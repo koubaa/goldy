@@ -19,13 +19,12 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DE
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::types::ResourceCategory;
 
-/// WARP's buffer state tracker corrupts with precise enhanced/global barriers that
-/// name UAV/SRV access (see `buffer.rs` upload path). Use ALL/ALL/COMMON/COMMON.
-fn warp_full_global_barrier() -> D3D12_GLOBAL_BARRIER {
+/// Post-record tail barrier: make UAV and copy writes visible to subsequent operations.
+fn compute_submit_tail_barrier() -> D3D12_GLOBAL_BARRIER {
     D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
         SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+        AccessBefore: D3D12_BARRIER_ACCESS(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0),
         AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
     }
 }
@@ -145,9 +144,6 @@ fn collect_bindless_slots_from_graph_commands(
 /// Returns `D3D12_BARRIER_SYNC_ALL` if no kinds are recorded (empty set) so
 /// that the barrier is conservatively correct even without IR information.
 ///
-/// When `for_buffer` is true, RENDER maps to `VERTEX_SHADING | PIXEL_SHADING`
-/// (shader stages that can read a buffer in a render pass) rather than the
-/// texture-only `RENDER_TARGET | DEPTH_STENCIL` stages.
 /// Lower Koubaa slot usage to a DX12 sync-stage mask for a **buffer** barrier.
 ///
 /// `is_storage` is whether the buffer was created with
@@ -155,7 +151,12 @@ fn collect_bindless_slots_from_graph_commands(
 /// are never written by the GPU, so transfer/compute *writes* against them are
 /// nonsensical; we still clamp the access mask in
 /// [`slot_usage_to_dx12_access_for_buffer`] and keep the sync stages here valid.
-fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool) -> D3D12_BARRIER_SYNC {
+///
+/// On a COMPUTE command list (`on_direct_queue == false`), `RENDER` cannot map to
+/// `VERTEX_SHADING | PIXEL_SHADING` (debug layer ID 1333). Cross-submit prologue
+/// barriers still OR `RENDER` into the producer mask from the old DIRECT-context
+/// era; on compute lists that bit is remapped to `COMPUTE_SHADING`.
+fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool, on_direct_queue: bool) -> D3D12_BARRIER_SYNC {
     if usage.kinds.is_empty() {
         return D3D12_BARRIER_SYNC_ALL;
     }
@@ -170,8 +171,12 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool) -> D3D12_BARR
         sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        // Buffer reads inside a render pass happen in vertex/pixel shader stages.
-        sync.0 |= D3D12_BARRIER_SYNC_VERTEX_SHADING.0 | D3D12_BARRIER_SYNC_PIXEL_SHADING.0;
+        if on_direct_queue {
+            // Buffer reads inside a render pass happen in vertex/pixel shader stages.
+            sync.0 |= D3D12_BARRIER_SYNC_VERTEX_SHADING.0 | D3D12_BARRIER_SYNC_PIXEL_SHADING.0;
+        } else {
+            sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
+        }
     }
     sync
 }
@@ -229,26 +234,31 @@ fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, is_storage: bool) 
 
 fn texture_barrier_state_for_layout(
     layout: D3D12_BARRIER_LAYOUT,
+    on_direct_queue: bool,
 ) -> (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
+    let target_uav = super::storage_uav_layout(on_direct_queue);
+    let target_srv = super::shader_resource_layout(on_direct_queue);
     if layout == D3D12_BARRIER_LAYOUT_COPY_SOURCE {
         (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_SOURCE, layout)
     } else if layout == D3D12_BARRIER_LAYOUT_COPY_DEST {
         (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST, layout)
     } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
         || layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+        || layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS
     {
         (
             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+            target_uav,
         )
     } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
         || layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+        || layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE
     {
         (
             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
             D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+            target_srv,
         )
     } else {
         (D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON, layout)
@@ -258,7 +268,10 @@ fn texture_barrier_state_for_layout(
 fn texture_barrier_state_for_usage(
     usage: &SlotUsageSet,
     is_storage: bool,
+    on_direct_queue: bool,
 ) -> (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
+    let target_uav = super::storage_uav_layout(on_direct_queue);
+    let target_srv = super::shader_resource_layout(on_direct_queue);
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         if usage.access == NodeAccessUnion::Write {
             (
@@ -277,20 +290,29 @@ fn texture_barrier_state_for_usage(
         (
             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+            target_uav,
         )
     } else if usage.kinds.contains(UsageKindFlags::COMPUTE) {
         (
             D3D12_BARRIER_SYNC_COMPUTE_SHADING,
             D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+            target_srv,
         )
     } else if usage.kinds.contains(UsageKindFlags::RENDER) {
-        (
-            D3D12_BARRIER_SYNC_RENDER_TARGET,
-            D3D12_BARRIER_ACCESS_RENDER_TARGET,
-            D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-        )
+        if on_direct_queue {
+            (
+                D3D12_BARRIER_SYNC_RENDER_TARGET,
+                D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+            )
+        } else {
+            // COMPUTE lists cannot name RENDER_TARGET sync/layout (ID 1333).
+            (
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                target_srv,
+            )
+        }
     } else {
         (
             D3D12_BARRIER_SYNC_ALL,
@@ -630,27 +652,55 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 // Shared submit helpers
 // ---------------------------------------------------------------------------
 
-/// GPU-side queue waits on producer-context fences before executing consumer work.
-fn queue_wait_for_epochs(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<()> {
+/// Resolve producer-context fences for a submission's cross-submit waits.
+///
+/// Returns `(producer_fence, value)` pairs so the caller can enqueue the GPU `Wait`s inside
+/// the same `queue_lock` hold as `ExecuteCommandLists`/`Signal` (see
+/// [`super::utils::execute_with_waits_and_signal_context`]). Enqueuing waits outside that lock
+/// races the externally-synchronized command queue and can reorder sibling submits.
+fn apply_cpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<()> {
     let Some(s) = sync else {
         return Ok(());
     };
-    if s.waits.is_empty() {
+    if s.cpu_waits.is_empty() {
         return Ok(());
     }
-    let ld = scope.ld();
-    for epoch in &s.waits {
+    // Clone producer fences then drop the map lock before blocking. Holding
+    // `context_fences` across `wait_for_fence` stalls create/destroy (write lock).
+    let pending: Vec<(ID3D12Fence, u64, ContextHandle)> = {
         let fences = scope.context_fences.read().unwrap();
-        let (_, producer_fence) = fences
-            .get(&epoch.context)
-            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
-        unsafe {
-            ld.command_queue
-                .Wait(producer_fence, epoch.value)
-                .context("cross-submit GPU queue Wait")?;
+        let mut out = Vec::with_capacity(s.cpu_waits.len());
+        for epoch in &s.cpu_waits {
+            let (_, producer_fence, _) = fences
+                .get(&epoch.context)
+                .with_context(|| format!("cross-submit cpu wait: unknown producer context {:?}", epoch.context))?;
+            out.push((producer_fence.clone(), epoch.value, epoch.context));
         }
+        out
+    };
+    for (producer_fence, value, _) in pending {
+        super::utils::wait_for_fence(&producer_fence, value)?;
     }
     Ok(())
+}
+
+fn resolve_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<Vec<(ID3D12Fence, u64)>> {
+    apply_cpu_epoch_waits(scope, sync)?;
+    let Some(s) = sync else {
+        return Ok(Vec::new());
+    };
+    if s.waits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fences = scope.context_fences.read().unwrap();
+    let mut resolved = Vec::with_capacity(s.waits.len());
+    for epoch in &s.waits {
+        let (_, producer_fence, _) = fences
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
+        resolved.push((producer_fence.clone(), epoch.value));
+    }
+    Ok(resolved)
 }
 
 /// Latest device-global seq retired on the scope's device.
@@ -660,8 +710,8 @@ fn device_retired_for_scope(scope: &Dx12SubmitScope<'_>) -> u64 {
     let fences = scope.context_fences.read().unwrap();
     let max_ctx = fences
         .values()
-        .filter(|(dev, _)| *dev == device)
-        .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+        .filter(|(dev, _, _)| *dev == device)
+        .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
         .max()
         .unwrap_or(0);
     drop(fences);
@@ -679,20 +729,28 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
             .with_context(|| format!("Invalid context handle {ctx}"))?,
     );
     let device_handle = sc.lock().unwrap().device;
-    let record = record_state_from_backend(state, device_handle)?;
-    let use_global_buffer_barriers = record.ld.adapter_id == super::WARP_ADAPTER_ID;
+    let record = record_state_from_backend(state, ctx, device_handle)?;
+    let device_owner = state.device_owner_handles.get(&device_handle).copied();
     Ok(Dx12SubmitScope {
         ctx,
         device_handle,
         sc,
         record,
         context_fences: &state.context_fences,
-        use_global_buffer_barriers,
+        device_owner,
     })
 }
 
 /// Acquire (or create) a compute allocator slot.
 ///
+fn texture_post_copy_layout(is_storage: bool, on_direct_queue: bool) -> D3D12_BARRIER_LAYOUT {
+    if is_storage {
+        super::storage_uav_layout(on_direct_queue)
+    } else {
+        super::shader_resource_layout(on_direct_queue)
+    }
+}
+
 /// Returns `(command_list, slot_idx)`.  The slot is taken from the
 /// pool when its fence has already signalled; otherwise a fresh one is created.
 fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
@@ -708,6 +766,7 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
         .1
         .clone();
     let completed = unsafe { ctx_fence.GetCompletedValue() };
+    let list_type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     let mut sc = scope.sc.lock().unwrap();
     let pool = &mut sc.compute_allocator_pool;
     // Skip retained slots — their allocator must not be reset until evict_retained is called.
@@ -722,7 +781,7 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
             let new_list: ID3D12GraphicsCommandList = unsafe {
                 logical_device
                     .device
-                    .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &slot.allocator, None)
+                    .CreateCommandList(0, list_type, &slot.allocator, None)
             }
             .context("Failed to create command list")?;
             slot.command_list = Some(new_list.clone());
@@ -730,16 +789,12 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
         };
         (list, idx)
     } else {
-        let new_allocator: ID3D12CommandAllocator = unsafe {
-            logical_device
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-        }
-        .context("Failed to create command allocator")?;
+        let new_allocator: ID3D12CommandAllocator = unsafe { logical_device.device.CreateCommandAllocator(list_type) }
+            .context("Failed to create command allocator")?;
         let new_list: ID3D12GraphicsCommandList = unsafe {
             logical_device
                 .device
-                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &new_allocator, None)
+                .CreateCommandList(0, list_type, &new_allocator, None)
         }
         .context("Failed to create command list")?;
         pool.push(ComputeAllocatorSlot {
@@ -753,11 +808,64 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
     Ok((cmd_list, slot_idx))
 }
 
+/// Acquire (or create) a device DIRECT allocator slot for render partitions.
+///
+/// Returns `(command_list, slot_idx)`. Retained slots are skipped until
+/// `evict_retained` clears their `retained` bit — same contract as
+/// [`acquire_allocator_slot`].
+fn acquire_device_direct_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
+    let logical_device = scope.ld();
+    let completed = unsafe { logical_device.fence.GetCompletedValue() };
+    let list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    let mut pool = logical_device.device_direct_pool.lock().unwrap();
+    let slot_idx = pool.iter().position(|s| completed >= s.fence_value && !s.retained);
+    let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
+        let slot = &mut pool[idx];
+        unsafe { slot.allocator.Reset() }.context("Failed to reset device render allocator")?;
+        unsafe { slot.command_list.Reset(&slot.allocator, None) }
+            .context("Failed to reset device render command list")?;
+        (slot.command_list.clone(), idx)
+    } else {
+        let new_allocator: ID3D12CommandAllocator = unsafe { logical_device.device.CreateCommandAllocator(list_type) }
+            .context("Failed to create device render command allocator")?;
+        let new_list: ID3D12GraphicsCommandList = unsafe {
+            logical_device
+                .device
+                .CreateCommandList(0, list_type, &new_allocator, None)
+        }
+        .context("Failed to create device render command list")?;
+        pool.push(super::types::DeviceDirectSlot {
+            allocator: new_allocator,
+            command_list: new_list.clone(),
+            fence_value: 0,
+            retained: false,
+        });
+        (new_list, pool.len() - 1)
+    };
+    Ok((cmd_list, slot_idx))
+}
+
+/// Clear the `retained` bit on the allocator slot backing `old`.
+fn clear_retained_allocator_flag(
+    sc: &mut types::Dx12SubmissionContext,
+    ld: &types::LogicalDevice,
+    old: &types::RetainedGraph,
+) {
+    if old.on_device_queue {
+        if let Some(slot) = ld.device_direct_pool.lock().unwrap().get_mut(old.slot_idx) {
+            slot.retained = false;
+        }
+    } else if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
+        slot.retained = false;
+    }
+}
+
 /// Mutable state threaded through the per-command recording loop.
 struct CmdCtx<'a> {
     command_list: &'a ID3D12GraphicsCommandList,
     command_list7: &'a ID3D12GraphicsCommandList7,
-    use_global_buffer_barriers: bool,
+    /// When true, texture barriers use DIRECT-queue layout tags (render partition on device queue).
+    on_direct_queue: bool,
     belt_slices: &'a [(ID3D12Resource, u64)],
     belt_idx: usize,
     staged_texture_uploads: &'a [super::texture::StagedTextureUpload],
@@ -766,6 +874,8 @@ struct CmdCtx<'a> {
     dispatch_idx: u32,
     current_compute_pipeline: Option<ComputePipelineHandle>,
     pending_deletions: Vec<super::types::PendingDeletion>,
+    /// Frame table row chosen at prologue record time (stable under concurrent submits).
+    frame_table_row: Option<u32>,
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
@@ -786,14 +896,16 @@ fn record_gpu_command(
     let cl7 = ctx.command_list7;
     match cmd {
         GpuCommand::FrameTableStaging { data } => {
-            super::frame_table::record_prologue(
+            let row = super::frame_table::record_prologue(
                 scope.contexts(),
+                scope.ld(),
+                _ctx_handle,
                 scope.frame_table(),
                 &scope.buffers().read().unwrap().entries,
-                device_handle,
                 cl7,
                 data,
             )?;
+            ctx.frame_table_row = Some(row);
         }
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
@@ -867,6 +979,10 @@ fn record_gpu_command(
             }
             let mut layout = types::PushLayout::default();
             shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+            {
+                let ft = scope.frame_table();
+                shared::set_frame_table_slots(&mut layout, ft.selector_slot, ft.table_slot);
+            }
             unsafe {
                 cl.SetComputeRoot32BitConstants(
                     0,
@@ -945,25 +1061,15 @@ fn record_gpu_command(
                 .as_ref()
                 .context("DispatchIndirect: compute indirect signature not available")?;
 
-            if ctx.use_global_buffer_barriers {
-                let g = D3D12_GLOBAL_BARRIER {
-                    SyncBefore: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    SyncAfter: D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    AccessAfter: D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                };
-                unsafe { barriers::barrier_globals(cl7, &[g]) };
-            } else {
-                let mut to_indirect = [barriers::buffer_barrier_full(
-                    &buf_state.resource,
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                )];
-                unsafe { barriers::barrier_buffers(cl7, &to_indirect) };
-                unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
-            }
+            let mut to_indirect = [barriers::buffer_barrier_full(
+                &buf_state.resource,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+            )];
+            unsafe { barriers::barrier_buffers(cl7, &to_indirect) };
+            unsafe { barriers::drop_buffer_barriers(&mut to_indirect) };
 
             if let Some(ref prof) = ctx.gpu_profile {
                 let base = 2u32 + ctx.dispatch_idx * 2;
@@ -978,25 +1084,15 @@ fn record_gpu_command(
             }
             ctx.dispatch_idx += 1;
 
-            if ctx.use_global_buffer_barriers {
-                let g = D3D12_GLOBAL_BARRIER {
-                    SyncBefore: D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                    SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    AccessBefore: D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                    AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                };
-                unsafe { barriers::barrier_globals(cl7, &[g]) };
-            } else {
-                let mut to_uav = [barriers::buffer_barrier_full(
-                    &buf_state.resource,
-                    D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                )];
-                unsafe { barriers::barrier_buffers(cl7, &to_uav) };
-                unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
-            }
+            let mut to_uav = [barriers::buffer_barrier_full(
+                &buf_state.resource,
+                D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            )];
+            unsafe { barriers::barrier_buffers(cl7, &to_uav) };
+            unsafe { barriers::drop_buffer_barriers(&mut to_uav) };
         }
         GpuCommand::DispatchBatch {
             label: _,
@@ -1008,6 +1104,21 @@ fn record_gpu_command(
                 .devices()
                 .get(&device_handle)
                 .context("DispatchBatch: invalid device")?;
+
+            // Arg data is built during context-agnostic lowering; patch in this
+            // context's frame-table slots (`_rs1`/`_rs2`) at record time.
+            let arg_data = {
+                let ft = scope.frame_table();
+                let mut patched = arg_data.to_vec();
+                crate::backend::shared::patch_dispatch_batch_frame_table_slots(
+                    &mut patched,
+                    *count as usize,
+                    ft.selector_slot,
+                    ft.table_slot,
+                );
+                patched
+            };
+            let arg_data = &arg_data;
 
             if let Some(batch_sig) = logical_device.compute_batch_dispatch_signature.clone() {
                 let buf_size = arg_data.len() as u64;
@@ -1101,62 +1212,29 @@ fn record_gpu_command(
         } => {
             let _tz = tracy_zone!("dx12.resource_barrier");
 
-            // WARP silently removes the device when D3D12_BARRIER_TYPE_BUFFER
-            // enhanced barriers are used, causing ExecuteCommandLists to fail
-            // and the subsequent Signal() to AV. Fall back to a global barrier
-            // which is correct (just less precise).
-            let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = Vec::new();
-            if ctx.use_global_buffer_barriers {
-                for (h, usage) in buf_entries {
-                    // Clamp access against the resource's real capabilities: a
-                    // non-storage (upload) buffer can never carry UAV/COPY_DEST.
-                    let buffers_read = scope.buffers().read().unwrap();
-                    let is_storage = buffers_read.entries.get(h).map(|bs| bs.is_storage).unwrap_or(false);
-                    let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, is_storage);
-                    let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, is_storage);
-                    // WARP validation (ID 1331): global barriers with AccessBefore=COMMON
-                    // must use AccessAfter=COMMON. Empty producer usage sets COMMON; clamp
-                    // rather than emitting UAV/SRV which fails Close() on the debug layer.
-                    if access_before == D3D12_BARRIER_ACCESS_COMMON {
-                        access_after = D3D12_BARRIER_ACCESS_COMMON;
-                    }
-                    let g = if is_storage {
-                        warp_full_global_barrier()
-                    } else {
-                        D3D12_GLOBAL_BARRIER {
-                            SyncBefore: slot_usage_to_dx12_sync(&usage.src, is_storage),
-                            SyncAfter: slot_usage_to_dx12_sync(&usage.dst, is_storage),
-                            AccessBefore: access_before,
-                            AccessAfter: access_after,
-                        }
-                    };
-                    unsafe { barriers::barrier_globals(cl7, &[g]) };
-                }
-            } else {
-                buf_barriers = buf_entries
-                    .iter()
-                    .filter_map(|(h, usage)| {
-                        scope.buffers().read().unwrap().entries.get(h).map(|bs| {
-                            barriers::buffer_barrier_full(
-                                &bs.resource,
-                                slot_usage_to_dx12_sync(&usage.src, bs.is_storage),
-                                slot_usage_to_dx12_sync(&usage.dst, bs.is_storage),
-                                slot_usage_to_dx12_access_for_buffer(&usage.src, bs.is_storage),
-                                slot_usage_to_dx12_access_for_buffer(&usage.dst, bs.is_storage),
-                            )
-                        })
+            let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = buf_entries
+                .iter()
+                .filter_map(|(h, usage)| {
+                    scope.buffers().read().unwrap().entries.get(h).map(|bs| {
+                        barriers::buffer_barrier_full(
+                            &bs.resource,
+                            slot_usage_to_dx12_sync(&usage.src, bs.is_storage, ctx.on_direct_queue),
+                            slot_usage_to_dx12_sync(&usage.dst, bs.is_storage, ctx.on_direct_queue),
+                            slot_usage_to_dx12_access_for_buffer(&usage.src, bs.is_storage),
+                            slot_usage_to_dx12_access_for_buffer(&usage.dst, bs.is_storage),
+                        )
                     })
-                    .collect();
-            }
+                })
+                .collect();
 
             let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_entries
                 .iter()
                 .filter_map(|(h, usage)| {
                     scope.textures().read().unwrap().entries.get(h).map(|ts| {
                         let (tex_sync_after, tex_access_after, tex_layout_after) =
-                            texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
+                            texture_barrier_state_for_usage(&usage.dst, ts.is_storage, ctx.on_direct_queue);
                         let (tex_sync_before, tex_access_before, tex_layout_before) =
-                            texture_barrier_state_for_layout(ts.last_layout);
+                            texture_barrier_state_for_layout(ts.last_layout, ctx.on_direct_queue);
                         (
                             barriers::texture_barrier_full(
                                 &ts.resource,
@@ -1174,19 +1252,16 @@ fn record_gpu_command(
                 .map(|(b, _)| b)
                 .collect();
 
-            if !ctx.use_global_buffer_barriers {
-                unsafe { barriers::barrier_groups(cl7, &buf_barriers, &tex_barriers) };
-                unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
-            } else if !tex_barriers.is_empty() {
-                unsafe { barriers::barrier_textures(cl7, &tex_barriers) };
-            }
+            unsafe { barriers::barrier_groups(cl7, &buf_barriers, &tex_barriers) };
+            unsafe { barriers::drop_buffer_barriers(&mut buf_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
 
             for (h, usage) in tex_entries {
                 {
                     let mut textures_write = scope.textures().write().unwrap();
                     if let Some(ts) = textures_write.entries.get_mut(h) {
-                        let (_, _, tex_layout_after) = texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
+                        let (_, _, tex_layout_after) =
+                            texture_barrier_state_for_usage(&usage.dst, ts.is_storage, ctx.on_direct_queue);
                         ts.last_layout = tex_layout_after;
                     }
                 }
@@ -1212,26 +1287,16 @@ fn record_gpu_command(
                         .context("ClearBuffer: invalid device")?;
                     let zero = logical_device.zero_buffer.clone();
                     let buf_resource = buf_state.resource.clone();
-                    if ctx.use_global_buffer_barriers {
-                        let pre = D3D12_GLOBAL_BARRIER {
-                            SyncBefore: D3D12_BARRIER_SYNC_ALL,
-                            SyncAfter: D3D12_BARRIER_SYNC_COPY,
-                            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                            AccessAfter: D3D12_BARRIER_ACCESS_COPY_DEST,
-                        };
-                        unsafe { barriers::barrier_globals(cl7, &[pre]) };
-                    } else {
-                        let mut b_to_copy = [barriers::buffer_barrier_full(
-                            &buf_resource,
-                            D3D12_BARRIER_SYNC_ALL,
-                            D3D12_BARRIER_SYNC_COPY,
-                            D3D12_BARRIER_ACCESS_COMMON,
-                            D3D12_BARRIER_ACCESS_COPY_DEST,
-                        )];
-                        unsafe {
-                            barriers::barrier_buffers(cl7, &b_to_copy);
-                            barriers::drop_buffer_barriers(&mut b_to_copy);
-                        }
+                    let mut b_to_copy = [barriers::buffer_barrier_full(
+                        &buf_resource,
+                        D3D12_BARRIER_SYNC_ALL,
+                        D3D12_BARRIER_SYNC_COPY,
+                        D3D12_BARRIER_ACCESS_COMMON,
+                        D3D12_BARRIER_ACCESS_COPY_DEST,
+                    )];
+                    unsafe {
+                        barriers::barrier_buffers(cl7, &b_to_copy);
+                        barriers::drop_buffer_barriers(&mut b_to_copy);
                     }
                     let mut cleared = 0u64;
                     while cleared < clear_size {
@@ -1292,30 +1357,17 @@ fn record_gpu_command(
                 let buffers_read = scope.buffers().read().unwrap();
                 let buf_state = buffers_read.entries.get(buf_handle).unwrap();
 
-                if ctx.use_global_buffer_barriers {
-                    let pre = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: D3D12_BARRIER_SYNC_ALL,
-                        SyncAfter: D3D12_BARRIER_SYNC_COPY,
-                        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                        AccessAfter: D3D12_BARRIER_ACCESS_COPY_DEST,
-                    };
-                    unsafe {
-                        barriers::barrier_globals(cl7, &[pre]);
-                        cl.CopyBufferRegion(&buf_state.resource, *offset, &upload_src, upload_off, data.len() as u64);
-                    }
-                } else {
-                    let mut b_to_copy = [barriers::buffer_barrier_full(
-                        &buf_state.resource,
-                        D3D12_BARRIER_SYNC_ALL,
-                        D3D12_BARRIER_SYNC_COPY,
-                        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                        D3D12_BARRIER_ACCESS_COPY_DEST,
-                    )];
-                    unsafe {
-                        barriers::barrier_buffers(cl7, &b_to_copy);
-                        barriers::drop_buffer_barriers(&mut b_to_copy);
-                        cl.CopyBufferRegion(&buf_state.resource, *offset, &upload_src, upload_off, data.len() as u64);
-                    }
+                let mut b_to_copy = [barriers::buffer_barrier_full(
+                    &buf_state.resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                )];
+                unsafe {
+                    barriers::barrier_buffers(cl7, &b_to_copy);
+                    barriers::drop_buffer_barriers(&mut b_to_copy);
+                    cl.CopyBufferRegion(&buf_state.resource, *offset, &upload_src, upload_off, data.len() as u64);
                 }
             }
         }
@@ -1333,6 +1385,7 @@ fn record_gpu_command(
                 cl7,
                 &mut scope.textures().write().unwrap().entries,
                 upload,
+                ctx.on_direct_queue,
             )?;
         }
         GpuCommand::CopyTexture { src, dst } => {
@@ -1354,8 +1407,10 @@ fn record_gpu_command(
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
 
-            let (src_sync_before, src_access_before, src_layout_before) = texture_barrier_state_for_layout(src_layout);
-            let (dst_sync_before, dst_access_before, dst_layout_before) = texture_barrier_state_for_layout(dst_layout);
+            let (src_sync_before, src_access_before, src_layout_before) =
+                texture_barrier_state_for_layout(src_layout, ctx.on_direct_queue);
+            let (dst_sync_before, dst_access_before, dst_layout_before) =
+                texture_barrier_state_for_layout(dst_layout, ctx.on_direct_queue);
 
             let mut pre_barriers = vec![
                 barriers::texture_barrier_full(
@@ -1385,23 +1440,23 @@ fn record_gpu_command(
             let src_post_state = if src_is_storage {
                 (
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    texture_post_copy_layout(true, ctx.on_direct_queue),
                 )
             } else {
                 (
                     D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                    texture_post_copy_layout(false, ctx.on_direct_queue),
                 )
             };
             let dst_post_state = if dst_is_storage {
                 (
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    texture_post_copy_layout(true, ctx.on_direct_queue),
                 )
             } else {
                 (
                     D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                    texture_post_copy_layout(false, ctx.on_direct_queue),
                 )
             };
             let mut post_barriers = vec![
@@ -1474,26 +1529,16 @@ fn record_gpu_command(
             } else {
                 D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
             };
-            if ctx.use_global_buffer_barriers {
-                let pre = D3D12_GLOBAL_BARRIER {
-                    SyncBefore: D3D12_BARRIER_SYNC_ALL,
-                    SyncAfter: D3D12_BARRIER_SYNC_COPY,
-                    AccessBefore: src_access_before,
-                    AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                };
-                unsafe { barriers::barrier_globals(cl7, &[pre]) };
-            } else {
-                let mut b_to_copy = [barriers::buffer_barrier_full(
-                    &src_resource,
-                    D3D12_BARRIER_SYNC_ALL,
-                    D3D12_BARRIER_SYNC_COPY,
-                    src_access_before,
-                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                )];
-                unsafe {
-                    barriers::barrier_buffers(cl7, &b_to_copy);
-                    barriers::drop_buffer_barriers(&mut b_to_copy);
-                }
+            let mut b_to_copy = [barriers::buffer_barrier_full(
+                &src_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                src_access_before,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            )];
+            unsafe {
+                barriers::barrier_buffers(cl7, &b_to_copy);
+                barriers::drop_buffer_barriers(&mut b_to_copy);
             }
             unsafe { cl.CopyBufferRegion(&dst_resource, dst_off, &src_resource, src_off, *size) };
         }
@@ -1507,6 +1552,7 @@ fn record_gpu_command(
                 *src,
                 *dst,
                 *layout,
+                ctx.on_direct_queue,
             )?;
         }
         GpuCommand::CopyRenderTarget { src, dst } => {
@@ -1528,7 +1574,8 @@ fn record_gpu_command(
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
 
-            let (dst_sync_before, dst_access_before, dst_layout_before) = texture_barrier_state_for_layout(dst_layout);
+            let (dst_sync_before, dst_access_before, dst_layout_before) =
+                texture_barrier_state_for_layout(dst_layout, ctx.on_direct_queue);
 
             let mut pre_barriers = vec![
                 barriers::texture_barrier_full(
@@ -1558,16 +1605,21 @@ fn record_gpu_command(
             let dst_post_state = if dst_is_storage {
                 (
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    texture_post_copy_layout(true, ctx.on_direct_queue),
                 )
             } else {
                 (
                     D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                    texture_post_copy_layout(false, ctx.on_direct_queue),
                 )
             };
-            let mut post_barriers = vec![
-                barriers::texture_barrier_full(
+            // Restore the RT to RENDER_TARGET only on a DIRECT list. CopyRenderTarget is
+            // often emitted in a compute-only partition after the render pass; COMPUTE
+            // lists reject RENDER_TARGET access/layout (debug layer ID 1332). Leaving the
+            // RT in COPY_SOURCE is fine — the next DIRECT render pass transitions it.
+            let mut post_barriers = Vec::with_capacity(2);
+            if ctx.on_direct_queue {
+                post_barriers.push(barriers::texture_barrier_full(
                     &src_res,
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_SYNC_RENDER_TARGET,
@@ -1575,17 +1627,17 @@ fn record_gpu_command(
                     D3D12_BARRIER_ACCESS_RENDER_TARGET,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                     D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-                ),
-                barriers::texture_barrier_full(
-                    &dst_res,
-                    D3D12_BARRIER_SYNC_COPY,
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    D3D12_BARRIER_ACCESS_COPY_DEST,
-                    dst_post_state.0,
-                    D3D12_BARRIER_LAYOUT_COPY_DEST,
-                    dst_post_state.1,
-                ),
-            ];
+                ));
+            }
+            post_barriers.push(barriers::texture_barrier_full(
+                &dst_res,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                dst_post_state.0,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+                dst_post_state.1,
+            ));
             unsafe { barriers::barrier_textures(cl7, &post_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
 
@@ -1607,6 +1659,7 @@ struct SubmitFinish {
     retain_key: Option<u64>,
     used_slots: Vec<DeferredSlot>,
     frame_table_staging: Option<std::sync::Arc<[u32]>>,
+    frame_table_row: Option<u32>,
     pending_deletions: Vec<super::types::PendingDeletion>,
 }
 
@@ -1655,6 +1708,7 @@ fn execute_signal_and_finish(
         retain_key,
         used_slots,
         frame_table_staging,
+        frame_table_row,
         pending_deletions,
     } = submit;
     let StagingFinish {
@@ -1669,6 +1723,9 @@ fn execute_signal_and_finish(
     );
 
     if let Err(e) = unsafe { command_list.Close() } {
+        if let Some(row) = frame_table_row {
+            super::frame_table::record_submission(scope.frame_table(), row, 0);
+        }
         let diag = scope
             .devices()
             .get(&device_handle)
@@ -1690,11 +1747,33 @@ fn execute_signal_and_finish(
         .context("Invalid context handle")?
         .1
         .clone();
+    let (queue, queue_lock) = {
+        let sc = scope.sc.lock().unwrap();
+        (sc.command_queue.clone(), std::sync::Arc::clone(&sc.queue_lock))
+    };
     let fence_value = {
         let _tz = tracy_zone!("dx12.execute_and_signal");
-        queue_wait_for_epochs(scope, sync)?;
-        super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
+        let waits = resolve_epoch_waits(scope, sync)?;
+        match super::utils::execute_with_waits_and_signal_context(
+            logical_device,
+            &queue,
+            &queue_lock,
+            &waits,
+            &ctx_fence,
+            &[Some(cmd_list)],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(row) = frame_table_row {
+                    super::frame_table::record_submission(scope.frame_table(), row, 0);
+                }
+                return Err(e);
+            }
+        }
     };
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(scope.frame_table(), row, fence_value);
+    }
 
     scope
         .ld()
@@ -1711,29 +1790,28 @@ fn execute_signal_and_finish(
     }
 
     if let Some(prof) = gpu_profile {
-        if let Err(e) = dx12_finish_gpu_profile(&ctx_fence, &logical_device.command_queue, fence_value, prof) {
+        if let Err(e) = dx12_finish_gpu_profile(&ctx_fence, &queue, fence_value, prof) {
             tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
         }
     }
 
     {
         let mut sc = scope.sc.lock().unwrap();
+        let mut unpin_slots: Vec<super::types::DeferredSlot> = Vec::new();
+        let mut pin_slots: Vec<super::types::DeferredSlot> = Vec::new();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
         if let Some(key) = retain_key {
             if let Some(old) = sc.retained_graphs.remove(&key) {
+                unpin_slots = old.used_slots.clone();
                 if let Some(row) = old.frame_table_row {
                     super::frame_table::unpin_row(scope.frame_table(), row);
                 }
-                if let Some(old_slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
-                    old_slot.retained = false;
-                }
+                clear_retained_allocator_flag(&mut sc, logical_device, &old);
             }
-            let frame_table_row = frame_table_staging
-                .as_ref()
-                .and_then(|_| super::frame_table::last_prologue_row(scope.frame_table()));
-            if let Some(row) = frame_table_row {
+            let pin_row_index = frame_table_staging.is_some().then_some(frame_table_row).flatten();
+            if let Some(row) = pin_row_index {
                 super::frame_table::pin_row(scope.frame_table(), row)?;
             }
             if let Some(cl) = sc
@@ -1742,36 +1820,35 @@ fn execute_signal_and_finish(
                 .and_then(|s| s.command_list.clone())
             {
                 sc.compute_allocator_pool[slot_idx].retained = true;
+                pin_slots = used_slots.clone();
                 sc.retained_graphs.insert(
                     key,
                     types::RetainedGraph {
                         command_list: cl,
                         slot_idx,
+                        on_device_queue: false,
                         used_slots,
                         frame_table_staging,
-                        frame_table_row,
+                        frame_table_row: pin_row_index,
                     },
                 );
             }
         }
-        sc.last_submitted_seq = fence_value;
+        sc.last_submitted_seq
+            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        drop(sc);
+        if !unpin_slots.is_empty() || !pin_slots.is_empty() {
+            let mut registry = scope.ld().descriptors.lock().unwrap();
+            registry.unpin_retained_slots(unpin_slots);
+            registry.pin_retained_slots(pin_slots);
+        }
     }
 
-    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    let ctx_del_batch = scope
-        .sc
-        .lock()
-        .unwrap()
-        .deletion_queue
-        .drain_up_to_completed(ctx_completed);
     {
+        let fences = scope.context_fences.read().unwrap();
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();
-        for resource in ctx_del_batch {
-            types::destroy_pending_deletion(dev, &mut registry, resource);
-        }
-        let fences = scope.context_fences.read().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }
 
@@ -1796,6 +1873,145 @@ fn execute_signal_and_finish(
                 .texture_staging_pool
                 .release(fence_value, entries);
         }
+    }
+
+    Ok(fence_value)
+}
+
+/// Close, execute on the device DIRECT queue, and signal [`LogicalDevice::fence`].
+///
+/// When `retain_key` is `Some`, the closed list is stored in the submitting
+/// context's `retained_graphs` with `on_device_queue: true` so
+/// [`try_resubmit_retained_with_scope`] can re-Execute it on the device queue.
+#[allow(clippy::too_many_arguments)]
+fn execute_signal_and_finish_device(
+    scope: &Dx12SubmitScope<'_>,
+    command_list: &ID3D12GraphicsCommandList,
+    device_handle: DeviceHandle,
+    submit_ctx: ContextHandle,
+    stamp_ctx: ContextHandle,
+    slot_idx: usize,
+    retain_key: Option<u64>,
+    used_slots: Vec<super::types::DeferredSlot>,
+    frame_table_staging: Option<std::sync::Arc<[u32]>>,
+    frame_table_row: Option<u32>,
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    if let Err(e) = unsafe { command_list.Close() } {
+        if let Some(row) = frame_table_row {
+            super::frame_table::record_submission(scope.frame_table(), row, 0);
+        }
+        let diag = scope
+            .devices()
+            .get(&device_handle)
+            .and_then(|dev| drain_info_queue(&dev.device))
+            .unwrap_or_else(|| "  (no debug-layer messages; enable GOLDY_DX12_DEBUG=1)\n".to_string());
+        return Err(anyhow::anyhow!(
+            "Failed to close device render command list: {e}\nDebug layer messages:\n{diag}"
+        ));
+    }
+
+    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
+    let logical_device = scope.ld();
+    let fence_value = {
+        let _tz = tracy_zone!("dx12.execute_and_signal_device");
+        let waits = resolve_epoch_waits(scope, sync)?;
+        match super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)]) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(row) = frame_table_row {
+                    super::frame_table::record_submission(scope.frame_table(), row, 0);
+                }
+                return Err(e);
+            }
+        }
+    };
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(scope.frame_table(), row, fence_value);
+    }
+
+    // Device-queue render submits share the device timeline counter but must also publish
+    // the value on the submitting context's fence — `Context::wait_until` blocks there.
+    let ctx_fence = scope
+        .context_fences
+        .read()
+        .unwrap()
+        .get(&submit_ctx)
+        .context("Invalid submitting context handle")?
+        .1
+        .clone();
+    if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence) {
+        super::utils::with_queue_lock(logical_device, || -> Result<()> {
+            unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
+                .context("Failed to signal submitting context fence after device render submit")?;
+            Ok(())
+        })?;
+    }
+
+    {
+        let mut sc = scope.sc.lock().unwrap();
+        let mut unpin_slots: Vec<super::types::DeferredSlot> = Vec::new();
+        let mut pin_slots: Vec<super::types::DeferredSlot> = Vec::new();
+        if let Some(slot) = logical_device.device_direct_pool.lock().unwrap().get_mut(slot_idx) {
+            slot.fence_value = fence_value;
+        }
+        if let Some(key) = retain_key {
+            if let Some(old) = sc.retained_graphs.remove(&key) {
+                unpin_slots = old.used_slots.clone();
+                if let Some(row) = old.frame_table_row {
+                    super::frame_table::unpin_row(scope.frame_table(), row);
+                }
+                clear_retained_allocator_flag(&mut sc, logical_device, &old);
+            }
+            let pin_row_index = frame_table_staging.is_some().then_some(frame_table_row).flatten();
+            if let Some(row) = pin_row_index {
+                super::frame_table::pin_row(scope.frame_table(), row)?;
+            }
+            let cl = {
+                let pool = logical_device.device_direct_pool.lock().unwrap();
+                pool.get(slot_idx).map(|s| s.command_list.clone())
+            };
+            if let Some(cl) = cl {
+                if let Some(slot) = logical_device.device_direct_pool.lock().unwrap().get_mut(slot_idx) {
+                    slot.retained = true;
+                }
+                pin_slots = used_slots.clone();
+                sc.retained_graphs.insert(
+                    key,
+                    types::RetainedGraph {
+                        command_list: cl,
+                        slot_idx,
+                        on_device_queue: true,
+                        used_slots: used_slots.clone(),
+                        frame_table_staging,
+                        frame_table_row: pin_row_index,
+                    },
+                );
+            }
+        }
+        sc.last_submitted_seq
+            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        drop(sc);
+        if !unpin_slots.is_empty() || !pin_slots.is_empty() {
+            let mut registry = scope.ld().descriptors.lock().unwrap();
+            registry.unpin_retained_slots(unpin_slots);
+            registry.pin_retained_slots(pin_slots);
+        }
+    }
+
+    scope
+        .ld()
+        .descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(stamp_ctx, fence_value, used_slots.iter().copied());
+
+    {
+        let fences = scope.context_fences.read().unwrap();
+        let dev = scope.ld();
+        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
+        registry.drain_ready_slot_reclamations(&fences);
     }
 
     Ok(fence_value)
@@ -1830,7 +2046,6 @@ pub(super) fn submit_with_scope(
         .context("Invalid context handle")?
         .1
         .clone();
-    let use_global_buffer_barriers = scope.use_global_buffer_barriers;
 
     let has_upload = commands.iter().any(|c| {
         matches!(
@@ -1977,12 +2192,13 @@ pub(super) fn submit_with_scope(
         prof
     };
 
-    let (belt_idx_final, pending_deletions) = {
+    let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
+    let (belt_idx_final, pending_deletions, frame_table_row) = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
         let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
-            use_global_buffer_barriers,
+            on_direct_queue: false,
             belt_slices: &belt_slices,
             belt_idx: 0,
             staged_texture_uploads: &staged_texture_uploads,
@@ -1991,25 +2207,24 @@ pub(super) fn submit_with_scope(
             dispatch_idx: 0,
             current_compute_pipeline: None,
             pending_deletions: Vec::new(),
+            frame_table_row: None,
         };
         for cmd in &commands {
             record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, cmd)?;
+            if let Some(row) = cmd_ctx.frame_table_row {
+                row_guard.set(row);
+            }
         }
         debug_assert_eq!(
             cmd_ctx.texture_upload_idx,
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions)
+        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, row_guard.take())
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
-    let tail = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0),
-        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-    };
+    let tail = compute_submit_tail_barrier();
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
@@ -2038,6 +2253,7 @@ pub(super) fn submit_with_scope(
             retain_key: None,
             used_slots,
             frame_table_staging,
+            frame_table_row,
             pending_deletions,
         },
         StagingFinish {
@@ -2056,7 +2272,8 @@ pub(super) fn submit(
     commands: &[GpuCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    submit_with_scope(&scope_from_state(state, ctx)?, ctx, commands, sync)
+    let scope = scope_from_state(state, ctx)?;
+    submit_with_scope(&scope, ctx, commands, sync)
 }
 
 /// Submit mixed compute + render graph commands in a single command list.
@@ -2078,7 +2295,15 @@ pub(super) fn submit_graph_with_scope(
     let frame_table_staging = super::frame_table::extract_staging_from_graph(commands);
     let device_handle = scope.device_handle;
     let _tz = tracy_zone!("dx12.submit_graph");
-    let (command_list, slot_idx) = acquire_allocator_slot(scope)?;
+    let has_render = commands.iter().any(|c| matches!(c, GraphCommand::Render { .. }));
+    let route_device = has_render;
+    let (command_list, slot_idx, on_device_queue) = if route_device {
+        let (cl, idx) = acquire_device_direct_slot(scope)?;
+        (cl, idx, true)
+    } else {
+        let (cl, idx) = acquire_allocator_slot(scope)?;
+        (cl, idx, false)
+    };
 
     let ctx_fence_clone = scope
         .context_fences
@@ -2088,7 +2313,6 @@ pub(super) fn submit_graph_with_scope(
         .context("Invalid context handle")?
         .1
         .clone();
-    let use_global_buffer_barriers = scope.use_global_buffer_barriers;
 
     let has_upload = commands.iter().any(|c| {
         matches!(
@@ -2239,13 +2463,14 @@ pub(super) fn submit_graph_with_scope(
     };
 
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
-    let (belt_idx_final, pending_deletions);
+    let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
+    let (belt_idx_final, pending_deletions, frame_table_row);
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
         let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
-            use_global_buffer_barriers,
+            on_direct_queue: on_device_queue,
             belt_slices: &belt_slices,
             belt_idx: 0,
             staged_texture_uploads: &staged_texture_uploads,
@@ -2254,6 +2479,7 @@ pub(super) fn submit_graph_with_scope(
             dispatch_idx: 0,
             current_compute_pipeline: None,
             pending_deletions: Vec::new(),
+            frame_table_row: None,
         };
 
         let mut frame_table_prologue_in_cb = false;
@@ -2264,6 +2490,9 @@ pub(super) fn submit_graph_with_scope(
                         frame_table_prologue_in_cb = true;
                     }
                     record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, gpu_cmd)?;
+                    if let Some(row) = cmd_ctx.frame_table_row {
+                        row_guard.set(row);
+                    }
                 }
                 GraphCommand::Render {
                     target,
@@ -2289,21 +2518,21 @@ pub(super) fn submit_graph_with_scope(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    let pre_render_barrier = if use_global_buffer_barriers {
-                        warp_full_global_barrier()
-                    } else {
-                        compute_to_render
-                    };
-                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[pre_render_barrier]) };
+                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[compute_to_render]) };
 
-                    let touched = super::render_target::record_render_pass_to_list_with_record(
+                    let (touched, prologue_row) = super::render_target::record_render_pass_to_list_with_record(
                         &scope.record,
                         device_handle,
+                        Some(ctx),
                         *target,
                         render_cmds,
                         &command_list7,
                         frame_table_prologue_in_cb,
                     )?;
+                    if let Some(row) = prologue_row {
+                        cmd_ctx.frame_table_row = Some(row);
+                        row_guard.set(row);
+                    }
                     frame_table_prologue_in_cb |= touched;
                     {
                         let render_targets_read = scope.render_targets().read().unwrap();
@@ -2336,14 +2565,10 @@ pub(super) fn submit_graph_with_scope(
         );
         belt_idx_final = cmd_ctx.belt_idx;
         pending_deletions = cmd_ctx.pending_deletions;
+        frame_table_row = row_guard.take();
     }
 
-    let tail = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0),
-        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-    };
+    let tail = compute_submit_tail_barrier();
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
@@ -2361,26 +2586,46 @@ pub(super) fn submit_graph_with_scope(
     }
 
     let used_slots = collect_bindless_slots_from_graph_commands(commands, &scope.buffers().read().unwrap().entries);
-    let result = execute_signal_and_finish(
-        scope,
-        &command_list,
-        dx_gpu_profile.take(),
-        SubmitFinish {
-            ctx,
+    let result = if on_device_queue {
+        let stamp_ctx = scope
+            .device_owner
+            .context("device owner handle missing for device-queue render submit")?;
+        execute_signal_and_finish_device(
+            scope,
+            &command_list,
             device_handle,
+            ctx,
+            stamp_ctx,
             slot_idx,
             retain_key,
             used_slots,
             frame_table_staging,
-            pending_deletions,
-        },
-        StagingFinish {
-            texture_uploads: staged_texture_uploads,
-            belt_slices_len: belt_slices.len(),
-            belt_idx: belt_idx_final,
-        },
-        sync,
-    )?;
+            frame_table_row,
+            sync,
+        )?
+    } else {
+        execute_signal_and_finish(
+            scope,
+            &command_list,
+            dx_gpu_profile.take(),
+            SubmitFinish {
+                ctx,
+                device_handle,
+                slot_idx,
+                retain_key,
+                used_slots,
+                frame_table_staging,
+                frame_table_row,
+                pending_deletions,
+            },
+            StagingFinish {
+                texture_uploads: staged_texture_uploads,
+                belt_slices_len: belt_slices.len(),
+                belt_idx: belt_idx_final,
+            },
+            sync,
+        )?
+    };
 
     for t in rendered_targets {
         let mut render_targets_write = scope.render_targets().write().unwrap();
@@ -2405,11 +2650,15 @@ pub(super) fn submit_graph(
 /// Re-execute a previously retained command list without re-recording.
 ///
 /// Calls `ExecuteCommandLists` on the closed list stored by a prior
-/// `submit_graph(..., Some(key))` call, then signals the device fence.
+/// `submit_graph(..., Some(key))` call, then signals the appropriate fence.
 /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
 ///
-/// No CPU wait is required: the retained slot's allocator is not reset while in flight
-/// (`acquire_allocator_slot` skips retained slots), and re-executing a closed list is legal.
+/// Compute-retained lists re-execute on the context COMPUTE queue; device-queue
+/// render lists re-execute on [`LogicalDevice::command_queue`]. The retained
+/// slot's allocator is not reset while in flight (`acquire_*_slot` skips
+/// retained slots). Unlike Vulkan's `SIMULTANEOUS_USE`, DXGI does not allow
+/// re-executing a closed list while a prior execution from the same slot is still
+/// in flight — we retire the previous signal on the CPU before re-execute.
 pub(super) fn try_resubmit_retained_with_scope(
     scope: &Dx12SubmitScope<'_>,
     ctx: ContextHandle,
@@ -2425,13 +2674,16 @@ pub(super) fn try_resubmit_retained_with_scope(
             (
                 r.command_list.clone(),
                 r.slot_idx,
+                r.on_device_queue,
                 r.used_slots.clone(),
                 r.frame_table_staging.clone(),
+                r.frame_table_row,
             )
         })
     };
 
-    let Some((command_list, slot_idx, used_slots, _frame_table_staging)) = retained else {
+    let Some((command_list, slot_idx, on_device_queue, used_slots, _frame_table_staging, frame_table_row)) = retained
+    else {
         return Ok(None);
     };
 
@@ -2449,52 +2701,116 @@ pub(super) fn try_resubmit_retained_with_scope(
             .clone()
     };
     let logical_device = scope.ld();
-    let fence_value = {
-        {
-            let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
-            queue_wait_for_epochs(scope, sync)?;
-        }
-        let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
-        super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
-    };
 
-    {
-        let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
-        logical_device
-            .descriptors
+    let fence_value = if on_device_queue {
+        let prior_signal = logical_device
+            .device_direct_pool
             .lock()
             .unwrap()
-            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
-    }
-
-    {
-        let _tz_book = tracy_zone!("dx12.resubmit_retained.bookkeeping");
-        let mut sc = scope.sc.lock().unwrap();
-        if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
+            .get(slot_idx)
+            .map(|s| s.fence_value)
+            .unwrap_or(0);
+        if prior_signal > 0 {
+            let completed = unsafe { logical_device.fence.GetCompletedValue() };
+            if completed < prior_signal {
+                super::utils::wait_for_fence(&logical_device.fence, prior_signal)?;
+            }
+        }
+        let waits = {
+            let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
+            resolve_epoch_waits(scope, sync)?
+        };
+        let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
+        let fence_value =
+            super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)])?;
+        if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence) {
+            super::utils::with_queue_lock(logical_device, || -> Result<()> {
+                unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
+                    .context("Failed to signal submitting context fence after device render resubmit")?;
+                Ok(())
+            })?;
+        }
+        if let Some(slot) = logical_device.device_direct_pool.lock().unwrap().get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
-        sc.last_submitted_seq = fence_value;
+        {
+            let sc = scope.sc.lock().unwrap();
+            sc.last_submitted_seq
+                .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        }
+        let stamp_ctx = scope
+            .device_owner
+            .context("device owner handle missing for device-queue render resubmit")?;
+        logical_device.descriptors.lock().unwrap().record_slot_usage(
+            stamp_ctx,
+            fence_value,
+            used_slots.iter().copied(),
+        );
+        fence_value
+    } else {
+        let (queue, queue_lock, prior_signal) = {
+            let sc = scope.sc.lock().unwrap();
+            let prior_signal = sc
+                .compute_allocator_pool
+                .get(slot_idx)
+                .map(|s| s.fence_value)
+                .unwrap_or(0);
+            (
+                sc.command_queue.clone(),
+                std::sync::Arc::clone(&sc.queue_lock),
+                prior_signal,
+            )
+        };
+        if prior_signal > 0 {
+            let completed = unsafe { ctx_fence.GetCompletedValue() };
+            if completed < prior_signal {
+                super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
+            }
+        }
+        let waits = {
+            let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
+            resolve_epoch_waits(scope, sync)?
+        };
+        let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
+        let fence_value = super::utils::execute_with_waits_and_signal_context(
+            logical_device,
+            &queue,
+            &queue_lock,
+            &waits,
+            &ctx_fence,
+            &[Some(cmd_list)],
+        )?;
+
+        {
+            let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
+            logical_device
+                .descriptors
+                .lock()
+                .unwrap()
+                .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+        }
+
+        {
+            let _tz_book = tracy_zone!("dx12.resubmit_retained.bookkeeping");
+            let mut sc = scope.sc.lock().unwrap();
+            if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
+                slot.fence_value = fence_value;
+            }
+            sc.last_submitted_seq
+                .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        }
+        fence_value
+    };
+
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(scope.frame_table(), row, fence_value);
     }
 
     {
-        let _tz_del = tracy_zone!("dx12.resubmit_retained.deletion_drain");
-        // TODO - This hides latency and can be done asynchronously, but the effect
-        //        of deleting late might affect memory pool usage that could be
-        //        depended on in some workloads.
-        let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-        let retained_del_batch = scope
-            .sc
-            .lock()
-            .unwrap()
-            .deletion_queue
-            .drain_up_to_completed(retired_ctx_completed);
+        let fences = scope.context_fences.read().unwrap();
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();
-        for resource in retained_del_batch {
-            types::destroy_pending_deletion(dev, &mut registry, resource);
-        }
-        let fences = scope.context_fences.read().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }
 
@@ -2512,73 +2828,59 @@ pub(super) fn try_resubmit_retained(
 
 fn evict_retained_on_context(
     contexts: &types::SharedContextMap,
-    frame_table: &super::frame_table::FrameTableDevice,
+    frame_table: &super::frame_table::ContextFrameTable,
+    descriptors: &types::SharedLogicalDevice,
     ctx: ContextHandle,
     key: u64,
 ) {
-    if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
+    let removed = if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_graphs.remove(&key) {
-            if let Some(row) = old.frame_table_row {
-                super::frame_table::unpin_row(frame_table, row);
-            }
-            if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
-                slot.retained = false;
-            }
+        sc.retained_graphs.remove(&key)
+    } else {
+        None
+    };
+    if let Some(old) = removed {
+        descriptors
+            .descriptors
+            .lock()
+            .unwrap()
+            .unpin_retained_slots(old.used_slots.clone());
+        if let Some(row) = old.frame_table_row {
+            super::frame_table::unpin_row(frame_table, row);
+        }
+        if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            clear_retained_allocator_flag(&mut sc, descriptors, &old);
         }
     }
 }
 
-/// Evict every retained graph on contexts for `device_handle` that pins `row`.
-///
-/// Called when the frame-table ring wraps and a new prologue needs to overwrite staging
-/// bytes for a row still held by a retained command list from partitioned retention.
-pub(super) fn evict_retained_pinning_row(
+pub(super) fn evict_retained_pinning_row_for_context(
     contexts: &types::SharedContextMap,
-    frame_table: &super::frame_table::FrameTableDevice,
-    device_handle: DeviceHandle,
+    frame_table: &super::frame_table::ContextFrameTable,
+    descriptors: &types::SharedLogicalDevice,
+    ctx: ContextHandle,
     row: u32,
 ) {
-    // Collect all (ctx, key) pairs that pin `row` under a single short-lived read guard,
-    // then drop the guard before calling evict_retained_on_context.
-    //
-    // evict_retained_on_context takes its own contexts.read() internally.  Windows
-    // SRWLOCK has write-priority: if any thread queues a write (e.g. context::destroy)
-    // between the outer read acquisition and the inner one, the inner read blocks while
-    // the outer read prevents the writer from completing — deadlock.  Releasing the
-    // guard before calling evict avoids the re-entrant read.
-    let evict_list: Vec<(ContextHandle, Vec<u64>)> = {
+    let keys: Vec<u64> = {
         let contexts_read = contexts.read().unwrap();
-        contexts_read
+        let Some(sc_arc) = contexts_read.get(&ctx) else {
+            return;
+        };
+        let sc = sc_arc.lock().unwrap();
+        sc.retained_graphs
             .iter()
-            .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
-            .filter_map(|(ctx_h, sc_arc)| {
-                let keys: Vec<u64> = sc_arc
-                    .lock()
-                    .unwrap()
-                    .retained_graphs
-                    .iter()
-                    .filter(|(_, g)| g.frame_table_row == Some(row))
-                    .map(|(k, _)| *k)
-                    .collect();
-                if keys.is_empty() {
-                    None
-                } else {
-                    Some((*ctx_h, keys))
-                }
-            })
+            .filter(|(_, g)| g.frame_table_row == Some(row))
+            .map(|(k, _)| *k)
             .collect()
-    }; // contexts_read dropped here — no read guard held during eviction
-
-    for (ctx, keys) in evict_list {
-        for key in keys {
-            evict_retained_on_context(contexts, frame_table, ctx, key);
-        }
+    };
+    for key in keys {
+        evict_retained_on_context(contexts, frame_table, descriptors, ctx, key);
     }
 }
 
 pub(super) fn evict_retained_with_scope(scope: &Dx12SubmitScope<'_>, ctx: ContextHandle, key: u64) {
-    evict_retained_on_context(scope.contexts(), scope.frame_table(), ctx, key);
+    evict_retained_on_context(scope.contexts(), scope.frame_table(), scope.ld(), ctx, key);
 }
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.
@@ -2730,7 +3032,11 @@ mod barrier_lowering_tests {
             slot_usage_to_dx12_access_for_buffer(&empty, false).0,
             D3D12_BARRIER_ACCESS_COMMON.0
         );
-        assert_eq!(slot_usage_to_dx12_sync(&empty, false).0, D3D12_BARRIER_SYNC_ALL.0);
+        assert_eq!(slot_usage_to_dx12_sync(&empty, false, true).0, D3D12_BARRIER_SYNC_ALL.0);
+        assert_eq!(
+            slot_usage_to_dx12_sync(&empty, false, false).0,
+            D3D12_BARRIER_SYNC_ALL.0
+        );
     }
 
     // --- Sync-stage / access pairing invariant (ID 1331 / barriers.rs assert) ---
@@ -2741,10 +3047,19 @@ mod barrier_lowering_tests {
     #[test]
     fn render_buffer_sync_is_non_zero() {
         let render_read = slot(NodeAccess::Read, UsageKindFlags::RENDER);
-        let sync = slot_usage_to_dx12_sync(&render_read, false);
-        assert_ne!(sync.0, 0, "render buffer usage must have a valid sync stage");
-        assert!(sync.0 & D3D12_BARRIER_SYNC_VERTEX_SHADING.0 != 0);
-        assert!(sync.0 & D3D12_BARRIER_SYNC_PIXEL_SHADING.0 != 0);
+        let sync_direct = slot_usage_to_dx12_sync(&render_read, false, true);
+        assert_ne!(sync_direct.0, 0, "render buffer usage must have a valid sync stage");
+        assert!(sync_direct.0 & D3D12_BARRIER_SYNC_VERTEX_SHADING.0 != 0);
+        assert!(sync_direct.0 & D3D12_BARRIER_SYNC_PIXEL_SHADING.0 != 0);
+
+        let sync_compute = slot_usage_to_dx12_sync(&render_read, false, false);
+        assert_ne!(sync_compute.0, 0);
+        assert_eq!(
+            sync_compute.0 & (D3D12_BARRIER_SYNC_VERTEX_SHADING.0 | D3D12_BARRIER_SYNC_PIXEL_SHADING.0),
+            0,
+            "COMPUTE lists must not name vertex/pixel sync stages"
+        );
+        assert!(sync_compute.0 & D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 != 0);
     }
 
     /// Any non-empty usage that lowers to a non-COMMON access must also lower to
@@ -2759,14 +3074,16 @@ mod barrier_lowering_tests {
             slot(NodeAccess::Read, UsageKindFlags::RENDER),
         ];
         for (storage, set) in cases.iter().flat_map(|s| [(true, s), (false, s)]) {
-            let access = slot_usage_to_dx12_access_for_buffer(set, storage);
-            let sync = slot_usage_to_dx12_sync(set, storage);
-            if access.0 != D3D12_BARRIER_ACCESS_COMMON.0 {
-                assert_ne!(
-                    sync.0, 0,
-                    "non-COMMON access {:#x} (storage={storage}) must have a sync stage",
-                    access.0
-                );
+            for on_direct in [true, false] {
+                let access = slot_usage_to_dx12_access_for_buffer(set, storage);
+                let sync = slot_usage_to_dx12_sync(set, storage, on_direct);
+                if access.0 != D3D12_BARRIER_ACCESS_COMMON.0 {
+                    assert_ne!(
+                        sync.0, 0,
+                        "non-COMMON access {:#x} (storage={storage}, on_direct={on_direct}) must have a sync stage",
+                        access.0
+                    );
+                }
             }
         }
     }

@@ -6,6 +6,7 @@ use super::barriers;
 use super::types::RenderTargetState;
 use super::utils::{depth_format_to_dxgi, execute_command_lists_and_signal_device, format_to_dxgi, wait_for_fence};
 use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
+use crate::backend::ContextHandle;
 use crate::backend::RenderCommand;
 use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
@@ -221,11 +222,12 @@ pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
 pub(super) fn record_render_pass_to_list_with_record(
     record: &super::submit_session::Dx12RecordState<'_>,
     device_handle: DeviceHandle,
+    recording_ctx: Option<ContextHandle>,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
-) -> Result<bool> {
+) -> Result<(bool, Option<u32>)> {
     let logical_device = record.devices.get(&device_handle).context("Invalid device handle")?;
 
     let render_targets_read = record.render_targets.read().unwrap();
@@ -340,18 +342,28 @@ pub(super) fn record_render_pass_to_list_with_record(
     }
 
     let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(record, commands)?;
+    let mut prologue_row = None;
     if has_bindings {
         if frame_table_prologue_already_recorded {
             super::frame_table::sync_table_row_to_device(record, device_handle, cmd_list, &staging_data)?;
-        } else {
-            super::frame_table::record_prologue(
+        } else if let Some(ctx) = recording_ctx {
+            prologue_row = Some(super::frame_table::record_prologue(
                 record.contexts,
+                logical_device,
+                ctx,
                 &record.frame_table,
                 &record.buffers.read().unwrap().entries,
-                device_handle,
                 cmd_list,
                 &staging_data,
-            )?;
+            )?);
+        } else {
+            prologue_row = Some(super::frame_table::record_prologue_legacy(
+                &record.frame_table,
+                &logical_device.fence,
+                &record.buffers.read().unwrap().entries,
+                cmd_list,
+                &staging_data,
+            )?);
         }
     }
 
@@ -369,23 +381,24 @@ pub(super) fn record_render_pass_to_list_with_record(
     );
     unsafe { barriers::barrier_textures(cmd_list, &[to_copy]) };
 
-    Ok(has_bindings)
+    Ok((has_bindings, prologue_row))
 }
 
 /// Record an offscreen render pass into an existing command list without closing/executing.
 #[allow(clippy::too_many_lines)]
 pub(super) fn record_render_pass_to_list(
-    state: &Dx12State,
+    state: &mut Dx12State,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
-) -> Result<bool> {
-    let record = super::submit_session::record_state_from_backend(state, device_handle)?;
+) -> Result<(bool, Option<u32>)> {
+    let record = super::submit_session::record_state_for_legacy_render(state, device_handle)?;
     record_render_pass_to_list_with_record(
         &record,
         device_handle,
+        None,
         target,
         commands,
         cmd_list,
@@ -411,30 +424,39 @@ pub(super) fn render(
     // Upgrading render_to_target to a pool would eliminate the wait but is not yet done.
     unsafe { logical_device.command_allocator.Reset() }.context("Failed to reset command allocator")?;
 
-    let render_targets_read = state.render_targets.read().unwrap();
-    let render_target = render_targets_read
-        .entries
-        .get(&target)
-        .context("Invalid render target handle")?;
+    let cmd = {
+        let render_targets_read = state.render_targets.read().unwrap();
+        let render_target = render_targets_read
+            .entries
+            .get(&target)
+            .context("Invalid render target handle")?;
 
-    if render_target.device_handle != device_handle {
-        anyhow::bail!("Render target belongs to a different device");
-    }
+        if render_target.device_handle != device_handle {
+            anyhow::bail!("Render target belongs to a different device");
+        }
 
-    let cmd = &render_target.command_list;
-    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
+        render_target.command_list.clone()
+    };
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&cmd) };
 
     unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }.context("Failed to reset command list")?;
 
-    let _ = record_render_pass_to_list(state, device_handle, target, commands, cmd, false)?;
+    let ft = super::frame_table::ensure_legacy_frame_table(state, device_handle)?;
+    let mut row_guard = super::frame_table::RowReservation::new(&ft);
+    let (_, prologue_row) = record_render_pass_to_list(state, device_handle, target, commands, &cmd, false)?;
+    if let Some(row) = prologue_row {
+        row_guard.set(row);
+    }
 
-    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&cmd) };
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
 
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
+    // Record before wait: if wait fails, the row must still track in-flight GPU use.
+    row_guard.commit(fence_value);
     // Blocking wait — required so the shared command_allocator can be safely
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;

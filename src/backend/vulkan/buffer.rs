@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
@@ -59,10 +59,13 @@ fn submit_copy(
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue_lock = Arc::clone(&device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         device
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
+        drop(_queue_guard);
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
@@ -340,7 +343,7 @@ pub(super) fn create_sparse_with_capacity(
         );
     }
 
-    sparse::queue_bind_sparse_sync(dev, bind_queue, buffer, &binds)?;
+    sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, buffer, &binds)?;
     drop(pool_guard);
 
     let bindless_descriptor_set = ld.bindless_descriptor_set;
@@ -463,7 +466,7 @@ pub(super) fn hint_unused_above(
         if binds.is_empty() {
             return;
         }
-        if let Err(e) = sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds) {
+        if let Err(e) = sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, vkbuf, &binds) {
             tracing::warn!(?e, "hint_unused_above sparse unbind failed");
             return;
         }
@@ -488,6 +491,7 @@ pub(super) fn capacity(buffers: &SharedBufferTable, buffer_handle: BufferHandle)
 }
 
 pub(super) fn set_logical_size(
+    state: &super::types::VulkanState,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
@@ -503,7 +507,7 @@ pub(super) fn set_logical_size(
             .unwrap_or(false)
     };
     if is_sparse {
-        return set_logical_size_sparse(devices, buffers, device_handle, buffer_handle, new_logical_size);
+        return set_logical_size_sparse(state, devices, buffers, device_handle, buffer_handle, new_logical_size);
     }
 
     let (bindless_index, is_storage, vkbuf, old_logical) = {
@@ -546,9 +550,13 @@ pub(super) fn set_logical_size(
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
             let ld = devices.get(&device_handle).unwrap();
-            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            let requirements = super::context::reclamation_requirements(
+                state,
+                device_handle,
+                super::context::destroy_attribution_context(state, device_handle),
+            );
             ld.deletion_queue.lock().unwrap().queue(
-                barrier,
+                requirements,
                 types::PendingDeletion::ReplacedBufferGpu {
                     buffer: stg_buf,
                     memory: stg_mem,
@@ -600,6 +608,7 @@ pub(super) fn set_logical_size(
 }
 
 fn set_logical_size_sparse(
+    state: &super::types::VulkanState,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
@@ -676,7 +685,7 @@ fn set_logical_size_sparse(
                         .flags(vk::SparseMemoryBindFlags::empty()),
                 );
             }
-            sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds)?;
+            sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, vkbuf, &binds)?;
         } else if new_pages < old_pages {
             let mut binds = Vec::new();
             let mut to_free: Vec<(vk::DeviceMemory, vk::DeviceSize)> = Vec::new();
@@ -695,7 +704,7 @@ fn set_logical_size_sparse(
                 }
             }
             if !binds.is_empty() {
-                sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds)?;
+                sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, vkbuf, &binds)?;
             }
             for (mem, off) in to_free {
                 pool.free_page(mem, off);
@@ -715,9 +724,13 @@ fn set_logical_size_sparse(
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
             let ld = devices.get(&device_handle).unwrap();
-            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            let requirements = super::context::reclamation_requirements(
+                state,
+                device_handle,
+                super::context::destroy_attribution_context(state, device_handle),
+            );
             ld.deletion_queue.lock().unwrap().queue(
-                barrier,
+                requirements,
                 types::PendingDeletion::ReplacedBufferGpu {
                     buffer: stg_buf,
                     memory: stg_mem,
@@ -958,10 +971,13 @@ fn submit_resize_transfer(
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue_lock = Arc::clone(&device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         device
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
+        drop(_queue_guard);
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
@@ -976,7 +992,9 @@ fn submit_resize_transfer(
 }
 
 /// Resize a root buffer in place. [`BufferHandle`] and bindless slot stay stable.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resize(
+    state: &super::types::VulkanState,
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &SharedBufferTable,
@@ -1086,12 +1104,13 @@ pub(super) fn resize(
         }
     }
 
-    let barrier = devices
-        .get(&device_handle)
-        .unwrap()
-        .timeline_next
-        .load(Ordering::Relaxed)
-        .saturating_sub(1);
+    let ctx_h = super::context::destroy_attribution_context(state, device_handle);
+    let base = super::context::reclamation_requirements(state, device_handle, ctx_h);
+    let requirements = {
+        let ld = devices.get(&device_handle).context("resize: queue deletion")?;
+        let registry = ld.descriptors.lock().unwrap();
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+    };
     let pending = if old_state.is_sparse {
         let binds = sparse::collect_sparse_binds_for_teardown(old_state.sparse_block_size, &old_state.sparse_pages);
         types::PendingDeletion::ReplacedSparseBufferGpu {
@@ -1116,7 +1135,7 @@ pub(super) fn resize(
         .deletion_queue
         .lock()
         .unwrap()
-        .queue(barrier, pending);
+        .queue(requirements, pending);
 
     let old_parent_vk = old_state.buffer;
 
@@ -1195,62 +1214,72 @@ pub(super) fn resize(
 /// index for deferred deletion after in-flight GPU work completes.
 /// For views, only the descriptor index is deferred — the underlying VkBuffer/memory
 /// belongs to the parent and is not freed.
-pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &SharedBufferTable,
-    buffer_handle: BufferHandle,
-) {
-    if let Some(buffer) = buffers.write().unwrap().entries.remove(&buffer_handle) {
-        if let Some(device) = devices.get(&buffer.device_handle) {
-            let barrier = device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+pub(super) fn destroy(state: &super::types::VulkanState, buffer_handle: BufferHandle) {
+    let buffer = {
+        let mut buffers = state.buffers.write().unwrap();
+        buffers.entries.remove(&buffer_handle)
+    };
+    let Some(buffer) = buffer else {
+        return;
+    };
+    if let Some(device) = state.devices.get(&buffer.device_handle) {
+        let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
+        let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
+        let requirements = {
+            let registry = device.descriptors.lock().unwrap();
+            registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+        };
 
-            if buffer.is_view {
-                device
-                    .deletion_queue
-                    .lock()
-                    .unwrap()
-                    .queue(barrier, types::PendingDeletion::BufferView { buffer_handle });
-                return;
-            }
-
-            if buffer.transient_heap_suballoc {
-                device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
-                unsafe {
-                    device.device.destroy_buffer(buffer.buffer, None);
-                }
-                return;
-            }
-            if buffer.host_mapped.is_some() && !buffer.is_sparse {
-                if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
-                    tracing::warn!(?e, "unmap_memory2 failed for CPU_READABLE buffer on destroy");
-                }
-            }
-            let sparse_teardown = if buffer.is_sparse {
-                Some(types::SparseBufferTeardown {
-                    allocation_size: buffer.allocation_size,
-                    block_size: buffer.sparse_block_size,
-                    binds: sparse::collect_sparse_binds_for_teardown(buffer.sparse_block_size, &buffer.sparse_pages),
-                })
-            } else {
-                None
-            };
-            device.deletion_queue.lock().unwrap().queue(
-                barrier,
-                types::PendingDeletion::Buffer {
-                    buffer_handle,
-                    buffer: buffer.buffer,
-                    memory: if buffer.is_sparse {
-                        vk::DeviceMemory::null()
-                    } else {
-                        buffer.memory
-                    },
-                    staging_buffer: buffer.staging_buffer,
-                    staging_memory: buffer.staging_memory,
-                    sparse_teardown,
-                },
-            );
+        if buffer.is_view {
+            let deletion = types::PendingDeletion::BufferView { buffer_handle };
+            queue_pending_deletion(device, requirements, deletion);
+            return;
         }
+
+        if buffer.transient_heap_suballoc {
+            device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
+            unsafe {
+                device.device.destroy_buffer(buffer.buffer, None);
+            }
+            return;
+        }
+        if buffer.host_mapped.is_some() && !buffer.is_sparse {
+            if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
+                tracing::warn!(?e, "unmap_memory2 failed for CPU_READABLE buffer on destroy");
+            }
+        }
+        let sparse_teardown = if buffer.is_sparse {
+            Some(types::SparseBufferTeardown {
+                allocation_size: buffer.allocation_size,
+                block_size: buffer.sparse_block_size,
+                binds: sparse::collect_sparse_binds_for_teardown(buffer.sparse_block_size, &buffer.sparse_pages),
+            })
+        } else {
+            None
+        };
+        let deletion = types::PendingDeletion::Buffer {
+            buffer_handle,
+            buffer: buffer.buffer,
+            memory: if buffer.is_sparse {
+                vk::DeviceMemory::null()
+            } else {
+                buffer.memory
+            },
+            staging_buffer: buffer.staging_buffer,
+            staging_memory: buffer.staging_memory,
+            sparse_teardown,
+        };
+        queue_pending_deletion(device, requirements, deletion);
     }
+}
+
+/// Queue bindless-tracked buffer/view teardown on the device-level requirement-gated queue.
+fn queue_pending_deletion(
+    device: &types::SharedLogicalDevice,
+    requirements: Vec<(super::ContextHandle, u64)>,
+    deletion: types::PendingDeletion,
+) {
+    device.deletion_queue.lock().unwrap().queue(requirements, deletion);
 }
 
 /// Create a view into a sub-region of an existing buffer.
@@ -1729,10 +1758,13 @@ pub(super) fn clear(
     // Submit and wait
     let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
     unsafe {
+        let queue_lock = Arc::clone(&device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         device
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
+        drop(_queue_guard);
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 

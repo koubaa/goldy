@@ -54,10 +54,12 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
         D3D12_BARRIER_ACCESS_COMMON
     } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
         || layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+        || layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE
     {
         D3D12_BARRIER_ACCESS_SHADER_RESOURCE
     } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
         || layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+        || layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS
     {
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
     } else if layout == D3D12_BARRIER_LAYOUT_COPY_DEST {
@@ -66,6 +68,20 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
         D3D12_BARRIER_ACCESS_COPY_SOURCE
     } else {
         D3D12_BARRIER_ACCESS_COMMON
+    }
+}
+
+fn post_copy_texture_state(is_storage: bool, on_direct_queue: bool) -> (D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
+    if is_storage {
+        (
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            super::storage_uav_layout(on_direct_queue),
+        )
+    } else {
+        (
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+            super::shader_resource_layout(on_direct_queue),
+        )
     }
 }
 
@@ -94,6 +110,8 @@ pub(super) fn init_storage_texture_uav_layout(
     .context("Failed to create init barrier command list")?;
     let init_cmd7: ID3D12GraphicsCommandList7 = init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
+    // Queue-agnostic UAV layout: textures are later used from context COMPUTE lists.
+    let after_layout = D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
     let b = barriers::texture_barrier_full(
         resource,
         D3D12_BARRIER_SYNC_NONE,
@@ -101,7 +119,7 @@ pub(super) fn init_storage_texture_uav_layout(
         D3D12_BARRIER_ACCESS_NO_ACCESS,
         D3D12_BARRIER_ACCESS_NO_ACCESS,
         last_layout,
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+        after_layout,
     );
     unsafe {
         barriers::barrier_textures(&init_cmd7, &[b]);
@@ -113,7 +131,7 @@ pub(super) fn init_storage_texture_uav_layout(
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
-    Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
+    Ok(after_layout)
 }
 
 /// Create a texture.
@@ -575,12 +593,15 @@ pub(super) fn record_staged_texture_upload(
     command_list7: &ID3D12GraphicsCommandList7,
     textures: &mut std::collections::HashMap<TextureHandle, TextureState>,
     upload: &StagedTextureUpload,
+    on_direct_queue: bool,
 ) -> Result<()> {
-    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
     let texture = textures
         .get(&upload.texture_handle)
         .context("record_staged_texture_upload: invalid texture")?;
     let layout_before = upload.layout_before;
+    let layout_before_barrier = super::texture_layout_for_command_list(layout_before, on_direct_queue);
+    let is_storage = texture.is_storage;
+    let (post_access, after_layout) = post_copy_texture_state(is_storage, on_direct_queue);
 
     let mut b_to_copy = [barriers::texture_barrier_full(
         &texture.resource,
@@ -588,7 +609,7 @@ pub(super) fn record_staged_texture_upload(
         D3D12_BARRIER_SYNC_COPY,
         access_for_layout(layout_before),
         D3D12_BARRIER_ACCESS_COPY_DEST,
-        layout_before,
+        layout_before_barrier,
         D3D12_BARRIER_LAYOUT_COPY_DEST,
     )];
     unsafe { barriers::barrier_textures(command_list7, &b_to_copy) };
@@ -620,7 +641,7 @@ pub(super) fn record_staged_texture_upload(
         D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_ACCESS_COPY_DEST,
-        D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+        post_access,
         D3D12_BARRIER_LAYOUT_COPY_DEST,
         after_layout,
     )];
@@ -745,11 +766,13 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
             .push(i);
     }
 
-    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    // Queue-agnostic: this DIRECT list may hand the texture to a context COMPUTE list next.
+    let after_layout = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
 
     for tex_handle in &texture_order {
         let indices = &groups[tex_handle];
         let layout_before = copies[indices[0]].layout_before;
+        let layout_before_barrier = super::texture_layout_for_command_list(layout_before, true);
         let resource = {
             let textures_read = state.textures.read().unwrap();
             textures_read
@@ -766,7 +789,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
             D3D12_BARRIER_SYNC_COPY,
             access_for_layout(layout_before),
             D3D12_BARRIER_ACCESS_COPY_DEST,
-            layout_before,
+            layout_before_barrier,
             D3D12_BARRIER_LAYOUT_COPY_DEST,
         )];
         unsafe { barriers::barrier_textures(&command_list7, &b_to_copy) };
@@ -886,6 +909,7 @@ pub(super) fn query_texture_copy_footprint(
 }
 
 /// Record copy from a texture into a grant-readback staging buffer.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_copy_texture_to_readback(
     command_list: &ID3D12GraphicsCommandList,
     command_list7: &ID3D12GraphicsCommandList7,
@@ -894,6 +918,7 @@ pub(super) fn record_copy_texture_to_readback(
     src: TextureHandle,
     dst: BufferHandle,
     layout: crate::backend::TextureCopyFootprint,
+    on_direct_queue: bool,
 ) -> Result<()> {
     // Extract everything we need from the immutable borrow before any mutable access.
     let (src_resource, dst_resource, layout_before, is_storage, dxgi_format) = {
@@ -912,13 +937,15 @@ pub(super) fn record_copy_texture_to_readback(
         )
     };
 
+    let layout_before_barrier = super::texture_layout_for_command_list(layout_before, on_direct_queue);
+
     let b_to_src = barriers::texture_barrier_full(
         &src_resource,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_SYNC_COPY,
         access_for_layout(layout_before),
         D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        layout_before,
+        layout_before_barrier,
         D3D12_BARRIER_LAYOUT_COPY_SOURCE,
     );
     unsafe { barriers::barrier_textures(command_list7, &[b_to_src]) };
@@ -946,16 +973,7 @@ pub(super) fn record_copy_texture_to_readback(
     };
     unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
 
-    let post_access = if is_storage {
-        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
-    } else {
-        D3D12_BARRIER_ACCESS_SHADER_RESOURCE
-    };
-    let post_layout = if is_storage {
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-    } else {
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
-    };
+    let (post_access, post_layout) = post_copy_texture_state(is_storage, on_direct_queue);
     let b_back = barriers::texture_barrier_full(
         &src_resource,
         D3D12_BARRIER_SYNC_COPY,
@@ -1169,12 +1187,14 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
                 dev.descriptors.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;
             }
-            let last_fence = dev
-                .timeline_next
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_sub(1);
+            let ctx_h = super::context::destroy_attribution_context(state, tex.device_handle);
+            let base = super::context::reclamation_requirements(state, tex.device_handle, ctx_h);
+            let requirements = {
+                let registry = dev.descriptors.lock().unwrap();
+                registry.bindless_retirement_requirements_for_texture(texture_handle, base)
+            };
             dev.deletion_queue.lock().unwrap().queue(
-                last_fence,
+                requirements,
                 PendingDeletion::Texture {
                     texture_handle,
                     resource: tex.resource,

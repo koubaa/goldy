@@ -327,7 +327,7 @@ pub(super) fn destroy(
     if let Some(state) = render_targets.write().unwrap().entries.remove(&target) {
         if let Some(logical_device) = devices.get(&state.device_handle) {
             unsafe {
-                let _ = logical_device.device.device_wait_idle();
+                let _ = logical_device.device_wait_idle_locked();
                 logical_device.device.destroy_image_view(state.image_view, None);
                 logical_device.device.destroy_image(state.image, None);
                 logical_device.device.free_memory(state.image_memory, None);
@@ -544,9 +544,8 @@ where
 }
 
 pub(super) struct RenderToResources<'a> {
-    pub(super) contexts: &'a super::types::SharedContextMap,
     pub(super) devices: &'a HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    pub(super) frame_tables: &'a super::types::SharedFrameTableMap,
+    pub(super) frame_table: &'a super::types::SharedContextFrameTable,
     pub(super) buffers: &'a super::types::SharedBufferTable,
     pub(super) pipelines: &'a super::types::SharedPipelineTable,
 }
@@ -579,16 +578,16 @@ where
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
 
+    let mut row_guard = super::frame_table::RowReservation::new(resources.frame_table);
     if has_bindings {
-        super::frame_table::record_prologue_for_tables(
-            resources.contexts,
-            resources.frame_tables,
+        let row = super::frame_table::record_prologue_legacy(
+            resources.frame_table,
             resources.buffers,
-            device_handle,
             logical_device,
             cmd,
             &staging_data,
         )?;
+        row_guard.set(row);
     }
 
     record_render_pass_to_buffer(
@@ -607,15 +606,24 @@ where
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
     unsafe {
-        logical_device.device.queue_submit(
-            logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            vk::Fence::null(),
-        )
+        let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
+        logical_device
+            .device
+            .queue_submit(
+                logical_device.queue,
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
+            .context("Failed to submit command buffer")?;
+        logical_device
+            .device
+            .queue_wait_idle(logical_device.queue)
+            .context("Failed to wait for queue")?;
+        drop(_queue_guard);
     }
-    .context("Failed to submit command buffer")?;
-
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
+    // Legacy path waits idle — clear the reservation (no timeline token).
+    row_guard.commit(0);
 
     if let Some(rt) = render_targets.read().unwrap().entries.get(&target) {
         rt.has_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -772,15 +780,22 @@ pub(super) fn read_to_cpu(
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
 
     unsafe {
-        logical_device.device.queue_submit(
-            logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            vk::Fence::null(),
-        )
+        let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
+        logical_device
+            .device
+            .queue_submit(
+                logical_device.queue,
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
+            .context("Failed to submit command buffer")?;
+        logical_device
+            .device
+            .queue_wait_idle(logical_device.queue)
+            .context("Failed to wait for queue")?;
+        drop(_queue_guard);
     }
-    .context("Failed to submit command buffer")?;
-
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
     // Read from staging buffer
     unsafe {

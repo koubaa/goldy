@@ -43,18 +43,25 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     })
 }
 
+pub(in crate::backend::metal) fn drain_context_deletion_queue_up_to(
+    ld: &types::LogicalDevice,
+    queue: &mut types::DeletionQueue,
+    signaled: crate::timeline::TimelineValue,
+) {
+    let registry = ld.descriptors.lock().unwrap();
+    queue.process_up_to_gated(signaled, |deletion| match deletion {
+        types::PendingDeletion::Buffer { retained_slots, .. } => registry.retained_pins_clear(retained_slots),
+        _ => true,
+    });
+}
+
 /// Move every entry in each device's pending-slot list to its free list.
 ///
 /// Called after [`GpuBackend::wait_until`] has confirmed GPU completion so slots
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
-        device
-            .descriptors
-            .lock()
-            .unwrap()
-            .resource_registry
-            .drain_pending_slots();
+        device.descriptors.lock().unwrap().drain_pending_slots();
     }
 }
 
@@ -238,12 +245,12 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
         let device = self.context_device(ctx);
         let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            let mut sc = sc_arc.lock().unwrap();
-            drain_completed_cbs(&mut sc);
-            sc.deletion_queue.process_up_to(value);
-        }
         if let Some(ld) = self.state.devices.get(&device) {
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                drain_completed_cbs(&mut sc);
+                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, value);
+            }
             ld.process_deletion_queue_up_to(value.min(retired));
         }
         {
@@ -305,7 +312,7 @@ impl GpuBackend for MetalBackend {
             .map(|(id, _)| *id)
             .collect();
         for ctx in ctxs {
-            context::destroy(&mut self.state, ctx);
+            crate::backend::destroy_context_mut(self, ctx);
         }
         device::destroy(&mut self.state, device);
     }
@@ -318,36 +325,17 @@ impl GpuBackend for MetalBackend {
         context::create(&mut self.state, device)
     }
 
-    fn destroy_context(&mut self, ctx: ContextHandle) {
-        context::destroy(&mut self.state, ctx);
-    }
-
-    fn clone_context_timeline_reader(
-        &self,
+    fn detach_context_for_destroy(
+        &mut self,
         ctx: ContextHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
-        Some(std::sync::Arc::new(MetalContextTimelineReader {
-            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
-        }))
-    }
-
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
-        Some(std::sync::Arc::new(MetalDeviceTimelineReader {
-            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
-        }))
+    ) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&mut self.state, ctx)
+            .map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-            >,
-        >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
         let device_handle = {
@@ -357,7 +345,6 @@ impl GpuBackend for MetalBackend {
         Some(std::sync::Arc::new(MetalContextDeferredDeletionFlush {
             sc,
             ld: std::sync::Arc::clone(self.state.devices.get(&device_handle)?),
-            timeline: std::sync::Arc::clone(context_readers.lock().unwrap().get(&ctx)?),
         }))
     }
 
@@ -866,10 +853,10 @@ impl GpuBackend for MetalBackend {
         }
 
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            sc_arc.lock().unwrap().deletion_queue.process_up_to(value);
-        }
         if let Some(ld) = self.state.devices.get(&device) {
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                drain_context_deletion_queue_up_to(ld, &mut sc_arc.lock().unwrap().deletion_queue, value);
+            }
             ld.process_deletion_queue_up_to(value.min(retired));
         }
         drain_all_pending_slots(&mut self.state);
@@ -968,12 +955,12 @@ impl GpuBackend for MetalBackend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            let mut sc = sc_arc.lock().unwrap();
-            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-            sc.deletion_queue.process_up_to(ctx_signaled);
-        }
         if let Some(ld) = self.state.devices.get(&device) {
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+            }
             ld.process_deletion_queue_up_to(retired);
         }
     }
@@ -1025,20 +1012,19 @@ impl GpuBackend for MetalBackend {
     }
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
-        let device = self.context_device(ctx);
-        let ctx_count = self
-            .state
+        self.state
             .contexts
             .get(&ctx)
             .map(|sc_arc| sc_arc.lock().unwrap().deletion_queue.pending_len())
-            .unwrap_or(0);
-        let device_count = self
-            .state
+            .unwrap_or(0)
+    }
+
+    fn device_deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {
+        self.state
             .devices
             .get(&device)
             .map(|d| d.deletion_queue.lock().unwrap().pending_len())
-            .unwrap_or(0);
-        ctx_count + device_count
+            .unwrap_or(0)
     }
 
     fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {
@@ -1107,27 +1093,6 @@ impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
     }
 }
 
-struct MetalContextTimelineReader {
-    sc: types::SharedMetalSubmissionContext,
-}
-
-impl crate::backend::ContextTimelineReader for MetalContextTimelineReader {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        let sc = self.sc.lock().unwrap();
-        context::context_gpu_progress(&sc)
-    }
-
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.sc.lock().unwrap();
-        let progress = context::context_gpu_progress(&sc);
-        if progress < sc.last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
-    }
-}
-
 struct MetalWaiterBlockingWait {
     waiter: types::TimelineWaiter,
     value: crate::timeline::TimelineValue,
@@ -1168,28 +1133,27 @@ impl crate::backend::TimelineBlockingWait for MetalWaiterBlockingWait {
     }
 }
 
-struct MetalDeviceTimelineReader {
-    ld: types::SharedLogicalDevice,
-}
-
-impl crate::backend::DeviceTimelineReader for MetalDeviceTimelineReader {
-    fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        use std::sync::atomic::Ordering;
-        self.ld.retired_floor.load(Ordering::Relaxed)
-    }
-}
-
 struct MetalContextDeferredDeletionFlush {
     sc: types::SharedMetalSubmissionContext,
     ld: types::SharedLogicalDevice,
-    timeline: std::sync::Arc<dyn crate::backend::ContextTimelineReader>,
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for MetalContextDeferredDeletionFlush {
-    fn flush(&self, device_retired: crate::timeline::TimelineValue) {
-        let ctx_signaled = self.timeline.gpu_progress();
+    fn flush(&self) {
+        let ctx_signaled = if let Ok(sc) = self.sc.lock() {
+            context::context_gpu_progress(&sc)
+        } else {
+            return;
+        };
+        // Metal uses a single shared queue, so this context's progress is the device
+        // retired value for items enqueued up to this context's last submission.
+        let device_retired = self
+            .ld
+            .retired_floor
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(ctx_signaled);
         if let Ok(mut sc) = self.sc.lock() {
-            sc.deletion_queue.process_up_to(ctx_signaled);
+            drain_context_deletion_queue_up_to(&self.ld, &mut sc.deletion_queue, ctx_signaled);
         }
         self.ld.process_deletion_queue_up_to(device_retired);
     }

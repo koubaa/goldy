@@ -415,16 +415,12 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
         let slot_barrier = if gpu_idle { None } else { Some(barrier) };
         if let Some(device) = state.devices.get(&device_handle) {
             let mut registry = device.descriptors.lock().unwrap();
-            registry.resource_registry.unregister_texture(texture_handle);
+            registry.unregister_texture(texture_handle);
             if !texture.slot_owned_externally {
                 if texture.is_storage_image {
-                    registry
-                        .resource_registry
-                        .release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
+                    registry.release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
                 } else {
-                    registry
-                        .resource_registry
-                        .release_texture_slot(texture.arg_buffer_index, slot_barrier);
+                    registry.release_texture_slot(texture.arg_buffer_index, slot_barrier);
                 }
             }
         }

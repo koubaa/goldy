@@ -302,19 +302,17 @@ pub fn compare_images(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_remove_alpha() {
         let rgba = vec![255, 128, 64, 255, 0, 0, 0, 128];
-        let rgb = remove_alpha(&rgba);
+        let rgb = super::remove_alpha(&rgba);
         assert_eq!(rgb, vec![255, 128, 64, 0, 0, 0]);
     }
 
     #[test]
     fn test_add_alpha() {
         let rgb = vec![255, 128, 64, 0, 0, 0];
-        let rgba = add_alpha(&rgb);
+        let rgba = super::add_alpha(&rgb);
         assert_eq!(rgba, vec![255, 128, 64, 255, 0, 0, 0, 255]);
     }
 }

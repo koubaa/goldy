@@ -31,7 +31,9 @@ use super::barriers;
 use super::render_commands;
 use super::texture;
 use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
-use super::utils::{depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device};
+use super::utils::{
+    depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device, execute_with_waits_and_signal_device,
+};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};
 use crate::types::{Color, DepthFormat, TextureFlags, TextureFormat, TextureKind};
@@ -361,8 +363,8 @@ pub(super) fn acquire(
 
     // Fix 1: Ensure this slot's command allocator and scratch texture are no
     // longer in use by the GPU before we reset and reuse them.  With
-    // MAX_FRAMES_IN_FLIGHT=2 this is almost always a near-zero stall because
-    // roughly two CPU frames have elapsed since the slot was last submitted.
+    // With MAX_FRAMES_IN_FLIGHT=3 this is almost always a near-zero stall because
+    // enough CPU frames have elapsed since the slot was last submitted.
     if prev_fence > 0 {
         {
             let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
@@ -378,10 +380,9 @@ pub(super) fn acquire(
     }
 
     // Process deferred deletions now that the fence wait has completed.
-    let retired = super::context::device_retired(state, device_handle);
     if let Some(device) = state.devices.get(&device_handle) {
         let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
-        device.process_deletion_queue_up_to(retired);
+        device.process_deletion_queue_up_to(&state.context_fences);
     }
 
     let surface = state
@@ -481,6 +482,7 @@ pub(super) fn render(
     surface_handle: SurfaceHandle,
     image: SwapchainImageHandle,
     present_slot: u32,
+    ctx: super::ContextHandle,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
@@ -611,25 +613,34 @@ pub(super) fn render(
     }
 
     let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands_state(state, device_handle, commands)?;
+        super::frame_table::prepare_render_commands_state(state, ctx, device_handle, commands)?;
+    let ft = {
+        let contexts_read = state.contexts.read().unwrap();
+        let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
+        drop(contexts_read);
+        let sc_guard = sc_arc.lock().unwrap();
+        let ft = std::sync::Arc::clone(&sc_guard.frame_table);
+        drop(sc_guard);
+        ft
+    };
+    let mut row_guard = super::frame_table::RowReservation::new(&ft);
     if has_bindings {
-        super::frame_table::record_prologue(
+        // Per-context frame-table slots are bound once at context init; no
+        // per-submit rebinding needed.
+        let row = super::frame_table::record_prologue(
             &state.contexts,
-            state
-                .frame_tables
-                .read()
-                .unwrap()
-                .get(&device_handle)
-                .context("frame table not initialized")?,
+            logical_device,
+            ctx,
+            &ft,
             &state.buffers.read().unwrap().entries,
-            device_handle,
             cmd,
             &staging_data,
         )?;
+        row_guard.set(row);
     }
 
     // Execute render commands
-    render_commands::record_state(cmd, &lowered, device_handle, state)?;
+    render_commands::record_state(cmd, &lowered, device_handle, ctx, state)?;
 
     // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
     // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.
@@ -661,6 +672,7 @@ pub(super) fn render(
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
+    row_guard.commit(fence_value);
 
     // Update fence value for next operation
 
@@ -682,7 +694,7 @@ pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, submit_tv:
 pub(super) fn prepare_present_work(
     state: &mut Dx12State,
     frame: crate::backend::FrameToken,
-    _submit_tv: u64,
+    submit_tv: u64,
 ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
     let surface_handle = frame.surface;
     let image_index = frame.image as usize;
@@ -722,6 +734,16 @@ pub(super) fn prepare_present_work(
         .resource
         .clone();
     let existing_fence = surface.frame_sync[present_slot].fence_value;
+    let ctx_fence = {
+        let contexts_read = state.contexts.read().unwrap();
+        let sc_arc = contexts_read
+            .get(&frame.context)
+            .context("Invalid context handle")?
+            .clone();
+        drop(contexts_read);
+        let fence = sc_arc.lock().unwrap().fence.clone();
+        fence
+    };
 
     Ok(Box::new(Dx12PresentGpuWork {
         frame,
@@ -729,6 +751,8 @@ pub(super) fn prepare_present_work(
         present_slot,
         scratch_handle,
         render_pass_submitted,
+        submit_tv,
+        ctx_fence,
         logical_device,
         scratch_res,
         backbuffer,
@@ -765,7 +789,7 @@ pub(super) fn finish_present(
             .entries
             .get_mut(&finish.scratch_texture.expect("scratch texture"))
         {
-            tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+            tex.last_layout = D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
         }
     }
 
@@ -794,6 +818,8 @@ struct Dx12PresentGpuWork {
     present_slot: usize,
     scratch_handle: TextureHandle,
     render_pass_submitted: bool,
+    submit_tv: u64,
+    ctx_fence: ID3D12Fence,
     logical_device: std::sync::Arc<LogicalDevice>,
     scratch_res: ID3D12Resource,
     backbuffer: ID3D12Resource,
@@ -832,7 +858,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                 ),
                 barriers::texture_barrier_full(
@@ -867,7 +893,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
                 ),
             ];
             unsafe { barriers::barrier_textures(&self.cmd7, &post_barriers) };
@@ -876,7 +902,12 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
             unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-            return_fence = execute_command_lists_and_signal_device(&self.logical_device, &[Some(cmd_list)])?;
+            return_fence = if self.submit_tv > 0 {
+                let waits = [(self.ctx_fence.clone(), self.submit_tv)];
+                execute_with_waits_and_signal_device(&self.logical_device, &waits, &[Some(cmd_list)])?
+            } else {
+                execute_command_lists_and_signal_device(&self.logical_device, &[Some(cmd_list)])?
+            };
             scratch_layout_updated = true;
         }
 

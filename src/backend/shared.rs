@@ -93,6 +93,44 @@ pub fn fill_frame_table_dispatch(layout: &mut PushLayout, dispatch_base: u32, us
     }
 }
 
+/// `PushLayout._reserved` word carrying the submitting context's selector
+/// bindless slot (`_rs1` in generated shader wrappers).
+pub const FRAME_TABLE_SELECTOR_SLOT_WORD: usize = 1;
+/// `PushLayout._reserved` word carrying the submitting context's table
+/// bindless slot (`_rs2` in generated shader wrappers).
+pub const FRAME_TABLE_TABLE_SLOT_WORD: usize = 2;
+
+/// Record-time fill of the submitting context's per-context frame-table
+/// bindless slots (`_rs1`/`_rs2`).
+///
+/// Context-agnostic lowering (task-graph analysis) leaves these words zero;
+/// each backend sets them when recording for a known context so concurrent
+/// contexts on one device never share mutable descriptor slots.
+#[inline]
+pub fn set_frame_table_slots(layout: &mut PushLayout, selector_slot: u32, table_slot: u32) {
+    layout._reserved[FRAME_TABLE_SELECTOR_SLOT_WORD] = selector_slot;
+    layout._reserved[FRAME_TABLE_TABLE_SLOT_WORD] = table_slot;
+}
+
+/// Patch the frame-table slot words of every entry in a `DispatchBatch`
+/// argument blob (entries are `DISPATCH_BATCH_STRIDE` bytes apart).
+///
+/// `DispatchBatch` arg data is built during context-agnostic lowering with the
+/// slot words zeroed; backends call this at record time for the submitting
+/// context.
+pub fn patch_dispatch_batch_frame_table_slots(arg_data: &mut [u8], count: usize, selector_slot: u32, table_slot: u32) {
+    let sel_off = (MAX_BINDLESS_SLOTS * 2) + (MAX_USER_SLOTS * 4) + FRAME_TABLE_SELECTOR_SLOT_WORD * 4;
+    let tab_off = (MAX_BINDLESS_SLOTS * 2) + (MAX_USER_SLOTS * 4) + FRAME_TABLE_TABLE_SLOT_WORD * 4;
+    for i in 0..count {
+        let base = i * DISPATCH_BATCH_STRIDE;
+        if base + TOTAL_PUSH_BYTES > arg_data.len() {
+            break;
+        }
+        arg_data[base + sel_off..base + sel_off + 4].copy_from_slice(&selector_slot.to_ne_bytes());
+        arg_data[base + tab_off..base + tab_off + 4].copy_from_slice(&table_slot.to_ne_bytes());
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Slot allocator
 // ──────────────────────────────────────────────────────────────────────────────
@@ -220,13 +258,21 @@ impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {
     /// Drain all entries whose key is `<= threshold`, returning them as an
     /// owned `Vec`. Entries with keys above `threshold` are kept in the queue.
     pub fn drain_up_to(&mut self, threshold: K) -> Vec<V> {
+        self.drain_up_to_filtered(threshold, |_| true)
+    }
+
+    /// Drain entries whose key is `<= threshold` and `can_take(&value)` is true.
+    pub fn drain_up_to_filtered<F>(&mut self, threshold: K, can_take: F) -> Vec<V>
+    where
+        F: Fn(&V) -> bool,
+    {
         if self.pending.is_empty() {
             return Vec::new();
         }
         let mut i = 0;
         let mut eligible: Vec<V> = Vec::new();
         while i < self.pending.len() {
-            if self.pending[i].0 <= threshold {
+            if self.pending[i].0 <= threshold && can_take(&self.pending[i].1) {
                 let (_, v) = self.pending.swap_remove(i);
                 eligible.push(v);
             } else {
@@ -235,10 +281,39 @@ impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {
         }
         eligible
     }
+}
 
+impl<K, V> DeferredQueue<K, V> {
     /// Drain all entries unconditionally (device teardown).
     pub fn flush_all(&mut self) -> impl Iterator<Item = V> + '_ {
         self.pending.drain(..).map(|(_, v)| v)
+    }
+
+    /// Drain all entries whose key satisfies `ready`, returning them as an owned `Vec`.
+    ///
+    /// Unlike [`Self::drain_up_to`], this does not require `K: PartialOrd` — used when a
+    /// single entry's readiness depends on a multi-part requirement (e.g. a per-context
+    /// `(ContextHandle, u64)` snapshot) rather than one totally-ordered threshold.
+    pub fn drain_where<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<V> {
+        self.drain_where_with_keys(ready).into_iter().map(|(_, v)| v).collect()
+    }
+
+    /// Like [`Self::drain_where`], but returns `(key, value)` pairs for diagnostics.
+    pub fn drain_where_with_keys<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<(K, V)> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let mut i = 0;
+        let mut eligible: Vec<(K, V)> = Vec::new();
+        while i < self.pending.len() {
+            if ready(&self.pending[i].0) {
+                let (k, v) = self.pending.swap_remove(i);
+                eligible.push((k, v));
+            } else {
+                i += 1;
+            }
+        }
+        eligible
     }
 }
 

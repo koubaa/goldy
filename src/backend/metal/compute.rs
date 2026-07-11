@@ -1,8 +1,12 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle, SubmitSync};
+use super::super::{
+    ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, GraphCommand, RenderCommand, ShaderHandle,
+    SubmitSync,
+};
 use super::staging::TextureStagingEntry;
+use super::types::MetalSlotKey;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
@@ -32,12 +36,159 @@ fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
     })
 }
 
+fn metal_slot_key_from_category(cat: ResourceCategory, index: u32) -> Option<MetalSlotKey> {
+    match cat {
+        ResourceCategory::Scattered => Some(MetalSlotKey::StorageBuffer(index)),
+        ResourceCategory::Broadcast => Some(MetalSlotKey::UniformBuffer(index)),
+        ResourceCategory::Texture => Some(MetalSlotKey::Texture(index)),
+        ResourceCategory::StorageImage => Some(MetalSlotKey::StorageImage(index)),
+        ResourceCategory::Sampler => None,
+    }
+}
+
+fn collect_metal_slots_from_raw_bind(indices: &[u32], categories: &[Option<ResourceCategory>]) -> Vec<MetalSlotKey> {
+    let mut slots = Vec::new();
+    for (i, &idx) in indices.iter().enumerate() {
+        if let Some(Some(cat)) = categories.get(i) {
+            if let Some(key) = metal_slot_key_from_category(*cat, idx) {
+                slots.push(key);
+            }
+        }
+    }
+    slots
+}
+
+fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[GraphCommand]) -> Vec<MetalSlotKey> {
+    let mut slots = Vec::new();
+    let mut current_compute_pipeline = None;
+    let mut current_render_pipeline = None;
+    for gc in commands {
+        match gc {
+            GraphCommand::Compute(cmd) => match cmd {
+                GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
+                GpuCommand::BindResourcesRaw { indices, .. } => {
+                    if let Some(h) = current_compute_pipeline {
+                        if let Some(p) = state.compute_pipelines.get(&h) {
+                            slots.extend(collect_metal_slots_from_raw_bind(indices, &p.push_constant_categories));
+                        }
+                    }
+                }
+                GpuCommand::BindResourcesTyped { handles } => {
+                    for h in handles {
+                        if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
+                            slots.push(key);
+                        }
+                    }
+                }
+                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                    if let Some(h) = current_compute_pipeline {
+                        if let Some(p) = state.compute_pipelines.get(&h) {
+                            let layout_size = std::mem::size_of::<PushLayout>();
+                            for i in 0..*count as usize {
+                                let base = i * shared::DISPATCH_BATCH_STRIDE;
+                                if base + layout_size <= arg_data.len() {
+                                    let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                                    for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                        if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
+                                            if let Some(key) = metal_slot_key_from_category(cat, idx as u32) {
+                                                slots.push(key);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            GraphCommand::Render {
+                commands: render_cmds, ..
+            } => {
+                for rc in render_cmds {
+                    match rc {
+                        RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::BindResources { buffers: buf_handles } => {
+                            for h in buf_handles {
+                                if let Some(buf) = state.buffers.get(h) {
+                                    slots.push(MetalSlotKey::from_buffer(buf.access, buf.arg_buffer_index));
+                                }
+                            }
+                        }
+                        RenderCommand::BindResourcesRaw { indices, .. } => {
+                            if let Some(h) = current_render_pipeline {
+                                if let Some(p) = state.pipelines.get(&h) {
+                                    slots.extend(collect_metal_slots_from_raw_bind(
+                                        indices,
+                                        &p.push_constant_categories,
+                                    ));
+                                }
+                            }
+                        }
+                        RenderCommand::BindResourcesTyped { handles } => {
+                            for h in handles {
+                                if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
+                                    slots.push(key);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    slots
+}
+
+fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Option<super::types::MetalRetainedGraph> {
+    let device_handle = super::context::context_device(state, ctx);
+    let removed = state.contexts.get(&ctx)?.lock().unwrap().retained_graphs.remove(&key);
+    if let Some(graph) = removed {
+        if let Some(device) = state.devices.get(&device_handle) {
+            let used_slots = graph.used_slots.clone();
+            device.descriptors.lock().unwrap().unpin_retained_slots(used_slots);
+        }
+        Some(graph)
+    } else {
+        None
+    }
+}
+
 /// Encode GPU-side waits on producer-context shared events before consumer work.
+fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.cpu_waits.is_empty() {
+        return Ok(());
+    }
+    for epoch in &s.cpu_waits {
+        let waiter = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit cpu wait: unknown producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        if !waiter.wait_until(epoch.value, std::time::Duration::from_secs(120)) {
+            anyhow::bail!(
+                "cross-submit cpu wait timed out waiting for context {:?} value {}",
+                epoch.context,
+                epoch.value
+            );
+        }
+    }
+    Ok(())
+}
+
 fn encode_wait_for_epochs(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     sync: Option<&SubmitSync>,
 ) -> Result<()> {
+    apply_cpu_epoch_waits(state, sync)?;
     let Some(s) = sync else {
         return Ok(());
     };
@@ -700,6 +851,14 @@ pub(super) fn record_commands_to_buffer(
                     prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
                 let mut layout = PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
+                // Metal's frame table is device-level at fixed arg slots (selector
+                // unused; table at slot 1); the slots still travel via push words
+                // so the shared shader preamble reads them uniformly.
+                shared::set_frame_table_slots(
+                    &mut layout,
+                    crate::frame_table::FRAME_TABLE_SELECTOR_SLOT,
+                    crate::frame_table::FRAME_TABLE_DEVICE_SLOT,
+                );
                 let layout_bytes = layout.as_bytes();
                 guard
                     .compute
@@ -774,6 +933,11 @@ pub(super) fn record_commands_to_buffer(
                             let mut patched = PushLayout::default();
                             bytemuck::bytes_of_mut(&mut patched).copy_from_slice(layout_slice);
                             patched._reserved[0] = patched._reserved[0].wrapping_add(row_offset);
+                            shared::set_frame_table_slots(
+                                &mut patched,
+                                crate::frame_table::FRAME_TABLE_SELECTOR_SLOT,
+                                crate::frame_table::FRAME_TABLE_DEVICE_SLOT,
+                            );
                             enc.set_bytes(
                                 RESOURCE_SLOT_BUFFER,
                                 std::mem::size_of::<PushLayout>() as u64,
@@ -1337,17 +1501,15 @@ pub(super) fn submit(
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
-        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-        sc.deletion_queue.process_up_to(ctx_signaled);
-    }
-    {
-        let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
-            maybe_log_mem_diag(ld);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
+        let retired = super::context::device_retired(state, device_handle);
+        ld.process_deletion_queue_up_to(retired);
+        maybe_log_mem_diag(ld);
     }
 
     Ok(signal_value)
@@ -1610,17 +1772,15 @@ pub(super) fn submit_graph(
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
-        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-        sc.deletion_queue.process_up_to(ctx_signaled);
-    }
-    {
-        let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
-            maybe_log_mem_diag(ld);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
+        let retired = super::context::device_retired(state, device_handle);
+        ld.process_deletion_queue_up_to(retired);
+        maybe_log_mem_diag(ld);
     }
 
     // Mark render targets as rendered.
@@ -1633,9 +1793,21 @@ pub(super) fn submit_graph(
     }
 
     if let Some(key) = retain_key {
+        let used_slots = collect_metal_slots_from_graph_commands(state, commands);
+        let graph = super::types::MetalRetainedGraph {
+            commands: commands.into(),
+            used_slots: used_slots.clone(),
+        };
         if let Some(sc_arc) = state.contexts.get(&ctx) {
-            let arc: std::sync::Arc<[super::super::GraphCommand]> = commands.into();
-            sc_arc.lock().unwrap().retained_graphs.insert(key, arc);
+            let replaced = sc_arc.lock().unwrap().retained_graphs.insert(key, graph);
+            if let Some(old) = replaced {
+                if let Some(device) = state.devices.get(&device_handle) {
+                    device.descriptors.lock().unwrap().unpin_retained_slots(old.used_slots);
+                }
+            }
+            if let Some(device) = state.devices.get(&device_handle) {
+                device.descriptors.lock().unwrap().pin_retained_slots(used_slots);
+            }
         }
     }
 
@@ -1651,9 +1823,7 @@ pub(super) fn submit_graph_and_retain(
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     // Evict only the slot for this key; other schemes' retained graphs are unaffected.
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        sc_arc.lock().unwrap().retained_graphs.remove(&key);
-    }
+    let _ = remove_retained_graph(state, ctx, key);
     submit_graph(state, ctx, commands, Some(key), sync).inspect_err(|e| {
         tracing::error!(
             target: "goldy::diag::submit",
@@ -1673,7 +1843,12 @@ pub(super) fn try_resubmit_retained(
 ) -> Result<Option<TimelineValue>> {
     let commands = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        sc_arc.lock().unwrap().retained_graphs.get(&key).cloned()
+        sc_arc
+            .lock()
+            .unwrap()
+            .retained_graphs
+            .get(&key)
+            .map(|g| g.commands.clone())
     };
     let Some(commands) = commands else {
         return Ok(None);
@@ -1684,9 +1859,7 @@ pub(super) fn try_resubmit_retained(
 
 /// Drop the retained graph entry for `key` on this context.
 pub(super) fn evict_retained(state: &mut MetalState, ctx: ContextHandle, key: u64) {
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        sc_arc.lock().unwrap().retained_graphs.remove(&key);
-    }
+    let _ = remove_retained_graph(state, ctx, key);
 }
 
 /// Record an offscreen render pass into an existing command buffer (no commit/wait).

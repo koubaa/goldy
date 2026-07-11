@@ -481,17 +481,24 @@ pub struct SubmitSync {
     pub prologue: crate::task_graph::BarrierSet,
     /// Cross-context GPU queue-waits on producer timeline values.
     pub waits: Vec<crate::timeline::Epoch>,
+    /// Cross-context WAR hazards resolved on the CPU before enqueueing GPU work.
+    ///
+    /// A live GPU `Wait` for a cross-context WAR can form opposing queue dependencies
+    /// with a concurrent cross-context RAW wait (producer upload vs consumer reader),
+    /// wedging per-context queues. CPU-side retirement breaks the cycle.
+    pub cpu_waits: Vec<crate::timeline::Epoch>,
 }
 
 impl SubmitSync {
     pub fn is_empty(&self) -> bool {
-        self.prologue.is_empty() && self.waits.is_empty()
+        self.prologue.is_empty() && self.waits.is_empty() && self.cpu_waits.is_empty()
     }
 
     pub fn from_cross_submit(cross: &crate::task_graph::CrossSubmitSync) -> Self {
         Self {
             prologue: cross.prologue.clone(),
             waits: cross.waits.clone(),
+            cpu_waits: cross.cpu_waits.clone(),
         }
     }
 
@@ -720,31 +727,52 @@ pub(crate) trait TimelineBlockingWait: Send {
     }
 }
 
-/// Per-context GPU timeline queries cloned out of the backend so
-/// [`Context::gpu_progress`](crate::Context::gpu_progress) and
-/// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
-/// need the global backend lock.
+/// Context teardown detached from live lookup tables. [`Self::wait`] and [`Self::finish`]
+/// run without holding the global backend mutex.
 #[doc(hidden)]
-pub trait ContextTimelineReader: Send + Sync {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue;
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
+pub trait ContextDestroyHandle: Send {
+    fn wait(&self) -> Result<()>;
+    fn finish(self: Box<Self>) -> Result<()>;
 }
 
-/// Device-scoped timeline horizon (retired floor + device sync primitive) cloned out of
-/// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can combine
-/// it with per-context readers without the global backend mutex.
-#[doc(hidden)]
-pub trait DeviceTimelineReader: Send + Sync {
-    /// Floor and device-level sync completion; excludes per-context fence/semaphore progress.
-    fn device_horizon(&self) -> crate::timeline::TimelineValue;
+/// Drain GPU work then release resources for a detached context.
+pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
+    let _ = handle.wait();
+    let _ = handle.finish();
+}
+
+/// Like [`destroy_context`] for an already-unlocked concrete backend (tests, `destroy_device`).
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHandle) {
+    if let Some(handle) = backend.detach_context_for_destroy(ctx) {
+        run_context_destroy(handle);
+    }
+}
+/// Destroy `ctx` without holding the global backend lock across blocking GPU work.
+pub(crate) fn destroy_context(backend: &std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>, ctx: ContextHandle) {
+    if let Some(handle) = {
+        let mut guard = backend.lock().unwrap();
+        guard.detach_context_for_destroy(ctx)
+    } {
+        run_context_destroy(handle);
+    }
 }
 
 /// Per-context deferred GPU deletion flush cloned out of the backend so
 /// [`Context::boundary_crossed`](crate::Context::boundary_crossed) does not need the global
 /// backend mutex for `flush_deferred_deletions`.
+///
+/// Each implementation is responsible for computing whatever device-scope timeline value it
+/// needs internally; the trait no longer takes `device_retired` as a parameter so callers
+/// do not need to produce it.
 #[doc(hidden)]
 pub trait ContextDeferredDeletionFlush: Send + Sync {
-    fn flush(&self, device_retired: crate::timeline::TimelineValue);
+    fn flush(&self);
 }
 
 /// Per-context reclamation epoch scope (Metal heap routing during `boundary_crossed`).
@@ -762,7 +790,7 @@ impl ContextReclamationScope for NoOpReclamationScope {
 pub(crate) struct NoOpDeferredDeletionFlush;
 
 impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
-    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {}
+    fn flush(&self) {}
 }
 
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
@@ -797,6 +825,16 @@ pub(crate) trait PresentGpuWork: Send {
 /// tables so IR lowering + command recording + queue submit can run without the global
 /// backend mutex. Resource create/destroy still takes the global lock (write access).
 pub(crate) trait ContextSubmitSession: Send + Sync {
+    /// When true, compute and render partitions use separate GPU queues and must not merge.
+    fn separate_graphics_queue(&self) -> bool {
+        false
+    }
+
+    /// Synthetic context handle for device-queue producer epochs (DX12 compute style).
+    fn device_queue_owner(&self, _ctx: ContextHandle) -> Option<ContextHandle> {
+        None
+    }
+
     fn retains_present_partitions(&self) -> bool;
     fn submit_standalone(
         &self,
@@ -963,23 +1001,20 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
 
     // Submission context (timeline / submit / reclaim API is keyed by context)
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle>;
-    fn destroy_context(&mut self, ctx: ContextHandle);
 
-    /// Clone the per-context timeline reader out of backend state.
+    /// Detach `ctx` from live lookup tables under a brief global-backend lock.
     ///
-    /// Called once from [`Context::new`](crate::Context::new) so hot-path progress
-    /// queries avoid the global backend mutex.
+    /// The caller should release the lock before [`ContextDestroyHandle::wait`] /
+    /// [`ContextDestroyHandle::finish`]. Prefer [`destroy_context`] when destroying
+    /// from code that holds the wrapping `Arc<Mutex<Box<dyn GpuBackend>>>`.
     #[doc(hidden)]
-    fn clone_context_timeline_reader(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
+    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>>;
 
     /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
     #[doc(hidden)]
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        context_readers: std::sync::Arc<
-            std::sync::Mutex<std::collections::HashMap<ContextHandle, std::sync::Arc<dyn ContextTimelineReader>>>,
-        >,
     ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>>;
 
     /// Clone the per-context reclamation scope for [`Context::boundary_crossed`].
@@ -988,10 +1023,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         let _ = ctx;
         std::sync::Arc::new(NoOpReclamationScope)
     }
-
-    /// Clone the device-scoped timeline horizon reader for lock-free retirement queries.
-    #[doc(hidden)]
-    fn clone_device_timeline_reader(&self, device: DeviceHandle) -> Option<std::sync::Arc<dyn DeviceTimelineReader>>;
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///
@@ -1607,6 +1638,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
     fn deferred_deletion_pending_count(&self, _ctx: ContextHandle) -> usize {
+        0
+    }
+
+    /// Device-level deferred deletions (bindless buffer/texture destroys that may span
+    /// contexts). Per-context [`Self::deferred_deletion_pending_count`] stays separate.
+    #[doc(hidden)]
+    fn device_deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {
         0
     }
 

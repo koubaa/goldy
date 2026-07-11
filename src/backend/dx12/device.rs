@@ -387,6 +387,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         |cache_root| pso_cache::load_maps(&cache_root.join("goldy").join(format!("dx12_pso_{adapter_id}.bin"))),
     );
 
+    let device_last_submitted_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     state.devices.insert(
         handle,
         std::sync::Arc::new(LogicalDevice {
@@ -415,19 +417,40 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             compute_dispatch_indirect_signature,
             compute_batch_dispatch_signature,
             zero_buffer,
-            deletion_queue: std::sync::Mutex::new(super::types::DeletionQueue::new()),
+            deletion_queue: std::sync::Mutex::new(super::types::DeviceDeletionQueue::new()),
+            pending_buffer_gpu_releases: std::sync::Mutex::new(Vec::new()),
+            device_removed: std::sync::Arc::clone(&state.device_removed),
             descriptors: std::sync::Arc::new(std::sync::Mutex::new(super::types::DescriptorRegistry::new())),
             pso_cache: std::sync::Arc::new(std::sync::RwLock::new(super::types::PsoCache::new(
                 graphics_pso_blobs,
                 compute_pso_blobs,
             ))),
             queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            device_last_submitted_seq: std::sync::Arc::clone(&device_last_submitted_seq),
+            device_direct_pool: std::sync::Mutex::new(Vec::new()),
+            legacy_frame_table: std::sync::Mutex::new(None),
         }),
     );
 
-    let ld = state.devices.get(&handle).unwrap().clone();
-    super::frame_table::init_device(state, handle, &ld)?;
+    // Synthetic context handle for device-queue epoch stamps (render partitions under compute style).
+    let owner_id = state.next_context_id;
+    state.next_context_id = state.next_context_id.saturating_add(1);
+    let ld = state.devices.get(&handle).unwrap();
+    state
+        .context_fences
+        .write()
+        .unwrap()
+        .insert(owner_id, (handle, ld.fence.clone(), device_last_submitted_seq));
+    state.device_owner_handles.insert(handle, owner_id);
+
+    {
+        let ld = state.devices.get(&handle).unwrap();
+        super::frame_table::reserve_device_bindless_slots(ld);
+    }
 
     tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
+    if super::api_log::enabled() {
+        super::api_log::log_device_create(adapter_id, handle);
+    }
     Ok(handle)
 }

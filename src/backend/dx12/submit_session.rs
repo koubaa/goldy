@@ -4,9 +4,9 @@
 //! submit never touch the global backend mutex.
 
 use super::compute;
-use super::frame_table::FrameTableDevice;
+use super::frame_table::ContextFrameTable;
 use super::types::{
-    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextMap, SharedFrameTableDevice,
+    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextFrameTable, SharedContextMap,
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSamplerTable, SharedShaderTable,
     SharedSubmissionContext, SharedTextureTable,
 };
@@ -15,14 +15,13 @@ use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 
 /// Resource tables + device handles used by compute and render command recording.
 pub(crate) struct Dx12RecordState<'a> {
     pub ld: &'a SharedLogicalDevice,
     pub devices: &'a HashMap<DeviceHandle, SharedLogicalDevice>,
     pub contexts: &'a SharedContextMap,
-    pub frame_table: SharedFrameTableDevice,
+    pub frame_table: SharedContextFrameTable,
     pub buffers: &'a SharedBufferTable,
     pub shaders: &'a SharedShaderTable,
     pub pipelines: &'a SharedPipelineTable,
@@ -39,8 +38,9 @@ pub(crate) struct Dx12SubmitScope<'a> {
     pub device_handle: DeviceHandle,
     pub sc: super::types::SharedSubmissionContext,
     pub record: Dx12RecordState<'a>,
-    pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
-    pub use_global_buffer_barriers: bool,
+    pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
+    /// Synthetic context for device-queue epoch stamps (compute style only).
+    pub device_owner: Option<ContextHandle>,
 }
 
 impl<'a> Dx12SubmitScope<'a> {
@@ -56,7 +56,7 @@ impl<'a> Dx12SubmitScope<'a> {
         self.record.contexts
     }
 
-    pub fn frame_table(&self) -> &FrameTableDevice {
+    pub fn frame_table(&self) -> &ContextFrameTable {
         &self.record.frame_table
     }
 
@@ -94,16 +94,43 @@ impl<'a> Dx12SubmitScope<'a> {
 
 pub(crate) fn record_state_from_backend<'a>(
     state: &'a Dx12State,
+    ctx: ContextHandle,
     device_handle: DeviceHandle,
 ) -> Result<Dx12RecordState<'a>> {
     let frame_table = Arc::clone(
-        state
-            .frame_tables
+        &state
+            .contexts
             .read()
             .unwrap()
-            .get(&device_handle)
-            .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
+            .get(&ctx)
+            .with_context(|| format!("Invalid context handle {ctx}"))?
+            .lock()
+            .unwrap()
+            .frame_table,
     );
+    Ok(Dx12RecordState {
+        ld: state
+            .devices
+            .get(&device_handle)
+            .with_context(|| format!("Invalid device {device_handle}"))?,
+        devices: &state.devices,
+        contexts: &state.contexts,
+        frame_table,
+        buffers: &state.buffers,
+        shaders: &state.shaders,
+        pipelines: &state.pipelines,
+        compute_pipelines: &state.compute_pipelines,
+        render_targets: &state.render_targets,
+        textures: &state.textures,
+        samplers: &state.samplers,
+    })
+}
+
+pub(crate) fn record_state_for_legacy_render<'a>(
+    state: &'a mut Dx12State,
+    device_handle: DeviceHandle,
+) -> Result<Dx12RecordState<'a>> {
+    let frame_table = super::frame_table::ensure_legacy_frame_table(state, device_handle)?;
     Ok(Dx12RecordState {
         ld: state
             .devices
@@ -130,8 +157,8 @@ pub(crate) struct Dx12SubmitSession {
     ld: SharedLogicalDevice,
     devices: Arc<HashMap<DeviceHandle, SharedLogicalDevice>>,
     contexts: SharedContextMap,
-    frame_table: SharedFrameTableDevice,
-    context_fences: Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    frame_table: SharedContextFrameTable,
+    context_fences: Arc<RwLock<HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
     buffers: SharedBufferTable,
     shaders: SharedShaderTable,
     pipelines: SharedPipelineTable,
@@ -139,7 +166,7 @@ pub(crate) struct Dx12SubmitSession {
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
-    use_global_buffer_barriers: bool,
+    device_owner_handle: Option<ContextHandle>,
 }
 
 impl Dx12SubmitSession {
@@ -152,27 +179,22 @@ impl Dx12SubmitSession {
                 .get(&ctx)
                 .with_context(|| format!("Invalid context handle {ctx}"))?,
         );
-        let device_handle = sc.lock().unwrap().device;
+        let (device_handle, frame_table) = {
+            let sc_guard = sc.lock().unwrap();
+            (sc_guard.device, Arc::clone(&sc_guard.frame_table))
+        };
         let ld = Arc::clone(
             state
                 .devices
                 .get(&device_handle)
                 .with_context(|| format!("Invalid device handle {device_handle}"))?,
         );
-        let frame_table = Arc::clone(
-            state
-                .frame_tables
-                .read()
-                .unwrap()
-                .get(&device_handle)
-                .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
-        );
         let devices: HashMap<DeviceHandle, SharedLogicalDevice> = state
             .devices
             .iter()
             .map(|(handle, device)| (*handle, Arc::clone(device)))
             .collect();
-        let use_global_buffer_barriers = ld.adapter_id == super::WARP_ADAPTER_ID;
+        let device_owner_handle = state.device_owner_handles.get(&device_handle).copied();
         Ok(Arc::new(Self {
             ctx,
             device_handle,
@@ -189,7 +211,7 @@ impl Dx12SubmitSession {
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
-            use_global_buffer_barriers,
+            device_owner_handle,
         }))
     }
 
@@ -212,12 +234,20 @@ impl Dx12SubmitSession {
                 samplers: &self.samplers,
             },
             context_fences: &self.context_fences,
-            use_global_buffer_barriers: self.use_global_buffer_barriers,
+            device_owner: self.device_owner_handle,
         }
     }
 }
 
 impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
+    fn separate_graphics_queue(&self) -> bool {
+        true
+    }
+
+    fn device_queue_owner(&self, _ctx: ContextHandle) -> Option<ContextHandle> {
+        self.device_owner_handle
+    }
+
     fn retains_present_partitions(&self) -> bool {
         true
     }

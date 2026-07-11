@@ -96,32 +96,15 @@ struct MockContextState {
     signal_queue: crate::signal::SignalQueue,
 }
 
-struct MockContextTimelineReader {
-    state: Arc<Mutex<MockContextState>>,
-}
+struct MockContextDestroyHandle;
 
-impl crate::backend::ContextTimelineReader for MockContextTimelineReader {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        self.state.lock().unwrap().completed
+impl ContextDestroyHandle for MockContextDestroyHandle {
+    fn wait(&self) -> Result<()> {
+        Ok(())
     }
 
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
-        let state = self.state.lock().unwrap();
-        if state.completed < state.last_submitted_seq {
-            Some(state.completed.saturating_add(1))
-        } else {
-            None
-        }
-    }
-}
-
-struct MockDeviceTimelineReader {
-    floor: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl crate::backend::DeviceTimelineReader for MockDeviceTimelineReader {
-    fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        self.floor.load(std::sync::atomic::Ordering::Relaxed)
+    fn finish(self: Box<Self>) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -590,42 +573,25 @@ impl GpuBackend for MockBackend {
         Ok(id)
     }
 
-    fn destroy_context(&mut self, ctx: ContextHandle) {
+    fn detach_context_for_destroy(
+        &mut self,
+        ctx: ContextHandle,
+    ) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
         if let Some(state) = self.contexts.remove(&ctx) {
             let state = state.lock().unwrap();
             let retired_horizon = state.completed.max(state.last_submitted_seq);
             if let Some(floor) = self.device_retired_floor.get(&state.device) {
                 floor.fetch_max(retired_horizon, std::sync::atomic::Ordering::Relaxed);
             }
+            Some(Box::new(MockContextDestroyHandle) as Box<dyn crate::backend::ContextDestroyHandle>)
+        } else {
+            None
         }
-    }
-
-    fn clone_context_timeline_reader(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<Arc<dyn crate::backend::ContextTimelineReader>> {
-        Some(Arc::new(MockContextTimelineReader {
-            state: Arc::clone(self.contexts.get(&ctx)?),
-        }))
-    }
-
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<Arc<dyn crate::backend::DeviceTimelineReader>> {
-        Some(Arc::new(MockDeviceTimelineReader {
-            floor: Arc::clone(self.device_retired_floor.get(&device)?),
-        }))
     }
 
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        _context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-            >,
-        >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let _ = ctx;
         Some(std::sync::Arc::new(crate::backend::NoOpDeferredDeletionFlush))
@@ -2489,7 +2455,7 @@ mod tests {
         }
         *backend.device_timeline_next.entry(device).or_insert(0) = 10;
 
-        backend.destroy_context(ctx);
+        crate::backend::destroy_context_mut(&mut backend, ctx);
 
         assert_eq!(
             backend.device_retired(device),

@@ -7,8 +7,7 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
 #[allow(clippy::too_many_arguments)]
@@ -466,6 +465,8 @@ pub(super) fn write(
         let cmd_buffers = [cmd_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
@@ -474,6 +475,7 @@ pub(super) fn write(
             .device
             .queue_wait_idle(logical_device.queue)
             .context("Failed to wait for queue")?;
+        drop(_queue_guard);
 
         // Cleanup
         logical_device
@@ -693,6 +695,8 @@ pub(super) fn write_region(
         let cmd_buffers = [cmd_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
@@ -701,6 +705,7 @@ pub(super) fn write_region(
             .device
             .queue_wait_idle(logical_device.queue)
             .context("Failed to wait for queue")?;
+        drop(_queue_guard);
 
         // Cleanup
         logical_device
@@ -995,15 +1000,22 @@ pub(super) fn read_to_cpu(
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
     unsafe {
-        logical_device.device.queue_submit(
-            logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            vk::Fence::null(),
-        )
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
+        logical_device
+            .device
+            .queue_submit(
+                logical_device.queue,
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
+            .context("Failed to submit command buffer")?;
+        logical_device
+            .device
+            .queue_wait_idle(logical_device.queue)
+            .context("Failed to wait for queue")?;
+        drop(_queue_guard);
     }
-    .context("Failed to submit command buffer")?;
-
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
     unsafe {
         logical_device
@@ -1033,11 +1045,16 @@ pub(super) fn read_to_cpu(
 
 /// Destroy a texture, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
+    state: &super::types::VulkanState,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &SharedTextureTable,
     texture_handle: TextureHandle,
 ) {
-    if let Some(texture) = textures.write().unwrap().entries.remove(&texture_handle) {
+    let texture = {
+        let mut textures = textures.write().unwrap();
+        textures.entries.remove(&texture_handle)
+    };
+    if let Some(texture) = texture {
         if let Some(logical_device) = devices.get(&texture.device_handle) {
             if texture.transient_heap_suballoc {
                 logical_device
@@ -1052,9 +1069,14 @@ pub(super) fn destroy(
                 return;
             }
 
-            let barrier = logical_device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            let ctx_h = super::context::destroy_attribution_context(state, texture.device_handle);
+            let base = super::context::reclamation_requirements(state, texture.device_handle, ctx_h);
+            let requirements = {
+                let registry = logical_device.descriptors.lock().unwrap();
+                registry.bindless_retirement_requirements_for_texture(texture_handle, base)
+            };
             logical_device.deletion_queue.lock().unwrap().queue(
-                barrier,
+                requirements,
                 types::PendingDeletion::Texture {
                     texture_handle,
                     image: texture.image,
@@ -1147,12 +1169,15 @@ pub(super) fn transition_image_layout(
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         let sub = logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null());
         sub.context("Failed to submit layout transition")?;
         let wait = logical_device.device.queue_wait_idle(logical_device.queue);
         wait.context("Failed to wait for layout transition")?;
+        drop(_queue_guard);
 
         logical_device
             .device
@@ -1245,45 +1270,33 @@ pub(super) fn allocate_compute_texture_staging(
     })
 }
 
-/// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+/// Copy flat texel bytes from a CPU-writable source buffer for [`GpuCommand::CopyBufferToTexture`].
+///
+/// Does not touch the context staging pool — safe to call before locking `SubmissionContext`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn allocate_copy_buffer_to_texture_staging(
-    instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+pub(super) fn copy_buffer_to_texture_flat_bytes(
     textures: &SharedTextureTable,
     buffers: &super::types::SharedBufferTable,
-    pool: &mut super::staging::TextureStagingPool,
     src: crate::backend::BufferHandle,
     src_offset: u64,
     texture_handle: TextureHandle,
-    x: u32,
-    y: u32,
     width: u32,
     height: u32,
-) -> Result<ComputeTextureScratch> {
-    let textures_guard = textures.read().unwrap();
-    let texture = textures_guard
-        .entries
-        .get(&texture_handle)
-        .context("allocate_copy_buffer_to_texture_staging: invalid texture")?;
-    let bpp = texture.format.bytes_per_pixel();
+) -> Result<Vec<u8>> {
+    let bpp = {
+        let textures_guard = textures.read().unwrap();
+        let texture = textures_guard
+            .entries
+            .get(&texture_handle)
+            .context("copy_buffer_to_texture_flat_bytes: invalid texture")?;
+        texture.format.bytes_per_pixel()
+    };
     let flat_len = (width as usize)
         .checked_mul(height as usize)
         .and_then(|h| h.checked_mul(bpp as usize))
         .context("CopyBufferToTexture: flat byte size overflow")?;
     let data = super::buffer::cpu_writable_flat_slice(buffers, src, src_offset, flat_len)?;
-    allocate_compute_texture_staging(
-        instance,
-        devices,
-        textures,
-        pool,
-        texture_handle,
-        data,
-        x,
-        y,
-        width,
-        height,
-    )
+    Ok(data.to_vec())
 }
 
 /// Record buffer→image copy + layout transitions into an open command buffer.

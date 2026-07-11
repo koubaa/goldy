@@ -5,10 +5,10 @@
 use super::types::LogicalDevice;
 use anyhow::{Context, Result};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use windows::Win32::{
     Foundation::{CloseHandle, WAIT_OBJECT_0},
-    Graphics::Direct3D12::{ID3D12CommandList, ID3D12Fence},
+    Graphics::Direct3D12::{ID3D12CommandList, ID3D12CommandQueue, ID3D12Fence},
     System::Threading::{CreateEventA, WaitForSingleObject, INFINITE},
 };
 
@@ -183,43 +183,165 @@ pub(super) fn execute_command_lists_and_signal_device(
     logical_device: &LogicalDevice,
     command_lists: &[Option<ID3D12CommandList>],
 ) -> Result<u64> {
+    execute_with_waits_and_signal_device(logical_device, &[], command_lists)
+}
+
+/// Enqueue cross-queue GPU waits, execute command lists, and signal the device fence — all
+/// under a single hold of [`LogicalDevice::queue_lock`].
+///
+/// Used by the present copy path: frame compute runs on a per-context queue, but the
+/// scratch→backbuffer copy must run on the swapchain-associated device queue. A
+/// `queue.Wait(ctx_fence, submit_tv)` here orders the copy after the context submission
+/// (mirrors Vulkan's `wait_compute_done` in `present_split.rs`).
+pub(super) fn execute_with_waits_and_signal_device(
+    logical_device: &LogicalDevice,
+    waits: &[(ID3D12Fence, u64)],
+    command_lists: &[Option<ID3D12CommandList>],
+) -> Result<u64> {
     let queue_lock = Arc::clone(&logical_device.queue_lock);
     let _guard = queue_lock.lock().unwrap();
+    let api_log_on = super::api_log::enabled();
+    let queue_id = if api_log_on {
+        super::api_log::com_identity(&logical_device.command_queue)
+    } else {
+        0
+    };
+    for (producer_fence, value) in waits {
+        if api_log_on {
+            super::api_log::log_queue_wait(queue_id, super::api_log::com_identity(producer_fence), *value);
+        }
+        unsafe { logical_device.command_queue.Wait(producer_fence, *value) }
+            .context("device queue Wait before present copy")?;
+    }
     let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+    if api_log_on {
+        super::api_log::log_execute_command_lists(queue_id, command_lists.len());
+    }
     unsafe {
         logical_device.command_queue.ExecuteCommandLists(command_lists);
     }
     unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
         .context("Failed to signal device fence")?;
+    logical_device
+        .device_last_submitted_seq
+        .store(fence_value, Ordering::Relaxed);
+    if api_log_on {
+        super::api_log::log_queue_signal(
+            queue_id,
+            super::api_log::com_identity(&logical_device.fence),
+            fence_value,
+        );
+    }
     Ok(fence_value)
 }
 
-/// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
-pub(super) fn execute_command_lists_and_signal_context(
+/// Run `f` while holding [`LogicalDevice::queue_lock`] (the queue is externally synchronized).
+pub(super) fn with_queue_lock<R>(logical_device: &LogicalDevice, f: impl FnOnce() -> R) -> R {
+    let queue_lock = Arc::clone(&logical_device.queue_lock);
+    let _guard = queue_lock.lock().unwrap();
+    f()
+}
+
+/// Enqueue cross-context GPU waits, execute command lists, and signal a context fence — all
+/// under a single hold of `queue_lock`, on `queue`.
+///
+/// `queue` and `queue_lock` are the *calling context's own* command queue and its per-context
+/// queue lock (`Dx12SubmissionContext::command_queue`/`queue_lock`) — never the shared
+/// `LogicalDevice::command_queue`. Each context owns its queue so that a cross-context `Wait`
+/// enqueued here only ever stalls this context's queue: it can never block a sibling
+/// context's submission, and a sibling context's submission can never be blocked behind this
+/// one's `Wait` on the (now nonexistent) shared queue. `logical_device` is only used for the
+/// shared timeline-value counter (see the comment below), never for its own queue.
+///
+/// The queue itself is externally synchronized in D3D12: `Wait`, `ExecuteCommandLists`, and
+/// `Signal` are all queue mutations that must not interleave with another thread's submission
+/// on the *same* queue. Splitting the `Wait` out of the lock (the previous behavior) both
+/// races the queue object and can reorder a same-context resubmit behind this submission's
+/// wait, deadlocking or removing the device under parallel submit.
+pub(super) fn execute_with_waits_and_signal_context(
     logical_device: &LogicalDevice,
+    queue: &ID3D12CommandQueue,
+    queue_lock: &Arc<Mutex<()>>,
+    waits: &[(ID3D12Fence, u64)],
     ctx_fence: &ID3D12Fence,
     command_lists: &[Option<ID3D12CommandList>],
 ) -> Result<u64> {
-    let queue_lock = Arc::clone(&logical_device.queue_lock);
     let _guard = queue_lock.lock().unwrap();
-    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(command_lists);
+    let api_log_on = super::api_log::enabled();
+    let queue_id = if api_log_on {
+        super::api_log::com_identity(queue)
+    } else {
+        0
+    };
+    for (producer_fence, value) in waits {
+        if api_log_on {
+            super::api_log::log_queue_wait(queue_id, super::api_log::com_identity(producer_fence), *value);
+        }
+        unsafe { queue.Wait(producer_fence, *value) }.context("cross-submit GPU queue Wait")?;
     }
-    unsafe { logical_device.command_queue.Signal(ctx_fence, fence_value) }.context("Failed to signal context fence")?;
+    // Values are drawn from the device-shared counter (not a per-context one): the public
+    // `Device::wait_until_retired` contract requires an arbitrary context's `TimelineValue` to
+    // be findable/comparable across every other context on the device (see
+    // `Dx12Backend::device_wait_until`), which only holds if all contexts share one space.
+    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+    if api_log_on {
+        super::api_log::log_execute_command_lists(queue_id, command_lists.len());
+    }
+    unsafe {
+        queue.ExecuteCommandLists(command_lists);
+    }
+    unsafe { queue.Signal(ctx_fence, fence_value) }.context("Failed to signal context fence")?;
+    if api_log_on {
+        super::api_log::log_queue_signal(queue_id, super::api_log::com_identity(ctx_fence), fence_value);
+    }
     Ok(fence_value)
 }
 
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    if unsafe { fence.GetCompletedValue() } < value {
+    wait_for_fence_on_device(fence, value, None)
+}
+
+/// Like [`wait_for_fence`] but logs DRED on first `u64::MAX` when `ld` is provided.
+pub(super) fn wait_for_fence_on_device(
+    fence: &ID3D12Fence,
+    value: u64,
+    ld: Option<&super::types::LogicalDevice>,
+) -> Result<()> {
+    let completed = unsafe { fence.GetCompletedValue() };
+    if completed == u64::MAX {
+        if let Some(ld) = ld {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &ld.device_removed,
+                "dx12::utils::wait_for_fence_on_device",
+                value,
+                completed,
+            );
+        }
+        anyhow::bail!("GPU device removed while waiting for fence value {value}");
+    }
+    if completed < value {
         let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
         unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
 
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe { CloseHandle(event) }.ok();
+    }
+    let completed_after = unsafe { fence.GetCompletedValue() };
+    if completed_after == u64::MAX {
+        if let Some(ld) = ld {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &ld.device_removed,
+                "dx12::utils::wait_for_fence_on_device",
+                value,
+                completed_after,
+            );
+        }
+        anyhow::bail!("GPU device removed after waiting for fence value {value}");
     }
     Ok(())
 }

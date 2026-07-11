@@ -233,7 +233,8 @@ impl Submission {
 
     /// Block until this submission's GPU work has completed.
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
-        ctx.wait_until(self.data.timeline)
+        ctx.wait_until(self.data.timeline)?;
+        Ok(())
     }
 }
 
@@ -502,17 +503,14 @@ impl<T> Grant for ReadGrant<T> {
         let byte_size = usize::try_from(self.byte_size)
             .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
         let mut bytes = vec![0u8; byte_size];
-        {
+        let read_result = {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
             match self.read_kind {
-                GrantReadKind::Buffer => backend
-                    .read_readback_buffer(handle, &mut bytes)
-                    .map_err(|e| self.ctx.classify(e))?,
-                GrantReadKind::Texture(layout) => backend
-                    .read_texture_readback_staging(handle, layout, &mut bytes)
-                    .map_err(|e| self.ctx.classify(e))?,
+                GrantReadKind::Buffer => backend.read_readback_buffer(handle, &mut bytes),
+                GrantReadKind::Texture(layout) => backend.read_texture_readback_staging(handle, layout, &mut bytes),
             }
-        }
+        };
+        read_result.map_err(|e| self.ctx.classify(e))?;
         Ok(Loan {
             bytes,
             handle,
@@ -1278,10 +1276,11 @@ impl Scheme {
         }
 
         let tv_copy = {
-            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend
-                .submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
-                .map_err(|e| self.ctx.classify(e))?
+            let submit_result = {
+                let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+                backend.submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
+            };
+            submit_result.map_err(|e| self.ctx.classify(e))?
         };
         self.ctx.advance_high_water_timeline(tv_copy);
 
@@ -1608,10 +1607,11 @@ impl Scheme {
             )));
         }
         let layout = {
-            let backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend
-                .query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
-                .map_err(|e| self.ctx.classify(e))?
+            let query_result = {
+                let backend = self.ctx.device().inner.backend.lock().unwrap();
+                backend.query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
+            };
+            query_result.map_err(|e| self.ctx.classify(e))?
         };
         let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
@@ -3813,7 +3813,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
     /// to one ledger cell (`ResourceSync`), and a present-path submit must record the copy
-    /// read on that cell so cross-frame WAR enforcement can key off `last_reads`.
+    /// read on that cell so cross-frame WAR enforcement can key off `foreign_reads`
+    /// (present easement is an exercised-claim / foreign read, not a scheduled `last_reads`).
     #[test]
     fn out_image_fine_write_and_present_copy_share_ledger_identity() {
         use crate::task_graph::cross_submit::{compute_cross_submit_sync, net_access_per_resource, ResourceKey};
@@ -3901,11 +3902,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         present.consume(&sub1).expect("present frame 1");
 
-        // Frame 2 submit gate folds the resolved present epoch into last_reads.
+        // Frame 2 submit gate folds the resolved present epoch into foreign_reads.
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
             let sync = registered.sync.lock().unwrap();
-            *sync.last_reads.get(&ctx_handle).expect("last_reads after present fold")
+            *sync
+                .foreign_reads
+                .get(&ctx_handle)
+                .expect("foreign_reads after present fold")
         };
         assert!(
             present_read_tv >= frame1_tv,

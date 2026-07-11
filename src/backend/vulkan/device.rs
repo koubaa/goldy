@@ -450,20 +450,22 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_descriptor_set,
             bindless_pipeline_layout,
             descriptors: Arc::new(Mutex::new(types::DescriptorRegistry::new())),
-            deletion_queue: Mutex::new(types::DeletionQueue::new()),
+            deletion_queue: Mutex::new(types::DeviceDeletionQueue::new()),
+            pending_buffer_gpu_releases: Mutex::new(Vec::new()),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),
             queue_lock: Arc::new(Mutex::new(())),
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
+            legacy_frame_table: Mutex::new(None),
         }),
     );
 
     tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
-    let ld = state.devices.get(&handle).unwrap().clone();
-    let instance = state.instance.clone();
-    super::frame_table::init_device(state, &instance, handle, &ld)?;
+    if let Some(ld) = state.devices.get(&handle) {
+        super::frame_table::reserve_device_bindless_slots(ld);
+    }
     Ok(handle)
 }
 
@@ -483,15 +485,23 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         "destroying Vulkan device"
     );
     if let Some(logical_device) = state.devices.remove(&device_handle) {
+        let wait_result = logical_device.device_wait_idle_locked();
+
+        if !matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
+            if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
+                super::frame_table::destroy_context(state, &logical_device, &ft);
+            }
+        }
+
         unsafe {
-            let wait_result = logical_device.device.device_wait_idle();
+            let wait_result = logical_device.device_wait_idle_locked();
 
             // When the device is lost, individual Vulkan destroy calls are unsafe
             // (driver bookkeeping is already corrupt). Per spec, vkDestroyDevice is
             // always valid and implicitly reclaims all child objects, so skip
             // individual cleanup and jump straight to it.
             if matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
-                let pending = logical_device.deletion_queue.lock().unwrap().len();
+                let pending = logical_device.deletion_queue.lock().unwrap().pending_len();
                 tracing::warn!(
                     %device_handle,
                     pending_deferred = pending,
@@ -578,8 +588,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     sc.texture_staging_pool.destroy_all(&logical_device);
                 }
             }
-
-            super::frame_table::destroy_device(state, device_handle, &logical_device);
 
             // Destroy buffers owned by this device
             let buffer_handles: Vec<_> = state

@@ -666,7 +666,7 @@ pub(super) fn acquire(
         state
             .devices
             .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().len())
+            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
             .unwrap_or(0)
     };
 
@@ -794,14 +794,7 @@ pub(super) fn acquire(
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let drained = logical_device.deletion_queue.lock().unwrap().drain_up_to(completed);
-        if !drained.is_empty() {
-            let descriptors_arc = std::sync::Arc::clone(&logical_device.descriptors);
-            let mut registry = descriptors_arc.lock().unwrap();
-            for r in drained {
-                types::destroy_pending_deletion(logical_device, &mut registry, r);
-            }
-        }
+        logical_device.process_deletion_queue_for_device(&state.contexts, device_handle);
     }
 
     // Request the next swapchain image.  Semaphore-only: the CPU does not wait
@@ -893,11 +886,11 @@ pub(super) fn render(
     surface_handle: SurfaceHandle,
     image: SwapchainImageHandle,
     present_slot: u32,
+    ctx: super::ContextHandle,
     timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let devices = &state.devices;
-    let frame_tables = &state.frame_tables;
     let buffers = &state.buffers;
     let pipelines = &state.pipelines;
     let surfaces = &mut state.surfaces;
@@ -960,6 +953,17 @@ pub(super) fn render(
     let (staging_data, lowered, has_bindings) =
         super::frame_table::prepare_render_commands(buffers, pipelines, commands)?;
 
+    let frame_table = {
+        let contexts_read = state.contexts.read().unwrap();
+        let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
+        drop(contexts_read);
+        let sc_guard = sc_arc.lock().unwrap();
+        let ft = std::sync::Arc::clone(&sc_guard.frame_table);
+        drop(sc_guard);
+        ft
+    };
+    let mut row_guard = super::frame_table::RowReservation::new(&frame_table);
+
     {
         let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
 
@@ -994,15 +998,18 @@ pub(super) fn render(
         }
 
         if has_bindings {
-            super::frame_table::record_prologue_for_tables(
+            // Per-context frame-table slots are bound once at context init; no
+            // per-submit rebinding needed.
+            let row = super::frame_table::record_prologue(
                 &state.contexts,
-                frame_tables,
+                ctx,
+                &frame_table,
                 buffers,
-                device_handle,
                 logical_device,
                 cmd,
                 &staging_data,
             )?;
+            row_guard.set(row);
         }
 
         // Transition image to color attachment. The image is in `GENERAL` layout at this
@@ -1138,6 +1145,7 @@ pub(super) fn render(
                 &pipelines_read.entries,
                 &buffers_read.entries,
                 &mut current_pipeline,
+                (frame_table.selector_slot, frame_table.table_slot),
             )?;
         }
 
@@ -1219,6 +1227,7 @@ pub(super) fn render(
         }
     }
     .context("Failed to submit render command buffer")?;
+    row_guard.commit(signal_timeline_value);
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[present_slot];
@@ -1337,7 +1346,7 @@ pub(super) fn resize(
     }
 
     // Wait for all in-flight frames to complete before resizing
-    unsafe { logical_device.device.device_wait_idle() }?;
+    logical_device.device_wait_idle_locked()?;
 
     // Destroy old depth buffer (must be before swapchain recreation)
     if let Some(surface_state) = surfaces.get(&surface_handle) {

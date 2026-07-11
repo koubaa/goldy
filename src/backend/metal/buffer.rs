@@ -502,10 +502,16 @@ pub(super) fn resize(
     let barrier = logical_device
         .timeline_scheduled_max
         .load(std::sync::atomic::Ordering::Relaxed);
+    let retained_slots = logical_device
+        .descriptors
+        .lock()
+        .unwrap()
+        .buffer_retained_slot_keys(buffer_handle);
     logical_device.deletion_queue.lock().unwrap().queue(
         barrier,
         super::types::PendingDeletion::Buffer {
             buffer: old_state.buffer,
+            retained_slots,
         },
     );
 
@@ -572,15 +578,28 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         // call free the Metal heap allocation immediately rather than waiting for
         // the (often much larger) timeline_scheduled_max.
         let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
+        let retained_slots = state
+            .devices
+            .get(&buffer.device_handle)
+            .map(|device| {
+                device
+                    .descriptors
+                    .lock()
+                    .unwrap()
+                    .buffer_retained_slot_keys(buffer_handle)
+            })
+            .unwrap_or_default();
         if let Some(device) = state.devices.get(&buffer.device_handle) {
             device
                 .descriptors
                 .lock()
                 .unwrap()
-                .resource_registry
                 .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });
         }
-        let deletion = super::types::PendingDeletion::Buffer { buffer: buffer.buffer };
+        let deletion = super::types::PendingDeletion::Buffer {
+            buffer: buffer.buffer,
+            retained_slots,
+        };
         // Hot path: route to the owning context's per-context deletion queue so
         // the MTL buffer is freed as soon as the context's own timeline retires,
         // without waiting for device_retired (max over all contexts).

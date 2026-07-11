@@ -41,6 +41,15 @@ pub(crate) struct PendingSlotReclamation {
     pub requirements: Vec<(super::ContextHandle, u64)>,
 }
 
+fn slot_requirements_met(
+    requirements: &[(super::ContextHandle, u64)],
+    completed_values: &HashMap<super::ContextHandle, u64>,
+) -> bool {
+    requirements
+        .iter()
+        .all(|(ctx_id, required_seq)| completed_values.get(ctx_id).is_none_or(|&v| v >= *required_seq))
+}
+
 /// Device-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
@@ -58,6 +67,8 @@ pub(crate) struct DescriptorRegistry {
     pub slot_last_seen: HashMap<SlotKey, HashMap<super::ContextHandle, u64>>,
     /// Slots waiting for referencing contexts to retire before returning to free lists.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
+    /// Retained command buffers still baking each bindless slot (incremental refcount).
+    retained_users: HashMap<SlotKey, u32>,
 }
 
 impl DescriptorRegistry {
@@ -66,7 +77,39 @@ impl DescriptorRegistry {
             resource_registry: ResourceRegistry::new(),
             slot_last_seen: HashMap::new(),
             pending_slot_reclamations: Vec::new(),
+            retained_users: HashMap::new(),
         }
+    }
+
+    /// Increment pin count for each slot baked into a newly retained command buffer.
+    pub(crate) fn pin_retained_slots(&mut self, slots: impl IntoIterator<Item = SlotKey>) {
+        for slot in slots {
+            *self.retained_users.entry(slot).or_insert(0) += 1;
+        }
+    }
+
+    /// Decrement pin count when a retained CB is evicted or a context is destroyed.
+    pub(crate) fn unpin_retained_slots(&mut self, slots: impl IntoIterator<Item = SlotKey>) {
+        for slot in slots {
+            if let Some(count) = self.retained_users.get_mut(&slot) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.retained_users.remove(&slot);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_user_count(&self, slot: SlotKey) -> u32 {
+        self.retained_users.get(&slot).copied().unwrap_or(0)
+    }
+
+    /// True when no retained command buffer still bakes any of `slots`.
+    pub(crate) fn retained_pins_clear(&self, slots: &[SlotKey]) -> bool {
+        slots
+            .iter()
+            .all(|slot| self.retained_users.get(slot).copied().unwrap_or(0) == 0)
     }
 
     /// Record that `ctx` submitted `seq` referencing each bindless slot in `slots`.
@@ -93,20 +136,20 @@ impl DescriptorRegistry {
             .remove(&slot)
             .map(|m| m.into_iter().collect())
             .unwrap_or_default();
-        if requirements.is_empty() {
-            self.resource_registry.free_slot(slot);
-        } else {
-            self.pending_slot_reclamations
-                .push(PendingSlotReclamation { slot, requirements });
-        }
+        // Always defer: empty requirements may still be referenced by retained command buffers.
+        self.pending_slot_reclamations
+            .push(PendingSlotReclamation { slot, requirements });
     }
 
     /// Reclaim all descriptor slots for a destroyed buffer handle.
-    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) {
+    ///
+    /// Returns the slot keys that were reclaimed (for gating physical GPU free).
+    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) -> Vec<SlotKey> {
         let slots = self.resource_registry.extract_buffer_slots(handle);
-        for slot in slots {
+        for slot in slots.iter().copied() {
             self.queue_slot_reclamation(slot);
         }
+        slots
     }
 
     /// Reclaim all descriptor slots for a destroyed texture handle.
@@ -134,17 +177,57 @@ impl DescriptorRegistry {
     pub(crate) fn drain_ready_slot_reclamations(&mut self, completed_values: &HashMap<super::ContextHandle, u64>) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
-            let ready = self.pending_slot_reclamations[i]
+            let slot = self.pending_slot_reclamations[i].slot;
+            let gpu_ready = self.pending_slot_reclamations[i]
                 .requirements
                 .iter()
                 .all(|(ctx_id, required_seq)| completed_values.get(ctx_id).is_none_or(|&v| v >= *required_seq));
-            if ready {
+            let pin_clear = self.retained_users.get(&slot).copied().unwrap_or(0) == 0;
+            if gpu_ready && pin_clear {
                 let entry = self.pending_slot_reclamations.swap_remove(i);
                 self.resource_registry.free_slot(entry.slot);
             } else {
                 i += 1;
             }
         }
+    }
+
+    /// Per-context requirements that must retire before a buffer's GPU resource can be
+    /// released: `base` merged with every live `slot_last_seen` entry for this buffer's
+    /// bindless slots.
+    pub(crate) fn bindless_retirement_requirements_for_buffer(
+        &self,
+        handle: BufferHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.buffer_slot_keys(handle);
+        self.merge_slot_requirements(&slots, base)
+    }
+
+    /// Same as [`Self::bindless_retirement_requirements_for_buffer`] but for a texture handle.
+    pub(crate) fn bindless_retirement_requirements_for_texture(
+        &self,
+        handle: TextureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.texture_slot_keys(handle);
+        self.merge_slot_requirements(&slots, base)
+    }
+
+    fn merge_slot_requirements(
+        &self,
+        slots: &[SlotKey],
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let mut merged: HashMap<super::ContextHandle, u64> = base.into_iter().collect();
+        for &slot in slots {
+            if let Some(map) = self.slot_last_seen.get(&slot) {
+                for (ctx, seq) in map.iter() {
+                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
+                }
+            }
+        }
+        merged.into_iter().collect()
     }
 }
 
@@ -276,6 +359,34 @@ impl ResourceRegistry {
         let index = self.sampler.alloc();
         self.sampler_indices.insert(handle, index);
         index
+    }
+
+    /// Bindless slot keys for `handle` without removing the registry entry.
+    pub fn buffer_slot_keys(&self, handle: BufferHandle) -> Vec<SlotKey> {
+        self.buffer_indices
+            .get(&handle)
+            .map(|&(index, is_storage)| {
+                vec![if is_storage {
+                    SlotKey::StorageBuffer(index)
+                } else {
+                    SlotKey::UniformBuffer(index)
+                }]
+            })
+            .unwrap_or_default()
+    }
+
+    /// Bindless slot keys for `handle` without removing the registry entry.
+    pub fn texture_slot_keys(&self, handle: TextureHandle) -> Vec<SlotKey> {
+        self.texture_indices
+            .get(&handle)
+            .map(|&(index, is_storage_image)| {
+                vec![if is_storage_image {
+                    SlotKey::StorageImage(index)
+                } else {
+                    SlotKey::SampledTexture(index)
+                }]
+            })
+            .unwrap_or_default()
     }
 
     /// Remove a buffer's handle mapping and return its slot key without recycling.
@@ -568,6 +679,83 @@ mod registry_tests {
         drain_pending(&retired, &mut reg, &mut pending);
         assert_eq!(reg.storage_buffer.free_count(), 1);
     }
+
+    /// Retained-graph pin blocks slot free even when GPU requirements are met.
+    #[test]
+    fn retained_pin_blocks_slot_free_until_unpin() {
+        use crate::backend::ContextHandle;
+        let mut dr = DescriptorRegistry::new();
+        let handle = 3u64 as BufferHandle;
+        let slot = dr.resource_registry.register_buffer(handle, true);
+        let slot_key = SlotKey::StorageBuffer(slot);
+
+        dr.pin_retained_slots([slot_key]);
+        dr.queue_slot_reclamation(slot_key);
+        dr.resource_registry.extract_buffer_slots(handle);
+
+        let completed: HashMap<ContextHandle, u64> = HashMap::new();
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(dr.resource_registry.storage_buffer.free_count(), 0, "pin blocks free");
+        assert_eq!(dr.retained_user_count(slot_key), 1);
+
+        dr.unpin_retained_slots([slot_key]);
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(
+            dr.resource_registry.storage_buffer.free_count(),
+            1,
+            "unpin then drain frees"
+        );
+    }
+
+    /// Two retained graphs sharing a slot: free only after both unpinned.
+    #[test]
+    fn retained_pin_shared_slot_needs_two_unpins() {
+        use crate::backend::ContextHandle;
+        let mut dr = DescriptorRegistry::new();
+        let handle = 4u64 as BufferHandle;
+        let slot = dr.resource_registry.register_buffer(handle, true);
+        let slot_key = SlotKey::StorageBuffer(slot);
+
+        dr.pin_retained_slots([slot_key]);
+        dr.pin_retained_slots([slot_key]);
+        dr.queue_slot_reclamation(slot_key);
+        dr.resource_registry.extract_buffer_slots(handle);
+
+        let completed: HashMap<ContextHandle, u64> = HashMap::new();
+        dr.unpin_retained_slots([slot_key]);
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(dr.resource_registry.storage_buffer.free_count(), 0, "one pin remains");
+
+        dr.unpin_retained_slots([slot_key]);
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(dr.resource_registry.storage_buffer.free_count(), 1);
+    }
+
+    /// Replacing a retained graph: unpin old-only slots, new slots stay pinned.
+    #[test]
+    fn retained_pin_replace_frees_old_only_slots() {
+        use crate::backend::ContextHandle;
+        let mut dr = DescriptorRegistry::new();
+        let slot_old = dr.resource_registry.register_buffer(5, true);
+        let slot_new = dr.resource_registry.register_buffer(6, true);
+        let old_key = SlotKey::StorageBuffer(slot_old);
+        let new_key = SlotKey::StorageBuffer(slot_new);
+
+        dr.pin_retained_slots([old_key]);
+        dr.pin_retained_slots([new_key]);
+        dr.unpin_retained_slots([old_key]);
+
+        dr.queue_slot_reclamation(old_key);
+        dr.queue_slot_reclamation(new_key);
+        dr.resource_registry.buffer_indices.remove(&5);
+        dr.resource_registry.buffer_indices.remove(&6);
+
+        let completed: HashMap<ContextHandle, u64> = HashMap::new();
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(dr.resource_registry.storage_buffer.free_count(), 1, "old slot freed");
+        assert_eq!(dr.retained_user_count(new_key), 1);
+        assert_eq!(dr.retained_user_count(old_key), 0);
+    }
 }
 
 /// Information about a physical Vulkan device.
@@ -611,12 +799,11 @@ pub(crate) struct SubmissionContext {
     /// on each submit using `ctx_completed_value` — never via `device_retired` —
     /// so no other context's progress can block reclaim here.
     ///
-    /// User-destroyed resources (buffers, textures, …) whose context is unknown
-    /// at destroy time still go to `LogicalDevice::deletion_queue` and are drained
-    /// in the explicit-wait paths (`wait_until`, `flush_deferred_deletions`,
-    /// surface acquire).  As a result the submit hot path no longer touches the
-    /// device-level queue at all, which is required for Phase 5 (lock-free submit).
+    /// Dispatch-batch arg buffers and other resources whose lifetime is bounded by
+    /// this context's timeline only.
     pub deletion_queue: DeletionQueue,
+    /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
+    pub frame_table: SharedContextFrameTable,
 }
 
 /// A logical Vulkan device with associated resources.
@@ -658,10 +845,11 @@ pub(crate) struct LogicalDevice {
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
     pub descriptors: Arc<Mutex<DescriptorRegistry>>,
-    /// Deferred deletion queue for resources that are still in-flight.
-    /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a): callers that
-    /// previously took `&mut LogicalDevice` now lock this field individually.
-    pub deletion_queue: Mutex<DeletionQueue>,
+    /// Deferred deletion queue for bindless-tracked buffer/texture destroys that may
+    /// span more than one context. Keyed by per-context requirement snapshots.
+    pub deletion_queue: Mutex<DeviceDeletionQueue>,
+    /// Deferred Vk buffer frees after fence requirements and retained-graph pins clear.
+    pub pending_buffer_gpu_releases: Mutex<Vec<PendingBufferGpuRelease>>,
     /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
     /// `Arc` allows submit paths to clone the counter out before dropping device/state borrows
     /// (required for Phase 5 lock-free submit).
@@ -698,6 +886,9 @@ pub(crate) struct LogicalDevice {
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
     pub vk_timestamp_period_ns: f32,
+
+    /// Frame table for legacy `render_to_target` (no submission context).
+    pub legacy_frame_table: Mutex<Option<SharedContextFrameTable>>,
 }
 
 /// A Vulkan command buffer retained for resubmission.
@@ -730,6 +921,12 @@ impl LogicalDevice {
     pub unsafe fn unmap_memory2(&self, memory: vk::DeviceMemory) -> ash::prelude::VkResult<()> {
         let info = vk::MemoryUnmapInfoKHR::default().memory(memory);
         (self.map_memory2.fp().unmap_memory2_khr)(self.device.handle(), &info).result()
+    }
+
+    /// `vkDeviceWaitIdle` under [`Self::queue_lock`]: externally synchronized like queue submits.
+    pub(crate) fn device_wait_idle_locked(&self) -> ash::prelude::VkResult<()> {
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.device.device_wait_idle() }
     }
 }
 
@@ -1050,6 +1247,16 @@ pub(crate) struct PendingBuffer {
     pub offset: u64,
 }
 
+/// GPU buffer objects held until retained-graph pins on reclaimed slots clear.
+pub(crate) struct PendingBufferGpuRelease {
+    pub retained_slots: Vec<SlotKey>,
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+    pub staging_buffer: Option<vk::Buffer>,
+    pub staging_memory: Option<vk::DeviceMemory>,
+    pub sparse_teardown: Option<SparseBufferTeardown>,
+}
+
 /// Deferred sparse teardown (after timeline barrier): unbind + pool recycle + buffer destroy.
 #[allow(dead_code)]
 pub(crate) struct SparseBufferTeardown {
@@ -1121,6 +1328,7 @@ impl DeletionQueue {
     }
 
     /// Queue a resource for deferred deletion once the device timeline reaches `barrier`.
+    #[allow(dead_code, reason = "per-context deferred deletion API; device queue used today")]
     pub fn queue(&mut self, barrier: TimelineValue, resource: PendingDeletion) {
         self.inner.push(barrier, resource);
     }
@@ -1140,6 +1348,40 @@ impl DeletionQueue {
     }
 }
 
+/// Device-level deferred deletion queue for resources whose destroy could touch more than
+/// one context (bindless-registry-tracked buffers/textures/views).
+pub(crate) struct DeviceDeletionQueue {
+    inner: super::super::shared::DeferredQueue<Vec<(super::ContextHandle, u64)>, PendingDeletion>,
+}
+
+impl DeviceDeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            inner: super::super::shared::DeferredQueue::new(),
+        }
+    }
+
+    pub fn queue(&mut self, requirements: Vec<(super::ContextHandle, u64)>, resource: PendingDeletion) {
+        self.inner.push(requirements, resource);
+    }
+
+    pub(crate) fn drain_ready(
+        &mut self,
+        completed_values: &HashMap<super::ContextHandle, u64>,
+    ) -> Vec<PendingDeletion> {
+        self.inner
+            .drain_where(|reqs| slot_requirements_met(reqs, completed_values))
+    }
+
+    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
+        self.inner.flush_all().collect()
+    }
+
+    pub(crate) fn pending_len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
 /// Deferred-delete one entry ([`SparseBufferTeardown`] needs [`LogicalDevice`] for the page pool).
 ///
 /// `registry` must be the already-locked `DescriptorRegistry` from `ld.descriptors`; passing it separately
@@ -1149,69 +1391,47 @@ pub(crate) fn destroy_pending_deletion(
     registry: &mut DescriptorRegistry,
     resource: PendingDeletion,
 ) {
-    match &resource {
-        PendingDeletion::Buffer { buffer_handle, .. } | PendingDeletion::BufferView { buffer_handle } => {
-            registry.reclaim_buffer_slots(*buffer_handle);
+    match resource {
+        PendingDeletion::Buffer {
+            buffer_handle,
+            buffer,
+            memory,
+            staging_buffer,
+            staging_memory,
+            sparse_teardown,
+        } => {
+            let retained_slots = registry.reclaim_buffer_slots(buffer_handle);
+            ld.pending_buffer_gpu_releases
+                .lock()
+                .unwrap()
+                .push(PendingBufferGpuRelease {
+                    retained_slots,
+                    buffer,
+                    memory,
+                    staging_buffer,
+                    staging_memory,
+                    sparse_teardown,
+                });
+        }
+        PendingDeletion::BufferView { buffer_handle } => {
+            registry.reclaim_buffer_slots(buffer_handle);
         }
         PendingDeletion::Texture { texture_handle, .. } => {
-            registry.reclaim_texture_slots(*texture_handle);
+            registry.reclaim_texture_slots(texture_handle);
+            destroy_pending_deletion_gpu(ld, resource);
         }
-        _ => {}
+        other => destroy_pending_deletion_gpu(ld, other),
     }
+}
 
+fn destroy_pending_deletion_gpu(ld: &LogicalDevice, resource: PendingDeletion) {
     let device = &ld.device;
     let bind_queue = ld.sparse_binding_queue;
-    // Lock sparse_page_pool once for the duration of this call (needed when freeing
-    // sparse memory pages). Held only here; no other code path holds it concurrently
-    // while the outer backend lock serialises all submits.
     let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
 
     unsafe {
         match resource {
-            PendingDeletion::Buffer {
-                buffer_handle: _,
-                buffer,
-                memory,
-                staging_buffer,
-                staging_memory,
-                sparse_teardown,
-            } => {
-                if let Some(td) = sparse_teardown {
-                    if !td.binds.is_empty() {
-                        let mut sparse_binds = Vec::with_capacity(td.binds.len());
-                        for (res_off, _mem, _mem_off) in &td.binds {
-                            sparse_binds.push(
-                                vk::SparseMemoryBind::default()
-                                    .resource_offset(*res_off)
-                                    .size(td.block_size)
-                                    .memory(vk::DeviceMemory::default())
-                                    .memory_offset(0)
-                                    .flags(vk::SparseMemoryBindFlags::empty()),
-                            );
-                        }
-                        if let Err(e) = super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds)
-                        {
-                            tracing::warn!(?e, "sparse unbind on buffer destroy failed");
-                        }
-                        for (_res_off, mem, mem_off) in &td.binds {
-                            if let Some(pool) = pool_guard.as_mut() {
-                                pool.free_page(*mem, *mem_off);
-                            }
-                        }
-                    }
-                    device.destroy_buffer(buffer, None);
-                } else {
-                    device.destroy_buffer(buffer, None);
-                    device.free_memory(memory, None);
-                }
-                if let Some(buf) = staging_buffer {
-                    device.destroy_buffer(buf, None);
-                }
-                if let Some(mem) = staging_memory {
-                    device.free_memory(mem, None);
-                }
-            }
-            PendingDeletion::BufferView { buffer_handle: _ } => {}
+            PendingDeletion::Buffer { .. } | PendingDeletion::BufferView { .. } => {}
             PendingDeletion::ReplacedBufferGpu {
                 buffer,
                 memory,
@@ -1247,7 +1467,9 @@ pub(crate) fn destroy_pending_deletion(
                                 .flags(vk::SparseMemoryBindFlags::empty()),
                         );
                     }
-                    if let Err(e) = super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds) {
+                    if let Err(e) =
+                        super::sparse::queue_bind_sparse_sync(device, &ld.queue_lock, bind_queue, buffer, &sparse_binds)
+                    {
                         tracing::warn!(?e, "sparse unbind on replaced buffer failed");
                     }
                     for (_res_off, mem, mem_off) in &binds {
@@ -1289,33 +1511,126 @@ pub(crate) fn destroy_pending_deletion(
     }
 }
 
+fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelease) {
+    let PendingBufferGpuRelease {
+        retained_slots: _,
+        buffer,
+        memory,
+        staging_buffer,
+        staging_memory,
+        sparse_teardown,
+    } = entry;
+    let device = &ld.device;
+    let bind_queue = ld.sparse_binding_queue;
+    let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
+
+    unsafe {
+        if let Some(td) = sparse_teardown {
+            if !td.binds.is_empty() {
+                let mut sparse_binds = Vec::with_capacity(td.binds.len());
+                for (res_off, _mem, _mem_off) in &td.binds {
+                    sparse_binds.push(
+                        vk::SparseMemoryBind::default()
+                            .resource_offset(*res_off)
+                            .size(td.block_size)
+                            .memory(vk::DeviceMemory::default())
+                            .memory_offset(0)
+                            .flags(vk::SparseMemoryBindFlags::empty()),
+                    );
+                }
+                if let Err(e) =
+                    super::sparse::queue_bind_sparse_sync(device, &ld.queue_lock, bind_queue, buffer, &sparse_binds)
+                {
+                    tracing::warn!(?e, "sparse unbind on buffer destroy failed");
+                }
+                for (_res_off, mem, mem_off) in &td.binds {
+                    if let Some(pool) = pool_guard.as_mut() {
+                        pool.free_page(*mem, *mem_off);
+                    }
+                }
+            }
+            device.destroy_buffer(buffer, None);
+        } else {
+            device.destroy_buffer(buffer, None);
+            device.free_memory(memory, None);
+        }
+        if let Some(buf) = staging_buffer {
+            device.destroy_buffer(buf, None);
+        }
+        if let Some(mem) = staging_memory {
+            device.free_memory(mem, None);
+        }
+    }
+}
+
 impl LogicalDevice {
-    /// Drop deferred resources whose timeline barrier is `<= completed`.
+    /// Drain ready device-level deletions without locking the descriptor registry.
+    pub(crate) fn drain_deletion_queue_ready(
+        &self,
+        completed_values: &HashMap<super::ContextHandle, u64>,
+    ) -> Vec<PendingDeletion> {
+        self.deletion_queue.lock().unwrap().drain_ready(completed_values)
+    }
+
+    /// Drop deferred resources once every listed context requirement has retired.
     ///
     /// Locks the deletion queue and descriptor registry internally; takes `&self` so this
     /// can be called through an `Arc<LogicalDevice>` (Phase 5a).
-    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
-        let drained = self.deletion_queue.lock().unwrap().drain_up_to(completed);
-        if drained.is_empty() {
-            return;
+    pub(crate) fn process_deletion_queue_up_to(&self, completed_values: &HashMap<super::ContextHandle, u64>) {
+        let drained = self.drain_deletion_queue_ready(completed_values);
+        if !drained.is_empty() {
+            let descriptors_arc = Arc::clone(&self.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
+            for r in drained {
+                destroy_pending_deletion(self, &mut registry, r);
+            }
         }
-        let descriptors_arc = Arc::clone(&self.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for r in drained {
-            destroy_pending_deletion(self, &mut registry, r);
+        let ready = {
+            let registry = self.descriptors.lock().unwrap();
+            self.take_ready_buffer_gpu_releases(&registry)
+        };
+        for entry in ready {
+            release_buffer_gpu_resources(self, entry);
         }
+    }
+
+    pub(crate) fn take_ready_buffer_gpu_releases(&self, registry: &DescriptorRegistry) -> Vec<PendingBufferGpuRelease> {
+        let mut pending = self.pending_buffer_gpu_releases.lock().unwrap();
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < pending.len() {
+            if registry.retained_pins_clear(&pending[i].retained_slots) {
+                ready.push(pending.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        ready
+    }
+
+    /// Snapshot live context semaphores and drain the device deletion queue.
+    pub(crate) fn process_deletion_queue_for_device(
+        &self,
+        contexts: &SharedContextMap,
+        device_handle: super::DeviceHandle,
+    ) {
+        let completed_values = snapshot_context_completed_values(&self.device, contexts, device_handle);
+        self.process_deletion_queue_up_to(&completed_values);
     }
 
     /// Drain all pending deletions (device teardown).
     pub(crate) fn flush_deletion_queue(&self) {
-        let batch = self.deletion_queue.lock().unwrap().flush_all_drain();
-        if batch.is_empty() {
-            return;
+        let batch = self.deletion_queue.lock().unwrap().drain_everything();
+        if !batch.is_empty() {
+            let descriptors_arc = Arc::clone(&self.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
+            for r in batch {
+                destroy_pending_deletion(self, &mut registry, r);
+            }
         }
-        let descriptors_arc = Arc::clone(&self.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for r in batch {
-            destroy_pending_deletion(self, &mut registry, r);
+        let all = std::mem::take(&mut *self.pending_buffer_gpu_releases.lock().unwrap());
+        for entry in all {
+            release_buffer_gpu_resources(self, entry);
         }
     }
 }
@@ -1341,11 +1656,8 @@ pub(super) type SharedComputeFencePool = Arc<ComputeFencePool>;
 /// Per-context map — read/write independently of the global backend mutex (Phase 5b-iii).
 pub(crate) type SharedContextMap = Arc<RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
 
-/// Per-device frame-table GPU resources — cloned into submit sessions.
-pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
-
-/// Frame tables keyed by device — cloned into [`super::submit_session::VulkanSubmitSession`].
-pub(crate) type SharedFrameTableMap = Arc<RwLock<HashMap<DeviceHandle, SharedFrameTableDevice>>>;
+/// Per-context frame-table GPU resources — cloned into submit sessions at context creation.
+pub(crate) type SharedContextFrameTable = Arc<super::frame_table::ContextFrameTable>;
 
 /// Map plus monotonic handle allocator for a single resource kind.
 ///
@@ -1426,6 +1738,4 @@ pub(super) struct VulkanState {
     /// `true` when `VK_EXT_debug_utils` was loaded (i.e. validation layers are
     /// active).  Guards `set_texture_debug_name` so we never call a null fp.
     pub enable_validation: bool,
-    /// Per-device frame-table GPU resources (selector, device table, upload staging).
-    pub frame_tables: SharedFrameTableMap,
 }
