@@ -118,8 +118,16 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
         .context("Vulkan per-context compute queue pool exhausted — destroy a context or create another device")?;
     let queue = ld.compute_queues[queue_index];
     let compute_family = ld.compute_queue_family;
-    let queue_lock = Arc::new(Mutex::new(()));
-    ld.register_active_compute_queue_lock(Arc::clone(&queue_lock));
+    // One-queue devices: all contexts share the graphics/present queue and its lock.
+    // Private locks would race on the same VkQueue (externally synchronized).
+    let (queue_lock, register_compute_lock) = if ld.compute_queues_alias_graphics {
+        (Arc::clone(&ld.queue_lock), false)
+    } else {
+        (Arc::new(Mutex::new(())), true)
+    };
+    if register_compute_lock {
+        ld.register_active_compute_queue_lock(Arc::clone(&queue_lock));
+    }
 
     let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
         .semaphore_type(vk::SemaphoreType::TIMELINE)
@@ -314,7 +322,10 @@ pub(super) fn teardown_submission_context(
             if let Some(idx) = sc.queue_index {
                 ld.free_compute_queue_indices.lock().unwrap().push_back(idx);
             }
-            ld.unregister_active_compute_queue_lock(&sc.queue_lock);
+            // Shared graphics lock is never registered in active_context_queue_locks.
+            if !ld.compute_queues_alias_graphics {
+                ld.unregister_active_compute_queue_lock(&sc.queue_lock);
+            }
         }
         if !sc.is_device_owner {
             super::frame_table::destroy_context_resources(buffers, ld, &sc.frame_table);

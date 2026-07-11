@@ -842,7 +842,13 @@ pub(crate) struct LogicalDevice {
     /// Queue family used for per-context compute submits (may equal [`Self::queue_family`]).
     pub compute_queue_family: u32,
     /// Pool of compute-capable queues assigned to submission contexts.
+    ///
+    /// When [`Self::compute_queues_alias_graphics`] is true, every entry is the
+    /// same handle as [`Self::queue`] (logical slots on a one-queue device).
     pub compute_queues: Vec<vk::Queue>,
+    /// True when the graphics family exposes only one queue: contexts share
+    /// [`Self::queue`] and [`Self::queue_lock`] instead of private compute queues.
+    pub compute_queues_alias_graphics: bool,
     pub free_compute_queue_indices: std::sync::Mutex<std::collections::VecDeque<usize>>,
     /// Reusable primary command buffers for device-queue render submits.
     pub free_device_cmd_buffers: std::sync::Mutex<Vec<vk::CommandBuffer>>,
@@ -948,10 +954,11 @@ impl LogicalDevice {
     }
 
     pub(crate) fn unregister_active_compute_queue_lock(&self, lock: &Arc<Mutex<()>>) {
-        self.active_context_queue_locks
-            .lock()
-            .unwrap()
-            .retain(|l| !Arc::ptr_eq(l, lock));
+        // Remove one matching entry (shared graphics lock may be registered zero times).
+        let mut locks = self.active_context_queue_locks.lock().unwrap();
+        if let Some(i) = locks.iter().position(|l| Arc::ptr_eq(l, lock)) {
+            locks.swap_remove(i);
+        }
     }
 
     /// `vkMapMemory2KHR` — core in Vulkan 1.4. Struct-based API that replaces `vkMapMemory`.

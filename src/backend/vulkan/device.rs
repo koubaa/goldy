@@ -212,29 +212,43 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     }
 
     // Per-context compute queue pool (see types::MAX_CONTEXT_COMPUTE_QUEUES).
+    // When the graphics family has only one queue and there is no dedicated compute
+    // family, contexts alias that graphics/present queue (logical slots, shared lock).
     let dedicated_compute_family = queue_families.iter().enumerate().find_map(|(idx, props)| {
         let has_compute = props.queue_flags.contains(vk::QueueFlags::COMPUTE);
         let has_graphics = props.queue_flags.contains(vk::QueueFlags::GRAPHICS);
         (has_compute && !has_graphics).then_some(idx as u32)
     });
 
-    let (compute_queue_family, compute_pool_size, graphics_family_queue_count) =
+    let (compute_queue_family, compute_pool_size, graphics_family_queue_count, compute_queues_alias_graphics) =
         if let Some(cf) = dedicated_compute_family {
             let family_count = queue_families[cf as usize].queue_count;
             let n = family_count.min(types::MAX_CONTEXT_COMPUTE_QUEUES).max(1);
-            (cf, n, 1u32)
+            (cf, n, 1u32, false)
         } else {
             let available = queue_families[queue_family_index as usize].queue_count;
             // Reserve queue index 0 for graphics/present; remaining indices are the compute pool.
             let spare = available.saturating_sub(1);
-            let n = spare.clamp(1, types::MAX_CONTEXT_COMPUTE_QUEUES);
-            (queue_family_index, n, 1 + n)
+            if spare == 0 {
+                (
+                    queue_family_index,
+                    types::MAX_CONTEXT_COMPUTE_QUEUES,
+                    1u32,
+                    true,
+                )
+            } else {
+                let n = spare.min(types::MAX_CONTEXT_COMPUTE_QUEUES);
+                (queue_family_index, n, 1 + n, false)
+            }
         };
 
     // Create logical device with swapchain extension
     let mut queue_priority_storage: Vec<Vec<f32>> = Vec::new();
     let mut queue_family_counts: Vec<(u32, usize)> = Vec::new();
-    if compute_queue_family == queue_family_index {
+    if compute_queues_alias_graphics {
+        queue_family_counts.push((queue_family_index, 1));
+        queue_priority_storage.push(vec![1.0f32]);
+    } else if compute_queue_family == queue_family_index {
         queue_family_counts.push((queue_family_index, graphics_family_queue_count as usize));
         queue_priority_storage.push(vec![1.0f32; graphics_family_queue_count as usize]);
     } else {
@@ -288,7 +302,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
     let mut compute_queues = Vec::with_capacity(compute_pool_size as usize);
-    if compute_queue_family == queue_family_index {
+    if compute_queues_alias_graphics {
+        // Logical context slots on the sole graphics/present queue.
+        for _ in 0..compute_pool_size {
+            compute_queues.push(queue);
+        }
+    } else if compute_queue_family == queue_family_index {
         for i in 1..=compute_pool_size {
             compute_queues.push(unsafe { device.get_device_queue(compute_queue_family, i) });
         }
@@ -485,6 +504,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             queue_family: queue_family_index,
             compute_queue_family,
             compute_queues,
+            compute_queues_alias_graphics,
             free_compute_queue_indices: Mutex::new(free_compute_queue_indices),
             free_device_cmd_buffers: Mutex::new(Vec::new()),
             sparse_binding_queue,
@@ -515,11 +535,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     );
 
     tracing::info!(
-        "Created Vulkan device {} for adapter {} (compute pool: {} queues, family {})",
+        "Created Vulkan device {} for adapter {} (compute pool: {} slots, family {}, alias_graphics={})",
         handle,
         adapter_id,
         compute_pool_size,
-        compute_queue_family
+        compute_queue_family,
+        compute_queues_alias_graphics
     );
     if let Some(ld) = state.devices.get(&handle).cloned() {
         super::frame_table::reserve_device_bindless_slots(&ld);
