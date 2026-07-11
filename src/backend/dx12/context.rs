@@ -70,6 +70,8 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         fence_value: 0,
         command_list: None,
         retained: false,
+        pre_reset: false,
+        in_recording: false,
     }];
 
     let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
@@ -245,7 +247,7 @@ pub(super) fn wait_for_all_contexts_on_device(state: &Dx12State, device: DeviceH
 
 pub(super) struct Dx12ContextDestroyWork {
     ctx: ContextHandle,
-    sc: super::types::Dx12SubmissionContext,
+    sc: super::types::SharedSubmissionContext,
     device: DeviceHandle,
     ld: super::types::SharedLogicalDevice,
     buffers: super::types::SharedBufferTable,
@@ -255,14 +257,21 @@ pub(super) struct Dx12ContextDestroyWork {
 
 impl ContextDestroyHandle for Dx12ContextDestroyWork {
     fn wait(&self) -> Result<()> {
-        let last_submitted = self.sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed);
+        let (last_submitted, fence) = {
+            let sc = self.sc.lock().unwrap();
+            (
+                sc.last_submitted_seq
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                sc.fence.clone(),
+            )
+        };
         // Flush drains every enqueued Execute/Signal on this device. Do not treat the
         // device-global worker epoch as proof that *this* context's fence reached
         // `last_submitted` — other contexts share the same timeline value space.
         self.ld.submission_worker.flush()?;
         self.ld.submission_worker.check_error()?;
         if last_submitted > 0 {
-            super::utils::wait_for_fence(&self.sc.fence, last_submitted)?;
+            super::utils::wait_for_fence(&fence, last_submitted)?;
         }
         Ok(())
     }
@@ -275,15 +284,13 @@ impl ContextDestroyHandle for Dx12ContextDestroyWork {
 
 /// Remove `ctx` from live lookup tables.
 pub(super) fn detach_for_destroy(state: &Dx12State, ctx: ContextHandle) -> Option<Dx12ContextDestroyWork> {
-    let sc_arc = state.contexts.write().unwrap().remove(&ctx)?;
+    let sc = state.contexts.write().unwrap().remove(&ctx)?;
 
     // Cloned per-context handles (`ContextDeferredDeletionFlush`, `ContextReclamationScope`, …)
     // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
-    let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
-        .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
-    let sc = sc_mutex.into_inner().expect("context Mutex poisoned");
-
-    let device = sc.device;
+    // Pending compute submits also clone `sc`; [`ContextDestroyHandle::wait`] flushes the
+    // submission worker before [`finish_destroy`] unwraps exclusive ownership.
+    let device = sc.lock().unwrap().device;
     let ld = state.devices.get(&device)?.clone();
 
     Some(Dx12ContextDestroyWork {
@@ -303,12 +310,20 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     let _lifetime = super::DEVICE_LIFETIME_LOCK.lock().unwrap();
     let Dx12ContextDestroyWork {
         ctx,
-        mut sc,
+        sc,
         device,
         ld,
         buffers,
         context_fences,
     } = *work;
+
+    let sc_mutex = std::sync::Arc::try_unwrap(sc).unwrap_or_else(|arc| {
+        panic!(
+            "context {ctx} Arc still has extra owners at destroy finish (count={})",
+            std::sync::Arc::strong_count(&arc)
+        )
+    });
+    let mut sc = sc_mutex.into_inner().expect("context Mutex poisoned");
 
     let completed_after_wait = unsafe { sc.fence.GetCompletedValue() };
     if completed_after_wait == u64::MAX && super::api_log::enabled() {
@@ -342,6 +357,8 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
                 }
             } else if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;
+                slot.pre_reset = false;
+                slot.in_recording = false;
             }
         }
     }
