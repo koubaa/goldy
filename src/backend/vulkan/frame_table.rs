@@ -373,16 +373,26 @@ fn prologue_post_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer, on_g
     }
 }
 
+struct TableCopyParams {
+    row: u32,
+    copy_u32s: usize,
+    copy_selector: bool,
+    on_graphics_queue: bool,
+}
+
 fn record_table_copies(
     ft: &ContextFrameTable,
     buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
-    row: u32,
-    copy_u32s: usize,
-    copy_selector: bool,
-    on_graphics_queue: bool,
+    params: TableCopyParams,
 ) -> Result<()> {
+    let TableCopyParams {
+        row,
+        copy_u32s,
+        copy_selector,
+        on_graphics_queue,
+    } = params;
     let buffers_read = buffers.read().unwrap();
     let device_table = buffers_read.entries.get(&ft.device_table).context("device table")?;
     let selector_state = buffers_read.entries.get(&ft.selector).context("selector")?;
@@ -620,8 +630,28 @@ pub(crate) fn record_prologue_legacy(
     let row = write_staging_standalone(frame_table, ld, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true, true)?;
+    record_table_copies(
+        frame_table,
+        buffers,
+        ld,
+        cmd,
+        TableCopyParams {
+            row,
+            copy_u32s,
+            copy_selector: true,
+            on_graphics_queue: true,
+        },
+    )?;
     Ok(row)
+}
+
+/// GPU resources used when recording a frame-table prologue into a command buffer.
+pub(crate) struct PrologueRecording<'a> {
+    pub frame_table: &'a ContextFrameTable,
+    pub buffers: &'a SharedBufferTable,
+    pub ld: &'a LogicalDevice,
+    pub cmd: vk::CommandBuffer,
+    pub on_graphics_queue: bool,
 }
 
 /// CPU staging write + GPU copy prologue.
@@ -634,17 +664,31 @@ pub(crate) fn record_prologue_legacy(
 pub(crate) fn record_prologue(
     contexts: &SharedContextMap,
     ctx: super::ContextHandle,
-    frame_table: &ContextFrameTable,
-    buffers: &SharedBufferTable,
-    ld: &LogicalDevice,
-    cmd: vk::CommandBuffer,
+    rec: PrologueRecording<'_>,
     data: &[u32],
-    on_graphics_queue: bool,
 ) -> Result<u32> {
+    let PrologueRecording {
+        frame_table,
+        buffers,
+        ld,
+        cmd,
+        on_graphics_queue,
+    } = rec;
     let row = write_staging_for_submission(contexts, ld, ctx, frame_table, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true, on_graphics_queue)?;
+    record_table_copies(
+        frame_table,
+        buffers,
+        ld,
+        cmd,
+        TableCopyParams {
+            row,
+            copy_u32s,
+            copy_selector: true,
+            on_graphics_queue,
+        },
+    )?;
     Ok(row)
 }
 
@@ -667,7 +711,18 @@ pub(crate) fn sync_table_row_to_device(
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, false, on_graphics_queue)?;
+    record_table_copies(
+        frame_table,
+        buffers,
+        ld,
+        cmd,
+        TableCopyParams {
+            row,
+            copy_u32s,
+            copy_selector: false,
+            on_graphics_queue,
+        },
+    )?;
     Ok(())
 }
 

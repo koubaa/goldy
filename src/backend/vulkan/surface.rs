@@ -701,17 +701,15 @@ pub(super) fn acquire(
             super::context::wait_until_device_seq_at_least(state, device_handle, next_compute);
         }
         let slot_timeline = slot_copy.max(next_compute);
-        if slot_timeline > 0 {
-            if crate::validation_env::timeline_validation_enabled() {
-                let completed = super::context::device_retired(state, device_handle);
-                assert!(
-                    completed >= slot_timeline,
-                    "vk.acquire: post-wait semaphore counter {completed} < \
-                     slot_timeline {slot_timeline} \
-                     (frame={current_frame} next_slot={next_slot} \
-                     slot_copy={slot_copy} next_compute={next_compute})"
-                );
-            }
+        if slot_timeline > 0 && crate::validation_env::timeline_validation_enabled() {
+            let completed = super::context::device_retired(state, device_handle);
+            assert!(
+                completed >= slot_timeline,
+                "vk.acquire: post-wait semaphore counter {completed} < \
+                 slot_timeline {slot_timeline} \
+                 (frame={current_frame} next_slot={next_slot} \
+                 slot_copy={slot_copy} next_compute={next_compute})"
+            );
         }
         if crate::validation_env::timeline_validation_enabled()
             && next_compute == 0
@@ -1015,12 +1013,14 @@ pub(super) fn render(
             let row = super::frame_table::record_prologue(
                 &state.contexts,
                 ctx,
-                &frame_table,
-                buffers,
-                logical_device,
-                cmd,
+                super::frame_table::PrologueRecording {
+                    frame_table: &frame_table,
+                    buffers,
+                    ld: logical_device,
+                    cmd,
+                    on_graphics_queue: true,
+                },
                 &staging_data,
-                true,
             )?;
             row_guard.set(row);
         }

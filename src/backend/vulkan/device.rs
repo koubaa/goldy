@@ -223,7 +223,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let (compute_queue_family, compute_pool_size, graphics_family_queue_count, compute_queues_alias_graphics) =
         if let Some(cf) = dedicated_compute_family {
             let family_count = queue_families[cf as usize].queue_count;
-            let n = family_count.min(types::MAX_CONTEXT_COMPUTE_QUEUES).max(1);
+            let n = family_count.clamp(1, types::MAX_CONTEXT_COMPUTE_QUEUES);
             (cf, n, 1u32, false)
         } else {
             let available = queue_families[queue_family_index as usize].queue_count;

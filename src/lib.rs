@@ -118,8 +118,8 @@ pub use backend::dx12::WARP_ADAPTER_ID;
 
 /// Test helpers for `--lib` and integration tests.
 ///
-/// - [`mock_device`] / [`with_mock`]: pure software; safe to run in parallel.
-/// - [`SerialGpuDevice`]: real GPU device for unit tests that touch DX12/Vulkan/Metal.
+/// - [`test_support::mock_device`] / [`test_support::with_mock`]: pure software; safe to run in parallel.
+/// - [`test_support::SerialGpuDevice`]: real GPU device for unit tests that touch DX12/Vulkan/Metal.
 ///   On DX12 WARP, holds a process-wide lock for the device lifetime so lib tests do not
 ///   interleave WARP work (same rationale as `test_threads = 1` in compute_integration).
 #[doc(hidden)]
@@ -175,6 +175,12 @@ pub mod test_support {
     pub struct SerialGpuDevice {
         device: Device,
         _warp_guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl Default for SerialGpuDevice {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl SerialGpuDevice {

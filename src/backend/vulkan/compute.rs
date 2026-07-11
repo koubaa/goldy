@@ -1088,12 +1088,14 @@ pub(super) fn submit_with_scope(
                     let row = super::frame_table::record_prologue(
                         view.contexts,
                         ctx,
-                        &scope.frame_table,
-                        view.buffers,
-                        logical_device,
-                        cmd,
+                        super::frame_table::PrologueRecording {
+                            frame_table: &scope.frame_table,
+                            buffers: view.buffers,
+                            ld: logical_device,
+                            cmd,
+                            on_graphics_queue: false,
+                        },
                         data,
-                        false,
                     )?;
                     row_guard.set(row);
                 }
@@ -2106,12 +2108,14 @@ pub(super) fn submit_graph_with_scope(
                     let row = super::frame_table::record_prologue(
                         view.contexts,
                         ctx,
-                        &scope.frame_table,
-                        view.buffers,
-                        logical_device,
-                        cmd,
+                        super::frame_table::PrologueRecording {
+                            frame_table: &scope.frame_table,
+                            buffers: view.buffers,
+                            ld: logical_device,
+                            cmd,
+                            on_graphics_queue: route_device,
+                        },
                         data,
-                        route_device,
                     )?;
                     frame_table_row = Some(row);
                     row_guard.set(row);
@@ -2691,12 +2695,14 @@ pub(super) fn submit_graph_with_scope(
                         let row = super::frame_table::record_prologue(
                             view.contexts,
                             ctx,
-                            &scope.frame_table,
-                            view.buffers,
-                            logical_device,
-                            cmd,
+                            super::frame_table::PrologueRecording {
+                                frame_table: &scope.frame_table,
+                                buffers: view.buffers,
+                                ld: logical_device,
+                                cmd,
+                                on_graphics_queue: route_device,
+                            },
                             &staging_data,
-                            route_device,
                         )?;
                         frame_table_row = Some(row);
                         row_guard.set(row);
