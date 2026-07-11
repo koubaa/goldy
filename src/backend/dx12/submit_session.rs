@@ -15,6 +15,7 @@ use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 
 /// Resource tables + device handles used by compute and render command recording.
 pub(crate) struct Dx12RecordState<'a> {
@@ -34,11 +35,15 @@ pub(crate) struct Dx12RecordState<'a> {
 
 /// Cloned handles for one partition submit — no global backend lock required.
 pub(crate) struct Dx12SubmitScope<'a> {
+    /// Submitting context identity (fence lookups use [`Self::ctx_fence`]).
+    #[allow(dead_code)]
     pub ctx: ContextHandle,
     pub device_handle: DeviceHandle,
     pub sc: super::types::SharedSubmissionContext,
     pub record: Dx12RecordState<'a>,
     pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
+    /// Per-context fence resolved once at scope construction (avoids repeated map lookups).
+    pub ctx_fence: ID3D12Fence,
     /// Synthetic context for device-queue epoch stamps (compute style only).
     pub device_owner: Option<ContextHandle>,
 }
@@ -167,6 +172,7 @@ pub(crate) struct Dx12SubmitSession {
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
     device_owner_handle: Option<ContextHandle>,
+    ctx_fence: ID3D12Fence,
 }
 
 impl Dx12SubmitSession {
@@ -195,6 +201,14 @@ impl Dx12SubmitSession {
             .map(|(handle, device)| (*handle, Arc::clone(device)))
             .collect();
         let device_owner_handle = state.device_owner_handles.get(&device_handle).copied();
+        let ctx_fence = state
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .with_context(|| format!("Invalid context handle {ctx}"))?
+            .1
+            .clone();
         Ok(Arc::new(Self {
             ctx,
             device_handle,
@@ -212,6 +226,7 @@ impl Dx12SubmitSession {
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
             device_owner_handle,
+            ctx_fence,
         }))
     }
 
@@ -234,6 +249,7 @@ impl Dx12SubmitSession {
                 samplers: &self.samplers,
             },
             context_fences: &self.context_fences,
+            ctx_fence: self.ctx_fence.clone(),
             device_owner: self.device_owner_handle,
         }
     }

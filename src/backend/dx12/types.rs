@@ -580,6 +580,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
     /// Pool of command allocators for non-blocking compute submission on this context.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
+    /// Round-robin start index for compute allocator pool reuse.
+    pub allocator_recycle_hint: usize,
     /// Retained command lists keyed by scheme fingerprint for zero-recording-cost re-submission.
     pub retained_graphs: HashMap<u64, RetainedGraph>,
     /// Upload belt for `GpuCommand::WriteBuffer` on this context.
@@ -697,6 +699,10 @@ fn slot_requirements_met(
     requirements: &[(super::ContextHandle, u64)],
     context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
 ) -> bool {
+    // Missing context ⇒ already destroyed after its GPU drain wait, so requirements on it
+    // are satisfied. Callers must keep the fence entry in the map until that wait + local
+    // teardown finish (see `finish_destroy`); removing earlier lets concurrent drains free
+    // slots still referenced by the dying context.
     requirements.iter().all(|(ctx_id, required_seq)| {
         context_fences
             .get(ctx_id)

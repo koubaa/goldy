@@ -111,6 +111,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence_shutdown,
             fence_thread,
             compute_allocator_pool,
+            allocator_recycle_hint: 0,
             retained_graphs: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
@@ -255,23 +256,14 @@ pub(super) struct Dx12ContextDestroyWork {
 impl ContextDestroyHandle for Dx12ContextDestroyWork {
     fn wait(&self) -> Result<()> {
         let last_submitted = self.sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed);
-        match self.ld.submission_worker.flush() {
-            Ok(()) if last_submitted > 0 => {
-                self.ld.submission_worker.wait_submitted(last_submitted)?;
-                let submitted = self
-                    .ld
-                    .submission_worker
-                    .submitted_epoch()
-                    .load(std::sync::atomic::Ordering::Acquire);
-                let fence_wait = last_submitted.min(submitted);
-                if fence_wait > 0 {
-                    super::utils::wait_for_fence(&self.sc.fence, fence_wait)?;
-                }
-            }
-            Ok(()) => {}
-            Err(e) => return Err(e),
-        }
+        // Flush drains every enqueued Execute/Signal on this device. Do not treat the
+        // device-global worker epoch as proof that *this* context's fence reached
+        // `last_submitted` — other contexts share the same timeline value space.
+        self.ld.submission_worker.flush()?;
         self.ld.submission_worker.check_error()?;
+        if last_submitted > 0 {
+            super::utils::wait_for_fence(&self.sc.fence, last_submitted)?;
+        }
         Ok(())
     }
 
@@ -305,6 +297,10 @@ pub(super) fn detach_for_destroy(state: &Dx12State, ctx: ContextHandle) -> Optio
 }
 
 fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
+    // Serialize with device create/destroy / backend drop — the D3D12 debug layer is
+    // process-global and races when one thread Releases DXGI/device objects while another
+    // tears down a context (observed as AV reading ~0xEB40 during parallel test teardown).
+    let _lifetime = super::DEVICE_LIFETIME_LOCK.lock().unwrap();
     let Dx12ContextDestroyWork {
         ctx,
         mut sc,
@@ -323,18 +319,9 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
         super::api_log::log_device_removed(device, hresult);
     }
 
-    // Only now is it safe to drop the fence out of the shared lookup table: any deferred
-    // deletion elsewhere with a requirement on `ctx` uses `is_none_or` to treat a *missing*
-    // context as "already retired" (see `slot_requirements_met`). Removing this earlier (before
-    // the GPU-drain wait above) let concurrent drains on other threads see `ctx` as gone and
-    // release resources this context's still in-flight work could still be touching.
-    context_fences.write().unwrap().remove(&ctx);
-
-    // Do not drain the device-global deletion queue here. Context destroy only waits on
-    // this context's own submitted work; device-owned reclamation is serviced at
-    // boundary_crossed / flush_deferred_deletions / timeline waits (see runtime §7).
-    // Eagerly sweeping device deletions on context death conflates "handle gone" with
-    // "physically reclaimed" and can stall / DeviceLost under multi-context sharing.
+    // Keep `ctx` in `context_fences` until all descriptor/bindless teardown below
+    // completes. Concurrent `drain_ready_slot_reclamations` must not treat a context as
+    // retired until its fence entry is removed at the end of this function.
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
     ld.retired_floor
@@ -375,6 +362,8 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     super::context::drain_pending_gpu_profiles_up_to(&ld, &mut sc, completed);
 
     super::frame_table::destroy_context_resources(&buffers, &ld, &sc.frame_table);
+
+    context_fences.write().unwrap().remove(&ctx);
 
     if super::api_log::enabled() {
         super::api_log::log_context_destroy(device, ctx);

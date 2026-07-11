@@ -740,12 +740,21 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
     let device_handle = sc.lock().unwrap().device;
     let record = record_state_from_backend(state, ctx, device_handle)?;
     let device_owner = state.device_owner_handles.get(&device_handle).copied();
+    let ctx_fence = state
+        .context_fences
+        .read()
+        .unwrap()
+        .get(&ctx)
+        .with_context(|| format!("Invalid context handle {ctx}"))?
+        .1
+        .clone();
     Ok(Dx12SubmitScope {
         ctx,
         device_handle,
         sc,
         record,
         context_fences: &state.context_fences,
+        ctx_fence,
         device_owner,
     })
 }
@@ -762,31 +771,62 @@ fn texture_post_copy_layout(is_storage: bool, on_direct_queue: bool) -> D3D12_BA
 
 /// Returns `(command_list, slot_idx)`.  The slot is taken from the
 /// pool when its fence has already signalled; otherwise a fresh one is created.
+fn find_recyclable_allocator_slot(pool: &[ComputeAllocatorSlot], start: usize, completed: u64) -> Option<usize> {
+    let len = pool.len();
+    if len == 0 {
+        return None;
+    }
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        let slot = &pool[idx];
+        if completed >= slot.fence_value && !slot.retained {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
     let _device_handle = scope.device_handle;
     let logical_device = scope.ld();
 
-    let ctx_fence = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&scope.ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
-    let completed = unsafe { ctx_fence.GetCompletedValue() };
+    let completed = {
+        let _tz = tracy_zone!("dx12.submit.acquire_allocator.completed");
+        unsafe { scope.ctx_fence.GetCompletedValue() }
+    };
     let list_type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    let mut sc = scope.sc.lock().unwrap();
+    let mut sc = {
+        let _tz = tracy_zone!("dx12.submit.acquire_allocator.lock");
+        scope.sc.lock().unwrap()
+    };
+    let start = {
+        let _tz = tracy_zone!("dx12.submit.acquire_allocator.hint");
+        let pool_len = sc.compute_allocator_pool.len();
+        if pool_len == 0 {
+            0
+        } else {
+            sc.allocator_recycle_hint % pool_len
+        }
+    };
     let pool = &mut sc.compute_allocator_pool;
     // Skip retained slots — their allocator must not be reset until evict_retained is called.
-    let slot_idx = pool.iter().position(|s| completed >= s.fence_value && !s.retained);
+    let slot_idx = {
+        let _tz = tracy_zone!("dx12.submit.acquire_allocator.find");
+        find_recyclable_allocator_slot(pool, start, completed)
+    };
     let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
+        let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse");
         let slot = &mut pool[idx];
-        unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
+        {
+            let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.reset_alloc");
+            unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
+        }
         let list = if let Some(ref existing) = slot.command_list {
+            let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.reset_list");
             unsafe { existing.Reset(&slot.allocator, None) }.context("Failed to reset command list")?;
             existing.clone()
         } else {
+            let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.create_list");
             let new_list: ID3D12GraphicsCommandList = unsafe {
                 logical_device
                     .device
@@ -796,23 +836,33 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
             slot.command_list = Some(new_list.clone());
             new_list
         };
+        sc.allocator_recycle_hint = (idx + 1) % pool.len();
         (list, idx)
     } else {
-        let new_allocator: ID3D12CommandAllocator = unsafe { logical_device.device.CreateCommandAllocator(list_type) }
-            .context("Failed to create command allocator")?;
-        let new_list: ID3D12GraphicsCommandList = unsafe {
-            logical_device
-                .device
-                .CreateCommandList(0, list_type, &new_allocator, None)
-        }
-        .context("Failed to create command list")?;
+        let _tz = tracy_zone!("dx12.submit.acquire_allocator.grow");
+        let new_allocator: ID3D12CommandAllocator = {
+            let _tz = tracy_zone!("dx12.submit.acquire_allocator.grow.create_alloc");
+            unsafe { logical_device.device.CreateCommandAllocator(list_type) }
+                .context("Failed to create command allocator")?
+        };
+        let new_list: ID3D12GraphicsCommandList = {
+            let _tz = tracy_zone!("dx12.submit.acquire_allocator.grow.create_list");
+            unsafe {
+                logical_device
+                    .device
+                    .CreateCommandList(0, list_type, &new_allocator, None)
+            }
+            .context("Failed to create command list")?
+        };
         pool.push(ComputeAllocatorSlot {
             allocator: new_allocator,
             fence_value: 0,
             command_list: Some(new_list.clone()),
             retained: false,
         });
-        (new_list, pool.len() - 1)
+        let idx = pool.len() - 1;
+        sc.allocator_recycle_hint = (idx + 1) % pool.len();
+        (new_list, idx)
     };
     Ok((cmd_list, slot_idx))
 }
@@ -1748,14 +1798,7 @@ fn execute_signal_and_finish(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = scope.ld();
-    let ctx_fence = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
+    let ctx_fence = scope.ctx_fence.clone();
     let (queue, queue_lock) = {
         let sc = scope.sc.lock().unwrap();
         (sc.command_queue.clone(), std::sync::Arc::clone(&sc.queue_lock))
@@ -1818,8 +1861,6 @@ fn execute_signal_and_finish(
                 );
             }
         }
-        sc.last_submitted_seq
-            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
         drop(sc);
         if !unpin_slots.is_empty() || !pin_slots.is_empty() {
             let mut registry = scope.ld().descriptors.lock().unwrap();
@@ -1861,6 +1902,14 @@ fn execute_signal_and_finish(
         sync,
         fence_value,
     )?;
+    // Publish after enqueue so destroy wait never observes a timeline value the worker
+    // has not been asked to Signal on this context's fence.
+    scope
+        .sc
+        .lock()
+        .unwrap()
+        .last_submitted_seq
+        .store(fence_value, std::sync::atomic::Ordering::Relaxed);
 
     if let Some(prof) = gpu_profile {
         scope.sc.lock().unwrap().pending_gpu_profiles.push((fence_value, prof));
@@ -1888,7 +1937,6 @@ fn execute_signal_and_finish_device(
     scope: &Dx12SubmitScope<'_>,
     command_list: &ID3D12GraphicsCommandList,
     device_handle: DeviceHandle,
-    submit_ctx: ContextHandle,
     stamp_ctx: ContextHandle,
     slot_idx: usize,
     retain_key: Option<u64>,
@@ -1932,17 +1980,10 @@ fn execute_signal_and_finish_device(
 
     // Device-queue render submits share the device timeline counter but must also publish
     // the value on the submitting context's fence — `Context::wait_until` blocks there.
-    let ctx_fence = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&submit_ctx)
-        .context("Invalid submitting context handle")?
-        .1
-        .clone();
-    if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence) {
+    let ctx_fence = &scope.ctx_fence;
+    if super::api_log::com_identity(ctx_fence) != super::api_log::com_identity(&logical_device.fence) {
         super::utils::with_queue_lock(logical_device, || -> Result<()> {
-            unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
+            unsafe { logical_device.command_queue.Signal(ctx_fence, fence_value) }
                 .context("Failed to signal submitting context fence after device render submit")?;
             Ok(())
         })?;
@@ -2042,14 +2083,7 @@ pub(super) fn submit_with_scope(
         acquire_allocator_slot(scope)?
     };
 
-    let ctx_fence_clone = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
+    let ctx_fence = &scope.ctx_fence;
 
     let has_upload = commands.iter().any(|c| {
         matches!(
@@ -2064,7 +2098,7 @@ pub(super) fn submit_with_scope(
         let _tz_reclaim = tracy_zone!("dx12.submit.staging_reclaim");
         let completed = device_retired_for_scope(scope);
         let mut sc = scope.sc.lock().unwrap();
-        sc.staging_belt.reclaim(&ctx_fence_clone)?;
+        sc.staging_belt.reclaim(ctx_fence)?;
         sc.texture_staging_pool.reclaim(completed);
     }
 
@@ -2309,14 +2343,7 @@ pub(super) fn submit_graph_with_scope(
         (cl, idx, false)
     };
 
-    let ctx_fence_clone = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
+    let ctx_fence = &scope.ctx_fence;
 
     let has_upload = commands.iter().any(|c| {
         matches!(
@@ -2332,7 +2359,7 @@ pub(super) fn submit_graph_with_scope(
     if has_upload {
         let completed = device_retired_for_scope(scope);
         let mut sc = scope.sc.lock().unwrap();
-        sc.staging_belt.reclaim(&ctx_fence_clone)?;
+        sc.staging_belt.reclaim(ctx_fence)?;
         sc.texture_staging_pool.reclaim(completed);
     }
 
@@ -2598,7 +2625,6 @@ pub(super) fn submit_graph_with_scope(
             scope,
             &command_list,
             device_handle,
-            ctx,
             stamp_ctx,
             slot_idx,
             retain_key,
@@ -2695,14 +2721,7 @@ pub(super) fn try_resubmit_retained_with_scope(
 
     let ctx_fence = {
         let _tz_fence = tracy_zone!("dx12.resubmit_retained.ctx_fence");
-        scope
-            .context_fences
-            .read()
-            .unwrap()
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .1
-            .clone()
+        scope.ctx_fence.clone()
     };
     let logical_device = scope.ld();
 
@@ -2791,8 +2810,6 @@ pub(super) fn try_resubmit_retained_with_scope(
             if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
                 slot.fence_value = fence_value;
             }
-            sc.last_submitted_seq
-                .store(fence_value, std::sync::atomic::Ordering::Relaxed);
         }
 
         {
@@ -2815,6 +2832,12 @@ pub(super) fn try_resubmit_retained_with_scope(
             sync,
             fence_value,
         )?;
+        scope
+            .sc
+            .lock()
+            .unwrap()
+            .last_submitted_seq
+            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
 
         fence_value
     };
