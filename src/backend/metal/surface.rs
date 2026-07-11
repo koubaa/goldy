@@ -314,8 +314,6 @@ pub(super) fn acquire(
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
 
-}
-
 /// Decrement the surface in-flight acquire counter without wrapping at zero.
 pub(super) fn release_pending_acquire_count(count: &mut u32) {
     if *count == 0 {
