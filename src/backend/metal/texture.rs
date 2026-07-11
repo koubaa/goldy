@@ -49,7 +49,8 @@ fn allocate_mtl_texture(
         let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.drain_reclaim");
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        logical_device.process_deletion_queue_up_to(retired);
+        let completed = super::context::snapshot_context_completed_values(state, device_handle);
+        logical_device.process_deletion_queue_up_to(retired, Some(&completed));
         logical_device.texture_heap.lock().unwrap().compact_overflow();
     }
     {
@@ -72,7 +73,8 @@ fn allocate_mtl_texture(
         cb.wait_until_completed();
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        logical_device.process_deletion_queue_up_to(retired);
+        let completed = super::context::snapshot_context_completed_values(state, device_handle);
+        logical_device.process_deletion_queue_up_to(retired, Some(&completed));
         let mut th = logical_device.texture_heap.lock().unwrap();
         th.compact_overflow();
         if let Some(tex) = th.allocate(descriptor) {
@@ -399,38 +401,35 @@ pub(super) fn read_to_cpu(state: &MetalState, texture_handle: TextureHandle, out
 /// owned by `SurfaceState`), the slot is NOT released here — the owner manages
 /// it across frames.
 ///
-/// As with buffer destroy, slot reuse is gated on GPU idleness: if any
-/// in-flight command buffer might still reference this descriptor, the slot
-/// parks on the pending list and is promoted by the next `wait_fence()`. This
-/// is what keeps the glyph atlas (and other sampled textures) from flickering
-/// when the renderer churns textures between frames.
+/// Slot reclaim is gated on `slot_last_seen` epochs stamped at submit time.
 pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(texture) = state.textures.remove(&texture_handle) {
         let device_handle = texture.device_handle;
-        // Use the same reclamation_barrier logic as buffer::destroy so that
-        // in-reclamation destroys get the tighter epoch rather than the wider
-        // timeline_scheduled_max.
-        let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
-        let slot_barrier = if gpu_idle { None } else { Some(barrier) };
-        if let Some(device) = state.devices.get(&device_handle) {
+        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+        let base_barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+        let key = if texture.is_storage_image {
+            super::types::MetalSlotKey::StorageImage(texture.arg_buffer_index)
+        } else {
+            super::types::MetalSlotKey::Texture(texture.arg_buffer_index)
+        };
+        let barrier = if let Some(device) = state.devices.get(&device_handle) {
             let mut registry = device.descriptors.lock().unwrap();
             registry.unregister_texture(texture_handle);
+            let mut barrier = base_barrier;
             if !texture.slot_owned_externally {
-                if texture.is_storage_image {
-                    registry.release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
-                } else {
-                    registry.release_texture_slot(texture.arg_buffer_index, slot_barrier);
+                if let Some(map) = registry.slot_last_seen.get(&key) {
+                    barrier = barrier.max(map.values().copied().max().unwrap_or(0));
                 }
+                registry.reclaim_texture_slot(key);
             }
-        }
+            barrier
+        } else {
+            base_barrier
+        };
         let deletion = super::types::PendingDeletion::Texture {
             texture: texture.texture,
         };
-        // Hot path: route to the owning context's per-context deletion queue.
-        // Falls back to device-level queue (async GC safety net) when no
-        // reclamation context is installed on the current thread.
-        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         if let Some(h) = ctx_h {
             if let Some(sc_arc) = state.contexts.get(&h) {
                 sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);

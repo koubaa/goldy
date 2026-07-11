@@ -64,44 +64,9 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
     let mut current_render_pipeline = None;
     for gc in commands {
         match gc {
-            GraphCommand::Compute(cmd) => match cmd {
-                GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
-                GpuCommand::BindResourcesRaw { indices, .. } => {
-                    if let Some(h) = current_compute_pipeline {
-                        if let Some(p) = state.compute_pipelines.get(&h) {
-                            slots.extend(collect_metal_slots_from_raw_bind(indices, &p.push_constant_categories));
-                        }
-                    }
-                }
-                GpuCommand::BindResourcesTyped { handles } => {
-                    for h in handles {
-                        if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
-                            slots.push(key);
-                        }
-                    }
-                }
-                GpuCommand::DispatchBatch { arg_data, count, .. } => {
-                    if let Some(h) = current_compute_pipeline {
-                        if let Some(p) = state.compute_pipelines.get(&h) {
-                            let layout_size = std::mem::size_of::<PushLayout>();
-                            for i in 0..*count as usize {
-                                let base = i * shared::DISPATCH_BATCH_STRIDE;
-                                if base + layout_size <= arg_data.len() {
-                                    let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                                    for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                        if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
-                                            if let Some(key) = metal_slot_key_from_category(cat, idx as u32) {
-                                                slots.push(key);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            },
+            GraphCommand::Compute(cmd) => {
+                collect_metal_slots_from_gpu_command(state, cmd, &mut current_compute_pipeline, &mut slots);
+            }
             GraphCommand::Render {
                 commands: render_cmds, ..
             } => {
@@ -139,6 +104,61 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
         }
     }
     slots
+}
+
+fn collect_metal_slots_from_gpu_commands(state: &MetalState, commands: &[GpuCommand]) -> Vec<MetalSlotKey> {
+    let mut slots = Vec::new();
+    let mut current_pipeline = None;
+    for cmd in commands {
+        collect_metal_slots_from_gpu_command(state, cmd, &mut current_pipeline, &mut slots);
+    }
+    slots
+}
+
+fn collect_metal_slots_from_gpu_command(
+    state: &MetalState,
+    cmd: &GpuCommand,
+    current_pipeline: &mut Option<ComputePipelineHandle>,
+    slots: &mut Vec<MetalSlotKey>,
+) {
+    match cmd {
+        GpuCommand::SetPipeline(p) => *current_pipeline = Some(*p),
+        GpuCommand::BindResourcesRaw { indices, .. } => {
+            if let Some(h) = *current_pipeline {
+                if let Some(p) = state.compute_pipelines.get(&h) {
+                    slots.extend(collect_metal_slots_from_raw_bind(indices, &p.push_constant_categories));
+                }
+            }
+        }
+        GpuCommand::BindResourcesTyped { handles } => {
+            for h in handles {
+                if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
+                    slots.push(key);
+                }
+            }
+        }
+        GpuCommand::DispatchBatch { arg_data, count, .. } => {
+            if let Some(h) = *current_pipeline {
+                if let Some(p) = state.compute_pipelines.get(&h) {
+                    let layout_size = std::mem::size_of::<PushLayout>();
+                    for i in 0..*count as usize {
+                        let base = i * shared::DISPATCH_BATCH_STRIDE;
+                        if base + layout_size <= arg_data.len() {
+                            let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                            for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
+                                    if let Some(key) = metal_slot_key_from_category(cat, idx as u32) {
+                                        slots.push(key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Option<super::types::MetalRetainedGraph> {
@@ -1421,6 +1441,11 @@ pub(super) fn submit(
 
     let compute_commit_instant = std::time::Instant::now();
     let signal_value = super::pending_submit::preallocate_device_timeline(&ld);
+    let used_slots = collect_metal_slots_from_gpu_commands(state, commands);
+    ld.descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(ctx, signal_value, used_slots);
     super::pending_submit::enqueue_metal_commit(
         &ld,
         owned_command_buffer,
@@ -1455,7 +1480,7 @@ pub(super) fn submit(
             super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
         let retired = super::context::device_retired(state, device_handle);
-        ld.process_deletion_queue_up_to(retired);
+        super::process_device_deletions_up_to(state, device_handle, retired);
         maybe_log_mem_diag(ld);
     }
 
@@ -1652,6 +1677,11 @@ pub(super) fn submit_graph(
     let timeline_event = sc_arc.lock().unwrap().timeline_event.clone();
 
     let signal_value = super::pending_submit::preallocate_device_timeline(&ld);
+    let used_slots = collect_metal_slots_from_graph_commands(state, commands);
+    ld.descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
     super::pending_submit::enqueue_metal_commit(
         &ld,
         owned_command_buffer,
@@ -1686,7 +1716,7 @@ pub(super) fn submit_graph(
             super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
         let retired = super::context::device_retired(state, device_handle);
-        ld.process_deletion_queue_up_to(retired);
+        super::process_device_deletions_up_to(state, device_handle, retired);
         maybe_log_mem_diag(ld);
     }
 

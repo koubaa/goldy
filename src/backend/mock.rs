@@ -453,6 +453,29 @@ impl Default for MockBackend {
 }
 
 impl crate::backend::GpuBackendTimelineWait for MockBackend {
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<crate::backend::submission_worker::SubmissionEpochWait>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device = self.context_device(ctx);
+        let Some(dev) = self.devices.get(&device) else {
+            return Ok(None);
+        };
+        let horizon = self.mock_scheduled_horizon(device);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
+            std::sync::Arc::clone(&dev.submission_worker),
+            value,
+            horizon,
+        )))
+    }
+
     fn take_timeline_blocking_wait(
         &self,
         _ctx: ContextHandle,

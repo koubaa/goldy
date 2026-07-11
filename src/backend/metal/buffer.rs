@@ -56,7 +56,8 @@ fn allocate_mtl_storage_buffer(
         let _tz = crate::tracy_zone!("mtl.heap_allocator.drain_reclaim");
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        logical_device.process_deletion_queue_up_to(retired);
+        let completed = super::context::snapshot_context_completed_values(state, device_handle);
+        logical_device.process_deletion_queue_up_to(retired, Some(&completed));
         logical_device.heap_allocator.lock().unwrap().compact_overflow();
     }
     {
@@ -563,39 +564,33 @@ pub(super) fn resize(
 }
 
 /// Destroy a buffer, unregistering it from the bindless registry.
-/// Slot recycling is gated on GPU idleness: if any previously-submitted
-/// compute command buffer is still running, the slot parks in the registry's
-/// pending list and only becomes reusable after the next `wait_fence()`
-/// succeeds. This prevents the CPU from overwriting an argument-buffer
-/// descriptor that an in-flight shader is about to dereference (descriptor
-/// aliasing = random wrong-buffer reads and MTLCommandBufferError::Internal).
+///
+/// Slot recycling is gated on per-slot last-use epochs stamped at submit time
+/// (`slot_last_seen`). Physical MTLBuffer teardown uses the max of those epochs
+/// (merged with any reclamation-context barrier) — never a device-wide
+/// `timeline_scheduled_max` guess that could free a slot still referenced by
+/// another context's in-flight work.
 pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
-        // When called during VRAM reclamation, the installing thread's explicit
-        // reclamation epoch has already been GPU-completed, so using it as the
-        // deletion-queue barrier lets the next process_deletion_queue_up_to_signaled
-        // call free the Metal heap allocation immediately rather than waiting for
-        // the (often much larger) timeline_scheduled_max.
-        let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
-        let retained_slots = state
-            .devices
-            .get(&buffer.device_handle)
-            .map(|device| {
-                device
-                    .descriptors
-                    .lock()
-                    .unwrap()
-                    .buffer_retained_slot_keys(buffer_handle)
-            })
+        let device_handle = buffer.device_handle;
+        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+        let base_barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+        let base = ctx_h
+            .filter(|_| !gpu_idle && base_barrier > 0)
+            .map(|h| vec![(h, base_barrier)])
             .unwrap_or_default();
-        if let Some(device) = state.devices.get(&buffer.device_handle) {
-            device
-                .descriptors
-                .lock()
-                .unwrap()
-                .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });
-        }
+
+        let (retained_slots, barrier) = if let Some(device) = state.devices.get(&device_handle) {
+            let mut registry = device.descriptors.lock().unwrap();
+            let requirements = registry.bindless_retirement_requirements_for_buffer(buffer_handle, base);
+            let barrier = requirements.iter().map(|(_, seq)| *seq).max().unwrap_or(0);
+            let retained_slots = registry.reclaim_buffer_slots(buffer_handle);
+            (retained_slots, barrier)
+        } else {
+            (Vec::new(), base_barrier)
+        };
+
         let deletion = super::types::PendingDeletion::Buffer {
             buffer: buffer.buffer,
             retained_slots,
@@ -605,14 +600,13 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         // without waiting for device_retired (max over all contexts).
         // Falls back to the device-level queue (async GC safety net) when there
         // is no reclamation context installed on the current thread.
-        let ctx_h = super::context::context_handle_for_thread(state, buffer.device_handle);
         if let Some(h) = ctx_h {
             if let Some(sc_arc) = state.contexts.get(&h) {
                 sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
                 return;
             }
         }
-        if let Some(device) = state.devices.get(&buffer.device_handle) {
+        if let Some(device) = state.devices.get(&device_handle) {
             device.deletion_queue.lock().unwrap().queue(barrier, deletion);
         }
     }
@@ -689,7 +683,10 @@ pub(super) fn write(state: &MetalState, buffer_handle: BufferHandle, offset: u64
     let blit = command_buffer.new_blit_command_encoder();
     blit.copy_from_buffer(&staging, 0, &buffer.buffer, offset, data.len() as u64);
     blit.end_encoding();
+    // Imperative writes are not stamped into `slot_last_seen` / the submission
+    // timeline. Wait so heap memory cannot be recycled while this blit is live.
     command_buffer.commit();
+    command_buffer.wait_until_completed();
 
     Ok(())
 }
@@ -779,9 +776,10 @@ pub(super) fn read_to_cpu(
 ///    compute dispatch on that queue is queue-ordered after the clear and
 ///    observes zeros.
 ///
-/// The blit is committed without waiting — Metal's queue guarantees
-/// ordering with subsequent command buffers, and whichever future waits on
-/// the final fence will also drain this one.
+/// The blit waits for completion: imperative clears are not stamped into
+/// `slot_last_seen`, so without a wait the heap could recycle this memory
+/// while the blit is still live (descriptor/heap aliasing under parallel
+/// contexts). Graph `ClearBuffer` nodes go through the timeline path instead.
 pub(super) fn clear(
     state: &MetalState,
     device_handle: DeviceHandle,
@@ -816,6 +814,7 @@ pub(super) fn clear(
     blit.fill_buffer(&buffer.buffer, range, 0);
     blit.end_encoding();
     command_buffer.commit();
+    command_buffer.wait_until_completed();
 
     Ok(())
 }

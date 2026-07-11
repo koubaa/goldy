@@ -192,19 +192,11 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
 
     // Release all persistent bindless storage-image slots back to the device
     // registry's free list so another surface can claim them.
-    let gpu_idle = super::gpu_is_idle(state);
     if let (Some(dev), Some(slot_arr)) = (device_handle, slots) {
         if let Some(logical_device) = state.devices.get(&dev) {
-            let barrier = logical_device
-                .timeline_scheduled_max
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let slot_barrier = if gpu_idle { None } else { Some(barrier) };
+            let mut registry = logical_device.descriptors.lock().unwrap();
             for &local in &slot_arr {
-                logical_device
-                    .descriptors
-                    .lock()
-                    .unwrap()
-                    .release_storage_image_slot(local, slot_barrier);
+                registry.release_storage_image_slot(local);
             }
         }
     }
@@ -313,7 +305,10 @@ pub(super) fn acquire(
             super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
         let retired = super::context::device_retired(state, device_handle);
-        ld.process_deletion_queue_up_to(retired);
+        ld.process_deletion_queue_up_to(
+            retired,
+            Some(&super::context::snapshot_context_completed_values(state, device_handle)),
+        );
     }
 
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
@@ -484,7 +479,10 @@ pub(super) fn prepare_present_work(
         };
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
+            ld.process_deletion_queue_up_to(
+                retired,
+                Some(&super::context::snapshot_context_completed_values(state, device_handle)),
+            );
         }
         return Ok(Box::new(MetalSkipPresentGpuWork {
             frame,
@@ -563,7 +561,10 @@ pub(super) fn finish_present(
             super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
         let retired = super::context::device_retired(state, device_handle);
-        ld.process_deletion_queue_up_to(retired);
+        ld.process_deletion_queue_up_to(
+            retired,
+            Some(&super::context::snapshot_context_completed_values(state, device_handle)),
+        );
     }
 
     Ok(finish.present_timeline)

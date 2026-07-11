@@ -56,10 +56,25 @@ pub(in crate::backend::metal) fn drain_context_deletion_queue_up_to(
     });
 }
 
+/// Process device deletion queue and reclaim bindless slots whose last-use epochs have retired.
+pub(in crate::backend::metal) fn process_device_deletions_up_to(
+    state: &MetalState,
+    device: DeviceHandle,
+    completed: crate::timeline::TimelineValue,
+) {
+    let completed_by_context = context::snapshot_context_completed_values(state, device);
+    if let Some(ld) = state.devices.get(&device) {
+        ld.process_deletion_queue_up_to(completed, Some(&completed_by_context));
+    }
+}
+
 /// Move every entry in each device's pending-slot list to its free list.
 ///
-/// Called after [`GpuBackend::wait_until`] has confirmed GPU completion so slots
-/// parked pending while work was in flight can be recycled.
+/// Promote all pending bindless slots unconditionally.
+///
+/// Only safe after [`wait_all_in_flight`] has confirmed device-wide GPU idle
+/// (e.g. [`GpuBackend::reset_buffer_heaps`]). Per-context [`finish_timeline_wait`]
+/// must use [`LogicalDevice::process_deletion_queue_up_to`] instead.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
         device.descriptors.lock().unwrap().drain_pending_slots();
@@ -201,6 +216,29 @@ impl Drop for MetalBackend {
 }
 
 impl crate::backend::GpuBackendTimelineWait for MetalBackend {
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<crate::backend::submission_worker::SubmissionEpochWait>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device = self.context_device(ctx);
+        let Some(ld) = self.state.devices.get(&device) else {
+            return Ok(None);
+        };
+        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
+            std::sync::Arc::clone(&ld.submission_worker),
+            value,
+            horizon,
+        )))
+    }
+
     fn take_timeline_blocking_wait(
         &self,
         ctx: ContextHandle,
@@ -214,14 +252,6 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
 
         if self.gpu_progress(ctx) >= value {
             return Ok(None);
-        }
-
-        let device = self.context_device(ctx);
-        if let Some(ld) = self.state.devices.get(&device) {
-            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            ld.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
-            ld.submission_worker.check_error()?;
         }
 
         let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
@@ -267,11 +297,7 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
                 drain_completed_cbs(&mut sc);
                 drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, value);
             }
-            ld.process_deletion_queue_up_to(value.min(retired));
-        }
-        {
-            let _pz = crate::tracy_zone!("mtl.wait_until.drain_pending_slots");
-            drain_all_pending_slots(&mut self.state);
+            process_device_deletions_up_to(&self.state, device, value.min(retired));
         }
         if self.state.device_lost.load(Ordering::Relaxed) {
             anyhow::bail!("Metal device lost");
@@ -882,9 +908,8 @@ impl GpuBackend for MetalBackend {
             if let Some(sc_arc) = self.state.contexts.get(&ctx) {
                 drain_context_deletion_queue_up_to(ld, &mut sc_arc.lock().unwrap().deletion_queue, value);
             }
-            ld.process_deletion_queue_up_to(value.min(retired));
+            process_device_deletions_up_to(&self.state, device, value.min(retired));
         }
-        drain_all_pending_slots(&mut self.state);
         Ok(true)
     }
 
@@ -986,7 +1011,7 @@ impl GpuBackend for MetalBackend {
                 let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
                 drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
             }
-            ld.process_deletion_queue_up_to(retired);
+            process_device_deletions_up_to(&self.state, device, retired);
         }
     }
 
@@ -1180,7 +1205,8 @@ impl crate::backend::ContextDeferredDeletionFlush for MetalContextDeferredDeleti
         if let Ok(mut sc) = self.sc.lock() {
             drain_context_deletion_queue_up_to(&self.ld, &mut sc.deletion_queue, ctx_signaled);
         }
-        self.ld.process_deletion_queue_up_to(device_retired);
+        // Physical frees only — full slot reclaim needs a device-wide context snapshot.
+        self.ld.process_deletion_queue_up_to(device_retired, None);
     }
 }
 

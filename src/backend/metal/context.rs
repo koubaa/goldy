@@ -251,6 +251,27 @@ pub(super) fn oldest_in_flight_cb(state: &MetalState, device: DeviceHandle) -> O
         .map(|(_, cb)| cb)
 }
 
+/// Snapshot completed timeline values for every context on `device`.
+///
+/// Call before locking descriptors so slot reclaim can evaluate last-use epochs
+/// without holding both locks.
+pub(super) fn snapshot_context_completed_values(
+    state: &MetalState,
+    device: DeviceHandle,
+) -> std::collections::HashMap<ContextHandle, u64> {
+    state
+        .contexts
+        .iter()
+        .filter_map(|(&id, sc_arc)| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device != device {
+                return None;
+            }
+            Some((id, context_gpu_progress(&sc)))
+        })
+        .collect()
+}
+
 /// Reclamation epoch installed on the current thread for any context on `device`.
 pub(super) fn reclamation_barrier(state: &MetalState, device: DeviceHandle, gpu_idle: bool) -> u64 {
     if gpu_idle {
