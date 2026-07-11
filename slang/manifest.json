@@ -1,5 +1,5 @@
 {
-  "version": "2026.4",
+  "version": "2026.13",
   "description": "Slang shader compiler libraries required by Goldy",
   "download_url_template": "https://github.com/shader-slang/slang/releases/download/v{version}/slang-{version}-{platform}.zip",
   "platforms": {
@@ -19,8 +19,8 @@
         "libslang-compiler.so",
         "libslang.so",
         "libslang-rt.so",
-        "libslang-glslang-2026.4.so",
-        "libslang-glsl-module-2026.4.so",
+        "libslang-glslang-2026.13.so",
+        "libslang-glsl-module-2026.13.so",
         "libslang-llvm.so"
       ],
       "primary": "libslang-compiler.so"
@@ -30,8 +30,8 @@
         "libslang-compiler.so",
         "libslang.so",
         "libslang-rt.so",
-        "libslang-glslang-2026.4.so",
-        "libslang-glsl-module-2026.4.so"
+        "libslang-glslang-2026.13.so",
+        "libslang-glsl-module-2026.13.so"
       ],
       "primary": "libslang-compiler.so"
     },
@@ -40,8 +40,8 @@
         "libslang-compiler.dylib",
         "libslang.dylib",
         "libslang-rt.dylib",
-        "libslang-glslang-2026.4.dylib",
-        "libslang-glsl-module-2026.4.dylib"
+        "libslang-glslang-2026.13.dylib",
+        "libslang-glsl-module-2026.13.dylib"
       ],
       "primary": "libslang-compiler.dylib"
     },
@@ -50,8 +50,8 @@
         "libslang-compiler.dylib",
         "libslang.dylib",
         "libslang-rt.dylib",
-        "libslang-glslang-2026.4.dylib",
-        "libslang-glsl-module-2026.4.dylib",
+        "libslang-glslang-2026.13.dylib",
+        "libslang-glsl-module-2026.13.dylib",
         "libslang-llvm.dylib"
       ],
       "primary": "libslang-compiler.dylib"
