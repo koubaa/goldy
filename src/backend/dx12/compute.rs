@@ -1950,6 +1950,7 @@ fn execute_signal_and_finish(
     if let Err(err) = super::pending_submit::enqueue_compute_submit(
         logical_device,
         scope.context_fences,
+        scope.buffers(),
         scope.sc.clone(),
         queue,
         queue_lock,
@@ -2884,16 +2885,20 @@ pub(super) fn try_resubmit_retained_with_scope(
             );
         }
 
-        super::pending_submit::enqueue_retained_resubmit(
-            logical_device,
-            scope.context_fences,
-            queue,
-            queue_lock,
-            ctx_fence,
-            vec![Some(cmd_list)],
-            sync,
-            fence_value,
-        )?;
+        {
+            let _tz = tracy_zone!("dx12.resubmit_retained.enqueue");
+            super::pending_submit::enqueue_retained_resubmit(
+                logical_device,
+                scope.context_fences,
+                scope.buffers(),
+                queue,
+                queue_lock,
+                ctx_fence,
+                vec![Some(cmd_list)],
+                sync,
+                fence_value,
+            )?;
+        }
         scope
             .sc
             .lock()

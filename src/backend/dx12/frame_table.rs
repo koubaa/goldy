@@ -61,15 +61,21 @@ pub(crate) fn init_context(
 ) -> Result<SharedContextFrameTable> {
     let (selector, selector_slot) =
         create_scattered_u32_buffer_registered(state, device_handle, ld, 1, "goldy_frame_table_selector")?;
+
     let (device_table, table_slot) = create_scattered_u32_buffer_registered(
         state,
         device_handle,
         ld,
         FRAME_TABLE_TABLE_U32S as u32,
         "goldy_frame_table_device",
-    )?;
+    )
+    .inspect_err(|_| {
+        release_registered_buffers(state, ld, &[selector]);
+    })?;
 
-    let (staging, staging_mapped) = create_upload_table_buffer(ld)?;
+    let (staging, staging_mapped) = create_upload_table_buffer(ld).inspect_err(|_| {
+        release_registered_buffers(state, ld, &[selector, device_table]);
+    })?;
 
     state
         .buffers
@@ -101,7 +107,10 @@ pub(crate) fn init_context(
     });
 
     let buffers = state.buffers.read().unwrap();
-    bind_to_bindless_heap(ld, &ft, &buffers.entries)?;
+    if let Err(e) = bind_to_bindless_heap(ld, &ft, &buffers.entries) {
+        destroy_context(state, device_handle, &ft);
+        return Err(e);
+    }
 
     Ok(ft)
 }
@@ -130,8 +139,9 @@ pub(crate) fn ensure_legacy_frame_table(
 
 /// Write this context's selector/table UAV descriptors at its per-context slots.
 ///
-/// Called once at context init; the slots are context-private for the context's
-/// lifetime, so no rebinding at execute time is ever needed.
+/// Called once at context init. Each context owns disjoint heap indices from the
+/// registry, so concurrent inits may write the shared heap safely (non-overlapping
+/// descriptor regions). No rebinding at execute time is ever needed.
 pub(crate) fn bind_to_bindless_heap(
     ld: &LogicalDevice,
     ft: &ContextFrameTable,
@@ -197,6 +207,19 @@ pub(crate) fn destroy_context_resources(
     let mut registry = ld.descriptors.lock().unwrap();
     registry.reclaim_buffer_slots(ft.selector);
     registry.reclaim_buffer_slots(ft.device_table);
+}
+
+/// Roll back buffer registry entries when [`init_context`] fails mid-flight.
+fn release_registered_buffers(state: &Dx12State, ld: &LogicalDevice, handles: &[BufferHandle]) {
+    let mut buffers = state.buffers.write().unwrap();
+    for &handle in handles {
+        buffers.entries.remove(&handle);
+    }
+    drop(buffers);
+    let mut registry = ld.descriptors.lock().unwrap();
+    for &handle in handles {
+        registry.reclaim_buffer_slots(handle);
+    }
 }
 
 fn create_upload_table_buffer(ld: &LogicalDevice) -> Result<(ID3D12Resource, usize)> {

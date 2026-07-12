@@ -1063,6 +1063,24 @@ impl Scheme {
         }
     }
 
+    /// Record GPU-orderable buffer reuse dependencies enforced at submit-worker execute time.
+    pub fn record_reuse_epochs(&mut self, refs: &crate::timeline::ReferenceTable) {
+        self.submit_state.record_reuse_epochs(refs);
+    }
+
+    /// Defer a host-visible buffer write until the submission worker after `refs` retire on the CPU.
+    ///
+    /// Currently applied by the DX12 submission worker only.
+    pub fn defer_host_write(
+        &mut self,
+        refs: &crate::timeline::ReferenceTable,
+        buffer: &crate::Buffer,
+        offset: u64,
+        data: Box<[u8]>,
+    ) {
+        self.submit_state.defer_host_write(refs, buffer, offset, data);
+    }
+
     /// Submit the scheme: resubmit the retained command list when clean, re-record when dirty.
     ///
     /// On a clean resubmit, bound parcels' reference tables are stamped with the new

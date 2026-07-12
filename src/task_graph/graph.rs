@@ -217,6 +217,8 @@ fn backend_submit_standalone(
         prologue: Default::default(),
         waits: s.waits.clone(),
         cpu_waits: s.cpu_waits.clone(),
+        host_observed_waits: s.host_observed_waits.clone(),
+        deferred_host_writes: s.deferred_host_writes.clone(),
     });
     session.submit_standalone(ctx, &cmds, waits_only.as_ref())
 }
@@ -250,7 +252,46 @@ fn submit_sync_waits_only(sync: Option<&SubmitSync>) -> Option<SubmitSync> {
         prologue: Default::default(),
         waits: s.waits.clone(),
         cpu_waits: s.cpu_waits.clone(),
+        host_observed_waits: s.host_observed_waits.clone(),
+        deferred_host_writes: s.deferred_host_writes.clone(),
     })
+}
+
+/// Per-scheme submit sidecars relocated from the render thread to the submission worker.
+pub(crate) struct SubmitSidecarState {
+    extra_queue_epochs: Vec<crate::timeline::Epoch>,
+    host_observed: Vec<crate::timeline::Epoch>,
+    deferred_writes: Vec<crate::backend::DeferredHostWrite>,
+    host_attached: bool,
+}
+
+impl SubmitSidecarState {
+    fn new(
+        extra_queue_epochs: Vec<crate::timeline::Epoch>,
+        host_observed: Vec<crate::timeline::Epoch>,
+        deferred_writes: Vec<crate::backend::DeferredHostWrite>,
+    ) -> Self {
+        Self {
+            extra_queue_epochs,
+            host_observed,
+            deferred_writes,
+            host_attached: false,
+        }
+    }
+
+    fn merge_sync(&mut self, base: Option<&SubmitSync>) -> Option<SubmitSync> {
+        let (host, writes) =
+            if !self.host_attached && (!self.host_observed.is_empty() || !self.deferred_writes.is_empty()) {
+                self.host_attached = true;
+                (
+                    std::mem::take(&mut self.host_observed),
+                    std::mem::take(&mut self.deferred_writes),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+        crate::backend::host_sidecar::merge_submit_sync_for_partition(base, &self.extra_queue_epochs, host, writes)
+    }
 }
 
 fn merge_epoch_wait(waits: &mut Vec<crate::timeline::Epoch>, epoch: crate::timeline::Epoch) {
@@ -302,6 +343,8 @@ fn merge_queue_boundary_waits(
         prologue: sync.map(|s| s.prologue.clone()).unwrap_or_default(),
         waits,
         cpu_waits: sync.map(|s| s.cpu_waits.clone()).unwrap_or_default(),
+        host_observed_waits: sync.map(|s| s.host_observed_waits.clone()).unwrap_or_default(),
+        deferred_host_writes: sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default(),
     })
 }
 
@@ -1172,6 +1215,7 @@ pub(crate) struct PresentSubmitOptions<'a> {
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
+    pub sidecar: SubmitSidecarState,
 }
 
 /// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
@@ -1182,15 +1226,16 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     context: &crate::Context,
     session: &dyn crate::backend::ContextSubmitSession,
     ir: &GraphIR,
-    options: &PresentSubmitOptions<'_>,
+    options: PresentSubmitOptions<'_>,
 ) -> Result<(TimelineValue, PartitionSubmitResult)> {
     use super::{ResolvedSwapchain, SlotResolver};
 
-    let &PresentSubmitOptions {
+    let PresentSubmitOptions {
         present_slots,
         resource_stamps,
         stamp_targets,
         ir_clean,
+        mut sidecar,
     } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_with_presents");
@@ -1296,11 +1341,12 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
                     cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &merged_waves, separate)
                 };
+                let merged = sidecar.merge_sync(sync);
                 let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
                 if cached_key == Some(merged_fp) {
                     let _tz = crate::tracy_zone!("goldy.resubmit.merged");
-                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, sync)? {
+                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, merged.as_ref())? {
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1316,7 +1362,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
                 ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, sync)?;
+                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, merged.as_ref())?;
                 {
                     let entry = cache.as_mut().unwrap();
                     entry.partition_retention_keys[part_idx] = Some(merged_fp);
@@ -1351,6 +1397,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 boundary.last_compute_tv,
                 boundary.last_render_tv,
             );
+            let merged = sidecar.merge_sync(sync.as_ref());
 
             if !can_retain {
                 let cache_entry = cache.as_ref().unwrap();
@@ -1367,7 +1414,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     )?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
-                last_tv = backend_submit_standalone(session, ctx, &cmds, sync.as_ref())?;
+                last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
                 record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
@@ -1397,7 +1444,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         )?
                     };
                     let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
-                    last_tv = backend_submit_standalone(session, ctx, &cmds, sync.as_ref())?;
+                    last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
                     record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
@@ -1425,7 +1472,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
                 if already_retained {
                     let _tz = crate::tracy_zone!("goldy.resubmit.present_slot");
-                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, slot_key, sync.as_ref())? {
+                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, slot_key, merged.as_ref())? {
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1449,7 +1496,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
                 ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, sync.as_ref())?;
+                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, merged.as_ref())?;
                 {
                     let entry = cache.as_mut().unwrap();
                     entry.partition_slot_keys[part_idx]
@@ -1469,7 +1516,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
             if cached_key == Some(part_fp) {
                 let _tz = crate::tracy_zone!("goldy.resubmit.partition");
-                if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, sync.as_ref())? {
+                if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, merged.as_ref())? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
                     record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1486,7 +1533,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
             ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-            last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync.as_ref())?;
+            last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, merged.as_ref())?;
             cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
             record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
             result.records += 1;
@@ -1506,6 +1553,11 @@ pub(crate) struct IrSubmitState {
     schedule_cache: Option<CompiledCacheEntry>,
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
     resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+    /// Reuse epochs merged into every partition's GPU queue-wait list at submit time.
+    extra_submit_epochs: crate::timeline::ReferenceTable,
+    /// Host-observed epochs + deferred writes (consumed once on the first partition job).
+    host_observed_epochs: crate::timeline::ReferenceTable,
+    deferred_host_writes: Vec<crate::backend::DeferredHostWrite>,
 }
 
 impl IrSubmitState {
@@ -1514,7 +1566,50 @@ impl IrSubmitState {
             schedule_cache: None,
             stamp_targets: Vec::new(),
             resource_stamps: ResourceKeyMap::default(),
+            extra_submit_epochs: crate::timeline::ReferenceTable::default(),
+            host_observed_epochs: crate::timeline::ReferenceTable::default(),
+            deferred_host_writes: Vec::new(),
         }
+    }
+
+    /// Record GPU-orderable reuse dependencies for the next submit (enforced via queue-wait).
+    pub fn record_reuse_epochs(&mut self, refs: &crate::timeline::ReferenceTable) {
+        crate::backend::host_sidecar::merge_reference_table(&mut self.extra_submit_epochs, refs);
+    }
+
+    /// Defer a host-visible write until the submission worker, after `refs` retire on the CPU.
+    ///
+    /// Currently applied by the DX12 submission worker only.
+    pub fn defer_host_write(
+        &mut self,
+        refs: &crate::timeline::ReferenceTable,
+        buffer: &crate::Buffer,
+        offset: u64,
+        data: Box<[u8]>,
+    ) {
+        let buffer_handle = buffer
+            .whole()
+            .buffer_handle()
+            .expect("defer_host_write requires a single-unit buffer");
+        crate::backend::host_sidecar::merge_reference_table(&mut self.host_observed_epochs, refs);
+        self.deferred_host_writes.push(crate::backend::DeferredHostWrite {
+            buffer: buffer_handle,
+            offset,
+            data: std::sync::Arc::from(data),
+        });
+    }
+
+    fn take_submit_sidecars(
+        &mut self,
+    ) -> (
+        Vec<crate::timeline::Epoch>,
+        Vec<crate::timeline::Epoch>,
+        Vec<crate::backend::DeferredHostWrite>,
+    ) {
+        let queue = crate::timeline::epochs_from(&std::mem::take(&mut self.extra_submit_epochs));
+        let host = crate::timeline::epochs_from(&std::mem::take(&mut self.host_observed_epochs));
+        let writes = std::mem::take(&mut self.deferred_host_writes);
+        (queue, host, writes)
     }
 
     pub fn register_parcel_stamp(&mut self, parcel: &crate::Parcel) {
@@ -1632,16 +1727,19 @@ impl IrSubmitState {
         present_slots: &[ResolvedPresentSlot],
         ir_clean: bool,
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
+        let (queue_epochs, host_epochs, host_writes) = self.take_submit_sidecars();
+        let sidecar = SubmitSidecarState::new(queue_epochs, host_epochs, host_writes);
         submit_resolved_ir_and_retain_with_presents(
             &mut self.schedule_cache,
             ctx,
             ctx.submit_session(),
             ir,
-            &PresentSubmitOptions {
+            PresentSubmitOptions {
                 present_slots,
                 resource_stamps: &self.resource_stamps,
                 stamp_targets: &self.stamp_targets,
                 ir_clean,
+                sidecar,
             },
         )
     }
