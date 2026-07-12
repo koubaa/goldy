@@ -1,9 +1,7 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
 use super::host_wait::HostWait;
-use super::types::{
-    ContextFenceEntry, LogicalDevice, SharedBufferTable, SharedLogicalDevice, SharedSubmissionContext,
-};
+use super::types::{ContextFenceEntry, LogicalDevice, SharedBufferTable, SharedLogicalDevice, SharedSubmissionContext};
 use super::ContextHandle;
 use crate::backend::submission_worker::PendingSubmit;
 use crate::backend::{DeferredHostWrite, SubmitSync};
@@ -62,11 +60,7 @@ fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[De
             .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
         if let Some(base) = buffer.cpu_writable_upload_mapped {
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    w.data.as_ptr(),
-                    (base as *mut u8).add(w.offset as usize),
-                    w.data.len(),
-                );
+                std::ptr::copy_nonoverlapping(w.data.as_ptr(), (base as *mut u8).add(w.offset as usize), w.data.len());
             }
         } else {
             anyhow::bail!(
@@ -108,11 +102,7 @@ pub(super) struct Dx12ComputePendingSubmit {
 impl PendingSubmit for Dx12ComputePendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.compute");
-        apply_host_sidecar_before_gpu(
-            &self.host_observed_waits,
-            &self.buffers,
-            &self.deferred_host_writes,
-        )?;
+        apply_host_sidecar_before_gpu(&self.host_observed_waits, &self.buffers, &self.deferred_host_writes)?;
         {
             let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.before");
             let mut sc = self.sc.lock().unwrap();
@@ -152,11 +142,7 @@ pub(super) struct Dx12RetainedResubmitPending {
 impl PendingSubmit for Dx12RetainedResubmitPending {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.retained_resubmit");
-        apply_host_sidecar_before_gpu(
-            &self.host_observed_waits,
-            &self.buffers,
-            &self.deferred_host_writes,
-        )?;
+        apply_host_sidecar_before_gpu(&self.host_observed_waits, &self.buffers, &self.deferred_host_writes)?;
         {
             let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
             let device_completed = unsafe { self.logical_device.fence.GetCompletedValue() };

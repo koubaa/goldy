@@ -82,23 +82,15 @@ pub(crate) fn init_context(
     ld: &LogicalDevice,
 ) -> Result<SharedContextFrameTable> {
     let (selector, selector_slot) = create_scattered_u32_buffer_registered(state, instance, device_handle, ld, 1)?;
-    let (device_table, table_slot) = create_scattered_u32_buffer_registered(
-        state,
-        instance,
-        device_handle,
-        ld,
-        FRAME_TABLE_TABLE_U32S as u32,
-    )
-    .map_err(|e| {
-        release_registered_buffers(state, ld, &[selector]);
-        e
-    })?;
+    let (device_table, table_slot) =
+        create_scattered_u32_buffer_registered(state, instance, device_handle, ld, FRAME_TABLE_TABLE_U32S as u32)
+            .inspect_err(|_| {
+                release_registered_buffers(state, ld, &[selector]);
+            })?;
 
-    let (staging, staging_memory, staging_mapped) =
-        create_upload_table_buffer(instance, ld).map_err(|e| {
-            release_registered_buffers(state, ld, &[selector, device_table]);
-            e
-        })?;
+    let (staging, staging_memory, staging_mapped) = create_upload_table_buffer(instance, ld).inspect_err(|_| {
+        release_registered_buffers(state, ld, &[selector, device_table]);
+    })?;
 
     state
         .buffers

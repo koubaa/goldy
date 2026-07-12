@@ -56,22 +56,10 @@ mod tests {
 
     #[test]
     fn merge_epochs_keeps_max_per_context() {
-        let mut into = vec![Epoch {
-            context: 1,
-            value: 10,
-        }];
+        let mut into = vec![Epoch { context: 1, value: 10 }];
         merge_epochs(
             &mut into,
-            &[
-                Epoch {
-                    context: 1,
-                    value: 8,
-                },
-                Epoch {
-                    context: 2,
-                    value: 3,
-                },
-            ],
+            &[Epoch { context: 1, value: 8 }, Epoch { context: 2, value: 3 }],
         );
         assert_eq!(into.len(), 2);
         assert_eq!(into[0].value, 10);
@@ -81,10 +69,7 @@ mod tests {
     #[test]
     fn merge_submit_sync_attaches_host_writes_once() {
         let base = SubmitSync {
-            waits: vec![Epoch {
-                context: 1,
-                value: 4,
-            }],
+            waits: vec![Epoch { context: 1, value: 4 }],
             ..Default::default()
         };
         let write = DeferredHostWrite {
@@ -94,14 +79,8 @@ mod tests {
         };
         let merged = merge_submit_sync_for_partition(
             Some(&base),
-            &[Epoch {
-                context: 1,
-                value: 7,
-            }],
-            vec![Epoch {
-                context: 2,
-                value: 5,
-            }],
+            &[Epoch { context: 1, value: 7 }],
+            vec![Epoch { context: 2, value: 5 }],
             vec![write],
         )
         .unwrap();
@@ -118,10 +97,7 @@ mod tests {
     #[test]
     fn merge_preserves_cpu_waits() {
         let base = SubmitSync {
-            cpu_waits: vec![Epoch {
-                context: 3,
-                value: 9,
-            }],
+            cpu_waits: vec![Epoch { context: 3, value: 9 }],
             ..Default::default()
         };
         let merged = merge_submit_sync_for_partition(Some(&base), &[], vec![], vec![]).unwrap();

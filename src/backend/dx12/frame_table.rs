@@ -69,14 +69,12 @@ pub(crate) fn init_context(
         FRAME_TABLE_TABLE_U32S as u32,
         "goldy_frame_table_device",
     )
-    .map_err(|e| {
+    .inspect_err(|_| {
         release_registered_buffers(state, ld, &[selector]);
-        e
     })?;
 
-    let (staging, staging_mapped) = create_upload_table_buffer(ld).map_err(|e| {
+    let (staging, staging_mapped) = create_upload_table_buffer(ld).inspect_err(|_| {
         release_registered_buffers(state, ld, &[selector, device_table]);
-        e
     })?;
 
     state
