@@ -40,6 +40,9 @@ pub(crate) mod shared;
 /// Per-device FIFO worker for async GPU queue submission.
 pub(crate) mod submission_worker;
 
+/// Helpers for relocating reuse waits and deferred host writes to the submission worker.
+pub(crate) mod host_sidecar;
+
 /// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
 #[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
 pub(crate) mod signal_fence;
@@ -477,6 +480,17 @@ impl TextureCopyFootprint {
     }
 }
 
+/// CPU-side write deferred to the submission worker, after [`SubmitSync::host_observed_waits`]
+/// retire on the host.
+///
+/// Currently applied by the DX12 submission worker only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredHostWrite {
+    pub buffer: BufferHandle,
+    pub offset: u64,
+    pub data: Arc<[u8]>,
+}
+
 /// Cross-submission synchronization derived from the runtime's ledger (spec §5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubmitSync {
@@ -490,11 +504,29 @@ pub struct SubmitSync {
     /// with a concurrent cross-context RAW wait (producer upload vs consumer reader),
     /// wedging per-context queues. CPU-side retirement breaks the cycle.
     pub cpu_waits: Vec<crate::timeline::Epoch>,
+    /// CPU-observed fence waits before host-visible writes (not ordered by GPU queue-wait alone).
+    pub host_observed_waits: Vec<crate::timeline::Epoch>,
+    /// Host writes performed on the submission worker after `host_observed_waits` retire.
+    pub deferred_host_writes: Vec<DeferredHostWrite>,
 }
 
 impl SubmitSync {
     pub fn is_empty(&self) -> bool {
-        self.prologue.is_empty() && self.waits.is_empty() && self.cpu_waits.is_empty()
+        self.prologue.is_empty()
+            && self.waits.is_empty()
+            && self.cpu_waits.is_empty()
+            && self.host_observed_waits.is_empty()
+            && self.deferred_host_writes.is_empty()
+    }
+
+    /// Merge `extra` queue-order epochs into `self.waits` (max per context).
+    pub fn merge_queue_waits(&mut self, extra: &[crate::timeline::Epoch]) {
+        crate::backend::host_sidecar::merge_epochs(&mut self.waits, extra);
+    }
+
+    /// Merge host-observed epochs into `self.host_observed_waits` (max per context).
+    pub fn merge_host_observed_waits(&mut self, extra: &[crate::timeline::Epoch]) {
+        crate::backend::host_sidecar::merge_epochs(&mut self.host_observed_waits, extra);
     }
 
     pub fn from_cross_submit(cross: &crate::task_graph::CrossSubmitSync) -> Self {
@@ -502,6 +534,8 @@ impl SubmitSync {
             prologue: cross.prologue.clone(),
             waits: cross.waits.clone(),
             cpu_waits: cross.cpu_waits.clone(),
+            host_observed_waits: Vec::new(),
+            deferred_host_writes: Vec::new(),
         }
     }
 

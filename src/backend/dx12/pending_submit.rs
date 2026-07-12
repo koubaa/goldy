@@ -1,9 +1,11 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
-use super::types::{ContextFenceEntry, LogicalDevice, SharedLogicalDevice, SharedSubmissionContext};
+use super::types::{
+    ContextFenceEntry, LogicalDevice, SharedBufferTable, SharedLogicalDevice, SharedSubmissionContext,
+};
 use super::ContextHandle;
 use crate::backend::submission_worker::PendingSubmit;
-use crate::backend::SubmitSync;
+use crate::backend::{DeferredHostWrite, SubmitSync};
 use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
@@ -29,6 +31,60 @@ pub(super) fn resolve_queue_waits(
     Ok(waits)
 }
 
+pub(super) fn resolve_host_observed_waits(
+    context_fences: &Arc<RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
+    sync: Option<&SubmitSync>,
+) -> Result<Vec<(ID3D12Fence, u64)>> {
+    let Some(s) = sync else {
+        return Ok(Vec::new());
+    };
+    let mut waits = Vec::with_capacity(s.host_observed_waits.len());
+    let fences = context_fences.read().unwrap();
+    for epoch in &s.host_observed_waits {
+        let (_, producer_fence, _) = fences
+            .get(&epoch.context)
+            .with_context(|| format!("host-observed wait: unknown context {:?}", epoch.context))?;
+        waits.push((producer_fence.clone(), epoch.value));
+    }
+    Ok(waits)
+}
+
+fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[DeferredHostWrite]) -> Result<()> {
+    for w in deferred_writes {
+        let buffers_read = buffers.read().unwrap();
+        let buffer = buffers_read
+            .entries
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+        if let Some(base) = buffer.cpu_writable_upload_mapped {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    w.data.as_ptr(),
+                    (base as *mut u8).add(w.offset as usize),
+                    w.data.len(),
+                );
+            }
+        } else {
+            anyhow::bail!(
+                "deferred host write requires CPU-writable mapped buffer (handle={})",
+                w.buffer
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_host_sidecar_before_gpu(
+    host_observed_waits: &[(ID3D12Fence, u64)],
+    buffers: &SharedBufferTable,
+    deferred_writes: &[DeferredHostWrite],
+) -> Result<()> {
+    for (fence, value) in host_observed_waits {
+        super::utils::wait_for_fence(fence, *value)?;
+    }
+    apply_deferred_host_writes(buffers, deferred_writes)
+}
+
 pub(super) struct Dx12ComputePendingSubmit {
     logical_device: SharedLogicalDevice,
     sc: SharedSubmissionContext,
@@ -38,12 +94,20 @@ pub(super) struct Dx12ComputePendingSubmit {
     slot_idx: usize,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
+    host_observed_waits: Vec<(ID3D12Fence, u64)>,
+    deferred_host_writes: Vec<DeferredHostWrite>,
+    buffers: SharedBufferTable,
     fence_value: TimelineValue,
 }
 
 impl PendingSubmit for Dx12ComputePendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.compute");
+        apply_host_sidecar_before_gpu(
+            &self.host_observed_waits,
+            &self.buffers,
+            &self.deferred_host_writes,
+        )?;
         {
             let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.before");
             let mut sc = self.sc.lock().unwrap();
@@ -74,12 +138,20 @@ pub(super) struct Dx12RetainedResubmitPending {
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
+    host_observed_waits: Vec<(ID3D12Fence, u64)>,
+    deferred_host_writes: Vec<DeferredHostWrite>,
+    buffers: SharedBufferTable,
     fence_value: TimelineValue,
 }
 
 impl PendingSubmit for Dx12RetainedResubmitPending {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.retained_resubmit");
+        apply_host_sidecar_before_gpu(
+            &self.host_observed_waits,
+            &self.buffers,
+            &self.deferred_host_writes,
+        )?;
         super::utils::execute_preallocated_context_submit(
             &self.logical_device,
             &self.queue,
@@ -96,6 +168,7 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
 pub(super) fn enqueue_compute_submit(
     logical_device: &SharedLogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
+    buffers: &SharedBufferTable,
     sc: SharedSubmissionContext,
     queue: ID3D12CommandQueue,
     queue_lock: Arc<std::sync::Mutex<()>>,
@@ -107,6 +180,8 @@ pub(super) fn enqueue_compute_submit(
 ) -> Result<()> {
     logical_device.submission_worker.check_error()?;
     let queue_waits = resolve_queue_waits(logical_device, context_fences, sync)?;
+    let host_observed_waits = resolve_host_observed_waits(context_fences, sync)?;
+    let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
     logical_device.submission_worker.enqueue(
         fence_value,
         Box::new(Dx12ComputePendingSubmit {
@@ -118,6 +193,9 @@ pub(super) fn enqueue_compute_submit(
             slot_idx,
             command_lists,
             queue_waits,
+            host_observed_waits,
+            deferred_host_writes,
+            buffers: Arc::clone(buffers),
             fence_value,
         }),
     )
@@ -127,6 +205,7 @@ pub(super) fn enqueue_compute_submit(
 pub(super) fn enqueue_retained_resubmit(
     logical_device: &SharedLogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
+    buffers: &SharedBufferTable,
     queue: ID3D12CommandQueue,
     queue_lock: Arc<std::sync::Mutex<()>>,
     ctx_fence: ID3D12Fence,
@@ -136,6 +215,8 @@ pub(super) fn enqueue_retained_resubmit(
 ) -> Result<()> {
     logical_device.submission_worker.check_error()?;
     let queue_waits = resolve_queue_waits(logical_device, context_fences, sync)?;
+    let host_observed_waits = resolve_host_observed_waits(context_fences, sync)?;
+    let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
     logical_device.submission_worker.enqueue(
         fence_value,
         Box::new(Dx12RetainedResubmitPending {
@@ -145,6 +226,9 @@ pub(super) fn enqueue_retained_resubmit(
             ctx_fence,
             command_lists,
             queue_waits,
+            host_observed_waits,
+            deferred_host_writes,
+            buffers: Arc::clone(buffers),
             fence_value,
         }),
     )
