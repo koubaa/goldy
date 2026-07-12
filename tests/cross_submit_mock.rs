@@ -622,3 +622,72 @@ fn topology_kind_change_on_existing_scheme_dirties_peers() {
         "write kind change on a shared parcel must dirty peers"
     );
 }
+
+#[test]
+fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
+    use goldy::types::BufferFlags;
+    use goldy::Buffer;
+
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let dest = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("dest");
+    let staging = pool
+        .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+
+    // Record once: upload staging→dest, then write-shader on dest (single scheme for simplicity).
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_parcel(staging.whole(), 0, dest.whole(), 0, 16)
+        .expect("copy");
+    scheme
+        .node("write", &write_pipe)
+        .with_parcel(&dest, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let first = scheme.submit().expect("record");
+    let first_tv = first.timeline_value();
+
+    clear_mock(&device);
+
+    // Frame N+1: reuse dest (queue wait) + deferred host write into staging before resubmit.
+    scheme.record_reuse_epochs(&dest.last_referenced());
+    scheme.defer_host_write(
+        &staging.last_referenced(),
+        &staging,
+        0,
+        Box::from([7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0]),
+    );
+
+    scheme.submit().expect("resubmit with sidecars");
+    assert_eq!(retained_resubmits(&device), 1);
+
+    let waits = recorded_waits(&device);
+    assert!(
+        waits.iter().any(|w| w.iter().any(|e| e.value >= first_tv)),
+        "retained resubmit must carry reuse epoch in SubmitSync.waits: {waits:?}"
+    );
+
+    let host_waits = with_mock(&device, |m| m.recorded_host_observed_waits.clone());
+    let host_writes = with_mock(&device, |m| m.recorded_deferred_host_writes.clone());
+    assert!(
+        host_writes.iter().any(|batch| !batch.is_empty()),
+        "deferred host writes must reach the retained resubmit path: {host_writes:?}"
+    );
+    assert!(
+        host_waits.iter().any(|batch| !batch.is_empty()) || host_writes.iter().any(|b| !b.is_empty()),
+        "host sidecar must be recorded on at least one partition"
+    );
+
+    let mut staging_bytes = [0u8; 16];
+    staging.read_to_cpu(&device, &mut staging_bytes).expect("read staging");
+    assert_eq!(&staging_bytes[..4], &[7, 0, 0, 0]);
+
+    // Silence unused warning if Buffer import is only for type clarity.
+    let _: &Buffer = &staging;
+}

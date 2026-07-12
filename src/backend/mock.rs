@@ -55,6 +55,10 @@ pub struct MockBackend {
     pub compute_dispatch_count: usize,
     /// Cross-context epoch waits recorded per standalone/graph submit (mock tests).
     pub recorded_waits: Vec<Vec<crate::timeline::Epoch>>,
+    /// Host-observed epochs recorded per submit (mock tests / deferred host writes).
+    pub recorded_host_observed_waits: Vec<Vec<crate::timeline::Epoch>>,
+    /// Deferred host writes recorded per submit (mock tests).
+    pub recorded_deferred_host_writes: Vec<Vec<crate::backend::DeferredHostWrite>>,
     /// Whether each `submit_graph` call received `sync = Some(...)`.
     ///
     /// When `Some`, the backend knows to suppress its legacy blanket-acquire barrier and
@@ -240,6 +244,8 @@ impl MockBackend {
             samplers_created: 0,
             compute_dispatch_count: 0,
             recorded_waits: Vec::new(),
+            recorded_host_observed_waits: Vec::new(),
+            recorded_deferred_host_writes: Vec::new(),
             recorded_graph_syncs: Vec::new(),
             retained_graphs: HashMap::new(),
             retained_resubmit_count: 0,
@@ -359,11 +365,21 @@ impl MockBackend {
     fn record_submit_sync(&mut self, sync: Option<&SubmitSync>) -> Result<()> {
         if let Some(s) = sync {
             self.recorded_waits.push(s.waits.clone());
+            self.recorded_host_observed_waits.push(s.host_observed_waits.clone());
+            self.recorded_deferred_host_writes.push(s.deferred_host_writes.clone());
             for epoch in &s.waits {
                 self.wait_until(epoch.context, epoch.value)?;
             }
+            for epoch in &s.host_observed_waits {
+                self.wait_until(epoch.context, epoch.value)?;
+            }
+            for write in &s.deferred_host_writes {
+                self.write_buffer(write.buffer, write.offset, &write.data)?;
+            }
         } else {
             self.recorded_waits.push(Vec::new());
+            self.recorded_host_observed_waits.push(Vec::new());
+            self.recorded_deferred_host_writes.push(Vec::new());
         }
         Ok(())
     }
@@ -393,9 +409,12 @@ impl MockBackend {
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
         self.recorded_waits.clear();
+        self.recorded_host_observed_waits.clear();
+        self.recorded_deferred_host_writes.clear();
         self.recorded_graph_syncs.clear();
         self.wait_until_count = 0;
         self.buffer_view_create_count = 0;
+        self.retained_resubmit_count = 0;
     }
 
     fn execute_copy_buffer(
@@ -606,7 +625,10 @@ impl GpuBackend for MockBackend {
     }
 
     fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
-        crate::device::DeviceCapabilities::default()
+        crate::device::DeviceCapabilities {
+            host_sidecar_on_submit_worker: true,
+            ..crate::device::DeviceCapabilities::default()
+        }
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {

@@ -84,6 +84,7 @@ pub(super) fn query_supports_reserved_buffers(adapter: &IDXGIAdapter1) -> bool {
 pub(super) fn adapter_capabilities(adapters: &[DxgiAdapterInfo], adapter_id: u32) -> crate::device::DeviceCapabilities {
     let mut caps = crate::device::DeviceCapabilities {
         has_zero_copy_storage_readback: false,
+        host_sidecar_on_submit_worker: true,
         ..Default::default()
     };
     if adapters

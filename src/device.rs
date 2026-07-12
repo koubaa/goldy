@@ -360,6 +360,12 @@ pub struct DeviceCapabilities {
 
     /// Whether `hint_unused_above` on backing buffer allocations can return physical memory to the system.
     pub buffer_decommit_supported: bool,
+
+    /// Whether [`crate::Scheme::defer_host_write`] / host-observed waits are applied on the
+    /// submission worker before GPU execute (DX12 today).
+    ///
+    /// When `false`, callers must keep synchronous host writes and render-thread reuse gates.
+    pub host_sidecar_on_submit_worker: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -380,6 +386,7 @@ impl Default for DeviceCapabilities {
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_page_size: 64 * 1024,
             buffer_decommit_supported: false,
+            host_sidecar_on_submit_worker: false,
         }
     }
 }
