@@ -7,12 +7,12 @@ name = "goldy"
 version = "0.1.0"
 description = "Python bindings for the Goldy GPU library"
 readme = "PYPI_README.md"
-license = { text = "LGPL-2.1-or-later" }
+license = { text = "MIT" }
 requires-python = ">=3.9"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

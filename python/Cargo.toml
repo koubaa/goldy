@@ -2,7 +2,7 @@
 name = "goldy-py"
 version = "0.1.0"
 edition = "2021"
-license = "LGPL-2.1-or-later"
+license = "MIT"
 description = "Python bindings for the Goldy GPU library"
 repository = "https://github.com/koubaa/goldy"
 readme = false

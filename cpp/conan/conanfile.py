@@ -7,7 +7,7 @@ import os
 class GoldyConan(ConanFile):
     name = "goldy"
     version = "0.1.0"
-    license = "LGPL-2.1-or-later"
+    license = "MIT"
     author = "KOB3 Contributors"
     url = "https://github.com/koubaa/goldy"
     homepage = "https://github.com/koubaa/goldy"

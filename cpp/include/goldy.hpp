@@ -1,7 +1,7 @@
 /*
  * Goldy GPU Library - C++ RAII Wrapper
  *
- * LGPL-2.1-or-later - Copyright (c) 2025-2026 Mohamed Koubaa
+ * MIT License - Copyright (c) 2025-2026 Mohamed Koubaa
  *
  * This header provides modern C++ RAII wrappers around the Goldy C API.
  * All resources are automatically cleaned up when they go out of scope.
