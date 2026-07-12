@@ -22,7 +22,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body: `Hi @${author} — goldy does not accept external pull requests at this time. The project is dual-licensed and contributions are restricted to maintainers. Feel free to open an issue to discuss ideas or report bugs.`
+                body: `Hi @${author} — goldy does not accept external pull requests at this time. Contributions are restricted to maintainers. Feel free to open an issue to discuss ideas or report bugs.`
               });
 
               await github.rest.pulls.update({

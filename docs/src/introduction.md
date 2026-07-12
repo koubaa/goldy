@@ -76,4 +76,4 @@ Goldy compiles Slang shaders to SPIR-V (Vulkan), DXIL (DX12), and Metal IR at ru
 
 ## License
 
-Goldy is dual-licensed under **LGPL-2.1-or-later** and a **commercial license**. See [License](./license.md) for details.
+Goldy is licensed under the **MIT License**. See [License](./license.md) for details.

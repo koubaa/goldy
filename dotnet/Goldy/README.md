@@ -43,5 +43,5 @@ byte[] pixels = target.ReadToCpu();
 
 ## License
 
-LGPL-2.1-or-later. A commercial license is also available; contact [koubaa on github](permament email tbd) for terms.
+MIT License. See the [goldy repository](https://github.com/koubaa/goldy/blob/main/LICENSE) for the full text.
 

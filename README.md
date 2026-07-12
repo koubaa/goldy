@@ -4,7 +4,7 @@
 
 # Goldy: Modern GPU Library
 
-[![License: LGPL v2.1+](https://img.shields.io/badge/License-LGPL_v2.1+-blue.svg)](https://www.gnu.org/licenses/lgpl-2.1.html)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets only modern GPU APIs (Vulkan 1.4+, DX12, Metal Tier2+) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
 
@@ -138,10 +138,7 @@ cargo test
 
 ## License
 
-Goldy is dual-licensed:
-
-- **Open source** — [GNU Lesser General Public License v2.1 or later](LICENSE) (LGPL-2.1-or-later). You may use, modify, and distribute Goldy as a dynamically linked library in any project, including proprietary software, under the terms of the LGPL.
-- **Commercial** — A commercial license is available for use cases where LGPL terms are not suitable (static linking, proprietary modifications, embedded distribution without LGPL obligations, etc.). Contact [koubaa at github](permanent email TBD) for terms.
+Goldy is licensed under the [MIT License](LICENSE). You may use, modify, and distribute Goldy in any project, including proprietary software, under the terms of the MIT License.
 
 ## Author
 

@@ -2,7 +2,7 @@
 name = "goldy-ffi-client"
 version = "0.1.0"
 edition = "2021"
-license = "LGPL-2.1-or-later"
+license = "MIT"
 description = "Rust RAII client for the Goldy C ABI (libgoldy_ffi)"
 repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "ffi"]
