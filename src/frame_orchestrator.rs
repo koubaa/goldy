@@ -223,6 +223,18 @@ impl<T> FrameOrchestrator<T> {
         Ok(submit_timeline)
     }
 
+    /// Close an open frame without creating a retirement-ring slot.
+    ///
+    /// Use when cross-frame resource ordering is enforced externally (scheme reuse epochs,
+    /// deferred host writes, present-easement ledger) so `begin_frame` must not wait on a
+    /// coarse frame timeline. The open handle is cleared; no Tracy frame mark is emitted.
+    pub fn end_frame_externally_ordered(&mut self, handle: FrameHandle) -> Result<(), GoldyError> {
+        let _tz = tracy_zone!("orchestrator.end_frame_externally_ordered");
+        self.expect_open(handle)?;
+        self.open = None;
+        Ok(())
+    }
+
     /// Submit `graph`, using command-buffer retention when [`Self::retains_command_buffers`].
     ///
     /// - **depth == 1**: tries [`crate::Context::try_resubmit_retained`] first

@@ -103,4 +103,69 @@ mod tests {
         let merged = merge_submit_sync_for_partition(Some(&base), &[], vec![], vec![]).unwrap();
         assert_eq!(merged.cpu_waits[0].value, 9);
     }
+
+    #[test]
+    fn merge_attach_host_once_then_queue_only() {
+        let write = DeferredHostWrite {
+            buffer: 7,
+            offset: 4,
+            data: Arc::from([9u8].as_slice()),
+        };
+        // First partition: attach queue + host sidecars.
+        let first = merge_submit_sync_for_partition(
+            None,
+            &[Epoch { context: 1, value: 3 }],
+            vec![Epoch { context: 1, value: 2 }],
+            vec![write],
+        )
+        .unwrap();
+        assert_eq!(first.waits[0].value, 3);
+        assert_eq!(first.host_observed_waits.len(), 1);
+        assert_eq!(first.deferred_host_writes.len(), 1);
+
+        // Later partitions (SubmitSidecarState after attach): queue epochs only.
+        let second = merge_submit_sync_for_partition(
+            Some(&SubmitSync {
+                waits: first.waits.clone(),
+                ..Default::default()
+            }),
+            &[Epoch { context: 1, value: 5 }],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(second.waits[0].value, 5);
+        assert!(second.host_observed_waits.is_empty());
+        assert!(second.deferred_host_writes.is_empty());
+    }
+
+    #[test]
+    fn submit_sync_waits_only_preserves_host_sidecar() {
+        let sync = SubmitSync {
+            prologue: Default::default(),
+            waits: vec![Epoch { context: 1, value: 11 }],
+            cpu_waits: vec![Epoch { context: 2, value: 22 }],
+            host_observed_waits: vec![Epoch { context: 3, value: 33 }],
+            deferred_host_writes: vec![DeferredHostWrite {
+                buffer: 42,
+                offset: 8,
+                data: Arc::from([1u8, 2].as_slice()),
+            }],
+        };
+        // Mirror `submit_sync_waits_only` from task_graph::graph (prologue stripped).
+        let waits_only = SubmitSync {
+            prologue: Default::default(),
+            waits: sync.waits.clone(),
+            cpu_waits: sync.cpu_waits.clone(),
+            host_observed_waits: sync.host_observed_waits.clone(),
+            deferred_host_writes: sync.deferred_host_writes.clone(),
+        };
+        assert!(waits_only.prologue.is_empty());
+        assert_eq!(waits_only.waits[0].value, 11);
+        assert_eq!(waits_only.cpu_waits[0].value, 22);
+        assert_eq!(waits_only.host_observed_waits[0].value, 33);
+        assert_eq!(waits_only.deferred_host_writes[0].buffer, 42);
+        assert_eq!(waits_only.deferred_host_writes[0].offset, 8);
+        assert_eq!(&*waits_only.deferred_host_writes[0].data, &[1u8, 2]);
+    }
 }
