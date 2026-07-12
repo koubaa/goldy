@@ -170,6 +170,9 @@ pub struct TaskGraph {
     /// — the binding fingerprint excludes data bytes, so cached `Arc<[u8]>` Arcs
     /// would otherwise be stale.  The Arc swap is a single atomic refcount bump.
     schedule_cache: Option<CompiledCacheEntry>,
+    /// Optional CB replay ledger for [`Self::submit_with_backend_and_retain`].
+    /// Cleared when `GOLDY_DISABLE_CB_REUSE` / GPU profiling disables replay.
+    replay: Option<super::cb_replay::CbReplayState>,
     /// Node count at the time the schedule cache was last validated.
     /// When the node count hasn't changed and the cache already holds a
     /// schedule, we skip the expensive `binding_fingerprint` hash.
@@ -412,28 +415,9 @@ fn backend_try_resubmit_retained(
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
     let _tz = crate::tracy_zone!("goldy.backend_try_resubmit_retained");
-    if crate::validation_env::retained_cb_reuse_disabled() {
-        return Ok(None);
-    }
     // Prologue is baked into the retained body; only cross-context waits are live.
+    // Callers must only invoke this when `CbReplayState` is present (replay enabled).
     session.try_resubmit_retained(ctx, key, submit_sync_waits_only(sync).as_ref())
-}
-
-fn ensure_partition_cache_vecs(entry: &mut CompiledCacheEntry, partition_count: usize) {
-    if entry.partition_retention_keys.len() != partition_count {
-        entry.partition_retention_keys = vec![None; partition_count];
-        entry.partition_slot_keys = vec![None; partition_count];
-        entry.partition_last_tv = vec![None; partition_count];
-    }
-}
-
-fn record_partition_last_tv(entry: &mut CompiledCacheEntry, part_idx: usize, tv: TimelineValue) {
-    entry.partition_last_tv[part_idx] = Some(tv);
-}
-
-fn record_merged_partition_last_tvs(entry: &mut CompiledCacheEntry, part_idx: usize, tv: TimelineValue) {
-    entry.partition_last_tv[part_idx] = Some(tv);
-    entry.partition_last_tv[part_idx + 1] = Some(tv);
 }
 
 /// Re-record allocates a fresh CB/allocator; backends must not reuse in-flight retained storage.
@@ -980,225 +964,26 @@ fn cross_sync_for_ir<'a>(
     )
 }
 
-/// Outcome of [`submit_resolved_ir_and_retain`]: how many partitions were re-recorded
-/// versus resubmitted from the retained cache.
+/// Outcome of partitioned IR submit: retention records vs resubmit hits.
+///
+/// When CB replay is disabled, both counters stay at zero — fresh encodes are
+/// neither retention "records" nor resubmits.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct PartitionSubmitResult {
-    /// Partitions that were re-recorded (and retained) this call.
+    /// Partitions that were re-recorded **and retained** this call.
     pub records: usize,
-    /// Partitions that were resubmitted from the cached command list without re-recording.
+    /// Partitions that were resubmitted from a retained command list without re-recording.
     pub resubmit_hits: usize,
 }
 
 impl PartitionSubmitResult {
-    /// True when every retainable partition was served from cache (zero re-records).
+    /// True when no retainable partition was re-recorded this call.
+    ///
+    /// With replay disabled this is always true (fresh encodes do not count as records),
+    /// so Scheme topology reregistration stays gated on IR dirtiness alone.
     pub fn all_from_cache(&self) -> bool {
         self.records == 0
     }
-}
-
-/// Submit `ir` to the backend with per-partition (slice-aware) retention.
-///
-/// The IR is split into the same partitions as [`submit_resolved_ir`] — one or
-/// two wave groups depending on barrier cost or swapchain presence.  Each
-/// partition is treated independently:
-///
-/// - **Tight upload partition** (contains `WriteBuffer`/`WriteTexture`/`CopyTexture`, or
-///   `CopyBufferToTexture` with `src_row_pitch == 0`): submitted via `submit_standalone`
-///   on every call — payload is staged via the belt or texture pool each frame.
-/// - **Pitched texture upload partition** (`CopyBufferToTexture` with `src_row_pitch > 0`):
-///   retainable after layout settles; partition fingerprint includes destination layout tag.
-///   `CopyRenderTarget` to a stable texture parcel (`ResourceId::Texture`) is retainable
-///   and does **not** force standalone.
-/// - **Render partition** (contains `RenderPass` nodes):
-///   submitted via `submit_graph_and_retain`; the backend retains the closed
-///   list and can resubmit it on cache hit.
-/// - **Pure-compute partition**: submitted via `submit_graph_and_retain`; the
-///   retained command list is reused whenever the partition fingerprint matches.
-///
-/// Upload partitions do not prevent retention of adjacent pure-compute
-/// partitions — this is the key improvement over the previous whole-IR bail-out.
-///
-/// Returns both the final timeline value and a [`PartitionSubmitResult`] so callers
-/// can decide whether to count this call as a record or a resubmit.
-pub(crate) fn submit_resolved_ir_and_retain(
-    cache: &mut Option<CompiledCacheEntry>,
-    context: &crate::Context,
-    session: &dyn crate::backend::ContextSubmitSession,
-    ir: &GraphIR,
-    submit_state: Option<&IrSubmitState>,
-) -> Result<(TimelineValue, PartitionSubmitResult)> {
-    let fp = binding_fingerprint(ir);
-
-    // Ensure schedule exists in the cache.
-    TaskGraph::get_or_build_schedule(cache, ir, fp);
-
-    // Compute partition wave ranges from the cached schedule (same split logic as
-    // `emit_partitioned_commands`).
-    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
-
-    // Compute per-partition fingerprints up front so we can check them against the
-    // cached keys without borrowing `cache` mutably yet.
-    let layout_tag = texture_copy_layout_tag(context);
-    let partition_fps: Vec<u64> = {
-        let schedule = &cache.as_ref().unwrap().schedule;
-        compute_partition_fps(ir, schedule, &wave_ranges, Some(&layout_tag))
-    };
-
-    // Ensure the partition retention key vecs are sized correctly.
-    // On a topology change (fp miss) the schedule was just rebuilt; reset keys.
-    {
-        let entry = cache.as_mut().unwrap();
-        ensure_partition_cache_vecs(entry, wave_ranges.len());
-    }
-
-    // Build partitioned commands (cached; only emits on topology change).
-    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
-
-    let ctx = context.backend_handle();
-    let separate = session.separate_graphics_queue();
-    let device_owner = session.device_queue_owner(ctx);
-    let mut last_tv = context.gpu_progress();
-    let mut result = PartitionSubmitResult::default();
-
-    let mut cross_scratch = CrossSubmitScratch::new();
-    let mut boundary = QueueBoundaryState::default();
-    let mut part_idx = 0usize;
-    while part_idx < wave_ranges.len() {
-        let merged_range = {
-            let schedule = &cache.as_ref().unwrap().schedule;
-            try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx, separate)
-        };
-        if let Some(merged_range) = merged_range {
-            let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
-            let merged_waves = {
-                let schedule = &cache.as_ref().unwrap().schedule;
-                schedule.waves[merged_range.clone()].to_vec()
-            };
-            let sync = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &merged_waves, separate)
-            };
-            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
-
-            if cached_key == Some(merged_fp) {
-                let _tz = crate::tracy_zone!("goldy.resubmit.merged");
-                if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, sync)? {
-                    last_tv = tv;
-                    result.resubmit_hits += 1;
-                    record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
-                    if let Some(state) = submit_state {
-                        state.apply_partition_reference_stamps(
-                            ctx,
-                            &context.device().inner,
-                            ir,
-                            &merged_waves,
-                            last_tv,
-                        );
-                    }
-                    part_idx += 2;
-                    continue;
-                }
-            }
-
-            let graph_cmds = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.merged_emit");
-                analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
-            };
-            let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-            ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-            last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, sync)?;
-            {
-                let entry = cache.as_mut().unwrap();
-                entry.partition_retention_keys[part_idx] = Some(merged_fp);
-                entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
-                record_merged_partition_last_tvs(entry, part_idx, last_tv);
-            }
-            result.records += 1;
-            if let Some(state) = submit_state {
-                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &merged_waves, last_tv);
-            }
-            part_idx += 2;
-            continue;
-        }
-
-        let part_fp = partition_fps[part_idx];
-        let range = wave_ranges[part_idx].clone();
-        let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
-        let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
-        let can_retain = partition_waves_can_retain(ir, &waves);
-        let has_render = partition_waves_have_render(ir, &waves);
-        // Plan hazards against the queue that will actually execute this partition
-        // (device graphics owner for DX12 render), not the recording context.
-        let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
-        let base_sync = {
-            let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-            cross_sync_for_ir(&mut cross_scratch, submit_state, ir, stamp_ctx, &waves, separate)
-        };
-        let sync = merge_queue_boundary_waits(
-            base_sync,
-            separate,
-            has_render,
-            ctx,
-            device_owner,
-            boundary.last_compute_tv,
-            boundary.last_render_tv,
-        );
-
-        if !can_retain {
-            // Non-retainable upload/copy partition: submit standalone every frame.
-            let cache_entry = cache.as_ref().unwrap();
-            let cmds = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
-                partition_standalone_commands(ir, cache_entry, &waves, part_idx, has_render, false, None)?
-            };
-            let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
-            last_tv = backend_submit_standalone(session, ctx, &cmds, sync.as_ref())?;
-            record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-            boundary.record(separate, has_render, last_tv);
-            if let Some(state) = submit_state {
-                state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
-            }
-            part_idx += 1;
-            continue;
-        }
-
-        // Try to resubmit from the retained cache if the fingerprint matches.
-        if cached_key == Some(part_fp) {
-            let _tz = crate::tracy_zone!("goldy.resubmit.partition");
-            if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, sync.as_ref())? {
-                last_tv = tv;
-                result.resubmit_hits += 1;
-                record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                boundary.record(separate, has_render, last_tv);
-                if let Some(state) = submit_state {
-                    state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
-                }
-                part_idx += 1;
-                continue;
-            }
-        }
-
-        // Re-record this partition.
-        let cache_entry = cache.as_ref().unwrap();
-        let graph_cmds = {
-            let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
-            partition_graph_commands_for_retain(ir, cache_entry, &waves, part_idx, has_render, None)
-        };
-        let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-        ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-        last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync.as_ref())?;
-        cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
-        record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-        result.records += 1;
-        boundary.record(separate, has_render, last_tv);
-        if let Some(state) = submit_state {
-            state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
-        }
-        part_idx += 1;
-    }
-
-    Ok((last_tv, result))
 }
 
 /// Resolved swapchain drawable for one present lease at submit time.
@@ -1209,7 +994,7 @@ pub(crate) struct ResolvedPresentSlot {
     pub uav_index: u32,
 }
 
-/// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir_and_retain_with_presents`].
+/// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir`].
 pub(crate) struct PresentSubmitOptions<'a> {
     pub present_slots: &'a [ResolvedPresentSlot],
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
@@ -1218,11 +1003,18 @@ pub(crate) struct PresentSubmitOptions<'a> {
     pub sidecar: SubmitSidecarState,
 }
 
-/// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
-/// bindings through `present_slots` and retains present-touching partitions per
-/// backing slot (immutable CB per swapchain image index).
-pub(crate) fn submit_resolved_ir_and_retain_with_presents(
+/// Submit `ir` with optional per-partition CB replay.
+///
+/// - **`replay: Some`** — slice-aware retain/resubmit (fingerprints, backend CB store,
+///   present-slot variants, retire-before-rerecord).
+/// - **`replay: None`** — fresh `submit_graph` / `submit_standalone` every partition;
+///   no retention fingerprints, no backend retain, no allocator retire waits.
+///
+/// Upload partitions always use `submit_standalone`. Cross-submit sync and parcel
+/// epoch stamps run regardless of replay.
+pub(crate) fn submit_resolved_ir_partitions(
     cache: &mut Option<CompiledCacheEntry>,
+    mut replay: Option<&mut super::cb_replay::CbReplayState>,
     context: &crate::Context,
     session: &dyn crate::backend::ContextSubmitSession,
     ir: &GraphIR,
@@ -1238,11 +1030,9 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
         mut sidecar,
     } = options;
 
-    let _tz = crate::tracy_zone!("goldy.submit_resolved_with_presents");
+    let _tz = crate::tracy_zone!("goldy.submit_resolved_partitions");
+    let replay_enabled = replay.is_some();
 
-    // When the caller guarantees the IR has not changed since the last submit
-    // (no structural or topology dirtiness), reuse the cached binding fingerprint
-    // directly — avoids an O(IR-nodes) hash walk every frame at steady state.
     let fp = if ir_clean {
         cache.as_ref().map(|e| e.fp).unwrap_or_else(|| binding_fingerprint(ir))
     } else {
@@ -1255,23 +1045,16 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
     let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
 
-    // When the IR is clean, skip the expensive per-partition hash walk.
-    // The COW dirty bit guarantees the IR hasn't changed, so every retained
-    // partition's fp is identical to the key stored on the last record.  Reuse
-    // cached keys directly; only compute individual fps for partitions that have
-    // no cached key yet (standalone upload partitions — whose fp is never actually
-    // read in the loop — and present partitions before their first N slot records).
-    let layout_tag = texture_copy_layout_tag(context);
-    let partition_fps: Vec<u64> = {
+    // Retention fingerprints are only needed when CB replay is enabled.
+    let partition_fps: Vec<u64> = if replay_enabled {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.partition_fps");
+        let layout_tag = texture_copy_layout_tag(context);
         if ir_clean {
-            let entry = cache.as_ref().unwrap();
-            let schedule = &entry.schedule;
+            let schedule = &cache.as_ref().unwrap().schedule;
+            let keys = replay.as_ref().map(|r| r.partition_keys.as_slice()).unwrap_or(&[]);
             (0..wave_ranges.len())
                 .map(|i| {
-                    entry.partition_retention_keys[i].unwrap_or_else(|| {
-                        // Partition never retained yet: standalone/upload (fp unused in
-                        // the loop) or fresh present slot (needs a real fp for slot_key).
+                    keys.get(i).and_then(|k| *k).unwrap_or_else(|| {
                         use std::collections::hash_map::DefaultHasher;
                         use std::hash::{Hash, Hasher};
                         let waves = &schedule.waves[wave_ranges[i].clone()];
@@ -1289,11 +1072,12 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let schedule = &cache.as_ref().unwrap().schedule;
             compute_partition_fps(ir, schedule, &wave_ranges, Some(&layout_tag))
         }
+    } else {
+        vec![0; wave_ranges.len()]
     };
 
-    {
-        let entry = cache.as_mut().unwrap();
-        ensure_partition_cache_vecs(entry, wave_ranges.len());
+    if let Some(r) = replay.as_mut() {
+        r.ensure_partition_vecs(wave_ranges.len());
     }
 
     {
@@ -1342,17 +1126,26 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &merged_waves, separate)
                 };
                 let merged = sidecar.merge_sync(sync);
-                let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
-                if cached_key == Some(merged_fp) {
-                    let _tz = crate::tracy_zone!("goldy.resubmit.merged");
-                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, merged.as_ref())? {
-                        last_tv = tv;
-                        result.resubmit_hits += 1;
-                        record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
-                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
-                        part_idx += 2;
-                        continue;
+                if let Some(r) = replay.as_mut() {
+                    let cached_key = r.partition_keys[part_idx];
+                    if cached_key == Some(merged_fp) {
+                        let _tz = crate::tracy_zone!("goldy.resubmit.merged");
+                        if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, merged.as_ref())? {
+                            last_tv = tv;
+                            result.resubmit_hits += 1;
+                            r.record_merged_last_tvs(part_idx, last_tv);
+                            apply_partition_epoch_stamps(
+                                resource_stamps,
+                                stamp_targets,
+                                ctx,
+                                ir,
+                                &merged_waves,
+                                last_tv,
+                            );
+                            part_idx += 2;
+                            continue;
+                        }
                     }
                 }
 
@@ -1361,15 +1154,16 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-                ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, merged.as_ref())?;
-                {
-                    let entry = cache.as_mut().unwrap();
-                    entry.partition_retention_keys[part_idx] = Some(merged_fp);
-                    entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
-                    record_merged_partition_last_tvs(entry, part_idx, last_tv);
+                if let Some(r) = replay.as_mut() {
+                    ensure_partition_retired_before_rerecord(context, r.partition_last_tv[part_idx])?;
+                    last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, merged.as_ref())?;
+                    r.partition_keys[part_idx] = Some(merged_fp);
+                    r.partition_keys[part_idx + 1] = Some(merged_fp);
+                    r.record_merged_last_tvs(part_idx, last_tv);
+                    result.records += 1;
+                } else {
+                    last_tv = backend_submit_graph(session, ctx, &graph_cmds, merged.as_ref())?;
                 }
-                result.records += 1;
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
                 part_idx += 2;
                 continue;
@@ -1381,8 +1175,6 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let can_retain = partition_waves_can_retain(ir, &waves);
             let has_render = partition_waves_have_render(ir, &waves);
             let has_present = analysis::partition_waves_have_present(ir, &waves);
-            // Plan hazards against the queue that will actually execute this partition
-            // (device graphics owner for DX12 render), not the recording context.
             let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
             let base_sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
@@ -1415,7 +1207,9 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
                 last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
-                record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
+                if let Some(r) = replay.as_mut() {
+                    r.record_last_tv(part_idx, last_tv);
+                }
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                 part_idx += 1;
@@ -1429,7 +1223,9 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     ));
                 }
 
-                if !session.retains_present_partitions() {
+                // Metal (and any backend that cannot retain present partitions): always fresh.
+                // Also always fresh when CB replay is disabled.
+                if !session.retains_present_partitions() || !replay_enabled {
                     let cache_entry = cache.as_ref().unwrap();
                     let cmds = {
                         let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
@@ -1445,7 +1241,9 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     };
                     let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
                     last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
-                    record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
+                    if let Some(r) = replay.as_mut() {
+                        r.record_last_tv(part_idx, last_tv);
+                    }
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                     part_idx += 1;
@@ -1465,7 +1263,8 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     h.finish()
                 };
 
-                let already_retained = cache.as_ref().unwrap().partition_slot_keys[part_idx]
+                let r = replay.as_mut().expect("present retain path requires replay");
+                let already_retained = r.partition_slot_keys[part_idx]
                     .as_ref()
                     .map(|s| s.contains(&slot_key))
                     .unwrap_or(false);
@@ -1475,7 +1274,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     if let Some(tv) = backend_try_resubmit_retained(session, ctx, slot_key, merged.as_ref())? {
                         last_tv = tv;
                         result.resubmit_hits += 1;
-                        record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
+                        r.record_last_tv(part_idx, last_tv);
                         boundary.record(separate, has_render, last_tv);
                         apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                         part_idx += 1;
@@ -1495,17 +1294,13 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
-                ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
+                ensure_partition_retired_before_rerecord(context, r.partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, merged.as_ref())?;
-                {
-                    let entry = cache.as_mut().unwrap();
-                    entry.partition_slot_keys[part_idx]
-                        .get_or_insert_with(std::collections::HashSet::new)
-                        .insert(slot_key);
-                    // Store part_fp so clean frames can reuse it without recomputing.
-                    entry.partition_retention_keys[part_idx] = Some(part_fp);
-                    record_partition_last_tv(entry, part_idx, last_tv);
-                }
+                r.partition_slot_keys[part_idx]
+                    .get_or_insert_with(std::collections::HashSet::new)
+                    .insert(slot_key);
+                r.partition_keys[part_idx] = Some(part_fp);
+                r.record_last_tv(part_idx, last_tv);
                 result.records += 1;
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
@@ -1513,30 +1308,40 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 continue;
             }
 
-            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
-            if cached_key == Some(part_fp) {
-                let _tz = crate::tracy_zone!("goldy.resubmit.partition");
-                if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, merged.as_ref())? {
-                    last_tv = tv;
-                    result.resubmit_hits += 1;
-                    record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                    boundary.record(separate, has_render, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                    part_idx += 1;
-                    continue;
+            // Retainable compute/render partition.
+            if let Some(r) = replay.as_mut() {
+                let cached_key = r.partition_keys[part_idx];
+                if cached_key == Some(part_fp) {
+                    let _tz = crate::tracy_zone!("goldy.resubmit.partition");
+                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, merged.as_ref())? {
+                        last_tv = tv;
+                        result.resubmit_hits += 1;
+                        r.record_last_tv(part_idx, last_tv);
+                        boundary.record(separate, has_render, last_tv);
+                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                        part_idx += 1;
+                        continue;
+                    }
                 }
-            }
 
-            let graph_cmds = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
-                partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
-            };
-            let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-            ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-            last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, merged.as_ref())?;
-            cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
-            record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-            result.records += 1;
+                let graph_cmds = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
+                    partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
+                };
+                let _tz = crate::tracy_zone!("goldy.submit_partition.record");
+                ensure_partition_retired_before_rerecord(context, r.partition_last_tv[part_idx])?;
+                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, merged.as_ref())?;
+                r.partition_keys[part_idx] = Some(part_fp);
+                r.record_last_tv(part_idx, last_tv);
+                result.records += 1;
+            } else {
+                let graph_cmds = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.fresh_cmds");
+                    partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
+                };
+                let _tz = crate::tracy_zone!("goldy.submit_partition.fresh");
+                last_tv = backend_submit_graph(session, ctx, &graph_cmds, merged.as_ref())?;
+            }
             boundary.record(separate, has_render, last_tv);
             apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
             part_idx += 1;
@@ -1546,11 +1351,42 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     Ok((last_tv, result))
 }
 
-/// Schedule cache + parcel stamp targets for a retained [`GraphIR`] submission.
-///
-/// Shared by [`crate::Scheme`]; [`TaskGraph`] carries an equivalent bundle inline.
+/// Compatibility wrapper: TaskGraph retain path without present slots / sidecars.
+pub(crate) fn submit_resolved_ir_and_retain(
+    cache: &mut Option<CompiledCacheEntry>,
+    replay: Option<&mut super::cb_replay::CbReplayState>,
+    context: &crate::Context,
+    session: &dyn crate::backend::ContextSubmitSession,
+    ir: &GraphIR,
+    submit_state: Option<&IrSubmitState>,
+) -> Result<(TimelineValue, PartitionSubmitResult)> {
+    let empty_stamps = ResourceKeyMap::default();
+    let empty_targets: &[Arc<crate::parcel::ParcelStamp>] = &[];
+    let (resource_stamps, stamp_targets) = match submit_state {
+        Some(s) => (s.resource_stamps(), s.stamp_targets.as_slice()),
+        None => (&empty_stamps, empty_targets),
+    };
+    submit_resolved_ir_partitions(
+        cache,
+        replay,
+        context,
+        session,
+        ir,
+        PresentSubmitOptions {
+            present_slots: &[],
+            resource_stamps,
+            stamp_targets,
+            ir_clean: false,
+            sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+        },
+    )
+}
+
+/// Schedule cache + parcel stamps + optional CB replay ledger for [`crate::Scheme`].
 pub(crate) struct IrSubmitState {
     schedule_cache: Option<CompiledCacheEntry>,
+    /// Present only while CB replay is enabled for this submitter.
+    replay: Option<super::cb_replay::CbReplayState>,
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
     resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     /// Reuse epochs merged into every partition's GPU queue-wait list at submit time.
@@ -1564,6 +1400,8 @@ impl IrSubmitState {
     pub fn new() -> Self {
         Self {
             schedule_cache: None,
+            // Start enabled; first submit with `cb_replay_disabled()` tears this down.
+            replay: Some(super::cb_replay::CbReplayState::new()),
             stamp_targets: Vec::new(),
             resource_stamps: ResourceKeyMap::default(),
             extra_submit_epochs: crate::timeline::ReferenceTable::default(),
@@ -1666,42 +1504,27 @@ impl IrSubmitState {
 
     /// Drop cached retention keys so the next submit re-records retained partitions.
     pub fn invalidate_retention(&mut self) {
-        if let Some(entry) = &mut self.schedule_cache {
-            for key in &mut entry.partition_retention_keys {
-                *key = None;
-            }
-            for keys in &mut entry.partition_slot_keys {
-                *keys = None;
-            }
-            // Topology/structural dirtiness forces re-record even when the GPU has not
-            // retired the prior partition timeline — do not gate re-record on stale TVs.
-            for tv in &mut entry.partition_last_tv {
-                *tv = None;
-            }
+        if let Some(replay) = &mut self.replay {
+            replay.invalidate();
         }
     }
 
-    /// Drop backend retained command lists referenced by the schedule cache.
-    ///
-    /// Call after waiting for in-flight submissions so re-execution cannot overlap
-    /// lease return or allocator reuse.
+    /// Ensure replay ledger matches the global disable flag; release backend CBs when turning off.
+    fn sync_replay_mode(&mut self, ctx: &crate::Context) {
+        if super::cb_replay::cb_replay_disabled() {
+            if let Some(mut replay) = self.replay.take() {
+                replay.release_backend(ctx);
+            }
+        } else if self.replay.is_none() {
+            self.replay = Some(super::cb_replay::CbReplayState::new());
+        }
+    }
+
+    /// Drop backend retained command lists referenced by the replay ledger.
     pub fn release_backend_retained_graphs(&mut self, ctx: &crate::Context) {
-        let Some(entry) = &self.schedule_cache else {
-            return;
-        };
-        let handle = ctx.backend_handle();
-        let session = ctx.submit_session();
-        let mut keys = std::collections::HashSet::new();
-        for key in entry.partition_retention_keys.iter().flatten() {
-            keys.insert(*key);
+        if let Some(replay) = &mut self.replay {
+            replay.release_backend(ctx);
         }
-        for slot_keys in entry.partition_slot_keys.iter().flatten() {
-            keys.extend(slot_keys.iter().copied());
-        }
-        for key in keys {
-            session.evict_retained(handle, key);
-        }
-        self.invalidate_retention();
     }
 
     pub fn resource_stamps(&self) -> &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>> {
@@ -1710,16 +1533,15 @@ impl IrSubmitState {
 
     /// Per-partition timeline values from the most recent successful submit.
     pub fn partition_last_tvs(&self) -> &[Option<TimelineValue>] {
-        self.schedule_cache
-            .as_ref()
-            .map(|e| e.partition_last_tv.as_slice())
-            .unwrap_or(&[])
+        self.replay.as_ref().map(|r| r.last_tvs()).unwrap_or(&[])
     }
 
-    /// Record and retain the command list for `ir` on `ctx`.
-    ///
-    /// When `present_slots` is empty, every partition uses the standard single-key
-    /// retention path. Present leases are resolved through `present_slots` at emit time.
+    /// True when a CB replay ledger is currently attached.
+    pub fn has_cb_replay(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// Submit `ir`, retaining command lists when CB replay is enabled.
     pub fn submit_pipelined_and_retain_with_presents(
         &mut self,
         ctx: &crate::Context,
@@ -1727,10 +1549,12 @@ impl IrSubmitState {
         present_slots: &[ResolvedPresentSlot],
         ir_clean: bool,
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
+        self.sync_replay_mode(ctx);
         let (queue_epochs, host_epochs, host_writes) = self.take_submit_sidecars();
         let sidecar = SubmitSidecarState::new(queue_epochs, host_epochs, host_writes);
-        submit_resolved_ir_and_retain_with_presents(
+        submit_resolved_ir_partitions(
             &mut self.schedule_cache,
+            self.replay.as_mut(),
             ctx,
             ctx.submit_session(),
             ir,
@@ -1745,7 +1569,9 @@ impl IrSubmitState {
     }
 }
 
-/// Cache entry holding both the wave schedule and the emitted compute command stream.
+/// Cache entry holding the wave schedule and the emitted compute command stream.
+///
+/// CB retention keys / TVs live in [`super::cb_replay::CbReplayState`], not here.
 pub(crate) struct CompiledCacheEntry {
     fp: u64,
     schedule: CompiledSchedule,
@@ -1769,21 +1595,6 @@ pub(crate) struct CompiledCacheEntry {
     /// Indexed in parallel with `partitioned_commands`.  `Some(cmds)` when partition
     /// `i` has render-pass nodes; `None` when partition `i` is pure-compute.
     partitioned_graph_commands: Vec<Option<Vec<GraphCommand>>>,
-    /// Per-partition retention keys for slice-aware retention.
-    ///
-    /// `Some(key)` when partition `i` was last successfully retained with that key;
-    /// `None` when the partition has not yet been retained (e.g. it contains upload
-    /// nodes and is submitted standalone rather than retained).
-    partition_retention_keys: Vec<Option<u64>>,
-    /// Timeline value from the most recent submission of each partition.
-    partition_last_tv: Vec<Option<TimelineValue>>,
-    /// Per-partition set of slot-combination keys for present-aware retention.
-    ///
-    /// Each entry is the set of `slot_key` values (derived from all present lease
-    /// slot assignments for that frame) that have been successfully retained.
-    /// A cache hit occurs when the current frame's `slot_key` is already in the set
-    /// and the backend can resubmit the retained command buffer.
-    partition_slot_keys: Vec<Option<std::collections::HashSet<u64>>>,
 }
 
 /// Per-page cache of a fully-lowered [`GraphIR`].
@@ -1802,6 +1613,7 @@ impl TaskGraph {
             transient_texture_specs: Vec::new(),
             next_transient_texture_id: 0,
             schedule_cache: None,
+            replay: Some(super::cb_replay::CbReplayState::new()),
             schedule_validated_node_count: 0,
             stamp_targets: Vec::new(),
             #[cfg(debug_assertions)]
@@ -1955,7 +1767,25 @@ impl TaskGraph {
         if self.has_transient_resources() {
             return submit_resolved_ir(&mut self.schedule_cache, context, session, &self.ir, None);
         }
-        submit_resolved_ir_and_retain(&mut self.schedule_cache, context, session, &self.ir, None).map(|(tv, _)| tv)
+        if super::cb_replay::cb_replay_disabled() {
+            if let Some(mut replay) = self.replay.take() {
+                replay.release_backend(context);
+            }
+            return submit_resolved_ir_and_retain(&mut self.schedule_cache, None, context, session, &self.ir, None)
+                .map(|(tv, _)| tv);
+        }
+        if self.replay.is_none() {
+            self.replay = Some(super::cb_replay::CbReplayState::new());
+        }
+        submit_resolved_ir_and_retain(
+            &mut self.schedule_cache,
+            self.replay.as_mut(),
+            context,
+            session,
+            &self.ir,
+            None,
+        )
+        .map(|(tv, _)| tv)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -2749,9 +2579,6 @@ impl TaskGraph {
                 upload_remap: Vec::new(),
                 partitioned_commands: None,
                 partitioned_upload_remap: Vec::new(),
-                partition_retention_keys: Vec::new(),
-                partition_last_tv: Vec::new(),
-                partition_slot_keys: Vec::new(),
                 partitioned_graph_commands: Vec::new(),
             });
         }
@@ -2811,9 +2638,6 @@ impl TaskGraph {
             upload_remap,
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
-            partition_retention_keys: Vec::new(),
-            partition_last_tv: Vec::new(),
-            partition_slot_keys: Vec::new(),
             partitioned_graph_commands: Vec::new(),
         });
         cache.as_ref().unwrap().commands.as_deref().unwrap()
@@ -2847,9 +2671,6 @@ impl TaskGraph {
                 upload_remap: Vec::new(),
                 partitioned_commands: None,
                 partitioned_upload_remap: Vec::new(),
-                partition_retention_keys: Vec::new(),
-                partition_last_tv: Vec::new(),
-                partition_slot_keys: Vec::new(),
                 partitioned_graph_commands: Vec::new(),
             });
         }
@@ -4999,6 +4820,61 @@ mod slice_retention_tests {
         do_submit(&mut state, &ctx, &ir, true);
         assert_eq!(resubmit_count(&device), 1, "second submit resubmits retained slice");
         assert_eq!(retained_count(&device), 1, "still one slice retained");
+    }
+
+    /// With `replay: None`, retainable partitions use fresh `submit_graph` — no backend
+    /// CB storage, no resubmit hits, no retention-record counters.
+    #[test]
+    fn replay_none_never_stores_or_resubmits_cbs() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "a",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+
+        let mut cache = None;
+        let empty_stamps = ResourceKeyMap::default();
+        for ir_clean in [false, true, true] {
+            let (tv, result) = submit_resolved_ir_partitions(
+                &mut cache,
+                None,
+                &ctx,
+                ctx.submit_session(),
+                &ir,
+                PresentSubmitOptions {
+                    present_slots: &[],
+                    resource_stamps: &empty_stamps,
+                    stamp_targets: &[],
+                    ir_clean,
+                    sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                },
+            )
+            .unwrap();
+            assert!(tv > 0);
+            assert_eq!(result.records, 0, "fresh path must not count retention records");
+            assert_eq!(result.resubmit_hits, 0, "fresh path must not count resubmits");
+        }
+        assert_eq!(
+            retained_count(&device),
+            0,
+            "no backend retained CBs when replay is None"
+        );
+        assert_eq!(resubmit_count(&device), 0);
     }
 
     // ------------------------------------------------------------------

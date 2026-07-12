@@ -576,8 +576,6 @@ pub struct Scheme {
     topology_dirty: Arc<AtomicBool>,
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
-    /// Retention key stored at record time. `None` when the backend cannot retain `ir`.
-    retention_key: Option<u64>,
     stats: ReplayStats,
     next_grant_id: u32,
     /// Process-unique identity for cross-scheme [`Submission`] / [`ReadGrant`] pairing.
@@ -600,7 +598,6 @@ impl Scheme {
             dirty: true,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
-            retention_key: None,
             stats: ReplayStats::default(),
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
@@ -1137,8 +1134,22 @@ impl Scheme {
         let submit_result = {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             let ir_clean = !structurally_dirty && !topo_dirty;
-            self.submit_state
-                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots, ir_clean)
+            let had_replay = self.submit_state.has_cb_replay();
+            let result = self.submit_state.submit_pipelined_and_retain_with_presents(
+                &self.ctx,
+                &self.ir,
+                &present_slots,
+                ir_clean,
+            );
+            // When CB replay was torn down (env / profiler), drop topology edges that only
+            // existed to invalidate baked retained barriers.
+            if had_replay && !self.submit_state.has_cb_replay() {
+                use crate::task_graph::cross_submit::clear_scheme_topology_registration;
+                clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
+                self.prev_topology_parcels.clear();
+                self.topology_dirty.store(false, Ordering::Release);
+            }
+            result
         };
 
         let (tv, part_result) = match submit_result {
@@ -1158,13 +1169,18 @@ impl Scheme {
         self.ctx.advance_high_water_timeline(tv);
 
         self.dirty = false;
-        self.retention_key = None;
 
         // Standalone upload partitions (WriteTexture, etc.) never increment
         // `PartitionSubmitResult.records`, but the first submit after IR mutation still
         // counts as a scheme record when `structurally_dirty`.
-        let recorded = !part_result.all_from_cache() || structurally_dirty;
-        let on_record_path = structurally_dirty || topo_dirty || recorded;
+        // With CB replay disabled, `records` stays 0 on clean submits (fresh encodes are
+        // not retention records), so topology reregistration stays gated on IR dirtiness.
+        let retention_recorded = part_result.records > 0;
+        let recorded = retention_recorded || structurally_dirty;
+        // Topology edges exist to invalidate baked barriers in retained CBs — only
+        // (re)register when CB replay is enabled and we actually recorded.
+        let on_record_path =
+            self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
 
         if on_record_path {
             use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};

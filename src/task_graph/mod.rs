@@ -84,6 +84,7 @@
 //! full design rationale.
 
 pub(crate) mod analysis;
+pub(crate) mod cb_replay;
 pub(crate) mod cross_submit;
 pub(crate) use cross_submit::CrossSubmitSync;
 mod graph;

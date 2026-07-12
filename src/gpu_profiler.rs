@@ -4,9 +4,10 @@
 //! - `chrome`, `chrome:`, `chrome=<path>`, or `chrome:<path>` additionally writes a
 //!   Perfetto-compatible Chrome trace JSON array (pretty-printed) to disk after each readback.
 //!
-//! While profiling is enabled, retained command-buffer resubmit is disabled (see
-//! `validation_env::retained_cb_reuse_disabled`): each submit re-records with a
-//! fresh timestamp query heap so resubmit never references a destroyed heap.
+//! While profiling is enabled, the CB-retention facility is disabled entirely (see
+//! `validation_env::retained_cb_reuse_disabled`): each submit re-records via ordinary
+//! `submit_graph` with a fresh timestamp query heap, and Goldy skips retention
+//! fingerprints / backend CB storage.
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};

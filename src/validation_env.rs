@@ -16,10 +16,12 @@
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
-//! - `GOLDY_DISABLE_CB_REUSE=1|true|yes` — re-record command buffers every submit instead of
-//!   resubmitting retained ones (scheme/task-graph and frame-orchestrator paths).
-//!   Also implied when [`crate::gpu_profiler::gpu_profile_enabled`] is true, because
-//!   timestamp queries reference a per-submit query heap that must not outlive resubmit.
+//! - `GOLDY_DISABLE_CB_REUSE=1|true|yes` — disable the CB-retention facility entirely:
+//!   no retention fingerprints, no backend CB store/resubmit, no retained-allocator
+//!   retire waits, no topology-dirty registration for replay. Each submit re-records
+//!   via ordinary `submit_graph` / `submit_standalone`. Also implied when
+//!   [`crate::gpu_profiler::gpu_profile_enabled`] is true, because timestamp queries
+//!   reference a per-submit query heap that must not outlive a retained list.
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct ParsedValidation {
@@ -113,11 +115,12 @@ pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
 }
 
-/// When true, skip retained command-buffer resubmit and re-record every submission instead.
+/// When true, disable the CB-retention facility entirely (not merely skip resubmit hits).
 ///
 /// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`), or enable [`crate::gpu_profiler::gpu_profile_enabled`].
-/// GPU timestamp profiling embeds per-submit query heaps in recorded command lists; resubmitting
-/// a retained list would reference a destroyed heap.
+/// Goldy tears down any live replay ledger and routes retainable partitions through ordinary
+/// `submit_graph` — no fingerprints, backend CB storage, allocator retire waits, or replay
+/// topology registration.
 #[must_use]
 pub(crate) fn retained_cb_reuse_disabled() -> bool {
     env_truthy("GOLDY_DISABLE_CB_REUSE") || crate::gpu_profiler::gpu_profile_enabled()
