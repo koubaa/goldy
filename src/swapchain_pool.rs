@@ -3,7 +3,9 @@
 //! A [`SwapchainPool`] wraps a [`Surface`] and supplies drawable backings for
 //! [`PresentLease`] handles acquired via [`SwapchainPool::lease`]. The scheme
 //! records the lease once; each [`crate::Scheme::submit`] acquires the next
-//! drawable and resolves it through the present partition retention path.
+//! drawable lazily when the present partition is about to run (after non-present
+//! partitions have already been submitted), then resolves it through the present
+//! partition path.
 
 use crate::backend::TextureHandle;
 use crate::context::Context;

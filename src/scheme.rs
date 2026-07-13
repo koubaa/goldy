@@ -1084,8 +1084,10 @@ impl Scheme {
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
     ///
-    /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    /// When present grants are recorded, swapchain drawables are acquired lazily —
+    /// after non-present partitions have been submitted — and stored on the returned
+    /// [`Submission`] for [`PresentGrant::consume`]. This lets GPU coarse/fine work
+    /// overlap the DXGI frame-latency wait (Exchange option/exercise split).
     ///
     /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
     /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
@@ -1100,47 +1102,67 @@ impl Scheme {
             }
         }
 
-        let mut present_slots = Vec::with_capacity(self.present_grants.len());
-        let mut surface_frames = Vec::with_capacity(self.present_grants.len());
-        {
-            let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
-            for grant in &self.present_grants {
-                let (slot_id, surface_frame, uav_index, handle) =
-                    SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
-                present_slots.push(ResolvedPresentSlot {
-                    lease_id: grant.lease_id,
-                    slot_id,
-                    handle,
-                    uav_index,
-                });
-                surface_frames.push(Mutex::new(Some(surface_frame)));
-            }
-        }
+        let submit_result = {
+            let mut present_slots = Vec::with_capacity(self.present_grants.len());
+            let mut surface_frames = Vec::with_capacity(self.present_grants.len());
+            // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
+            // across the mutable `submit_state` call below.
+            let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>)> = self
+                .present_grants
+                .iter()
+                .map(|g| (g.lease_id, Arc::clone(&g.pool)))
+                .collect();
+            let acquire_ctx = self.ctx.clone();
+            // Deferred acquire: run Surface::begin (DXGI wait) only when the first
+            // present-touching partition is about to submit — after coarse/fine have
+            // already been enqueued so GPU work can overlap the drawable wait.
+            let mut deferred_acquire = |slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
+                for (lease_id, pool) in &present_grant_pools {
+                    let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
+                        .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
+                    slots.push(ResolvedPresentSlot {
+                        lease_id: *lease_id,
+                        slot_id,
+                        handle,
+                        uav_index,
+                    });
+                    surface_frames.push(Mutex::new(Some(surface_frame)));
+                }
+                Ok(())
+            };
+            let deferred: Option<&mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> anyhow::Result<()>> =
+                if present_grant_pools.is_empty() {
+                    None
+                } else {
+                    Some(&mut deferred_acquire)
+                };
 
-        {
-            let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
-            use crate::task_graph::cross_submit::net_access_per_resource;
-            let net = net_access_per_resource(&self.ir);
-            let ctx = self.ctx.backend_handle();
-            for (key, access) in &net {
-                if access.writes {
-                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
-                        stamp.drain_pending_for_submit_gate(ctx);
+            {
+                let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
+                use crate::task_graph::cross_submit::net_access_per_resource;
+                let net = net_access_per_resource(&self.ir);
+                let ctx = self.ctx.backend_handle();
+                for (key, access) in &net {
+                    if access.writes {
+                        if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
+                            stamp.drain_pending_for_submit_gate(ctx);
+                        }
                     }
                 }
             }
-        }
 
-        let submit_result = {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             let ir_clean = !structurally_dirty && !topo_dirty;
             let had_replay = self.submit_state.has_cb_replay();
             let result = self.submit_state.submit_pipelined_and_retain_with_presents(
                 &self.ctx,
                 &self.ir,
-                &present_slots,
+                &mut present_slots,
+                deferred,
                 ir_clean,
             );
+            // Drop the acquire closure before touching surface_frames again.
+            drop(deferred_acquire);
             // When CB replay was torn down (env / profiler), drop topology edges that only
             // existed to invalidate baked retained barriers.
             if had_replay && !self.submit_state.has_cb_replay() {
@@ -1149,21 +1171,27 @@ impl Scheme {
                 self.prev_topology_parcels.clear();
                 self.topology_dirty.store(false, Ordering::Release);
             }
-            result
-        };
-
-        let (tv, part_result) = match submit_result {
-            Ok(ok) => ok,
-            Err(e) => {
-                for frame_mutex in surface_frames {
-                    if let Ok(mut slot) = frame_mutex.lock() {
-                        if let Some(frame) = slot.take() {
-                            frame.cancel();
+            match result {
+                Ok(ok) => Ok((ok, surface_frames)),
+                Err(e) => {
+                    // Cancel any drawables acquired before the failure (present partition
+                    // or mid-acquire). Early non-present partitions may already have run —
+                    // that throwaway GPU work is intentional under deferred exercise.
+                    for frame_mutex in surface_frames {
+                        if let Ok(mut slot) = frame_mutex.lock() {
+                            if let Some(frame) = slot.take() {
+                                frame.cancel();
+                            }
                         }
                     }
+                    Err(e)
                 }
-                return Err(self.ctx.classify(e));
             }
+        };
+
+        let ((tv, part_result), surface_frames) = match submit_result {
+            Ok(ok) => ok,
+            Err(e) => return Err(self.ctx.classify(e)),
         };
 
         self.ctx.advance_high_water_timeline(tv);

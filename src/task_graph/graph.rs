@@ -995,12 +995,57 @@ pub(crate) struct ResolvedPresentSlot {
 }
 
 /// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir`].
+///
+/// Present slots may be empty at entry. When a present-touching partition is about
+/// to run, [`Self::deferred_acquire`] (if set) fills `present_slots` — that is the
+/// DXGI / drawable wait. Non-present partitions are submitted first so GPU coarse/fine
+/// work can overlap the acquire wait (Exchange option/exercise split).
 pub(crate) struct PresentSubmitOptions<'a> {
-    pub present_slots: &'a [ResolvedPresentSlot],
+    pub present_slots: &'a mut Vec<ResolvedPresentSlot>,
+    /// Called once, on the first present partition, when `present_slots` is still empty.
+    pub deferred_acquire: Option<&'a mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
     pub sidecar: SubmitSidecarState,
+}
+
+/// Exercise deferred present acquire and populate the slot resolver (once).
+fn ensure_present_ready(
+    present_slots: &mut Vec<ResolvedPresentSlot>,
+    deferred_acquire: &mut Option<&mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
+    resolver: &mut super::SlotResolver,
+    present_resolver_ready: &mut bool,
+) -> Result<()> {
+    use super::ResolvedSwapchain;
+    if *present_resolver_ready {
+        return Ok(());
+    }
+    if present_slots.is_empty() {
+        if let Some(acquire) = deferred_acquire.as_mut() {
+            let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
+            acquire(present_slots)?;
+        }
+    }
+    if present_slots.is_empty() {
+        return Err(anyhow::anyhow!(
+            "present partition requires at least one resolved present slot"
+        ));
+    }
+    {
+        let _tz = crate::tracy_zone!("goldy.submit_resolved.present_resolver");
+        for slot in present_slots.iter() {
+            resolver.present_leases.insert(
+                slot.lease_id,
+                ResolvedSwapchain {
+                    handle: slot.handle,
+                    uav_index: slot.uav_index,
+                },
+            );
+        }
+    }
+    *present_resolver_ready = true;
+    Ok(())
 }
 
 /// Submit `ir` with optional per-partition CB replay.
@@ -1020,10 +1065,11 @@ pub(crate) fn submit_resolved_ir_partitions(
     ir: &GraphIR,
     options: PresentSubmitOptions<'_>,
 ) -> Result<(TimelineValue, PartitionSubmitResult)> {
-    use super::{ResolvedSwapchain, SlotResolver};
+    use super::SlotResolver;
 
     let PresentSubmitOptions {
         present_slots,
+        mut deferred_acquire,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1086,18 +1132,7 @@ pub(crate) fn submit_resolved_ir_partitions(
     }
 
     let mut resolver = SlotResolver::new();
-    {
-        let _tz = crate::tracy_zone!("goldy.submit_resolved.present_resolver");
-        for slot in present_slots {
-            resolver.present_leases.insert(
-                slot.lease_id,
-                ResolvedSwapchain {
-                    handle: slot.handle,
-                    uav_index: slot.uav_index,
-                },
-            );
-        }
-    }
+    let mut present_resolver_ready = false;
 
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
@@ -1192,6 +1227,14 @@ pub(crate) fn submit_resolved_ir_partitions(
             let merged = sidecar.merge_sync(sync.as_ref());
 
             if !can_retain {
+                if has_present {
+                    ensure_present_ready(
+                        present_slots,
+                        &mut deferred_acquire,
+                        &mut resolver,
+                        &mut present_resolver_ready,
+                    )?;
+                }
                 let cache_entry = cache.as_ref().unwrap();
                 let cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
@@ -1217,11 +1260,12 @@ pub(crate) fn submit_resolved_ir_partitions(
             }
 
             if has_present {
-                if present_slots.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "present partition requires at least one resolved present slot"
-                    ));
-                }
+                ensure_present_ready(
+                    present_slots,
+                    &mut deferred_acquire,
+                    &mut resolver,
+                    &mut present_resolver_ready,
+                )?;
 
                 // Metal (and any backend that cannot retain present partitions): always fresh.
                 // Also always fresh when CB replay is disabled.
@@ -1256,7 +1300,7 @@ pub(crate) fn submit_resolved_ir_partitions(
                     use std::hash::{Hash, Hasher};
                     let mut h = DefaultHasher::new();
                     part_fp.hash(&mut h);
-                    for slot in present_slots {
+                    for slot in present_slots.iter() {
                         slot.lease_id.hash(&mut h);
                         slot.slot_id.hash(&mut h);
                     }
@@ -1366,6 +1410,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         Some(s) => (s.resource_stamps(), s.stamp_targets.as_slice()),
         None => (&empty_stamps, empty_targets),
     };
+    let mut present_slots = Vec::new();
     submit_resolved_ir_partitions(
         cache,
         replay,
@@ -1373,7 +1418,8 @@ pub(crate) fn submit_resolved_ir_and_retain(
         session,
         ir,
         PresentSubmitOptions {
-            present_slots: &[],
+            present_slots: &mut present_slots,
+            deferred_acquire: None,
             resource_stamps,
             stamp_targets,
             ir_clean: false,
@@ -1542,11 +1588,16 @@ impl IrSubmitState {
     }
 
     /// Submit `ir`, retaining command lists when CB replay is enabled.
-    pub fn submit_pipelined_and_retain_with_presents(
-        &mut self,
+    ///
+    /// `deferred_acquire` runs on the first present-touching partition (after
+    /// non-present partitions have already been submitted), filling `present_slots`.
+    /// Pass `None` and a pre-filled `present_slots` for tests / eager acquire.
+    pub fn submit_pipelined_and_retain_with_presents<'a>(
+        &'a mut self,
         ctx: &crate::Context,
         ir: &GraphIR,
-        present_slots: &[ResolvedPresentSlot],
+        present_slots: &'a mut Vec<ResolvedPresentSlot>,
+        deferred_acquire: Option<&'a mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
         ir_clean: bool,
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
         self.sync_replay_mode(ctx);
@@ -1560,6 +1611,7 @@ impl IrSubmitState {
             ir,
             PresentSubmitOptions {
                 present_slots,
+                deferred_acquire,
                 resource_stamps: &self.resource_stamps,
                 stamp_targets: &self.stamp_targets,
                 ir_clean,
@@ -4776,8 +4828,9 @@ mod slice_retention_tests {
     }
 
     fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR, ir_clean: bool) {
+        let mut present_slots = Vec::new();
         state
-            .submit_pipelined_and_retain_with_presents(ctx, ir, &[], ir_clean)
+            .submit_pipelined_and_retain_with_presents(ctx, ir, &mut present_slots, None, ir_clean)
             .unwrap();
     }
 
@@ -4849,6 +4902,7 @@ mod slice_retention_tests {
 
         let mut cache = None;
         let empty_stamps = ResourceKeyMap::default();
+        let mut present_slots = Vec::new();
         for ir_clean in [false, true, true] {
             let (tv, result) = submit_resolved_ir_partitions(
                 &mut cache,
@@ -4857,7 +4911,8 @@ mod slice_retention_tests {
                 ctx.submit_session(),
                 &ir,
                 PresentSubmitOptions {
-                    present_slots: &[],
+                    present_slots: &mut present_slots,
+                    deferred_acquire: None,
                     resource_stamps: &empty_stamps,
                     stamp_targets: &[],
                     ir_clean,
