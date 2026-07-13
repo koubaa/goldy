@@ -5104,6 +5104,9 @@ mod slice_retention_tests {
     }
 
     fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR, ir_clean: bool) {
+        // Retention assertions must not flip when the developer shell exports
+        // GOLDY_DISABLE_CB_REUSE=1.
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let mut present_slots = Vec::new();
         let empty_uploads = std::collections::HashMap::new();
         state

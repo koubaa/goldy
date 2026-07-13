@@ -248,4 +248,33 @@ pub mod test_support {
             &self.device
         }
     }
+
+    /// Thread-local pin for [`crate::validation_env::retained_cb_reuse_disabled`].
+    ///
+    /// Retention-asserting tests must call [`Self::force_enabled`] so a developer
+    /// shell with `GOLDY_DISABLE_CB_REUSE=1` cannot flip the suite. Disable-path
+    /// tests call [`Self::force_disabled`]. Cleared on drop.
+    pub struct CbReuseOverride {
+        _private: (),
+    }
+
+    impl CbReuseOverride {
+        /// Force CB retention on for this thread (ignores env / profiler).
+        pub fn force_enabled() -> Self {
+            crate::validation_env::set_cb_reuse_override(false);
+            Self { _private: () }
+        }
+
+        /// Force CB retention off for this thread (ignores env / profiler).
+        pub fn force_disabled() -> Self {
+            crate::validation_env::set_cb_reuse_override(true);
+            Self { _private: () }
+        }
+    }
+
+    impl Drop for CbReuseOverride {
+        fn drop(&mut self) {
+            crate::validation_env::clear_cb_reuse_override();
+        }
+    }
 }

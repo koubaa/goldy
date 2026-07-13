@@ -2822,7 +2822,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         recording_scheme_with_parcel(device, pool, ctx).0
     }
 
-    fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> Scheme {
+    fn clean_scheme(
+        device: &Arc<Device>,
+        pool: &mut RetainedPool,
+    ) -> (Scheme, crate::test_support::CbReuseOverride) {
+        let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
@@ -2840,10 +2844,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.replay_stats().records, 1);
         #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
-        scheme
+        (scheme, cb)
     }
 
-    fn leased_texture_scheme(device: &Arc<Device>) -> (Scheme, Lease<LeaseTexture>) {
+    fn leased_texture_scheme(device: &Arc<Device>) -> (Scheme, Lease<LeaseTexture>, crate::test_support::CbReuseOverride) {
+        let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_texture_shader(device);
         let pipeline = mock_pipeline(device, &shader);
@@ -2864,14 +2869,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&lease, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        (scheme, lease)
+        (scheme, lease, cb)
     }
 
     #[test]
     fn clean_submits_resubmit_without_rerecord() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = clean_scheme(&device, &mut pool);
+        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2892,7 +2897,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = clean_scheme(&device, &mut pool);
+        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2913,7 +2918,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = clean_scheme(&device, &mut pool);
+        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -3036,7 +3041,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn lease_texture_records_once_resubmits_clean() {
         let device = mock_device();
-        let (mut scheme, _lease) = leased_texture_scheme(&device);
+        let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
 
         scheme.submit().expect("first submit records");
         scheme.submit().expect("second submit resubmits");
@@ -3054,7 +3059,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn lease_backing_stamped_per_submit() {
         let device = mock_device();
-        let (mut scheme, _lease) = leased_texture_scheme(&device);
+        let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
         let frame1 = scheme.submit().unwrap();
@@ -3146,6 +3151,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn scheme_with_grant_retains() {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -4031,6 +4037,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         // swapchain slot is seen and resubmit from cache on subsequent encounters.
         // Because the mock backend cycles through slots, the N-th submit may
         // record a new slot; we only assert that at least one resubmit occurs.
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
@@ -4586,6 +4593,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn upload_buffer_warms_slot_variants_per_physical_parcel() {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(Arc::clone(&device));
@@ -4675,14 +4683,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn upload_buffer_disable_cb_reuse_skips_replay_ledger() {
-        struct ClearCbReuseOverride;
-        impl Drop for ClearCbReuseOverride {
-            fn drop(&mut self) {
-                crate::validation_env::clear_test_cb_reuse_override();
-            }
-        }
-        crate::validation_env::set_test_cb_reuse_override(true);
-        let _clear = ClearCbReuseOverride;
+        let _cb = crate::test_support::CbReuseOverride::force_disabled();
 
         let device = mock_device();
         let ctx = device.create_context().unwrap();

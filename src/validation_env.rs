@@ -115,27 +115,27 @@ pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
 }
 
-#[cfg(test)]
 use std::cell::Cell;
 
 // Thread-local override for `retained_cb_reuse_disabled`. When `Some`, takes precedence
 // over the environment / profiler on this thread only (safe under parallel cargo tests).
-#[cfg(test)]
+// Always compiled (not `cfg(test)`-only) so integration tests under `tests/` can use it
+// via [`crate::test_support::CbReuseOverride`].
 thread_local! {
     static TEST_CB_REUSE_DISABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-/// Install a thread-local test override for CB reuse (see [`retained_cb_reuse_disabled`]).
+/// Install a thread-local override for CB reuse (see [`retained_cb_reuse_disabled`]).
 ///
-/// Must be paired with [`clear_test_cb_reuse_override`] on the same thread.
-#[cfg(test)]
-pub(crate) fn set_test_cb_reuse_override(disabled: bool) {
+/// Prefer [`crate::test_support::CbReuseOverride`] — it clears on drop.
+#[doc(hidden)]
+pub fn set_cb_reuse_override(disabled: bool) {
     TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.set(Some(disabled)));
 }
 
-/// Clear the override installed by [`set_test_cb_reuse_override`].
-#[cfg(test)]
-pub(crate) fn clear_test_cb_reuse_override() {
+/// Clear the override installed by [`set_cb_reuse_override`].
+#[doc(hidden)]
+pub fn clear_cb_reuse_override() {
     TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.set(None));
 }
 
@@ -145,9 +145,12 @@ pub(crate) fn clear_test_cb_reuse_override() {
 /// Goldy tears down any live replay ledger and routes retainable partitions through ordinary
 /// `submit_graph` — no fingerprints, backend CB storage, allocator retire waits, or replay
 /// topology registration.
+///
+/// Tests that assert retention behavior must pin the mode with
+/// [`crate::test_support::CbReuseOverride`] so a developer shell exporting
+/// `GOLDY_DISABLE_CB_REUSE=1` cannot flip the suite.
 #[must_use]
 pub(crate) fn retained_cb_reuse_disabled() -> bool {
-    #[cfg(test)]
     if let Some(disabled) = TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.get()) {
         return disabled;
     }
