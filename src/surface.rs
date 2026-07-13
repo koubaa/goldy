@@ -552,6 +552,21 @@ impl Frame {
         self.early_tv
     }
 
+    /// Timeline already associated with this frame's GPU submit, if any.
+    pub(crate) fn submit_timeline(&self) -> Option<TimelineValue> {
+        self.submit_tv
+    }
+
+    /// Record that GPU work for this frame was already submitted at `tv`.
+    ///
+    /// Used by scheme present when the present partition submits outside
+    /// [`Self::submit_frame`]. First stamp wins; does not call the backend.
+    pub(crate) fn note_submit_timeline(&mut self, tv: TimelineValue) {
+        if self.submit_tv.is_none() {
+            self.submit_tv = Some(tv);
+        }
+    }
+
     /// Submit recorded GPU work for this frame. Does not present.
     ///
     /// Safe to call once per frame before [`Self::present`].

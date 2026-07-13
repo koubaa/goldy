@@ -236,6 +236,14 @@ impl Submission {
         ctx.wait_until(self.data.timeline)?;
         Ok(())
     }
+
+    /// Submit timeline stamped on the acquired present frame, if still held.
+    #[cfg(test)]
+    pub(crate) fn present_frame_submit_timeline(&self, idx: usize) -> Option<TimelineValue> {
+        let frame_mutex = self.data.present_frames.get(idx)?;
+        let slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().and_then(|f| f.submit_timeline())
+    }
 }
 
 impl From<Submission> for TimelineValue {
@@ -1235,6 +1243,17 @@ impl Scheme {
             Ok(ok) => ok,
             Err(e) => return Err(self.ctx.classify(e)),
         };
+
+        // Present partition is last; stamp acquired frames with that epoch so
+        // Present's scratch→backbuffer copy Wait()s on it instead of inferring
+        // timeline_next-1 from an empty submit_frame().
+        for frame_mutex in &surface_frames {
+            if let Ok(mut slot) = frame_mutex.lock() {
+                if let Some(frame) = slot.as_mut() {
+                    frame.note_submit_timeline(tv);
+                }
+            }
+        }
 
         self.ctx.advance_high_water_timeline(tv);
 
@@ -3568,6 +3587,30 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         present.consume(&submission).expect("present");
         let after = mock_present_count(&device);
         assert_eq!(after, before + 1, "present must fire one swapchain present");
+    }
+
+    #[test]
+    fn grant_present_stamps_frame_with_present_partition_timeline() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = scheme.grant_present(&lease);
+
+        let submission = scheme.submit().expect("submit");
+        // No read grants → finish_submit_frame keeps the present-partition tv as
+        // the submission timeline; the acquired frame must carry the same stamp
+        // so Present waits on that epoch rather than timeline_next-1.
+        let stamped = submission
+            .present_frame_submit_timeline(present.grant_id() as usize)
+            .expect("present frame must be stamped before consume");
+        assert_eq!(
+            stamped,
+            submission.timeline_value(),
+            "frame submit_tv must equal present-partition timeline"
+        );
+        present.consume(&submission).expect("present");
     }
 
     #[test]
