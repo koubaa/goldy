@@ -811,6 +811,25 @@ impl Device {
         self.inner.backend.lock().unwrap().is_device_lost(self.inner.handle)
     }
 
+    /// Live VRAM bytes tracked by the device's allocation policy (allocations − frees).
+    ///
+    /// Requires an installed [`BudgetPolicy`](crate::BudgetPolicy) (or equivalent). Returns 0
+    /// when no tracking policy is installed.
+    pub fn tracked_vram_bytes(&self) -> u64 {
+        self.inner.vram_allocator.allocated_bytes()
+    }
+
+    /// OS/driver video-memory usage for this device, when the backend can query it.
+    ///
+    /// On DX12 this is `IDXGIAdapter3::QueryVideoMemoryInfo` (local + non-local segments).
+    pub fn video_memory_info(&self) -> Option<crate::backend::VideoMemoryInfo> {
+        self.inner
+            .backend
+            .lock()
+            .unwrap()
+            .query_video_memory(self.inner.handle)
+    }
+
     /// Number of bindless descriptor slots still available for allocation in
     /// the given `category`.
     ///

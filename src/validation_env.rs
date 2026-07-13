@@ -115,6 +115,7 @@ pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
 }
 
+#[cfg(test)]
 use std::cell::Cell;
 
 // Thread-local override for `retained_cb_reuse_disabled`. When `Some`, takes precedence
