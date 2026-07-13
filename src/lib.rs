@@ -71,7 +71,7 @@ pub use scheme::{
     Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture, Loan,
     PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission,
 };
-pub use swapchain_pool::{PresentLease, SwapchainPool};
+pub use swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
 pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};

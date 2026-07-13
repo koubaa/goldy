@@ -16,7 +16,7 @@ use crate::error::GoldyError;
 use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
-use crate::swapchain_pool::{PresentLease, SwapchainPool};
+use crate::swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
 use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
@@ -1084,15 +1084,29 @@ impl Scheme {
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
     ///
-    /// When present grants are recorded, swapchain drawables are acquired lazily —
-    /// after non-present partitions have been submitted — and stored on the returned
-    /// [`Submission`] for [`PresentGrant::consume`]. This lets GPU coarse/fine work
-    /// overlap the DXGI frame-latency wait (Exchange option/exercise split).
+    /// When present grants are recorded and no early acquire was supplied, swapchain
+    /// drawables are acquired lazily — after non-present partitions have been submitted
+    /// — and stored on the returned [`Submission`] for [`PresentGrant::consume`]. This
+    /// lets GPU coarse/fine work overlap the DXGI frame-latency wait (Exchange
+    /// option/exercise split). Prefer [`Self::submit_with_acquired_presents`] to match
+    /// classic task-graph timing (acquire at frame start).
     ///
     /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
     /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
     /// CPU wait here.
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
+        self.submit_with_acquired_presents(Vec::new())
+    }
+
+    /// Like [`Self::submit`], but uses pre-acquired swapchain drawables.
+    ///
+    /// `acquired` must be empty (deferred acquire) or contain one entry per present
+    /// grant, in grant order, with matching lease ids. Consumed claims are moved onto
+    /// the [`Submission`]; leftovers are cancelled on drop.
+    pub fn submit_with_acquired_presents(
+        &mut self,
+        mut acquired: Vec<AcquiredPresent>,
+    ) -> Result<Submission, GoldyError> {
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         let structurally_dirty = self.dirty;
         {
@@ -1113,6 +1127,34 @@ impl Scheme {
                 .map(|g| (g.lease_id, Arc::clone(&g.pool)))
                 .collect();
             let acquire_ctx = self.ctx.clone();
+
+            if !acquired.is_empty() {
+                if acquired.len() != present_grant_pools.len() {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "submit_with_acquired_presents: got {} acquired presents, scheme has {} present grants",
+                        acquired.len(),
+                        present_grant_pools.len()
+                    )));
+                }
+                for ((lease_id, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
+                    if claim.lease_id() != *lease_id {
+                        return Err(GoldyError::Backend(anyhow::anyhow!(
+                            "submit_with_acquired_presents: lease id mismatch (grant {}, claim {})",
+                            lease_id,
+                            claim.lease_id()
+                        )));
+                    }
+                    let (lease_id, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
+                    present_slots.push(ResolvedPresentSlot {
+                        lease_id,
+                        slot_id,
+                        handle,
+                        uav_index,
+                    });
+                    surface_frames.push(Mutex::new(Some(surface_frame)));
+                }
+            }
+
             // Deferred acquire: run Surface::begin (DXGI wait) only when the first
             // present-touching partition is about to submit — after coarse/fine have
             // already been enqueued so GPU work can overlap the drawable wait.
@@ -1131,7 +1173,7 @@ impl Scheme {
                 Ok(())
             };
             let deferred: Option<&mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> anyhow::Result<()>> =
-                if present_grant_pools.is_empty() {
+                if present_grant_pools.is_empty() || !present_slots.is_empty() {
                     None
                 } else {
                     Some(&mut deferred_acquire)

@@ -1,11 +1,10 @@
 //! Swapchain pool — N-backed present leases for retained schemes.
 //!
 //! A [`SwapchainPool`] wraps a [`Surface`] and supplies drawable backings for
-//! [`PresentLease`] handles acquired via [`SwapchainPool::lease`]. The scheme
-//! records the lease once; each [`crate::Scheme::submit`] acquires the next
-//! drawable lazily when the present partition is about to run (after non-present
-//! partitions have already been submitted), then resolves it through the present
-//! partition path.
+//! [`PresentLease`] handles acquired via [`SwapchainPool::lease`]. Callers may
+//! acquire a concrete drawable early via [`SwapchainPool::acquire_present`] (classic
+//! frame timing) or let [`crate::Scheme::submit`] defer acquire until the present
+//! partition is about to run.
 
 use crate::backend::TextureHandle;
 use crate::context::Context;
@@ -36,6 +35,45 @@ pub struct SwapchainPool {
 pub struct PresentLease {
     pub(crate) id: u32,
     pub(crate) pool: Arc<SwapchainPoolInner>,
+}
+
+/// A swapchain drawable acquired before scheme submit (classic-like early acquire).
+///
+/// Dropping an unconsumed claim cancels the underlying [`Surface`] frame so the
+/// image is not presented.
+pub struct AcquiredPresent {
+    lease_id: u32,
+    slot_id: u32,
+    handle: TextureHandle,
+    uav_index: u32,
+    frame: Option<SurfaceFrame>,
+}
+
+impl AcquiredPresent {
+    /// Lease id this drawable fulfills ([`PresentLease`] identity).
+    pub fn lease_id(&self) -> u32 {
+        self.lease_id
+    }
+
+    pub(crate) fn into_parts(mut self) -> (u32, u32, TextureHandle, u32, SurfaceFrame) {
+        let frame = self
+            .frame
+            .take()
+            .expect("AcquiredPresent frame already taken");
+        let lease_id = self.lease_id;
+        let slot_id = self.slot_id;
+        let handle = self.handle;
+        let uav_index = self.uav_index;
+        (lease_id, slot_id, handle, uav_index, frame)
+    }
+}
+
+impl Drop for AcquiredPresent {
+    fn drop(&mut self) {
+        if let Some(frame) = self.frame.take() {
+            frame.cancel();
+        }
+    }
 }
 
 impl SwapchainPool {
@@ -70,6 +108,25 @@ impl SwapchainPool {
             id: 0,
             pool: Arc::clone(&self.inner),
         }
+    }
+
+    /// Acquire the next drawable for `lease` now (blocks on DXGI / return fence).
+    ///
+    /// Pass the result to [`crate::Scheme::submit_with_acquired_presents`] so submit
+    /// does not wait again at the present partition. Prefer this when matching
+    /// classic task-graph timing (acquire at the start of the frame).
+    pub fn acquire_present(&self, lease: &PresentLease) -> Result<AcquiredPresent> {
+        if !Arc::ptr_eq(&lease.pool, &self.inner) {
+            anyhow::bail!("PresentLease does not belong to this SwapchainPool");
+        }
+        let (slot_id, frame, uav_index, handle) = Self::acquire_slot(&lease.pool)?;
+        Ok(AcquiredPresent {
+            lease_id: lease.id,
+            slot_id,
+            handle,
+            uav_index,
+            frame: Some(frame),
+        })
     }
 
     /// Current drawable extent.
