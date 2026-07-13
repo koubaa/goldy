@@ -883,28 +883,37 @@ pub(super) fn query_texture_copy_footprint(
         Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
     };
     let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+    let mut num_rows: u32 = 0;
+    let mut row_size: u64 = 0;
     let mut total_bytes: u64 = 0;
     unsafe {
+        // Pass every out-parameter. Omitting the middle pointers has been observed to
+        // leave `pTotalBytes` under-filled on some windows-rs / WARP combinations while
+        // still writing a valid RowPitch into `pLayouts` (e.g. staging_bytes=4 with
+        // row_pitch=256 for a 1×1 RGBA texture).
         logical_device.device.GetCopyableFootprints(
             &res_desc,
             0,
             1,
             0,
             Some(&mut footprint),
-            None,
-            None,
+            Some(&mut num_rows),
+            Some(&mut row_size),
             Some(&mut total_bytes),
         );
     }
     let logical_bytes = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
+    let row_pitch = footprint.Footprint.RowPitch;
+    let footprint_offset = footprint.Offset;
+    let min_from_pitch = footprint_offset.saturating_add((row_pitch as u64).saturating_mul(height as u64));
     Ok(crate::backend::TextureCopyFootprint {
         width,
         height,
         format,
         logical_bytes,
-        staging_bytes: total_bytes,
-        row_pitch: footprint.Footprint.RowPitch,
-        footprint_offset: footprint.Offset,
+        staging_bytes: total_bytes.max(min_from_pitch).max(logical_bytes),
+        row_pitch,
+        footprint_offset,
     })
 }
 

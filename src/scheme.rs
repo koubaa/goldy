@@ -542,6 +542,118 @@ pub struct LeaseBuffer;
 /// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
 pub struct LeaseRenderTarget;
 
+/// Marker type for upload buffers declared via [`Scheme::declare_upload_buffer`].
+pub struct UploadBufferMarker;
+
+/// Stable index of a scheme-held upload-buffer declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UploadBufferId(pub(crate) u32);
+
+/// Logical CPU→GPU upload source owned by a [`Scheme`].
+///
+/// Record copy topology once with [`Scheme::copy_upload_buffer`] /
+/// [`Scheme::copy_upload_buffer_to_texture`]. Each frame, call
+/// [`Scheme::stage_upload_buffer`] to select a settled (or freshly allocated)
+/// `CPU_WRITABLE` parcel, write bytes immediately, and bind that parcel for the
+/// next [`Scheme::submit`]. Pool depth grows with GPU backlog — never waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UploadBuffer {
+    pub(crate) id: UploadBufferId,
+    _marker: PhantomData<UploadBufferMarker>,
+}
+
+impl UploadBuffer {
+    /// Stable declaration index within the owning [`Scheme`].
+    pub fn id(&self) -> u32 {
+        self.id.0
+    }
+}
+
+/// Epoch-gated pool of physical staging parcels for one logical [`UploadBuffer`].
+struct UploadBufferPool {
+    size: u64,
+    /// All physical parcels kept alive for retained CB variants.
+    parcels: Vec<Parcel>,
+    /// Parcel selected for the next submit (`None` until [`Scheme::stage_upload_buffer`]).
+    pending: Option<usize>,
+}
+
+impl UploadBufferPool {
+    fn new(size: u64) -> Self {
+        Self {
+            size,
+            parcels: Vec::new(),
+            pending: None,
+        }
+    }
+
+    fn select_or_alloc(&mut self, ctx: &Context) -> Result<usize, GoldyError> {
+        if let Some(idx) = self.pending {
+            return Ok(idx);
+        }
+        if let Some(idx) = self.parcels.iter().position(|p| p.is_settled(ctx)) {
+            self.pending = Some(idx);
+            return Ok(idx);
+        }
+        let parcel = ctx
+            .with_transient_pool(|pool| {
+                pool.acquire_buffer(
+                    ctx,
+                    self.size,
+                    crate::types::BufferKind::Scattered,
+                    BufferFlags::CPU_WRITABLE,
+                )
+            })
+            .map_err(|e| ctx.classify(e))?;
+        self.parcels.push(parcel);
+        let idx = self.parcels.len() - 1;
+        self.pending = Some(idx);
+        Ok(idx)
+    }
+
+    fn stage(&mut self, ctx: &Context, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
+        if offset.saturating_add(data.len() as u64) > self.size {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "stage_upload_buffer: write [{offset}..{}] exceeds declaration size {}",
+                offset + data.len() as u64,
+                self.size
+            )));
+        }
+        let idx = self.select_or_alloc(ctx)?;
+        self.parcels[idx]
+            .write_bytes(offset, data)
+            .map_err(|e| ctx.classify(e))?;
+        Ok(())
+    }
+
+    fn resolve_pending(&self) -> Option<crate::task_graph::ResolvedUploadBuffer> {
+        let idx = self.pending?;
+        let parcel = &self.parcels[idx];
+        let parent = parcel
+            .buffer_handle()
+            .expect("upload buffer parcels are whole buffers");
+        Some(crate::task_graph::ResolvedUploadBuffer {
+            parent,
+            offset: 0,
+            len: parcel.byte_size(),
+        })
+    }
+
+    fn stamp_pending(&mut self, ctx: crate::backend::ContextHandle, tv: TimelineValue) {
+        if let Some(idx) = self.pending.take() {
+            self.parcels[idx].mark_referenced(ctx, tv);
+        }
+    }
+
+    fn return_all(self, ctx: &Context) {
+        for mut parcel in self.parcels {
+            let ready_after = parcel.last_referenced();
+            parcel.release_bookkeeping();
+            ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+        }
+    }
+}
+
 /// One-submission tenancy of pool property held by a [`Scheme`].
 ///
 /// Leases have no cross-scheme identity; the scheme owns the N=1 backing parcel
@@ -578,6 +690,8 @@ pub struct Scheme {
     leases: Vec<Parcel>,
     /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
     rt_leases: Vec<RenderTarget>,
+    /// Epoch-gated CPU-writable staging pools for [`UploadBuffer`] declarations.
+    upload_buffers: Vec<UploadBufferPool>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
@@ -603,6 +717,7 @@ impl Scheme {
             ctx: ctx.clone(),
             leases: Vec::new(),
             rt_leases: Vec::new(),
+            upload_buffers: Vec::new(),
             dirty: true,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
@@ -708,6 +823,174 @@ impl Scheme {
                 dst: dst_resource,
                 dst_offset,
                 size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Declare a logical upload buffer backed by an epoch-gated `CPU_WRITABLE` parcel pool.
+    ///
+    /// Structural mutation. Physical parcels are selected by [`Self::stage_upload_buffer`]
+    /// and rebound at submit; retained command buffers key variants by the selected handle.
+    pub fn declare_upload_buffer(&mut self, size: u64) -> Result<UploadBuffer, GoldyError> {
+        if size == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "declare_upload_buffer requires non-zero size"
+            )));
+        }
+        self.dirty = true;
+        let id = UploadBufferId(u32::try_from(self.upload_buffers.len()).expect("upload buffer id overflow"));
+        self.upload_buffers.push(UploadBufferPool::new(size));
+        Ok(UploadBuffer {
+            id,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Write `data` into a settled (or newly allocated) physical staging parcel for `buf`.
+    ///
+    /// Never waits: if every prior parcel is still in flight, allocates another from the
+    /// context transient pool. Must be called before [`Self::submit`] for every upload
+    /// buffer referenced by the scheme's copy topology this frame.
+    pub fn stage_upload_buffer(
+        &mut self,
+        buf: &UploadBuffer,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), GoldyError> {
+        let pool = self
+            .upload_buffers
+            .get_mut(buf.id.0 as usize)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("stage_upload_buffer: unknown upload buffer")))?;
+        pool.stage(&self.ctx, offset, data)
+    }
+
+    /// Record a GPU copy from a logical [`UploadBuffer`] into a destination buffer parcel.
+    ///
+    /// Topology is retained; physical source handles rebind each submit from the parcel
+    /// selected by [`Self::stage_upload_buffer`].
+    pub fn copy_upload_buffer(
+        &mut self,
+        src: &UploadBuffer,
+        src_offset: u64,
+        dst: &Parcel,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let pool = self
+            .upload_buffers
+            .get(src.id.0 as usize)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer: unknown upload buffer")))?;
+        if src_offset.saturating_add(size) > pool.size {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer: copy range exceeds upload buffer size"
+            )));
+        }
+        let dst_resource = dst.resource_id();
+        if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer requires a buffer parcel destination"
+            )));
+        }
+        self.submit_state.register_parcel_stamp(dst);
+        let src_resource = ResourceId::UploadBuffer(src.id.0);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_upload_buffer",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst_resource,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src: src_resource,
+                src_offset,
+                dst: dst_resource,
+                dst_offset,
+                size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Record a GPU copy from a logical [`UploadBuffer`] into a texture.
+    ///
+    /// Prefer a non-zero `src_row_pitch` (device footprint pitch) so the partition remains
+    /// retainable without backend repacking.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_upload_buffer_to_texture(
+        &mut self,
+        src: &UploadBuffer,
+        src_offset: u64,
+        src_row_pitch: u32,
+        dst: &crate::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let pool = self
+            .upload_buffers
+            .get(src.id.0 as usize)
+            .ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: unknown upload buffer"))
+            })?;
+        let x_end = x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: x+width overflow")))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: y+height overflow")))?;
+        if x_end > dst.width() || y_end > dst.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer_to_texture: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                dst.width(),
+                dst.height()
+            )));
+        }
+        let min_bytes = if src_row_pitch == 0 {
+            (width as u64) * (height as u64) * 4
+        } else {
+            (src_row_pitch as u64) * (height as u64)
+        };
+        if src_offset.saturating_add(min_bytes) > pool.size {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer_to_texture: copy range exceeds upload buffer size"
+            )));
+        }
+        let th = dst.gpu_handle();
+        let src_resource = ResourceId::UploadBuffer(src.id.0);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_upload_buffer_to_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Texture(th),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBufferToTexture {
+                src: src_resource,
+                src_offset,
+                src_row_pitch,
+                dst: th,
+                x,
+                y,
+                width,
+                height,
             },
         });
         Ok(())
@@ -1204,11 +1487,13 @@ impl Scheme {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             let ir_clean = !structurally_dirty && !topo_dirty;
             let had_replay = self.submit_state.has_cb_replay();
+            let upload_resolutions = self.resolve_upload_buffers_for_submit()?;
             let result = self.submit_state.submit_pipelined_and_retain_with_presents(
                 &self.ctx,
                 &self.ir,
                 &mut present_slots,
                 deferred,
+                &upload_resolutions,
                 ir_clean,
             );
             // Drop the acquire closure before touching surface_frames again.
@@ -1243,6 +1528,15 @@ impl Scheme {
             Ok(ok) => ok,
             Err(e) => return Err(self.ctx.classify(e)),
         };
+
+        // Stamp selected upload parcels with the submit timeline so they cannot be
+        // reselected until the GPU copy retires.
+        {
+            let ctx_h = self.ctx.backend_handle();
+            for pool in &mut self.upload_buffers {
+                pool.stamp_pending(ctx_h, tv);
+            }
+        }
 
         // Present partition is last; stamp acquired frames with that epoch so
         // Present's scratch→backbuffer copy Wait()s on it instead of inferring
@@ -1599,6 +1893,67 @@ impl Scheme {
     pub fn ir_node_count(&self) -> usize {
         self.ir.nodes.len()
     }
+
+    /// Resolve pending upload-buffer stages into concrete handles for this submit.
+    fn resolve_upload_buffers_for_submit(
+        &self,
+    ) -> Result<std::collections::HashMap<u32, crate::task_graph::ResolvedUploadBuffer>, GoldyError> {
+        let mut out = std::collections::HashMap::new();
+        let mut referenced = std::collections::HashSet::new();
+        for node in &self.ir.nodes {
+            for b in &node.bindings {
+                if let ResourceId::UploadBuffer(id) = b.resource {
+                    referenced.insert(id);
+                }
+            }
+        }
+        for id in referenced {
+            let pool = self.upload_buffers.get(id as usize).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "submit: IR references unknown UploadBuffer({id})"
+                ))
+            })?;
+            let resolved = pool.resolve_pending().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "submit: UploadBuffer({id}) was not staged before submit"
+                ))
+            })?;
+            out.insert(id, resolved);
+        }
+        Ok(out)
+    }
+
+    /// Test/telemetry: number of physical parcels owned by upload buffer `id`.
+    #[doc(hidden)]
+    pub fn upload_buffer_parcel_count(&self, buf: &UploadBuffer) -> usize {
+        self.upload_buffers
+            .get(buf.id.0 as usize)
+            .map(|p| p.parcels.len())
+            .unwrap_or(0)
+    }
+
+    /// Test helper: mark the first physical upload parcel as still in flight at `tv`.
+    #[doc(hidden)]
+    pub fn test_mark_upload_inflight(&mut self, buf: &UploadBuffer, tv: TimelineValue) {
+        let ctx = self.ctx.backend_handle();
+        let pool = &mut self.upload_buffers[buf.id.0 as usize];
+        pool.pending = None;
+        if let Some(parcel) = pool.parcels.first() {
+            parcel.mark_referenced(ctx, tv);
+        }
+    }
+
+    /// Test helper: number of retained CB slot variants across all partitions.
+    #[doc(hidden)]
+    pub fn test_retained_slot_variant_count(&self) -> usize {
+        self.submit_state.retained_slot_variant_count()
+    }
+
+    /// Test helper: whether a CB replay ledger is attached.
+    #[doc(hidden)]
+    pub fn test_has_cb_replay(&self) -> bool {
+        self.submit_state.has_cb_replay()
+    }
 }
 
 impl Drop for Scheme {
@@ -1617,6 +1972,9 @@ impl Drop for Scheme {
         self.submit_state.release_backend_retained_graphs(&self.ctx);
 
         let ctx = self.ctx.clone();
+        for pool in std::mem::take(&mut self.upload_buffers) {
+            pool.return_all(&ctx);
+        }
         for mut parcel in self.leases.drain(..) {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
@@ -4144,6 +4502,218 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(
             frame2_waits.iter().any(|e| e.context == ctx_handle && e.value >= present_tv),
             "frame 2 submit must live-wait on prior present read via ledger (need wait>={present_tv}, got {frame2_waits:?})"
+        );
+    }
+
+    #[test]
+    fn upload_buffer_allocates_instead_of_waiting_while_in_flight() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(64, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(64).unwrap();
+        scheme
+            .copy_upload_buffer(&upload, 0, dst.whole(), 0, 64)
+            .unwrap();
+
+        let payload_a = vec![1u8; 64];
+        scheme.stage_upload_buffer(&upload, 0, &payload_a).unwrap();
+        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 1);
+        let _sub1 = scheme.submit().unwrap();
+
+        // Mock completes submits immediately; force the physical parcel back in-flight.
+        scheme.test_mark_upload_inflight(&upload, 1_000_000);
+
+        let payload_b = vec![2u8; 64];
+        scheme.stage_upload_buffer(&upload, 0, &payload_b).unwrap();
+        assert_eq!(
+            scheme.upload_buffer_parcel_count(&upload),
+            2,
+            "in-flight staging must grow the pool instead of waiting"
+        );
+        let _sub2 = scheme.submit().unwrap();
+    }
+
+    #[test]
+    fn upload_buffer_reuses_settled_parcel() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(32).unwrap();
+        scheme
+            .copy_upload_buffer(&upload, 0, dst.whole(), 0, 32)
+            .unwrap();
+
+        scheme.stage_upload_buffer(&upload, 0, &[7u8; 32]).unwrap();
+        let _ = scheme.submit().unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[8u8; 32]).unwrap();
+        assert_eq!(
+            scheme.upload_buffer_parcel_count(&upload),
+            1,
+            "settled staging parcel must be reused"
+        );
+        let _ = scheme.submit().unwrap();
+    }
+
+    #[test]
+    fn upload_buffer_rejects_submit_without_stage() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(16).unwrap();
+        scheme
+            .copy_upload_buffer(&upload, 0, dst.whole(), 0, 16)
+            .unwrap();
+        let err = scheme.submit().expect_err("must require stage before submit");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("was not staged"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn upload_buffer_warms_slot_variants_per_physical_parcel() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(32).unwrap();
+        scheme
+            .copy_upload_buffer(&upload, 0, dst.whole(), 0, 32)
+            .unwrap();
+
+        scheme.stage_upload_buffer(&upload, 0, &[1u8; 32]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.replay_stats().records, 1);
+        assert_eq!(scheme.test_retained_slot_variant_count(), 1);
+
+        scheme.stage_upload_buffer(&upload, 0, &[2u8; 32]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.test_retained_slot_variant_count(), 1);
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            1,
+            "reusing the same physical parcel must hit the warmed variant"
+        );
+
+        scheme.test_mark_upload_inflight(&upload, 1_000_000);
+        scheme.stage_upload_buffer(&upload, 0, &[3u8; 32]).unwrap();
+        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 2);
+        let _ = scheme.submit().unwrap();
+        assert_eq!(
+            scheme.test_retained_slot_variant_count(),
+            2,
+            "a newly allocated physical parcel records a new slot variant"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(scheme.replay_stats().records, 2);
+    }
+
+    #[test]
+    fn upload_buffer_to_texture_resolves_at_submit() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let tex = pool
+            .acquire_texture(
+                1,
+                1,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Direct,
+                crate::types::TextureFlags::COPY_DST,
+                None,
+            )
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(4).unwrap();
+        scheme
+            .copy_upload_buffer_to_texture(&upload, 0, 0, &tex, 0, 0, 1, 1)
+            .unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[9, 8, 7, 6]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.replay_stats().records, 1);
+        assert!(scheme.upload_buffer_parcel_count(&upload) >= 1);
+    }
+
+    #[test]
+    fn upload_buffer_scheme_drop_returns_parcels() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(16).unwrap();
+        scheme
+            .copy_upload_buffer(&upload, 0, dst.whole(), 0, 16)
+            .unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[4u8; 16]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 1);
+        drop(scheme);
+        // Drop must not panic and must release CB/parcel ownership back to the context.
+        let _ = ctx.gpu_progress();
+    }
+
+    #[test]
+    fn upload_buffer_disable_cb_reuse_skips_replay_ledger() {
+        struct ClearCbReuseOverride;
+        impl Drop for ClearCbReuseOverride {
+            fn drop(&mut self) {
+                crate::validation_env::clear_test_cb_reuse_override();
+            }
+        }
+        crate::validation_env::set_test_cb_reuse_override(true);
+        let _clear = ClearCbReuseOverride;
+
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(16).unwrap();
+        scheme
+            .copy_upload_buffer(&upload, 0, dst.whole(), 0, 16)
+            .unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[1u8; 16]).unwrap();
+        let _ = scheme.submit().unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[2u8; 16]).unwrap();
+        let _ = scheme.submit().unwrap();
+
+        assert!(
+            !scheme.test_has_cb_replay(),
+            "CB-reuse disable override must tear down the replay ledger"
+        );
+        assert_eq!(
+            scheme.test_retained_slot_variant_count(),
+            0,
+            "no slot variants are retained when replay is disabled"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            0,
+            "fresh path must not count retention hits"
         );
     }
 }

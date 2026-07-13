@@ -203,6 +203,12 @@ pub(crate) enum ResourceId {
     /// Lowered to [`ResourceId::Texture`] when the pool acquires a backing slot
     /// at [`crate::Scheme::submit`] time.
     PresentLease(u32),
+    /// Scheme-scoped logical upload buffer: late-bound CPU-writable staging parcel.
+    ///
+    /// Declared via [`crate::Scheme::declare_upload_buffer`]; physical backing is
+    /// selected by [`crate::Scheme::stage_upload_buffer`] and resolved at submit
+    /// through [`SlotResolver::upload_buffers`].
+    UploadBuffer(u32),
 }
 
 impl ResourceId {
@@ -220,6 +226,7 @@ impl ResourceId {
             ResourceId::TransientTexture(_) => None,
             ResourceId::SwapchainOutput => None,
             ResourceId::PresentLease(_) => None,
+            ResourceId::UploadBuffer(_) => None,
         }
     }
 }
@@ -250,14 +257,24 @@ pub(crate) struct ResolvedSwapchain {
     pub uav_index: u32,
 }
 
+/// Resolved physical staging parcel for a scheme [`ResourceId::UploadBuffer`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedUploadBuffer {
+    pub parent: BufferHandle,
+    pub offset: u64,
+    pub len: u64,
+}
+
 /// Maps promised slots to their concrete storage for the current submission.
 ///
 /// The IR is invariant data written by the user; the runtime resolves
-/// promised slots (`TransientBuffer`, `TransientTexture`, `SwapchainOutput`)
-/// through this table at emission time.  No IR clone is ever necessary.
+/// promised slots (`TransientBuffer`, `TransientTexture`, `SwapchainOutput`,
+/// `PresentLease`, `UploadBuffer`) through this table at emission time.
+/// No IR clone is ever necessary.
 ///
 /// Transient entries are page-local (supplied by `PlacementHeap::advance_page`).
 /// The swapchain entry is boundary-local (filled after `surface.begin()`).
+/// Upload buffers are scheme-local (filled by [`crate::Scheme`] before submit).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SlotResolver {
     pub buffers: std::collections::HashMap<u32, ResolvedTransientBuffer>,
@@ -265,6 +282,8 @@ pub(crate) struct SlotResolver {
     pub swapchain: Option<ResolvedSwapchain>,
     /// Per [`ResourceId::PresentLease`] id, resolved at scheme submit time.
     pub present_leases: std::collections::HashMap<u32, ResolvedSwapchain>,
+    /// Per [`ResourceId::UploadBuffer`] id, resolved at scheme submit time.
+    pub upload_buffers: std::collections::HashMap<u32, ResolvedUploadBuffer>,
 }
 
 impl SlotResolver {
@@ -298,6 +317,17 @@ impl SlotResolver {
                     .get(&id)
                     .expect("SlotResolver::resolve: PresentLease accessed before pool acquire");
                 ResourceId::Texture(sc.handle)
+            }
+            ResourceId::UploadBuffer(id) => {
+                let u = self
+                    .upload_buffers
+                    .get(&id)
+                    .expect("SlotResolver::resolve: UploadBuffer accessed before stage/submit resolve");
+                ResourceId::BufferRange {
+                    parent: u.parent,
+                    offset: u.offset,
+                    len: u.len,
+                }
             }
             other => other,
         }

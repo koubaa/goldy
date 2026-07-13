@@ -115,6 +115,29 @@ pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
 }
 
+use std::cell::Cell;
+
+// Thread-local override for `retained_cb_reuse_disabled`. When `Some`, takes precedence
+// over the environment / profiler on this thread only (safe under parallel cargo tests).
+#[cfg(test)]
+thread_local! {
+    static TEST_CB_REUSE_DISABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Install a thread-local test override for CB reuse (see [`retained_cb_reuse_disabled`]).
+///
+/// Must be paired with [`clear_test_cb_reuse_override`] on the same thread.
+#[cfg(test)]
+pub(crate) fn set_test_cb_reuse_override(disabled: bool) {
+    TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.set(Some(disabled)));
+}
+
+/// Clear the override installed by [`set_test_cb_reuse_override`].
+#[cfg(test)]
+pub(crate) fn clear_test_cb_reuse_override() {
+    TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.set(None));
+}
+
 /// When true, disable the CB-retention facility entirely (not merely skip resubmit hits).
 ///
 /// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`), or enable [`crate::gpu_profiler::gpu_profile_enabled`].
@@ -123,6 +146,10 @@ pub(crate) fn scheme_validation_enabled() -> bool {
 /// topology registration.
 #[must_use]
 pub(crate) fn retained_cb_reuse_disabled() -> bool {
+    #[cfg(test)]
+    if let Some(disabled) = TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.get()) {
+        return disabled;
+    }
     env_truthy("GOLDY_DISABLE_CB_REUSE") || crate::gpu_profiler::gpu_profile_enabled()
 }
 

@@ -1000,10 +1000,15 @@ pub(crate) struct ResolvedPresentSlot {
 /// to run, [`Self::deferred_acquire`] (if set) fills `present_slots` — that is the
 /// DXGI / drawable wait. Non-present partitions are submitted first so GPU coarse/fine
 /// work can overlap the acquire wait (Exchange option/exercise split).
+///
+/// [`Self::upload_buffers`] maps logical [`super::ResourceId::UploadBuffer`] ids to
+/// the physical staging parcels selected for this submission.
 pub(crate) struct PresentSubmitOptions<'a> {
     pub present_slots: &'a mut Vec<ResolvedPresentSlot>,
     /// Called once, on the first present partition, when `present_slots` is still empty.
     pub deferred_acquire: Option<&'a mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
+    /// Scheme upload-buffer resolutions for this submission (may be empty).
+    pub upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
@@ -1046,6 +1051,63 @@ fn ensure_present_ready(
     }
     *present_resolver_ready = true;
     Ok(())
+}
+
+/// Fingerprint for retained CB variants that bake late-bound slot handles.
+///
+/// Combines the stable partition fingerprint with every present-lease slot and
+/// every resolved upload-buffer physical handle referenced by `waves`.
+fn dynamic_partition_slot_key(
+    part_fp: u64,
+    present_slots: &[ResolvedPresentSlot],
+    ir: &GraphIR,
+    waves: &[Wave],
+    resolver: &super::SlotResolver,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    part_fp.hash(&mut h);
+    for slot in present_slots {
+        slot.lease_id.hash(&mut h);
+        slot.slot_id.hash(&mut h);
+    }
+    let mut upload_ids: Vec<u32> = waves
+        .iter()
+        .flat_map(|w| w.node_indices.iter().copied())
+        .flat_map(|ni| ir.nodes[ni].bindings.iter())
+        .filter_map(|b| match b.resource {
+            ResourceId::UploadBuffer(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    upload_ids.sort_unstable();
+    upload_ids.dedup();
+    for id in upload_ids {
+        id.hash(&mut h);
+        let resolved = resolver
+            .upload_buffers
+            .get(&id)
+            .expect("dynamic_partition_slot_key: UploadBuffer missing from resolver");
+        resolved.parent.hash(&mut h);
+        resolved.offset.hash(&mut h);
+        resolved.len.hash(&mut h);
+    }
+    h.finish()
+}
+
+fn seed_upload_resolver(
+    resolver: &mut super::SlotResolver,
+    upload_buffers: &std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
+) {
+    resolver.upload_buffers.clear();
+    for (&id, resolved) in upload_buffers {
+        resolver.upload_buffers.insert(id, *resolved);
+    }
+}
+
+fn partition_needs_slot_resolver(ir: &GraphIR, waves: &[Wave], has_present: bool) -> bool {
+    has_present || analysis::partition_waves_have_upload_slots(ir, waves)
 }
 
 /// One execution segment for the no-replay Scheme submit path.
@@ -1116,6 +1178,7 @@ fn submit_resolved_ir_partitions_fresh(
     let PresentSubmitOptions {
         present_slots,
         mut deferred_acquire,
+        upload_buffers,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1139,6 +1202,7 @@ fn submit_resolved_ir_partitions_fresh(
     }
 
     let mut resolver = SlotResolver::new();
+    seed_upload_resolver(&mut resolver, upload_buffers);
     let mut present_resolver_ready = false;
 
     let ctx = context.backend_handle();
@@ -1209,13 +1273,14 @@ fn submit_resolved_ir_partitions_fresh(
                 last_tv = backend_submit_graph(session, ctx, &graph_cmds, merged.as_ref())?;
             } else {
                 // Pure compute, uploads, and present tail: surface-style standalone.
+                let needs_resolver = partition_needs_slot_resolver(ir, &cache.as_ref().unwrap().schedule.waves[wave_range.clone()], has_present);
                 let cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.fresh_emit");
                     let waves = &cache.as_ref().unwrap().schedule.waves[wave_range.clone()];
                     analysis::emit_waves_to_commands(
                         ir,
                         waves,
-                        if has_present { Some(&resolver) } else { None },
+                        if needs_resolver { Some(&resolver) } else { None },
                     )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.fresh");
@@ -1248,6 +1313,7 @@ fn submit_resolved_ir_partitions_replay(
     let PresentSubmitOptions {
         present_slots,
         mut deferred_acquire,
+        upload_buffers,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1304,6 +1370,7 @@ fn submit_resolved_ir_partitions_replay(
     }
 
     let mut resolver = SlotResolver::new();
+    seed_upload_resolver(&mut resolver, upload_buffers);
     let mut present_resolver_ready = false;
 
     let ctx = context.backend_handle();
@@ -1376,6 +1443,8 @@ fn submit_resolved_ir_partitions_replay(
             let can_retain = partition_waves_can_retain(ir, &waves);
             let has_render = partition_waves_have_render(ir, &waves);
             let has_present = analysis::partition_waves_have_present(ir, &waves);
+            let has_upload_slots = analysis::partition_waves_have_upload_slots(ir, &waves);
+            let needs_resolver = partition_needs_slot_resolver(ir, &waves, has_present);
             let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
             let base_sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
@@ -1410,8 +1479,8 @@ fn submit_resolved_ir_partitions_replay(
                         &waves,
                         part_idx,
                         has_render,
-                        has_present,
-                        if has_present { Some(&resolver) } else { None },
+                        needs_resolver,
+                        if needs_resolver { Some(&resolver) } else { None },
                     )?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
@@ -1423,16 +1492,21 @@ fn submit_resolved_ir_partitions_replay(
                 continue;
             }
 
-            if has_present {
-                ensure_present_ready(
-                    present_slots,
-                    &mut deferred_acquire,
-                    &mut resolver,
-                    &mut present_resolver_ready,
-                )?;
+            // Present and/or upload-slot partitions bake late-bound handles into the CB,
+            // so retention keys include the concrete slot combination.
+            if has_present || has_upload_slots {
+                if has_present {
+                    ensure_present_ready(
+                        present_slots,
+                        &mut deferred_acquire,
+                        &mut resolver,
+                        &mut present_resolver_ready,
+                    )?;
+                }
 
-                // Metal (and any backend that cannot retain present partitions): always fresh.
-                if !session.retains_present_partitions() {
+                // Metal (and any backend that cannot retain present partitions): always fresh
+                // when present is involved. Upload-only partitions may still retain.
+                if has_present && !session.retains_present_partitions() {
                     let cache_entry = cache.as_ref().unwrap();
                     let cmds = {
                         let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
@@ -1456,16 +1530,8 @@ fn submit_resolved_ir_partitions_replay(
                 }
 
                 let slot_key = {
-                    let _tz = crate::tracy_zone!("goldy.partition_loop.present_slot_key");
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    part_fp.hash(&mut h);
-                    for slot in present_slots.iter() {
-                        slot.lease_id.hash(&mut h);
-                        slot.slot_id.hash(&mut h);
-                    }
-                    h.finish()
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.dynamic_slot_key");
+                    dynamic_partition_slot_key(part_fp, present_slots, ir, &waves, &resolver)
                 };
 
                 let already_retained = replay.partition_slot_keys[part_idx]
@@ -1474,7 +1540,7 @@ fn submit_resolved_ir_partitions_replay(
                     .unwrap_or(false);
 
                 if already_retained {
-                    let _tz = crate::tracy_zone!("goldy.resubmit.present_slot");
+                    let _tz = crate::tracy_zone!("goldy.resubmit.slot_variant");
                     if let Some(tv) = backend_try_resubmit_retained(session, ctx, slot_key, merged.as_ref())? {
                         last_tv = tv;
                         result.resubmit_hits += 1;
@@ -1497,7 +1563,7 @@ fn submit_resolved_ir_partitions_replay(
                         Some(&resolver),
                     )
                 };
-                let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
+                let _tz = crate::tracy_zone!("goldy.submit_partition.slot_record");
                 ensure_partition_retired_before_rerecord(context, replay.partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, merged.as_ref())?;
                 replay.partition_slot_keys[part_idx]
@@ -1512,7 +1578,7 @@ fn submit_resolved_ir_partitions_replay(
                 continue;
             }
 
-            // Retainable compute/render partition.
+            // Retainable compute/render partition (no late-bound slots).
             let cached_key = replay.partition_keys[part_idx];
             if cached_key == Some(part_fp) {
                 let _tz = crate::tracy_zone!("goldy.resubmit.partition");
@@ -1562,6 +1628,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         None => (&empty_stamps, empty_targets),
     };
     let mut present_slots = Vec::new();
+    let empty_uploads = std::collections::HashMap::new();
     submit_resolved_ir_partitions(
         cache,
         replay,
@@ -1571,6 +1638,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         PresentSubmitOptions {
             present_slots: &mut present_slots,
             deferred_acquire: None,
+            upload_buffers: &empty_uploads,
             resource_stamps,
             stamp_targets,
             ir_clean: false,
@@ -1738,17 +1806,35 @@ impl IrSubmitState {
         self.replay.is_some()
     }
 
+    /// Number of retained late-bound slot variants across all partitions (tests/telemetry).
+    pub fn retained_slot_variant_count(&self) -> usize {
+        self.replay
+            .as_ref()
+            .map(|r| {
+                r.partition_slot_keys
+                    .iter()
+                    .flatten()
+                    .map(|s| s.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
     /// Submit `ir`, retaining command lists when CB replay is enabled.
     ///
     /// `deferred_acquire` runs on the first present-touching partition (after
     /// non-present partitions have already been submitted), filling `present_slots`.
     /// Pass `None` and a pre-filled `present_slots` for tests / eager acquire.
+    ///
+    /// `upload_buffers` maps logical upload-buffer ids to the physical parcels
+    /// selected for this submission (may be empty).
     pub fn submit_pipelined_and_retain_with_presents<'a>(
         &'a mut self,
         ctx: &crate::Context,
         ir: &GraphIR,
         present_slots: &'a mut Vec<ResolvedPresentSlot>,
         deferred_acquire: Option<&'a mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
+        upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
         ir_clean: bool,
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
         self.sync_replay_mode(ctx);
@@ -1763,6 +1849,7 @@ impl IrSubmitState {
             PresentSubmitOptions {
                 present_slots,
                 deferred_acquire,
+                upload_buffers,
                 resource_stamps: &self.resource_stamps,
                 stamp_targets: &self.stamp_targets,
                 ir_clean,
@@ -2960,13 +3047,14 @@ impl TaskGraph {
         for range in &wave_ranges {
             let waves = &entry.schedule.waves[range.clone()];
             let has_present = analysis::partition_waves_have_present(ir, waves);
+            let has_upload_slots = analysis::partition_waves_have_upload_slots(ir, waves);
             let has_render = waves.iter().any(|w| {
                 w.node_indices
                     .iter()
                     .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
             });
 
-            if has_present {
+            if has_present || has_upload_slots {
                 // Deferred: commands emitted fresh at submit time with a resolver.
                 compute_partitions.push(Vec::new());
                 graph_partitions.push(None);
@@ -5017,8 +5105,16 @@ mod slice_retention_tests {
 
     fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR, ir_clean: bool) {
         let mut present_slots = Vec::new();
+        let empty_uploads = std::collections::HashMap::new();
         state
-            .submit_pipelined_and_retain_with_presents(ctx, ir, &mut present_slots, None, ir_clean)
+            .submit_pipelined_and_retain_with_presents(
+                ctx,
+                ir,
+                &mut present_slots,
+                None,
+                &empty_uploads,
+                ir_clean,
+            )
             .unwrap();
     }
 
@@ -5090,6 +5186,7 @@ mod slice_retention_tests {
 
         let mut cache = None;
         let empty_stamps = ResourceKeyMap::default();
+        let empty_uploads = std::collections::HashMap::new();
         let mut present_slots = Vec::new();
         for ir_clean in [false, true, true] {
             let (tv, result) = submit_resolved_ir_partitions(
@@ -5101,6 +5198,7 @@ mod slice_retention_tests {
                 PresentSubmitOptions {
                     present_slots: &mut present_slots,
                     deferred_acquire: None,
+                    upload_buffers: &empty_uploads,
                     resource_stamps: &empty_stamps,
                     stamp_targets: &[],
                     ir_clean,
@@ -5170,6 +5268,7 @@ mod slice_retention_tests {
 
         let mut cache = None;
         let empty_stamps = ResourceKeyMap::default();
+        let empty_uploads = std::collections::HashMap::new();
         let mut present_slots = Vec::new();
         let acquire_after = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
         let acquire_after_cb = acquire_after.clone();
@@ -5195,6 +5294,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred),
+                upload_buffers: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -5243,6 +5343,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred2),
+                upload_buffers: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: true,
@@ -5288,6 +5389,7 @@ mod slice_retention_tests {
 
         let mut cache = None;
         let empty_stamps = ResourceKeyMap::default();
+        let empty_uploads = std::collections::HashMap::new();
         let mut present_slots = Vec::new();
         let (tv, result) = submit_resolved_ir_partitions(
             &mut cache,
@@ -5298,6 +5400,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
+                upload_buffers: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,

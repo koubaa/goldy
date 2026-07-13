@@ -113,6 +113,65 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
     );
 }
 
+/// Logical upload buffers feed a retained worker across pipelined frames without host waits.
+#[test]
+fn upload_buffer_feeds_retained_worker_across_frames() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let input = pool
+        .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+        .expect("input parcel");
+    let output = pool
+        .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+        .expect("output parcel");
+
+    let mut worker = Scheme::new(&ctx);
+    worker
+        .node("copy", &pipeline)
+        .with_parcel(&input, NodeAccess::Read)
+        .with_parcel(&output, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let grant = worker.grant_read(&output).expect("grant_read");
+
+    let mut upload = Scheme::new(&ctx);
+    let staging = upload
+        .declare_upload_buffer((8 * std::mem::size_of::<u32>()) as u64)
+        .expect("declare upload");
+    upload
+        .copy_upload_buffer(&staging, 0, input.whole(), 0, (8 * std::mem::size_of::<u32>()) as u64)
+        .expect("copy topology");
+
+    const FRAMES: u32 = 4;
+    for submission in 1..=FRAMES {
+        let data = [submission; 8];
+        upload
+            .stage_upload_buffer(&staging, 0, bytemuck::cast_slice(&data))
+            .expect("stage upload");
+        let _ = upload.submit().expect("submit upload");
+        let frame = worker.submit().expect("submit worker");
+        for v in read_grant_u32(&grant, &frame, 8) {
+            assert_eq!(v, submission, "frame {submission} must observe its staged payload");
+        }
+    }
+
+    assert_eq!(worker.replay_stats().records, 1, "worker records once");
+    assert!(
+        upload.upload_buffer_parcel_count(&staging) >= 1,
+        "upload buffer must own at least one physical parcel"
+    );
+    // After GPU retirement, subsequent stages should not unbounded-grow forever.
+    // Mock/backends that complete promptly settle back to one warm parcel.
+    assert!(
+        upload.upload_buffer_parcel_count(&staging) <= FRAMES as usize,
+        "parcel count must be bounded by in-flight depth"
+    );
+}
+
 /// Copy-only scheme: pre-initialized input, no upload — retention hit on submission 1.
 #[test]
 fn clean_scheme_resubmits_without_rerecord() {
