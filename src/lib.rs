@@ -69,9 +69,9 @@ pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField,
 pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
 pub use scheme::{
     Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture, Loan,
-    PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission,
+    PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, UploadBuffer,
 };
-pub use swapchain_pool::{PresentLease, SwapchainPool};
+pub use swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
 pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
@@ -84,7 +84,7 @@ pub use signal::{OversubscribedReason, Signal};
 pub use timeline::{Epoch, ReferenceTable, TimelineValue};
 
 pub use backend::GraphCommand;
-pub use backend::{BufferHeapStats, TextureCopyFootprint, TextureHeapStats};
+pub use backend::{BufferHeapStats, TextureCopyFootprint, TextureHeapStats, VideoMemoryInfo};
 pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
@@ -246,6 +246,35 @@ pub mod test_support {
 
         fn deref(&self) -> &Device {
             &self.device
+        }
+    }
+
+    /// Thread-local pin for retained command-buffer reuse (see `validation_env`).
+    ///
+    /// Retention-asserting tests must call [`Self::force_enabled`] so a developer
+    /// shell with `GOLDY_DISABLE_CB_REUSE=1` cannot flip the suite. Disable-path
+    /// tests call [`Self::force_disabled`]. Cleared on drop.
+    pub struct CbReuseOverride {
+        _private: (),
+    }
+
+    impl CbReuseOverride {
+        /// Force CB retention on for this thread (ignores env / profiler).
+        pub fn force_enabled() -> Self {
+            crate::validation_env::set_cb_reuse_override(false);
+            Self { _private: () }
+        }
+
+        /// Force CB retention off for this thread (ignores env / profiler).
+        pub fn force_disabled() -> Self {
+            crate::validation_env::set_cb_reuse_override(true);
+            Self { _private: () }
+        }
+    }
+
+    impl Drop for CbReuseOverride {
+        fn drop(&mut self) {
+            crate::validation_env::clear_cb_reuse_override();
         }
     }
 }

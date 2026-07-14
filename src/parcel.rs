@@ -415,6 +415,17 @@ impl Parcel {
         }
     }
 
+    /// Host write into a whole-buffer parcel (used by scheme upload staging).
+    pub(crate) fn write_bytes(&self, offset: u64, data: &[u8]) -> anyhow::Result<()> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.write(offset, data),
+            ParcelBacking::BufferRange { .. } => {
+                anyhow::bail!("write_bytes requires a whole-buffer parcel")
+            }
+            ParcelBacking::Texture(_) => anyhow::bail!("write_bytes requires a buffer parcel"),
+        }
+    }
+
     /// Structured-buffer element stride for whole-buffer parcels, if set at allocation.
     pub(crate) fn buffer_element_stride(&self) -> Option<u32> {
         match &self.backing {

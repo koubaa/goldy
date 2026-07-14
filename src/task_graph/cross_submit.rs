@@ -67,9 +67,13 @@ impl ResourceKey {
             // index into the owning scheme's rt_leases Vec, with no public Clone or borrow-out
             // path). They can never appear in a *different* scheme's IR, so cross-scheme
             // hazard tracking at the RT level is structurally impossible and the exclusion here
-            // is safe. SwapchainOutput and PresentLease are similarly owned by the surface
-            // infrastructure and not shared as ledger-tracked resources.
-            ResourceId::RenderTarget(_) | ResourceId::SwapchainOutput | ResourceId::PresentLease(_) => None,
+            // is safe. SwapchainOutput, PresentLease, and UploadBuffer are similarly owned by
+            // scheme/surface infrastructure and not shared as ledger-tracked resources
+            // (upload parcels are stamped directly after submit).
+            ResourceId::RenderTarget(_)
+            | ResourceId::SwapchainOutput
+            | ResourceId::PresentLease(_)
+            | ResourceId::UploadBuffer(_) => None,
         }
     }
 }
@@ -196,6 +200,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::TransientBuffer(_)
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
+            | ResourceId::UploadBuffer(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE

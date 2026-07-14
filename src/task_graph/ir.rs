@@ -316,11 +316,17 @@ pub struct BarrierSet {
     /// emission time (after slot resolution).  Resolved and folded into the
     /// `ResourceBarrier` command inside `emit_waves_to_commands`.
     pub transient_ids: Vec<(u32, BarrierUsage)>,
+    /// Scheme upload-buffer IDs whose concrete staging handle is only known at
+    /// emission time (after [`crate::Scheme`] resolves pending stages).
+    pub upload_ids: Vec<(u32, BarrierUsage)>,
 }
 
 impl BarrierSet {
     pub fn is_empty(&self) -> bool {
-        self.buffers.is_empty() && self.textures.is_empty() && self.transient_ids.is_empty()
+        self.buffers.is_empty()
+            && self.textures.is_empty()
+            && self.transient_ids.is_empty()
+            && self.upload_ids.is_empty()
     }
 }
 

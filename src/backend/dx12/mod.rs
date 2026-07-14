@@ -651,6 +651,43 @@ impl GpuBackend for Dx12Backend {
         self.state.device_removed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn query_video_memory(&self, device: DeviceHandle) -> Option<crate::backend::VideoMemoryInfo> {
+        use windows::core::Interface;
+        use windows::Win32::Graphics::Dxgi::{
+            IDXGIAdapter3, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+            DXGI_QUERY_VIDEO_MEMORY_INFO,
+        };
+
+        let ld = self.state.devices.get(&device)?;
+        let adapter = self
+            .state
+            .adapters
+            .iter()
+            .find(|a| a.adapter_id == ld.adapter_id)
+            .map(|a| &a.adapter)?;
+        let adapter3: IDXGIAdapter3 = adapter.cast().ok()?;
+
+        let mut local = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        unsafe {
+            adapter3
+                .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local)
+                .ok()?;
+        }
+        let mut non_local = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        let non_local_ok = unsafe {
+            adapter3
+                .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut non_local)
+                .is_ok()
+        };
+
+        Some(crate::backend::VideoMemoryInfo {
+            local_current_bytes: local.CurrentUsage,
+            local_budget_bytes: local.Budget,
+            non_local_current_bytes: if non_local_ok { non_local.CurrentUsage } else { 0 },
+            non_local_budget_bytes: if non_local_ok { non_local.Budget } else { 0 },
+        })
+    }
+
     fn create_buffer(
         &mut self,
         device_handle: DeviceHandle,

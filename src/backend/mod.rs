@@ -457,6 +457,22 @@ pub enum RenderCommand {
     },
 }
 
+/// Process GPU memory usage reported by the OS / driver (when available).
+///
+/// On DX12 this comes from `IDXGIAdapter3::QueryVideoMemoryInfo`. Other backends
+/// may leave this unset; callers can still use tracked allocator bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VideoMemoryInfo {
+    /// Bytes currently used in the local (device) memory segment.
+    pub local_current_bytes: u64,
+    /// OS-reported budget for the local segment.
+    pub local_budget_bytes: u64,
+    /// Bytes currently used in the non-local (system / shared) segment, if queried.
+    pub non_local_current_bytes: u64,
+    /// OS-reported budget for the non-local segment.
+    pub non_local_budget_bytes: u64,
+}
+
 /// Linear buffer layout for copying a 2D texture subresource into a buffer.
 ///
 /// `logical_bytes` is the tight linear size clients observe (`width * height * bpp`).
@@ -1081,6 +1097,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// backends that have not yet wired up the flag.
     fn is_device_lost(&self, _device: DeviceHandle) -> bool {
         false
+    }
+
+    /// OS/driver video-memory usage for `device`, when the backend can query it.
+    ///
+    /// DX12 returns DXGI local/non-local segment info. Other backends default to `None`.
+    fn query_video_memory(&self, _device: DeviceHandle) -> Option<VideoMemoryInfo> {
+        None
     }
 
     // Buffer management

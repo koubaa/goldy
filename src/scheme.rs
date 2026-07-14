@@ -16,11 +16,11 @@ use crate::error::GoldyError;
 use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
-use crate::swapchain_pool::{PresentLease, SwapchainPool};
+use crate::swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
 use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
-use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
+use crate::task_graph::{DeferredPresentAcquire, IrSubmitState};
 use crate::task_graph::{
     DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
     PRESENT_LEASE_SLOT_PLACEHOLDER,
@@ -235,6 +235,14 @@ impl Submission {
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
         ctx.wait_until(self.data.timeline)?;
         Ok(())
+    }
+
+    /// Submit timeline stamped on the acquired present frame, if still held.
+    #[cfg(test)]
+    pub(crate) fn present_frame_submit_timeline(&self, idx: usize) -> Option<TimelineValue> {
+        let frame_mutex = self.data.present_frames.get(idx)?;
+        let slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().and_then(|f| f.submit_timeline())
     }
 }
 
@@ -534,6 +542,116 @@ pub struct LeaseBuffer;
 /// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
 pub struct LeaseRenderTarget;
 
+/// Marker type for upload buffers declared via [`Scheme::declare_upload_buffer`].
+pub struct UploadBufferMarker;
+
+/// Stable index of a scheme-held upload-buffer declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UploadBufferId(pub(crate) u32);
+
+/// Logical CPU→GPU upload source owned by a [`Scheme`].
+///
+/// Record copy topology once with [`Scheme::copy_upload_buffer`] /
+/// [`Scheme::copy_upload_buffer_to_texture`]. Each frame, call
+/// [`Scheme::stage_upload_buffer`] to select a settled (or freshly allocated)
+/// `CPU_WRITABLE` parcel, write bytes immediately, and bind that parcel for the
+/// next [`Scheme::submit`]. Pool depth grows with GPU backlog — never waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UploadBuffer {
+    pub(crate) id: UploadBufferId,
+    _marker: PhantomData<UploadBufferMarker>,
+}
+
+impl UploadBuffer {
+    /// Stable declaration index within the owning [`Scheme`].
+    pub fn id(&self) -> u32 {
+        self.id.0
+    }
+}
+
+/// Epoch-gated pool of physical staging parcels for one logical [`UploadBuffer`].
+struct UploadBufferPool {
+    size: u64,
+    /// All physical parcels kept alive for retained CB variants.
+    parcels: Vec<Parcel>,
+    /// Parcel selected for the next submit (`None` until [`Scheme::stage_upload_buffer`]).
+    pending: Option<usize>,
+}
+
+impl UploadBufferPool {
+    fn new(size: u64) -> Self {
+        Self {
+            size,
+            parcels: Vec::new(),
+            pending: None,
+        }
+    }
+
+    fn select_or_alloc(&mut self, ctx: &Context) -> Result<usize, GoldyError> {
+        if let Some(idx) = self.pending {
+            return Ok(idx);
+        }
+        if let Some(idx) = self.parcels.iter().position(|p| p.is_settled(ctx)) {
+            self.pending = Some(idx);
+            return Ok(idx);
+        }
+        let parcel = ctx
+            .with_transient_pool(|pool| {
+                pool.acquire_buffer(
+                    ctx,
+                    self.size,
+                    crate::types::BufferKind::Scattered,
+                    BufferFlags::CPU_WRITABLE,
+                )
+            })
+            .map_err(|e| ctx.classify(e))?;
+        self.parcels.push(parcel);
+        let idx = self.parcels.len() - 1;
+        self.pending = Some(idx);
+        Ok(idx)
+    }
+
+    fn stage(&mut self, ctx: &Context, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
+        if offset.saturating_add(data.len() as u64) > self.size {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "stage_upload_buffer: write [{offset}..{}] exceeds declaration size {}",
+                offset + data.len() as u64,
+                self.size
+            )));
+        }
+        let idx = self.select_or_alloc(ctx)?;
+        self.parcels[idx]
+            .write_bytes(offset, data)
+            .map_err(|e| ctx.classify(e))?;
+        Ok(())
+    }
+
+    fn resolve_pending(&self) -> Option<crate::task_graph::ResolvedUploadBuffer> {
+        let idx = self.pending?;
+        let parcel = &self.parcels[idx];
+        let parent = parcel.buffer_handle().expect("upload buffer parcels are whole buffers");
+        Some(crate::task_graph::ResolvedUploadBuffer {
+            parent,
+            offset: 0,
+            len: parcel.byte_size(),
+        })
+    }
+
+    fn stamp_pending(&mut self, ctx: crate::backend::ContextHandle, tv: TimelineValue) {
+        if let Some(idx) = self.pending.take() {
+            self.parcels[idx].mark_referenced(ctx, tv);
+        }
+    }
+
+    fn return_all(self, ctx: &Context) {
+        for mut parcel in self.parcels {
+            let ready_after = parcel.last_referenced();
+            parcel.release_bookkeeping();
+            ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+        }
+    }
+}
+
 /// One-submission tenancy of pool property held by a [`Scheme`].
 ///
 /// Leases have no cross-scheme identity; the scheme owns the N=1 backing parcel
@@ -570,14 +688,14 @@ pub struct Scheme {
     leases: Vec<Parcel>,
     /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
     rt_leases: Vec<RenderTarget>,
+    /// Epoch-gated CPU-writable staging pools for [`UploadBuffer`] declarations.
+    upload_buffers: Vec<UploadBufferPool>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
     topology_dirty: Arc<AtomicBool>,
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
-    /// Retention key stored at record time. `None` when the backend cannot retain `ir`.
-    retention_key: Option<u64>,
     stats: ReplayStats,
     next_grant_id: u32,
     /// Process-unique identity for cross-scheme [`Submission`] / [`ReadGrant`] pairing.
@@ -597,10 +715,10 @@ impl Scheme {
             ctx: ctx.clone(),
             leases: Vec::new(),
             rt_leases: Vec::new(),
+            upload_buffers: Vec::new(),
             dirty: true,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
-            retention_key: None,
             stats: ReplayStats::default(),
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
@@ -703,6 +821,166 @@ impl Scheme {
                 dst: dst_resource,
                 dst_offset,
                 size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Declare a logical upload buffer backed by an epoch-gated `CPU_WRITABLE` parcel pool.
+    ///
+    /// Structural mutation. Physical parcels are selected by [`Self::stage_upload_buffer`]
+    /// and rebound at submit; retained command buffers key variants by the selected handle.
+    pub fn declare_upload_buffer(&mut self, size: u64) -> Result<UploadBuffer, GoldyError> {
+        if size == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "declare_upload_buffer requires non-zero size"
+            )));
+        }
+        self.dirty = true;
+        let id = UploadBufferId(u32::try_from(self.upload_buffers.len()).expect("upload buffer id overflow"));
+        self.upload_buffers.push(UploadBufferPool::new(size));
+        Ok(UploadBuffer {
+            id,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Write `data` into a settled (or newly allocated) physical staging parcel for `buf`.
+    ///
+    /// Never waits: if every prior parcel is still in flight, allocates another from the
+    /// context transient pool. Must be called before [`Self::submit`] for every upload
+    /// buffer referenced by the scheme's copy topology this frame.
+    pub fn stage_upload_buffer(&mut self, buf: &UploadBuffer, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
+        let pool = self
+            .upload_buffers
+            .get_mut(buf.id.0 as usize)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("stage_upload_buffer: unknown upload buffer")))?;
+        pool.stage(&self.ctx, offset, data)
+    }
+
+    /// Record a GPU copy from a logical [`UploadBuffer`] into a destination buffer parcel.
+    ///
+    /// Topology is retained; physical source handles rebind each submit from the parcel
+    /// selected by [`Self::stage_upload_buffer`].
+    pub fn copy_upload_buffer(
+        &mut self,
+        src: &UploadBuffer,
+        src_offset: u64,
+        dst: &Parcel,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let pool = self
+            .upload_buffers
+            .get(src.id.0 as usize)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer: unknown upload buffer")))?;
+        if src_offset.saturating_add(size) > pool.size {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer: copy range exceeds upload buffer size"
+            )));
+        }
+        let dst_resource = dst.resource_id();
+        if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer requires a buffer parcel destination"
+            )));
+        }
+        self.submit_state.register_parcel_stamp(dst);
+        let src_resource = ResourceId::UploadBuffer(src.id.0);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_upload_buffer",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst_resource,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src: src_resource,
+                src_offset,
+                dst: dst_resource,
+                dst_offset,
+                size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Record a GPU copy from a logical [`UploadBuffer`] into a texture.
+    ///
+    /// Prefer a non-zero `src_row_pitch` (device footprint pitch) so the partition remains
+    /// retainable without backend repacking.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_upload_buffer_to_texture(
+        &mut self,
+        src: &UploadBuffer,
+        src_offset: u64,
+        src_row_pitch: u32,
+        dst: &crate::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let pool = self.upload_buffers.get(src.id.0 as usize).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: unknown upload buffer"))
+        })?;
+        let x_end = x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: x+width overflow")))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: y+height overflow")))?;
+        if x_end > dst.width() || y_end > dst.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer_to_texture: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                dst.width(),
+                dst.height()
+            )));
+        }
+        let min_bytes = if src_row_pitch == 0 {
+            (width as u64) * (height as u64) * 4
+        } else {
+            (src_row_pitch as u64) * (height as u64)
+        };
+        if src_offset.saturating_add(min_bytes) > pool.size {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_upload_buffer_to_texture: copy range exceeds upload buffer size"
+            )));
+        }
+        let th = dst.gpu_handle();
+        let src_resource = ResourceId::UploadBuffer(src.id.0);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_upload_buffer_to_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Texture(th),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBufferToTexture {
+                src: src_resource,
+                src_offset,
+                src_row_pitch,
+                dst: th,
+                x,
+                y,
+                width,
+                height,
             },
         });
         Ok(())
@@ -1087,13 +1365,29 @@ impl Scheme {
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
     ///
-    /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    /// When present grants are recorded and no early acquire was supplied, swapchain
+    /// drawables are acquired lazily — after non-present partitions have been submitted
+    /// — and stored on the returned [`Submission`] for [`PresentGrant::consume`]. This
+    /// lets GPU coarse/fine work overlap the DXGI frame-latency wait (Exchange
+    /// option/exercise split). Prefer [`Self::submit_with_acquired_presents`] to match
+    /// classic task-graph timing (acquire at frame start).
     ///
     /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
     /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
     /// CPU wait here.
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
+        self.submit_with_acquired_presents(Vec::new())
+    }
+
+    /// Like [`Self::submit`], but uses pre-acquired swapchain drawables.
+    ///
+    /// `acquired` must be empty (deferred acquire) or contain one entry per present
+    /// grant, in grant order, with matching lease ids. Consumed claims are moved onto
+    /// the [`Submission`]; leftovers are cancelled on drop.
+    pub fn submit_with_acquired_presents(
+        &mut self,
+        mut acquired: Vec<AcquiredPresent>,
+    ) -> Result<Submission, GoldyError> {
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         let structurally_dirty = self.dirty;
         {
@@ -1103,68 +1397,162 @@ impl Scheme {
             }
         }
 
-        let mut present_slots = Vec::with_capacity(self.present_grants.len());
-        let mut surface_frames = Vec::with_capacity(self.present_grants.len());
-        {
-            let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
-            for grant in &self.present_grants {
-                let (slot_id, surface_frame, uav_index, handle) =
-                    SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
-                present_slots.push(ResolvedPresentSlot {
-                    lease_id: grant.lease_id,
-                    slot_id,
-                    handle,
-                    uav_index,
-                });
-                surface_frames.push(Mutex::new(Some(surface_frame)));
-            }
-        }
+        let submit_result = {
+            let mut present_slots = Vec::with_capacity(self.present_grants.len());
+            let mut surface_frames = Vec::with_capacity(self.present_grants.len());
+            // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
+            // across the mutable `submit_state` call below.
+            let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>)> = self
+                .present_grants
+                .iter()
+                .map(|g| (g.lease_id, Arc::clone(&g.pool)))
+                .collect();
+            let acquire_ctx = self.ctx.clone();
 
-        {
-            let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
-            use crate::task_graph::cross_submit::net_access_per_resource;
-            let net = net_access_per_resource(&self.ir);
-            let ctx = self.ctx.backend_handle();
-            for (key, access) in &net {
-                if access.writes {
-                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
-                        stamp.drain_pending_for_submit_gate(ctx);
+            if !acquired.is_empty() {
+                if acquired.len() != present_grant_pools.len() {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "submit_with_acquired_presents: got {} acquired presents, scheme has {} present grants",
+                        acquired.len(),
+                        present_grant_pools.len()
+                    )));
+                }
+                for ((lease_id, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
+                    if claim.lease_id() != *lease_id {
+                        return Err(GoldyError::Backend(anyhow::anyhow!(
+                            "submit_with_acquired_presents: lease id mismatch (grant {}, claim {})",
+                            lease_id,
+                            claim.lease_id()
+                        )));
                     }
+                    let (lease_id, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
+                    present_slots.push(ResolvedPresentSlot {
+                        lease_id,
+                        slot_id,
+                        handle,
+                        uav_index,
+                    });
+                    surface_frames.push(Mutex::new(Some(surface_frame)));
                 }
             }
-        }
 
-        let submit_result = {
-            let _tz = crate::tracy_zone!("scheme.submit.pipelined");
-            let ir_clean = !structurally_dirty && !topo_dirty;
-            self.submit_state
-                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots, ir_clean)
-        };
-
-        let (tv, part_result) = match submit_result {
-            Ok(ok) => ok,
-            Err(e) => {
-                for frame_mutex in surface_frames {
-                    if let Ok(mut slot) = frame_mutex.lock() {
-                        if let Some(frame) = slot.take() {
-                            frame.cancel();
+            {
+                let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
+                use crate::task_graph::cross_submit::net_access_per_resource;
+                let net = net_access_per_resource(&self.ir);
+                let ctx = self.ctx.backend_handle();
+                for (key, access) in &net {
+                    if access.writes {
+                        if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
+                            stamp.drain_pending_for_submit_gate(ctx);
                         }
                     }
                 }
-                return Err(self.ctx.classify(e));
+            }
+
+            let _tz = crate::tracy_zone!("scheme.submit.pipelined");
+            let ir_clean = !structurally_dirty && !topo_dirty;
+            let had_replay = self.submit_state.has_cb_replay();
+            let upload_resolutions = self.resolve_upload_buffers_for_submit()?;
+            let result = {
+                // Deferred acquire: run Surface::begin (DXGI wait) only when the first
+                // present-touching partition is about to submit — after coarse/fine have
+                // already been enqueued so GPU work can overlap the drawable wait.
+                let mut deferred_acquire = |slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
+                    for (lease_id, pool) in &present_grant_pools {
+                        let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
+                            .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
+                        slots.push(ResolvedPresentSlot {
+                            lease_id: *lease_id,
+                            slot_id,
+                            handle,
+                            uav_index,
+                        });
+                        surface_frames.push(Mutex::new(Some(surface_frame)));
+                    }
+                    Ok(())
+                };
+                let deferred: Option<&mut DeferredPresentAcquire<'_>> =
+                    if present_grant_pools.is_empty() || !present_slots.is_empty() {
+                        None
+                    } else {
+                        Some(&mut deferred_acquire)
+                    };
+                self.submit_state.submit_pipelined_and_retain_with_presents(
+                    &self.ctx,
+                    &self.ir,
+                    &mut present_slots,
+                    deferred,
+                    &upload_resolutions,
+                    ir_clean,
+                )
+            };
+            // When CB replay was torn down (env / profiler), drop topology edges that only
+            // existed to invalidate baked retained barriers.
+            if had_replay && !self.submit_state.has_cb_replay() {
+                use crate::task_graph::cross_submit::clear_scheme_topology_registration;
+                clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
+                self.prev_topology_parcels.clear();
+                self.topology_dirty.store(false, Ordering::Release);
+            }
+            match result {
+                Ok(ok) => Ok((ok, surface_frames)),
+                Err(e) => {
+                    // Cancel any drawables acquired before the failure (present partition
+                    // or mid-acquire). Early non-present partitions may already have run —
+                    // that throwaway GPU work is intentional under deferred exercise.
+                    for frame_mutex in surface_frames {
+                        if let Ok(mut slot) = frame_mutex.lock() {
+                            if let Some(frame) = slot.take() {
+                                frame.cancel();
+                            }
+                        }
+                    }
+                    Err(e)
+                }
             }
         };
+
+        let ((tv, part_result), surface_frames) = match submit_result {
+            Ok(ok) => ok,
+            Err(e) => return Err(self.ctx.classify(e)),
+        };
+
+        // Stamp selected upload parcels with the submit timeline so they cannot be
+        // reselected until the GPU copy retires.
+        {
+            let ctx_h = self.ctx.backend_handle();
+            for pool in &mut self.upload_buffers {
+                pool.stamp_pending(ctx_h, tv);
+            }
+        }
+
+        // Present partition is last; stamp acquired frames with that epoch so
+        // Present's scratch→backbuffer copy Wait()s on it instead of inferring
+        // timeline_next-1 from an empty submit_frame().
+        for frame_mutex in &surface_frames {
+            if let Ok(mut slot) = frame_mutex.lock() {
+                if let Some(frame) = slot.as_mut() {
+                    frame.note_submit_timeline(tv);
+                }
+            }
+        }
 
         self.ctx.advance_high_water_timeline(tv);
 
         self.dirty = false;
-        self.retention_key = None;
 
         // Standalone upload partitions (WriteTexture, etc.) never increment
         // `PartitionSubmitResult.records`, but the first submit after IR mutation still
         // counts as a scheme record when `structurally_dirty`.
-        let recorded = !part_result.all_from_cache() || structurally_dirty;
-        let on_record_path = structurally_dirty || topo_dirty || recorded;
+        // With CB replay disabled, `records` stays 0 on clean submits (fresh encodes are
+        // not retention records), so topology reregistration stays gated on IR dirtiness.
+        let retention_recorded = part_result.records > 0;
+        let recorded = retention_recorded || structurally_dirty;
+        // Topology edges exist to invalidate baked barriers in retained CBs — only
+        // (re)register when CB replay is enabled and we actually recorded.
+        let on_record_path =
+            self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
 
         if on_record_path {
             use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
@@ -1494,6 +1882,65 @@ impl Scheme {
     pub fn ir_node_count(&self) -> usize {
         self.ir.nodes.len()
     }
+
+    /// Resolve pending upload-buffer stages into concrete handles for this submit.
+    fn resolve_upload_buffers_for_submit(
+        &self,
+    ) -> Result<std::collections::HashMap<u32, crate::task_graph::ResolvedUploadBuffer>, GoldyError> {
+        let mut out = std::collections::HashMap::new();
+        let mut referenced = std::collections::HashSet::new();
+        for node in &self.ir.nodes {
+            for b in &node.bindings {
+                if let ResourceId::UploadBuffer(id) = b.resource {
+                    referenced.insert(id);
+                }
+            }
+        }
+        for id in referenced {
+            let pool = self.upload_buffers.get(id as usize).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown UploadBuffer({id})"))
+            })?;
+            let resolved = pool.resolve_pending().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "submit: UploadBuffer({id}) was not staged before submit"
+                ))
+            })?;
+            out.insert(id, resolved);
+        }
+        Ok(out)
+    }
+
+    /// Test/telemetry: number of physical parcels owned by upload buffer `id`.
+    #[doc(hidden)]
+    pub fn upload_buffer_parcel_count(&self, buf: &UploadBuffer) -> usize {
+        self.upload_buffers
+            .get(buf.id.0 as usize)
+            .map(|p| p.parcels.len())
+            .unwrap_or(0)
+    }
+
+    /// Test helper: mark the first physical upload parcel as still in flight at `tv`.
+    #[doc(hidden)]
+    pub fn test_mark_upload_inflight(&mut self, buf: &UploadBuffer, tv: TimelineValue) {
+        let ctx = self.ctx.backend_handle();
+        let pool = &mut self.upload_buffers[buf.id.0 as usize];
+        pool.pending = None;
+        if let Some(parcel) = pool.parcels.first() {
+            parcel.mark_referenced(ctx, tv);
+        }
+    }
+
+    /// Test helper: number of retained CB slot variants across all partitions.
+    #[doc(hidden)]
+    pub fn test_retained_slot_variant_count(&self) -> usize {
+        self.submit_state.retained_slot_variant_count()
+    }
+
+    /// Test helper: whether a CB replay ledger is attached.
+    #[doc(hidden)]
+    pub fn test_has_cb_replay(&self) -> bool {
+        self.submit_state.has_cb_replay()
+    }
 }
 
 impl Drop for Scheme {
@@ -1512,6 +1959,9 @@ impl Drop for Scheme {
         self.submit_state.release_backend_retained_graphs(&self.ctx);
 
         let ctx = self.ctx.clone();
+        for pool in std::mem::take(&mut self.upload_buffers) {
+            pool.return_all(&ctx);
+        }
         for mut parcel in self.leases.drain(..) {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
@@ -2359,7 +2809,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         recording_scheme_with_parcel(device, pool, ctx).0
     }
 
-    fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> Scheme {
+    fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> (Scheme, crate::test_support::CbReuseOverride) {
+        let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
@@ -2377,10 +2828,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.replay_stats().records, 1);
         #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
-        scheme
+        (scheme, cb)
     }
 
-    fn leased_texture_scheme(device: &Arc<Device>) -> (Scheme, Lease<LeaseTexture>) {
+    fn leased_texture_scheme(
+        device: &Arc<Device>,
+    ) -> (Scheme, Lease<LeaseTexture>, crate::test_support::CbReuseOverride) {
+        let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_texture_shader(device);
         let pipeline = mock_pipeline(device, &shader);
@@ -2401,14 +2855,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&lease, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        (scheme, lease)
+        (scheme, lease, cb)
     }
 
     #[test]
     fn clean_submits_resubmit_without_rerecord() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = clean_scheme(&device, &mut pool);
+        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2429,7 +2883,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = clean_scheme(&device, &mut pool);
+        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2450,7 +2904,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = clean_scheme(&device, &mut pool);
+        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -2573,7 +3027,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn lease_texture_records_once_resubmits_clean() {
         let device = mock_device();
-        let (mut scheme, _lease) = leased_texture_scheme(&device);
+        let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
 
         scheme.submit().expect("first submit records");
         scheme.submit().expect("second submit resubmits");
@@ -2591,7 +3045,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn lease_backing_stamped_per_submit() {
         let device = mock_device();
-        let (mut scheme, _lease) = leased_texture_scheme(&device);
+        let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
         let frame1 = scheme.submit().unwrap();
@@ -2683,6 +3137,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn scheme_with_grant_retains() {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -3485,6 +3940,30 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    fn grant_present_stamps_frame_with_present_partition_timeline() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = scheme.grant_present(&lease);
+
+        let submission = scheme.submit().expect("submit");
+        // No read grants → finish_submit_frame keeps the present-partition tv as
+        // the submission timeline; the acquired frame must carry the same stamp
+        // so Present waits on that epoch rather than timeline_next-1.
+        let stamped = submission
+            .present_frame_submit_timeline(present.grant_id() as usize)
+            .expect("present frame must be stamped before consume");
+        assert_eq!(
+            stamped,
+            submission.timeline_value(),
+            "frame submit_tv must equal present-partition timeline"
+        );
+        present.consume(&submission).expect("present");
+    }
+
+    #[test]
     fn grant_present_second_present_errors() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -3544,6 +4023,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         // swapchain slot is seen and resubmit from cache on subsequent encounters.
         // Because the mock backend cycles through slots, the N-th submit may
         // record a new slot; we only assert that at least one resubmit occurs.
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
@@ -4015,6 +4495,197 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(
             frame2_waits.iter().any(|e| e.context == ctx_handle && e.value >= present_tv),
             "frame 2 submit must live-wait on prior present read via ledger (need wait>={present_tv}, got {frame2_waits:?})"
+        );
+    }
+
+    #[test]
+    fn upload_buffer_allocates_instead_of_waiting_while_in_flight() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(64, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(64).unwrap();
+        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 64).unwrap();
+
+        let payload_a = vec![1u8; 64];
+        scheme.stage_upload_buffer(&upload, 0, &payload_a).unwrap();
+        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 1);
+        let _sub1 = scheme.submit().unwrap();
+
+        // Mock completes submits immediately; force the physical parcel back in-flight.
+        scheme.test_mark_upload_inflight(&upload, 1_000_000);
+
+        let payload_b = vec![2u8; 64];
+        scheme.stage_upload_buffer(&upload, 0, &payload_b).unwrap();
+        assert_eq!(
+            scheme.upload_buffer_parcel_count(&upload),
+            2,
+            "in-flight staging must grow the pool instead of waiting"
+        );
+        let _sub2 = scheme.submit().unwrap();
+    }
+
+    #[test]
+    fn upload_buffer_reuses_settled_parcel() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(32).unwrap();
+        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 32).unwrap();
+
+        scheme.stage_upload_buffer(&upload, 0, &[7u8; 32]).unwrap();
+        let _ = scheme.submit().unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[8u8; 32]).unwrap();
+        assert_eq!(
+            scheme.upload_buffer_parcel_count(&upload),
+            1,
+            "settled staging parcel must be reused"
+        );
+        let _ = scheme.submit().unwrap();
+    }
+
+    #[test]
+    fn upload_buffer_rejects_submit_without_stage() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(16).unwrap();
+        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 16).unwrap();
+        let err = scheme.submit().expect_err("must require stage before submit");
+        let msg = format!("{err}");
+        assert!(msg.contains("was not staged"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn upload_buffer_warms_slot_variants_per_physical_parcel() {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(32).unwrap();
+        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 32).unwrap();
+
+        scheme.stage_upload_buffer(&upload, 0, &[1u8; 32]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.replay_stats().records, 1);
+        assert_eq!(scheme.test_retained_slot_variant_count(), 1);
+
+        scheme.stage_upload_buffer(&upload, 0, &[2u8; 32]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.test_retained_slot_variant_count(), 1);
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            1,
+            "reusing the same physical parcel must hit the warmed variant"
+        );
+
+        scheme.test_mark_upload_inflight(&upload, 1_000_000);
+        scheme.stage_upload_buffer(&upload, 0, &[3u8; 32]).unwrap();
+        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 2);
+        let _ = scheme.submit().unwrap();
+        assert_eq!(
+            scheme.test_retained_slot_variant_count(),
+            2,
+            "a newly allocated physical parcel records a new slot variant"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(scheme.replay_stats().records, 2);
+    }
+
+    #[test]
+    fn upload_buffer_to_texture_resolves_at_submit() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let tex = pool
+            .acquire_texture(
+                1,
+                1,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Direct,
+                crate::types::TextureFlags::COPY_DST,
+                None,
+            )
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(4).unwrap();
+        scheme
+            .copy_upload_buffer_to_texture(&upload, 0, 0, &tex, 0, 0, 1, 1)
+            .unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[9, 8, 7, 6]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.replay_stats().records, 1);
+        assert!(scheme.upload_buffer_parcel_count(&upload) >= 1);
+    }
+
+    #[test]
+    fn upload_buffer_scheme_drop_returns_parcels() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(16).unwrap();
+        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 16).unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[4u8; 16]).unwrap();
+        let _ = scheme.submit().unwrap();
+        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 1);
+        drop(scheme);
+        // Drop must not panic and must release CB/parcel ownership back to the context.
+        let _ = ctx.gpu_progress();
+    }
+
+    #[test]
+    fn upload_buffer_disable_cb_reuse_skips_replay_ledger() {
+        let _cb = crate::test_support::CbReuseOverride::force_disabled();
+
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let dst = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let upload = scheme.declare_upload_buffer(16).unwrap();
+        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 16).unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[1u8; 16]).unwrap();
+        let _ = scheme.submit().unwrap();
+        scheme.stage_upload_buffer(&upload, 0, &[2u8; 16]).unwrap();
+        let _ = scheme.submit().unwrap();
+
+        assert!(
+            !scheme.test_has_cb_replay(),
+            "CB-reuse disable override must tear down the replay ledger"
+        );
+        assert_eq!(
+            scheme.test_retained_slot_variant_count(),
+            0,
+            "no slot variants are retained when replay is disabled"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            0,
+            "fresh path must not count retention hits"
         );
     }
 }

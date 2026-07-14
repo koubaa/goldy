@@ -249,6 +249,13 @@ impl<T> FrameOrchestrator<T> {
             return self.context.submit_pipelined(graph);
         }
 
+        // When CB replay is disabled globally, skip whole-graph fingerprinting and
+        // resubmit attempts; TaskGraph retain path also routes to fresh submits.
+        if crate::validation_env::retained_cb_reuse_disabled() {
+            self.last_retention_key = None;
+            return self.context.submit_pipelined_and_retain(graph);
+        }
+
         // Compute the full content fingerprint — covers pipeline, dispatch dims, push constants.
         let fp = graph.compute_retention_fingerprint();
 

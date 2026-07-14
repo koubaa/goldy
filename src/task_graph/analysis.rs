@@ -109,6 +109,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
         (ResourceId::PresentLease(a), ResourceId::PresentLease(b)) => a == b,
+        (ResourceId::UploadBuffer(a), ResourceId::UploadBuffer(b)) => a == b,
         _ => false,
     }
 }
@@ -130,8 +131,19 @@ fn resolve_copy_destination(id: ResourceId, resolver: Option<&SlotResolver>) -> 
     }
 }
 
-fn resolve_buffer_copy_target(id: ResourceId, offset: u64) -> (crate::backend::BufferHandle, u64) {
-    match id {
+fn resolve_buffer_copy_target(
+    id: ResourceId,
+    offset: u64,
+    resolver: Option<&SlotResolver>,
+) -> (crate::backend::BufferHandle, u64) {
+    let resolved = match id {
+        ResourceId::UploadBuffer(_) => match resolver {
+            Some(r) => r.resolve(id),
+            None => panic!("CopyBuffer UploadBuffer emitted before submit-time resolve"),
+        },
+        other => other,
+    };
+    match resolved {
         ResourceId::Buffer(h) => (h, offset),
         ResourceId::BufferRange {
             parent, offset: base, ..
@@ -208,6 +220,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         TransientTexture(u32),
         SwapchainOutput,
         PresentLease(u32),
+        UploadBuffer(u32),
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -220,6 +233,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
             ResourceId::SwapchainOutput => GroupKey::SwapchainOutput,
             ResourceId::PresentLease(id) => GroupKey::PresentLease(id),
+            ResourceId::UploadBuffer(id) => GroupKey::UploadBuffer(id),
         }
     }
 
@@ -487,6 +501,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::TransientBuffer(_)
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
+            | ResourceId::UploadBuffer(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE
@@ -515,6 +530,7 @@ fn compute_barriers(
     let mut buffer_usage: HashMap<BufferHandle, BarrierUsage> = HashMap::new();
     let mut texture_usage: HashMap<TextureHandle, BarrierUsage> = HashMap::new();
     let mut transient_usage: HashMap<u32, BarrierUsage> = HashMap::new();
+    let mut upload_usage: HashMap<u32, BarrierUsage> = HashMap::new();
 
     // Any edge crossing into this wave means the conflicting resource needs a barrier.
     for &(from, to) in edges {
@@ -537,6 +553,17 @@ fn compute_barriers(
                         match bi.resource {
                             ResourceId::TransientBuffer(tid) => {
                                 let entry = transient_usage.entry(tid.0).or_default();
+                                entry.src.merge(
+                                    bi.access,
+                                    barrier_usage_kind_for_binding(bi.resource, bi.access, from_node),
+                                );
+                                entry.dst.merge(
+                                    bj.access,
+                                    barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
+                                );
+                            }
+                            ResourceId::UploadBuffer(uid) => {
+                                let entry = upload_usage.entry(uid).or_default();
                                 entry.src.merge(
                                     bi.access,
                                     barrier_usage_kind_for_binding(bi.resource, bi.access, from_node),
@@ -581,14 +608,17 @@ fn compute_barriers(
     let mut buffers: Vec<_> = buffer_usage.into_iter().collect();
     let mut textures: Vec<_> = texture_usage.into_iter().collect();
     let mut transient_ids: Vec<_> = transient_usage.into_iter().collect();
+    let mut upload_ids: Vec<_> = upload_usage.into_iter().collect();
     buffers.sort_by_key(|(h, _)| *h);
     textures.sort_by_key(|(h, _)| *h);
     transient_ids.sort_by_key(|(id, _)| *id);
+    upload_ids.sort_by_key(|(id, _)| *id);
 
     BarrierSet {
         buffers,
         textures,
         transient_ids,
+        upload_ids,
     }
 }
 
@@ -620,6 +650,17 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 if let Some(r) = resolver {
                     for &(tid, usage) in &wave.barriers_before.transient_ids {
                         if let Some(resolved) = r.buffers.get(&tid) {
+                            if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
+                                barrier_buffers.push((resolved.parent, usage));
+                            }
+                        }
+                    }
+                }
+            }
+            if !wave.barriers_before.upload_ids.is_empty() {
+                if let Some(r) = resolver {
+                    for &(uid, usage) in &wave.barriers_before.upload_ids {
+                        if let Some(resolved) = r.upload_buffers.get(&uid) {
                             if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
                                 barrier_buffers.push((resolved.parent, usage));
                             }
@@ -659,8 +700,8 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     dst_offset,
                     size,
                 } => {
-                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
-                    let (dst_handle, dst_off) = resolve_buffer_copy_target(*dst, *dst_offset);
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset, resolver);
+                    let (dst_handle, dst_off) = resolve_buffer_copy_target(*dst, *dst_offset, resolver);
                     commands.push(GpuCommand::CopyBuffer {
                         src: src_handle,
                         src_offset: src_off,
@@ -679,7 +720,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     width,
                     height,
                 } => {
-                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset, resolver);
                     commands.push(GpuCommand::CopyBufferToTexture {
                         src: src_handle,
                         src_offset: src_off,
@@ -727,7 +768,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     dst_buffer_layout,
                 } => {
                     if let Some(layout) = dst_buffer_layout {
-                        let (dst_buf, _) = resolve_buffer_copy_target(*dst, 0);
+                        let (dst_buf, _) = resolve_buffer_copy_target(*dst, 0, resolver);
                         commands.push(GpuCommand::CopyTextureToReadback {
                             src: *src,
                             dst: dst_buf,
@@ -1227,6 +1268,18 @@ pub(crate) fn partition_waves_have_present(ir: &GraphIR, waves: &[Wave]) -> bool
     waves.iter().any(|w| wave_has_present_binding(ir, w))
 }
 
+/// Returns true if any node in `waves` references a scheme upload-buffer slot.
+pub(crate) fn partition_waves_have_upload_slots(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| {
+        w.node_indices.iter().any(|&ni| {
+            ir.nodes[ni]
+                .bindings
+                .iter()
+                .any(|b| matches!(b.resource, ResourceId::UploadBuffer(_)))
+        })
+    })
+}
+
 fn wave_has_present_binding(ir: &GraphIR, wave: &Wave) -> bool {
     wave.node_indices.iter().any(|&ni| {
         ir.nodes[ni]
@@ -1268,6 +1321,17 @@ pub(crate) fn emit_graph_commands_for_waves(
                     }
                 }
             }
+            if !wave.barriers_before.upload_ids.is_empty() {
+                if let Some(r) = resolver {
+                    for &(uid, usage) in &wave.barriers_before.upload_ids {
+                        if let Some(resolved) = r.upload_buffers.get(&uid) {
+                            if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
+                                barrier_buffers.push((resolved.parent, usage));
+                            }
+                        }
+                    }
+                }
+            }
             commands.push(GraphCommand::Compute(GpuCommand::ResourceBarrier {
                 buffers: barrier_buffers,
                 textures: wave.barriers_before.textures.clone(),
@@ -1299,8 +1363,8 @@ pub(crate) fn emit_graph_commands_for_waves(
                     dst_offset,
                     size,
                 } => {
-                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
-                    let (dst_handle, dst_off) = resolve_buffer_copy_target(*dst, *dst_offset);
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset, resolver);
+                    let (dst_handle, dst_off) = resolve_buffer_copy_target(*dst, *dst_offset, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyBuffer {
                         src: src_handle,
                         src_offset: src_off,
@@ -1319,7 +1383,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     width,
                     height,
                 } => {
-                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyBufferToTexture {
                         src: src_handle,
                         src_offset: src_off,
@@ -1367,7 +1431,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     dst_buffer_layout,
                 } => {
                     if let Some(layout) = dst_buffer_layout {
-                        let (dst_buf, _) = resolve_buffer_copy_target(*dst, 0);
+                        let (dst_buf, _) = resolve_buffer_copy_target(*dst, 0, resolver);
                         commands.push(GraphCommand::Compute(GpuCommand::CopyTextureToReadback {
                             src: *src,
                             dst: dst_buf,
