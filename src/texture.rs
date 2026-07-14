@@ -22,6 +22,8 @@ pub(crate) struct TextureBacking {
     access: TextureKind,
     flags: TextureFlags,
     owned: bool,
+    bindless_storage: Option<u32>,
+    bindless_sampled: Option<u32>,
     /// Accounting deed for observer + allocator notification on drop.
     deed: Option<ParcelDeed>,
 }
@@ -66,9 +68,12 @@ impl TextureBacking {
         flags: TextureFlags,
     ) -> Result<Self> {
         tracing::debug!(width, height, ?format, ?access, ?flags, "Creating texture");
-        let handle = {
+        let (handle, bindless_storage, bindless_sampled) = {
             let mut backend = device.inner.backend.lock().unwrap();
-            backend.create_texture(device.inner.handle, width, height, format, access, flags)?
+            let handle = backend.create_texture(device.inner.handle, width, height, format, access, flags)?;
+            let bindless_storage = backend.texture_bindless_index(handle);
+            let bindless_sampled = backend.texture_bindless_sampled_index(handle);
+            (handle, bindless_storage, bindless_sampled)
         };
 
         Ok(Self {
@@ -81,6 +86,8 @@ impl TextureBacking {
             access,
             flags,
             owned: true,
+            bindless_storage,
+            bindless_sampled,
             deed: None,
         })
     }
@@ -264,19 +271,14 @@ impl TextureBacking {
 
     /// Resource descriptor index for how this texture will be accessed in the current dispatch.
     pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
         match (self.access, access) {
-            (TextureKind::Interpolated, ResourceAccess::Read) => backend.texture_bindless_index(self.handle),
+            (TextureKind::Interpolated, ResourceAccess::Read) => self.bindless_storage,
             (TextureKind::Interpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
             (TextureKind::Direct, ResourceAccess::Read) => None,
-            (TextureKind::Direct, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
-                backend.texture_bindless_index(self.handle)
-            }
-            (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
-                backend.texture_bindless_sampled_index(self.handle)
-            }
+            (TextureKind::Direct, ResourceAccess::Write | ResourceAccess::ReadWrite) => self.bindless_storage,
+            (TextureKind::DirectInterpolated, ResourceAccess::Read) => self.bindless_sampled,
             (TextureKind::DirectInterpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
-                backend.texture_bindless_index(self.handle)
+                self.bindless_storage
             }
         }
     }
@@ -342,6 +344,8 @@ impl TextureBacking {
             access: self.access,
             flags: self.flags,
             owned: false,
+            bindless_storage: self.bindless_storage,
+            bindless_sampled: self.bindless_sampled,
             deed: None,
         }
     }
@@ -361,6 +365,13 @@ impl TextureBacking {
         height: u32,
         format: TextureFormat,
     ) -> Self {
+        let (bindless_storage, bindless_sampled) = {
+            let backend = backend.lock().unwrap();
+            (
+                backend.texture_bindless_index(handle),
+                backend.texture_bindless_sampled_index(handle),
+            )
+        };
         Self {
             _device: None,
             backend,
@@ -371,6 +382,8 @@ impl TextureBacking {
             access: TextureKind::Direct,
             flags: TextureFlags::empty(),
             owned: false,
+            bindless_storage,
+            bindless_sampled,
             deed: None,
         }
     }

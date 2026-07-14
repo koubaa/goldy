@@ -34,6 +34,7 @@ pub struct Sampler {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: SamplerHandle,
+    bindless: Option<u32>,
 }
 
 impl Sampler {
@@ -54,15 +55,18 @@ impl Sampler {
             address_u = ?desc.address_mode_u,
             "Creating sampler"
         );
-        let handle = {
+        let (handle, bindless) = {
             let mut backend = device.inner.backend.lock().unwrap();
-            backend.create_sampler(device.inner.handle, desc)?
+            let handle = backend.create_sampler(device.inner.handle, desc)?;
+            let bindless = backend.sampler_bindless_index(handle);
+            (handle, bindless)
         };
 
         Ok(Self {
             _device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
+            bindless,
         })
     }
 
@@ -133,10 +137,7 @@ impl Sampler {
     /// Resource descriptor index for how this sampler will be accessed in the current dispatch.
     pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match access {
-            ResourceAccess::Read => {
-                let backend = self.backend.lock().unwrap();
-                backend.sampler_bindless_index(self.handle)
-            }
+            ResourceAccess::Read => self.bindless,
             ResourceAccess::Write | ResourceAccess::ReadWrite => None,
         }
     }

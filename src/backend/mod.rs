@@ -828,6 +828,12 @@ pub trait ContextDeferredDeletionFlush: Send + Sync {
     fn flush(&self);
 }
 
+/// Lock-free per-context GPU timeline progress query (Vulkan/DX12 fence or semaphore value).
+#[doc(hidden)]
+pub trait ContextGpuProgress: Send + Sync {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue;
+}
+
 /// Per-context reclamation epoch scope (Metal heap routing during `boundary_crossed`).
 #[doc(hidden)]
 pub trait ContextReclamationScope: Send + Sync {
@@ -1081,6 +1087,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         &self,
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>>;
+
+    /// Clone a lock-free GPU progress query for [`Context::gpu_progress`].
+    #[doc(hidden)]
+    fn clone_context_gpu_progress(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextGpuProgress>> {
+        let _ = ctx;
+        None
+    }
 
     /// Clone the per-context reclamation scope for [`Context::boundary_crossed`].
     #[doc(hidden)]
