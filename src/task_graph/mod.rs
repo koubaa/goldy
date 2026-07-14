@@ -91,7 +91,7 @@ mod graph;
 mod ir;
 pub mod record;
 
-pub(crate) use graph::{apply_stamp_targets, IrSubmitState, ResolvedPresentSlot};
+pub(crate) use graph::{apply_stamp_targets, DeferredPresentAcquire, IrSubmitState, ResolvedPresentSlot};
 pub use graph::{NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph};
 pub use ir::{BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};

@@ -249,7 +249,7 @@ pub mod test_support {
         }
     }
 
-    /// Thread-local pin for [`crate::validation_env::retained_cb_reuse_disabled`].
+    /// Thread-local pin for retained command-buffer reuse (see `validation_env`).
     ///
     /// Retention-asserting tests must call [`Self::force_enabled`] so a developer
     /// shell with `GOLDY_DISABLE_CB_REUSE=1` cannot flip the suite. Disable-path

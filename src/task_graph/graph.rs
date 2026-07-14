@@ -994,6 +994,9 @@ pub(crate) struct ResolvedPresentSlot {
     pub uav_index: u32,
 }
 
+/// Deferred swapchain acquire callback for the first present-touching partition.
+pub(crate) type DeferredPresentAcquire<'a> = dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()> + 'a;
+
 /// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir`].
 ///
 /// Present slots may be empty at entry. When a present-touching partition is about
@@ -1006,7 +1009,7 @@ pub(crate) struct ResolvedPresentSlot {
 pub(crate) struct PresentSubmitOptions<'a> {
     pub present_slots: &'a mut Vec<ResolvedPresentSlot>,
     /// Called once, on the first present partition, when `present_slots` is still empty.
-    pub deferred_acquire: Option<&'a mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
+    pub deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
     /// Scheme upload-buffer resolutions for this submission (may be empty).
     pub upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
@@ -1018,7 +1021,7 @@ pub(crate) struct PresentSubmitOptions<'a> {
 /// Exercise deferred present acquire and populate the slot resolver (once).
 fn ensure_present_ready(
     present_slots: &mut Vec<ResolvedPresentSlot>,
-    deferred_acquire: &mut Option<&mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
+    deferred_acquire: &mut Option<&mut DeferredPresentAcquire<'_>>,
     resolver: &mut super::SlotResolver,
     present_resolver_ready: &mut bool,
 ) -> Result<()> {
@@ -1133,12 +1136,7 @@ fn try_merge_fresh_segments(plan: &[FreshSegment], idx: usize, separate_graphics
     }
     let a = &plan[idx];
     let b = &plan[idx + 1];
-    !a.has_present
-        && !b.has_present
-        && !a.needs_standalone
-        && !b.needs_standalone
-        && !a.has_render
-        && b.has_render
+    !a.has_present && !b.has_present && !a.needs_standalone && !b.needs_standalone && !a.has_render && b.has_render
 }
 
 /// Submit `ir` with optional per-partition CB replay.
@@ -1273,15 +1271,15 @@ fn submit_resolved_ir_partitions_fresh(
                 last_tv = backend_submit_graph(session, ctx, &graph_cmds, merged.as_ref())?;
             } else {
                 // Pure compute, uploads, and present tail: surface-style standalone.
-                let needs_resolver = partition_needs_slot_resolver(ir, &cache.as_ref().unwrap().schedule.waves[wave_range.clone()], has_present);
+                let needs_resolver = partition_needs_slot_resolver(
+                    ir,
+                    &cache.as_ref().unwrap().schedule.waves[wave_range.clone()],
+                    has_present,
+                );
                 let cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.fresh_emit");
                     let waves = &cache.as_ref().unwrap().schedule.waves[wave_range.clone()];
-                    analysis::emit_waves_to_commands(
-                        ir,
-                        waves,
-                        if needs_resolver { Some(&resolver) } else { None },
-                    )
+                    analysis::emit_waves_to_commands(ir, waves, if needs_resolver { Some(&resolver) } else { None })
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.fresh");
                 last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
@@ -1408,14 +1406,7 @@ fn submit_resolved_ir_partitions_replay(
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         replay.record_merged_last_tvs(part_idx, last_tv);
-                        apply_partition_epoch_stamps(
-                            resource_stamps,
-                            stamp_targets,
-                            ctx,
-                            ir,
-                            &merged_waves,
-                            last_tv,
-                        );
+                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
                         part_idx += 2;
                         continue;
                     }
@@ -1810,13 +1801,7 @@ impl IrSubmitState {
     pub fn retained_slot_variant_count(&self) -> usize {
         self.replay
             .as_ref()
-            .map(|r| {
-                r.partition_slot_keys
-                    .iter()
-                    .flatten()
-                    .map(|s| s.len())
-                    .sum()
-            })
+            .map(|r| r.partition_slot_keys.iter().flatten().map(|s| s.len()).sum())
             .unwrap_or(0)
     }
 
@@ -1833,7 +1818,7 @@ impl IrSubmitState {
         ctx: &crate::Context,
         ir: &GraphIR,
         present_slots: &'a mut Vec<ResolvedPresentSlot>,
-        deferred_acquire: Option<&'a mut dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()>>,
+        deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
         upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
         ir_clean: bool,
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
@@ -5110,14 +5095,7 @@ mod slice_retention_tests {
         let mut present_slots = Vec::new();
         let empty_uploads = std::collections::HashMap::new();
         state
-            .submit_pipelined_and_retain_with_presents(
-                ctx,
-                ir,
-                &mut present_slots,
-                None,
-                &empty_uploads,
-                ir_clean,
-            )
+            .submit_pipelined_and_retain_with_presents(ctx, ir, &mut present_slots, None, &empty_uploads, ir_clean)
             .unwrap();
     }
 
@@ -5372,13 +5350,8 @@ mod slice_retention_tests {
         let ctx = device.create_context().unwrap();
 
         // Create a real mock render target so submit_graph's render path succeeds.
-        let rt = crate::render_target::RenderTarget::new(
-            &device,
-            4,
-            4,
-            crate::types::TextureFormat::Rgba8Unorm,
-        )
-        .unwrap();
+        let rt =
+            crate::render_target::RenderTarget::new(&device, 4, 4, crate::types::TextureFormat::Rgba8Unorm).unwrap();
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {

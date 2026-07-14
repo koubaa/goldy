@@ -823,11 +823,7 @@ impl Device {
     ///
     /// On DX12 this is `IDXGIAdapter3::QueryVideoMemoryInfo` (local + non-local segments).
     pub fn video_memory_info(&self) -> Option<crate::backend::VideoMemoryInfo> {
-        self.inner
-            .backend
-            .lock()
-            .unwrap()
-            .query_video_memory(self.inner.handle)
+        self.inner.backend.lock().unwrap().query_video_memory(self.inner.handle)
     }
 
     /// Number of bindless descriptor slots still available for allocation in

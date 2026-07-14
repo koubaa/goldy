@@ -56,10 +56,7 @@ impl AcquiredPresent {
     }
 
     pub(crate) fn into_parts(mut self) -> (u32, u32, TextureHandle, u32, SurfaceFrame) {
-        let frame = self
-            .frame
-            .take()
-            .expect("AcquiredPresent frame already taken");
+        let frame = self.frame.take().expect("AcquiredPresent frame already taken");
         let lease_id = self.lease_id;
         let slot_id = self.slot_id;
         let handle = self.handle;

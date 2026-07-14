@@ -553,6 +553,7 @@ impl Frame {
     }
 
     /// Timeline already associated with this frame's GPU submit, if any.
+    #[cfg(test)]
     pub(crate) fn submit_timeline(&self) -> Option<TimelineValue> {
         self.submit_tv
     }
