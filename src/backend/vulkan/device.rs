@@ -50,7 +50,10 @@ pub(super) fn adapter_capabilities(
     physical_devices: &[PhysicalDeviceInfo],
     adapter_id: u32,
 ) -> crate::device::DeviceCapabilities {
-    let mut caps = crate::device::DeviceCapabilities::default();
+    let mut caps = crate::device::DeviceCapabilities {
+        host_sidecar_on_submit_worker: true,
+        ..Default::default()
+    };
     if physical_devices
         .iter()
         .find(|d| d.adapter_id == adapter_id)

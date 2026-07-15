@@ -471,6 +471,58 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         );
     }
 
+    fn retained_resubmit_applies_deferred_host_write_before_gpu(device: &Device) {
+        if !device.capabilities().host_sidecar_on_submit_worker {
+            // Metal still applies host writes on the render thread.
+            return;
+        }
+
+        use goldy::types::BufferFlags;
+        use goldy::Buffer;
+
+        let ctx = submission_context(device);
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let dest = pool
+            .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+            .expect("dest");
+        let staging = pool
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::CPU_WRITABLE, None)
+            .expect("staging");
+        staging.write(0, &[0u8; 16]).expect("zero staging");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .copy_buffer_parcel(staging.whole(), 0, dest.whole(), 0, 16)
+            .expect("copy");
+        let grant = scheme.grant_read(&dest).expect("grant");
+        let first = scheme.submit().expect("record");
+        let first_tv = first.timeline_value();
+        assert_eq!(read_u32(&grant, &first), 0, "initial dest must be zero");
+
+        let new_bytes: Box<[u8]> = Box::from([7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0]);
+        scheme.record_reuse_epochs(&dest.last_referenced());
+        scheme.defer_host_write(&staging.last_referenced(), &staging, 0, new_bytes);
+
+        let second = scheme.submit().expect("resubmit with host sidecar");
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            1,
+            "second submit must be a retained hit"
+        );
+        assert!(
+            second.timeline_value() > first_tv,
+            "resubmit must advance the timeline"
+        );
+        assert_eq!(
+            read_u32(&grant, &second),
+            7,
+            "deferred host write must land before retained GPU copy executes"
+        );
+
+        let _: &Buffer = &staging;
+    }
+
     pub fn run() {
         let device = make_device();
 
@@ -495,6 +547,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         trial!(topology_re_record_produces_correct_barriers_and_data);
         trial!(repeated_resubmit_of_b_never_dirties_a);
         trial!(partitioned_buffer_disjoint_ranges_no_cross_submit_hazard);
+        trial!(retained_resubmit_applies_deferred_host_write_before_gpu);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);

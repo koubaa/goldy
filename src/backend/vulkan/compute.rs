@@ -615,6 +615,7 @@ fn enqueue_vulkan_compute_with_housekeeping(
     super::pending_submit::enqueue_vulkan_submit(
         ld,
         view.contexts,
+        view.buffers,
         queue,
         queue_lock,
         timeline_sem,

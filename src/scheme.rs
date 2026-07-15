@@ -1348,7 +1348,8 @@ impl Scheme {
 
     /// Defer a host-visible buffer write until the submission worker after `refs` retire on the CPU.
     ///
-    /// Currently applied by the DX12 submission worker only.
+    /// Applied by the DX12 and Vulkan submission workers when
+    /// [`crate::DeviceCapabilities::host_sidecar_on_submit_worker`] is true.
     pub fn defer_host_write(
         &mut self,
         refs: &crate::timeline::ReferenceTable,
