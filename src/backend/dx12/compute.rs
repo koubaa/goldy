@@ -2796,14 +2796,18 @@ pub(super) fn try_resubmit_retained_with_scope(
     let logical_device = scope.ld();
 
     let fence_value = if on_device_queue {
-        let prior_signal = logical_device
-            .device_direct_pool
-            .lock()
-            .unwrap()
-            .get(slot_idx)
-            .map(|s| s.fence_value)
-            .unwrap_or(0);
+        let prior_signal = {
+            let _tz = tracy_zone!("dx12.resubmit_retained.prior_signal");
+            logical_device
+                .device_direct_pool
+                .lock()
+                .unwrap()
+                .get(slot_idx)
+                .map(|s| s.fence_value)
+                .unwrap_or(0)
+        };
         if prior_signal > 0 {
+            let _tz = tracy_zone!("dx12.resubmit_retained.prior_wait");
             let completed = unsafe { logical_device.fence.GetCompletedValue() };
             if completed < prior_signal {
                 super::utils::wait_for_fence(&logical_device.fence, prior_signal)?;
@@ -2834,17 +2838,21 @@ pub(super) fn try_resubmit_retained_with_scope(
         let stamp_ctx = scope
             .device_owner
             .context("device owner handle missing for device-queue render resubmit")?;
-        logical_device.descriptors.lock().unwrap().record_slot_usage(
-            stamp_ctx,
-            fence_value,
-            used_slots.iter().copied(),
-        );
+        {
+            let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
+            logical_device.descriptors.lock().unwrap().record_slot_usage(
+                stamp_ctx,
+                fence_value,
+                used_slots.iter().copied(),
+            );
+        }
         logical_device
             .submission_worker
             .record_synchronous_submit(fence_value)?;
         fence_value
     } else {
         let (queue, queue_lock, prior_signal) = {
+            let _tz = tracy_zone!("dx12.resubmit_retained.acquire_queue");
             let sc = scope.sc.lock().unwrap();
             let prior_signal = sc
                 .compute_allocator_pool
@@ -2858,12 +2866,16 @@ pub(super) fn try_resubmit_retained_with_scope(
             )
         };
         if prior_signal > 0 {
+            let _tz = tracy_zone!("dx12.resubmit_retained.prior_wait");
             let completed = unsafe { ctx_fence.GetCompletedValue() };
             if completed < prior_signal {
                 super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
             }
         }
-        let fence_value = allocate_timeline_value(&logical_device.timeline_next);
+        let fence_value = {
+            let _tz = tracy_zone!("dx12.resubmit_retained.alloc_timeline");
+            allocate_timeline_value(&logical_device.timeline_next)
+        };
 
         {
             let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
