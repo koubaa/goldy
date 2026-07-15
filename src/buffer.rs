@@ -7,6 +7,21 @@ use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
+fn bindless_cache_from_backend(
+    backend: &dyn GpuBackend,
+    handle: BufferHandle,
+    access: BufferKind,
+) -> (Option<u32>, Option<u32>, Option<u32>) {
+    match access {
+        BufferKind::Broadcast => (None, None, backend.buffer_bindless_index(handle)),
+        BufferKind::Scattered => (
+            backend.buffer_bindless_index(handle),
+            backend.buffer_bindless_srv_index(handle),
+            None,
+        ),
+    }
+}
+
 /// Types allowed as elements in [`RetainedPool::acquire_buffer_with_data`](crate::RetainedPool::acquire_buffer_with_data)
 /// and [`BufferPool::alloc_with_data`].
 ///
@@ -49,6 +64,12 @@ pub(crate) struct Allocation {
     peak_committed_bytes: u64,
     /// Number of completed [`Self::resize_to`] / [`Self::resize_to_uninitialized`] calls.
     resize_count: u32,
+    /// Cached bindless UAV index (Scattered write / RW).
+    bindless_uav: Option<u32>,
+    /// Cached bindless SRV index (Scattered read).
+    bindless_srv: Option<u32>,
+    /// Cached bindless CBV index (Broadcast read).
+    bindless_cbv: Option<u32>,
     /// Accounting deed for observer + allocator notification on drop.
     deed: Option<ParcelDeed>,
 }
@@ -114,6 +135,7 @@ impl Allocation {
         let mut backend = device.inner.backend.lock().unwrap();
         let (handle, allocated_size) =
             backend.create_buffer_with_capacity(device.inner.handle, initial_size, capacity, access, None, flags)?;
+        let (bindless_uav, bindless_srv, bindless_cbv) = bindless_cache_from_backend(&**backend, handle, access);
         Ok(Self {
             device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
@@ -125,6 +147,9 @@ impl Allocation {
             flags,
             peak_committed_bytes: allocated_size,
             resize_count: 0,
+            bindless_uav,
+            bindless_srv,
+            bindless_cbv,
             deed: None,
         })
     }
@@ -151,6 +176,7 @@ impl Allocation {
         }
         let mut backend = device.inner.backend.lock().unwrap();
         let handle = backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
+        let (bindless_uav, bindless_srv, bindless_cbv) = bindless_cache_from_backend(&**backend, handle, access);
 
         Ok(Self {
             device: device.clone(),
@@ -163,6 +189,9 @@ impl Allocation {
             flags,
             peak_committed_bytes: size,
             resize_count: 0,
+            bindless_uav,
+            bindless_srv,
+            bindless_cbv,
             deed: None,
         })
     }
@@ -204,6 +233,7 @@ impl Allocation {
             Some(element_stride),
             flags,
         )?;
+        let (bindless_uav, bindless_srv, bindless_cbv) = bindless_cache_from_backend(&**backend, handle, access);
         drop(backend);
 
         let buffer = Self {
@@ -217,6 +247,9 @@ impl Allocation {
             flags,
             peak_committed_bytes: bytes.len() as u64,
             resize_count: 0,
+            bindless_uav,
+            bindless_srv,
+            bindless_cbv,
             deed: None,
         };
         buffer.write(0, bytes)?;
@@ -266,6 +299,7 @@ impl Allocation {
             Some(element_stride),
             flags,
         )?;
+        let (bindless_uav, bindless_srv, bindless_cbv) = bindless_cache_from_backend(&**backend, handle, access);
         drop(backend);
 
         let buffer = Self {
@@ -279,6 +313,9 @@ impl Allocation {
             flags,
             peak_committed_bytes: data.len() as u64,
             resize_count: 0,
+            bindless_uav,
+            bindless_srv,
+            bindless_cbv,
             deed: None,
         };
         buffer.write(0, data)?;
@@ -405,14 +442,11 @@ impl Allocation {
     ///
     /// Returns `None` for invalid access/kind combinations (e.g. write on `Broadcast`).
     pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
         match (self.access, access) {
-            (BufferKind::Broadcast, ResourceAccess::Read) => backend.buffer_bindless_index(self.handle),
+            (BufferKind::Broadcast, ResourceAccess::Read) => self.bindless_cbv,
             (BufferKind::Broadcast, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
-            (BufferKind::Scattered, ResourceAccess::Read) => backend.buffer_bindless_srv_index(self.handle),
-            (BufferKind::Scattered, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
-                backend.buffer_bindless_index(self.handle)
-            }
+            (BufferKind::Scattered, ResourceAccess::Read) => self.bindless_srv,
+            (BufferKind::Scattered, ResourceAccess::Write | ResourceAccess::ReadWrite) => self.bindless_uav,
         }
     }
 
@@ -461,6 +495,8 @@ impl Allocation {
     pub fn create_view(&self, offset: u64, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_buffer_view(self.handle, offset, size, element_stride)?;
+        let bindless_uav = backend.buffer_bindless_index(handle);
+        let bindless_srv = backend.buffer_bindless_srv_index(handle);
         Ok(BufferView {
             _device: self.device.clone(),
             backend: Arc::clone(&self.backend),
@@ -468,6 +504,8 @@ impl Allocation {
             parent_handle: self.handle,
             offset,
             size,
+            bindless_uav,
+            bindless_srv,
         })
     }
 
@@ -534,15 +572,16 @@ pub struct BufferView {
     parent_handle: BufferHandle,
     offset: u64,
     size: u64,
+    bindless_uav: Option<u32>,
+    bindless_srv: Option<u32>,
 }
 
 impl BufferView {
     /// Resource descriptor index for how this view will be accessed in the current dispatch.
     pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
-        let backend = self.backend.lock().unwrap();
         match access {
-            ResourceAccess::Read => backend.buffer_bindless_srv_index(self.handle),
-            ResourceAccess::Write | ResourceAccess::ReadWrite => backend.buffer_bindless_index(self.handle),
+            ResourceAccess::Read => self.bindless_srv,
+            ResourceAccess::Write | ResourceAccess::ReadWrite => self.bindless_uav,
         }
     }
 

@@ -482,6 +482,19 @@ impl GpuBackend for VulkanBackend {
         }))
     }
 
+    fn clone_context_gpu_progress(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextGpuProgress>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?);
+        let device_handle = {
+            let sc_guard = sc.lock().unwrap();
+            sc_guard.device
+        };
+        let ld = std::sync::Arc::clone(self.state.devices.get(&device_handle)?);
+        Some(std::sync::Arc::new(VulkanContextGpuProgress { sc, ld }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -1567,6 +1580,18 @@ impl crate::backend::TimelineBlockingWait for VulkanTimelineBlockingWait {
                 Err(anyhow::anyhow!("wait_semaphores: {:?}", e))
             }
         }
+    }
+}
+
+struct VulkanContextGpuProgress {
+    sc: types::SharedSubmissionContext,
+    ld: types::SharedLogicalDevice,
+}
+
+impl crate::backend::ContextGpuProgress for VulkanContextGpuProgress {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        let sc = self.sc.lock().unwrap();
+        unsafe { self.ld.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0)
     }
 }
 

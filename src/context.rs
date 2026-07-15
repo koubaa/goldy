@@ -28,6 +28,7 @@ pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
     deletion_flush: Option<Arc<dyn crate::backend::ContextDeferredDeletionFlush>>,
+    gpu_progress: Option<Arc<dyn crate::backend::ContextGpuProgress>>,
     reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
     submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
     high_water_timeline: AtomicU64,
@@ -71,6 +72,7 @@ impl Drop for ContextInner {
         // Release cloned per-context backend handles before teardown.
         // Backends expect sole ownership of the per-context Arc at teardown.
         self.deletion_flush.take();
+        self.gpu_progress.take();
         self.reclamation_scope.take();
         self.submit_session.take();
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
@@ -95,15 +97,19 @@ impl Context {
             let reclamation_scope = backend.clone_context_reclamation_scope(handle);
             (deletion_flush, reclamation_scope)
         };
-        let submit_session = {
+        let (submit_session, gpu_progress) = {
             let backend = device.inner.backend.lock().unwrap();
-            backend.clone_context_submit_session(handle, Arc::clone(&device.inner.backend))
+            (
+                backend.clone_context_submit_session(handle, Arc::clone(&device.inner.backend)),
+                backend.clone_context_gpu_progress(handle),
+            )
         };
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
                 handle,
                 deletion_flush: Some(deletion_flush),
+                gpu_progress,
                 reclamation_scope: Some(reclamation_scope),
                 submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
@@ -170,6 +176,9 @@ impl Context {
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("context.gpu_progress");
         let _query = crate::tracy_zone!("context.gpu_progress.query");
+        if let Some(progress) = &self.inner.gpu_progress {
+            return progress.gpu_progress();
+        }
         self.inner
             .device
             .inner

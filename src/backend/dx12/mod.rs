@@ -627,6 +627,17 @@ impl GpuBackend for Dx12Backend {
         }))
     }
 
+    fn clone_context_gpu_progress(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextGpuProgress>> {
+        self.state.contexts.read().unwrap().get(&ctx)?;
+        Some(std::sync::Arc::new(Dx12ContextGpuProgress {
+            ctx,
+            context_fences: std::sync::Arc::clone(&self.state.context_fences),
+        }))
+    }
+
     fn clone_context_reclamation_scope(
         &self,
         ctx: ContextHandle,
@@ -1513,6 +1524,23 @@ struct Dx12ContextDeferredDeletionFlush {
     ld: types::SharedLogicalDevice,
     context_fences:
         std::sync::Arc<std::sync::RwLock<std::collections::HashMap<ContextHandle, types::ContextFenceEntry>>>,
+}
+
+struct Dx12ContextGpuProgress {
+    ctx: ContextHandle,
+    context_fences:
+        std::sync::Arc<std::sync::RwLock<std::collections::HashMap<ContextHandle, types::ContextFenceEntry>>>,
+}
+
+impl crate::backend::ContextGpuProgress for Dx12ContextGpuProgress {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        self.context_fences
+            .read()
+            .unwrap()
+            .get(&self.ctx)
+            .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
+            .unwrap_or(0)
+    }
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletionFlush {

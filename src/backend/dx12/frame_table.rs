@@ -106,8 +106,13 @@ pub(crate) fn init_context(
         last_token_for_row: std::array::from_fn(|_| AtomicU64::new(0)),
     });
 
-    let buffers = state.buffers.read().unwrap();
-    if let Err(e) = bind_to_bindless_heap(ld, &ft, &buffers.entries) {
+    // Drop the BufferTable read before any error cleanup: destroy_context takes
+    // buffers.write() and nesting that under a live read is a permanent hang.
+    let bind_result = {
+        let buffers = state.buffers.read().unwrap();
+        bind_to_bindless_heap(ld, &ft, &buffers.entries)
+    };
+    if let Err(e) = bind_result {
         destroy_context(state, device_handle, &ft);
         return Err(e);
     }

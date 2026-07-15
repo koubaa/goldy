@@ -389,6 +389,14 @@ impl GpuBackend for MetalBackend {
         }))
     }
 
+    fn clone_context_gpu_progress(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextGpuProgress>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        Some(std::sync::Arc::new(MetalContextGpuProgress { sc }))
+    }
+
     fn clone_context_reclamation_scope(
         &self,
         ctx: ContextHandle,
@@ -1178,6 +1186,16 @@ impl crate::backend::TimelineBlockingWait for MetalWaiterBlockingWait {
             return Ok(false);
         }
         Ok(true)
+    }
+}
+
+struct MetalContextGpuProgress {
+    sc: types::SharedMetalSubmissionContext,
+}
+
+impl crate::backend::ContextGpuProgress for MetalContextGpuProgress {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        context::context_gpu_progress(&self.sc.lock().unwrap())
     }
 }
 

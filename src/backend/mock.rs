@@ -119,6 +119,16 @@ struct MockContextState {
 
 struct MockContextDestroyHandle;
 
+struct MockContextGpuProgress {
+    state: std::sync::Arc<std::sync::Mutex<MockContextState>>,
+}
+
+impl crate::backend::ContextGpuProgress for MockContextGpuProgress {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        self.state.lock().unwrap().completed
+    }
+}
+
 impl ContextDestroyHandle for MockContextDestroyHandle {
     fn wait(&self) -> Result<()> {
         Ok(())
@@ -730,6 +740,15 @@ impl GpuBackend for MockBackend {
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let _ = ctx;
         Some(std::sync::Arc::new(crate::backend::NoOpDeferredDeletionFlush))
+    }
+
+    fn clone_context_gpu_progress(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextGpuProgress>> {
+        Some(std::sync::Arc::new(MockContextGpuProgress {
+            state: std::sync::Arc::clone(self.contexts.get(&ctx)?),
+        }))
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {

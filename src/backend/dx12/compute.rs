@@ -1441,16 +1441,21 @@ fn record_gpu_command(
             data,
         } => {
             let _tz = tracy_zone!("dx12.write_buffer");
-            let buffers_read = scope.buffers().read().unwrap();
-            let buf_state = buffers_read
-                .entries
-                .get(buf_handle)
-                .context("WriteBuffer: invalid buffer handle")?;
-            if !buf_state.is_storage {
+            // Snapshot under one BufferTable read. Nested re-reads deadlock when a
+            // writer is queued: Rust's RwLock blocks new readers while writers wait,
+            // so the second read never arrives and the held first guard never drops.
+            let (is_storage, resource) = {
+                let buffers_read = scope.buffers().read().unwrap();
+                let buf_state = buffers_read
+                    .entries
+                    .get(buf_handle)
+                    .context("WriteBuffer: invalid buffer handle")?;
+                (buf_state.is_storage, buf_state.resource.clone())
+            };
+            if !is_storage {
                 let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
                 let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-                unsafe { buf_state.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
-                    .context("WriteBuffer: map failed")?;
+                unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("WriteBuffer: map failed")?;
                 unsafe {
                     std::ptr::copy_nonoverlapping(data.as_ptr(), (mapped as *mut u8).add(*offset as usize), data.len());
                 }
@@ -1458,7 +1463,7 @@ fn record_gpu_command(
                     Begin: *offset as usize,
                     End: (*offset as usize) + data.len(),
                 };
-                unsafe { buf_state.resource.Unmap(0, Some(&written_range)) };
+                unsafe { resource.Unmap(0, Some(&written_range)) };
             } else {
                 let belt_entry = ctx
                     .belt_slices
@@ -1467,11 +1472,9 @@ fn record_gpu_command(
                 ctx.belt_idx += 1;
                 let upload_src = belt_entry.0.clone();
                 let upload_off = belt_entry.1;
-                let buffers_read = scope.buffers().read().unwrap();
-                let buf_state = buffers_read.entries.get(buf_handle).unwrap();
 
                 let mut b_to_copy = [barriers::buffer_barrier_full(
-                    &buf_state.resource,
+                    &resource,
                     D3D12_BARRIER_SYNC_ALL,
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
@@ -1480,7 +1483,7 @@ fn record_gpu_command(
                 unsafe {
                     barriers::barrier_buffers(cl7, &b_to_copy);
                     barriers::drop_buffer_barriers(&mut b_to_copy);
-                    cl.CopyBufferRegion(&buf_state.resource, *offset, &upload_src, upload_off, data.len() as u64);
+                    cl.CopyBufferRegion(&resource, *offset, &upload_src, upload_off, data.len() as u64);
                 }
             }
         }
@@ -2184,13 +2187,15 @@ pub(super) fn submit_with_scope(
                     data,
                     ..
                 } => {
-                    let buffers_read = scope.buffers().read().unwrap();
-                    let buf = buffers_read
-                        .entries
-                        .get(buf_handle)
-                        .context("WriteBuffer pre-pass: invalid handle")?;
-                    if buf.is_storage {
-                        let buf_dev = buf.device_handle;
+                    let (is_storage, buf_dev) = {
+                        let buffers_read = scope.buffers().read().unwrap();
+                        let buf = buffers_read
+                            .entries
+                            .get(buf_handle)
+                            .context("WriteBuffer pre-pass: invalid handle")?;
+                        (buf.is_storage, buf.device_handle)
+                    };
+                    if is_storage {
                         let ld = scope
                             .devices()
                             .get(&buf_dev)
@@ -2446,13 +2451,15 @@ pub(super) fn submit_graph_with_scope(
                         data,
                         ..
                     } => {
-                        let buffers_read = scope.buffers().read().unwrap();
-                        let buf = buffers_read
-                            .entries
-                            .get(buf_handle)
-                            .context("WriteBuffer pre-pass: invalid handle")?;
-                        if buf.is_storage {
-                            let buf_dev = buf.device_handle;
+                        let (is_storage, buf_dev) = {
+                            let buffers_read = scope.buffers().read().unwrap();
+                            let buf = buffers_read
+                                .entries
+                                .get(buf_handle)
+                                .context("WriteBuffer pre-pass: invalid handle")?;
+                            (buf.is_storage, buf.device_handle)
+                        };
+                        if is_storage {
                             let ld = scope
                                 .devices()
                                 .get(&buf_dev)
