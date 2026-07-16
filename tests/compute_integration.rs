@@ -1289,6 +1289,34 @@ mod imp {
         }
     }
 
+    /// [`BufferFlags::CPU_WRITABLE`] staging writes use host-mapped memcpy only (no blit+wait).
+    ///
+    /// On Metal this must not block on `wait_until_completed` during `write()`; bytes must be
+    /// visible immediately for the subsequent scheme upload copy recorded in the same frame.
+    fn test_cpu_writable_write_read_roundtrip(device: &Device) {
+        const N: usize = 16;
+        let initial: Vec<u32> = vec![0u32; N];
+
+        let buffer = test_alloc_buffer_with_bytes_stride_and_flags(
+            &device,
+            bytemuck::cast_slice(&initial),
+            BufferKind::Scattered,
+            size_of::<u32>() as u32,
+            BufferFlags::CPU_WRITABLE,
+        );
+
+        let new_values: Vec<u32> = (0xDEAD_0000u32..).take(N).collect();
+        buffer.write(0, bytemuck::cast_slice(&new_values)).expect("write");
+
+        let mut out = vec![0u8; N * size_of::<u32>()];
+        buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
+
+        let result: &[u32] = bytemuck::cast_slice(&out);
+        for (i, &val) in result.iter().enumerate() {
+            assert_eq!(val, new_values[i], "element {i}: expected {:08X} got {val:08X}", new_values[i]);
+        }
+    }
+
     // ── uniform entry-point parameter tests ──────────────────────────────────────
     //
     // `uniform T param` in a `cs_main` signature maps directly to a resource
@@ -2578,6 +2606,7 @@ mod imp {
         trial!(test_cpu_readable_compute_write_and_read);
         trial!(test_write_buffer_reuse_across_submissions);
         trial!(test_cpu_readable_cpu_write_read_roundtrip);
+        trial!(test_cpu_writable_write_read_roundtrip);
         trial!(test_uniform_param_uint_roundtrip);
         trial!(test_uniform_param_uint_zero);
         trial!(test_uniform_param_uint_max);
