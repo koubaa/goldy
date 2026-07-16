@@ -608,7 +608,23 @@ pub(crate) struct Dx12SubmissionContext {
 ///
 /// DX12 allows re-executing a closed command list via `ExecuteCommandLists`
 /// without calling `Reset`, as long as the backing allocator is not reset first.
-/// This enables zero-recording-cost re-submission for static scenes.
+/// This enables zero-recording-cost re-submission for static scenes — the DX12
+/// realization of a clean [`crate::Scheme`] resubmit.
+///
+/// # Not DX12 Work Graphs
+///
+/// Despite the name, this is **not** a D3D12 Work Graph (`DispatchGraph` /
+/// `ID3D12WorkGraph*`). Correspondence for readers of both models:
+///
+/// | Mechanism | Role here |
+/// |---|---|
+/// | **Retained CL** (this type) | Host-recorded DAG replay — closest to CUDA Graph capture/launch. Cuts CPU record cost when the scheme is clean. |
+/// | **`ExecuteIndirect`** | GPU fills dispatch (or batched-direct) args under a fixed PSO — used for `DispatchDim::Indirect` / same-pipeline batches. Does **not** choose child nodes or switch shaders. |
+/// | **DX12 Work Graphs** | GPU emits records to child nodes; hardware schedules producer→consumer fan-out across PSOs. Unused by Goldy today. |
+///
+/// A scheme (dispatches + precedences) could in principle lower onto Work
+/// Graphs as a future backend transformation; the current path is command-list
+/// retention + barriers (+ optional `ExecuteIndirect` for grid size only).
 pub(crate) struct RetainedGraph {
     /// The closed (but not reset) command list.  Cloned from the pool slot so both
     /// the pool and this struct hold a reference-counted pointer to the same COM object.
