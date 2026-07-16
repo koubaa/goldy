@@ -12,6 +12,7 @@ use ::metal as mtl;
 use anyhow::Result;
 use block::ConcreteBlock;
 use cocoa::base::id;
+use objc::rc::autoreleasepool;
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -96,61 +97,63 @@ struct MetalCommitPendingSubmit {
 
 impl PendingSubmit for MetalCommitPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.commit", self.log_kind);
-        let command_buffer_ref = self.command_buffer.as_ref();
-        let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
-        apply_host_sidecar_before_gpu(&self.host_sidecar)?;
-        if self.api_log_commit && super::api_log::enabled() {
-            super::api_log::log_commit(self.signal_value);
-        }
-        let signal_value = self.signal_value;
-        let waiter = self.waiter.clone();
-        let log_kind = self.log_kind;
-        let commit_instant = self.compute_commit_instant;
-        let handler = ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
-            let status = cb.status();
-            if status != mtl::MTLCommandBufferStatus::Completed {
-                let description = super::compute::read_command_buffer_error_description(cb);
-                tracing::error!(
-                    "GPU command buffer ({log_kind}, timeline={signal_value}) finished with status={status:?}: {description}"
-                );
+        autoreleasepool(|| {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.commit", self.log_kind);
+            let command_buffer_ref = self.command_buffer.as_ref();
+            let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
+            apply_host_sidecar_before_gpu(&self.host_sidecar)?;
+            if self.api_log_commit && super::api_log::enabled() {
+                super::api_log::log_commit(self.signal_value);
             }
-            if let Some(start) = commit_instant {
-                let cpu_lifetime = start.elapsed();
-                let (gpu_start, gpu_end): (f64, f64) = unsafe {
-                    (
-                        msg_send![cb, GPUStartTime],
-                        msg_send![cb, GPUEndTime],
-                    )
-                };
-                let gpu_ms = (gpu_end - gpu_start) * 1000.0;
-                tracing::debug!(
-                    "[mtl.cb_done] kind={log_kind} signal_value={signal_value} commit_to_complete={cpu_lifetime:?} gpu_exec={gpu_ms:.3}ms"
-                );
-                if crate::gpu_profiler::gpu_profile_enabled() {
-                    crate::gpu_profiler::log_cb_timing("metal", signal_value, gpu_ms);
+            let signal_value = self.signal_value;
+            let waiter = self.waiter.clone();
+            let log_kind = self.log_kind;
+            let commit_instant = self.compute_commit_instant;
+            let handler = ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
+                let status = cb.status();
+                if status != mtl::MTLCommandBufferStatus::Completed {
+                    let description = super::compute::read_command_buffer_error_description(cb);
+                    tracing::error!(
+                        "GPU command buffer ({log_kind}, timeline={signal_value}) finished with status={status:?}: {description}"
+                    );
                 }
-            } else if crate::gpu_profiler::gpu_profile_enabled() {
-                let gpu_start: f64 = unsafe { msg_send![cb, GPUStartTime] };
-                let gpu_end: f64 = unsafe { msg_send![cb, GPUEndTime] };
-                let ms = (gpu_end - gpu_start) * 1000.0;
-                crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
+                if let Some(start) = commit_instant {
+                    let cpu_lifetime = start.elapsed();
+                    let (gpu_start, gpu_end): (f64, f64) = unsafe {
+                        (
+                            msg_send![cb, GPUStartTime],
+                            msg_send![cb, GPUEndTime],
+                        )
+                    };
+                    let gpu_ms = (gpu_end - gpu_start) * 1000.0;
+                    tracing::debug!(
+                        "[mtl.cb_done] kind={log_kind} signal_value={signal_value} commit_to_complete={cpu_lifetime:?} gpu_exec={gpu_ms:.3}ms"
+                    );
+                    if crate::gpu_profiler::gpu_profile_enabled() {
+                        crate::gpu_profiler::log_cb_timing("metal", signal_value, gpu_ms);
+                    }
+                } else if crate::gpu_profiler::gpu_profile_enabled() {
+                    let gpu_start: f64 = unsafe { msg_send![cb, GPUStartTime] };
+                    let gpu_end: f64 = unsafe { msg_send![cb, GPUEndTime] };
+                    let ms = (gpu_end - gpu_start) * 1000.0;
+                    crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
+                }
+                waiter.signal(signal_value);
+            })
+            .copy();
+            command_buffer_ref.add_completed_handler(&handler);
+            command_buffer_ref.encode_signal_event(self.timeline_event.as_ref(), signal_value);
+            tracing::debug!(
+                "[mtl.cb_commit] kind={} signal_value={signal_value} queue=command_queue",
+                self.log_kind
+            );
+            {
+                let _commit = crate::tracy_zone!("goldy.submit_worker.mtl.execute_and_signal");
+                command_buffer_ref.commit();
             }
-            waiter.signal(signal_value);
-        })
-        .copy();
-        command_buffer_ref.add_completed_handler(&handler);
-        command_buffer_ref.encode_signal_event(self.timeline_event.as_ref(), signal_value);
-        tracing::debug!(
-            "[mtl.cb_commit] kind={} signal_value={signal_value} queue=command_queue",
-            self.log_kind
-        );
-        {
-            let _commit = crate::tracy_zone!("goldy.submit_worker.mtl.execute_and_signal");
-            command_buffer_ref.commit();
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -210,45 +213,47 @@ struct MetalPresentPendingSubmit {
 
 impl PendingSubmit for MetalPresentPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.present");
+        autoreleasepool(|| {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.present");
 
-        let command_buffer = self.command_buffer.as_ref();
-        let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
-        let signal_value = self.signal_value;
-        let drawable_ptr = self.drawable_ptr as id;
-        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
+            let command_buffer = self.command_buffer.as_ref();
+            let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
+            let signal_value = self.signal_value;
+            let drawable_ptr = self.drawable_ptr as id;
+            let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
 
-        command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
-        let return_image = self.return_image;
-        let surface = self.surface;
-        let signal_queue_present = std::sync::Arc::clone(&self.signal_queue_present);
-        let return_pending = std::sync::Arc::clone(&self.return_pending);
-        let waiter = self.waiter.clone();
-        let handler = ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
-            waiter.signal(signal_value);
-            if let Some(idx) = return_image {
-                signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
-                if let Ok(mut pending) = return_pending.lock() {
-                    pending.push((surface, idx));
+            command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
+            let return_image = self.return_image;
+            let surface = self.surface;
+            let signal_queue_present = std::sync::Arc::clone(&self.signal_queue_present);
+            let return_pending = std::sync::Arc::clone(&self.return_pending);
+            let waiter = self.waiter.clone();
+            let handler = ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+                waiter.signal(signal_value);
+                if let Some(idx) = return_image {
+                    signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    if let Ok(mut pending) = return_pending.lock() {
+                        pending.push((surface, idx));
+                    }
                 }
+            })
+            .copy();
+            command_buffer.add_completed_handler(&handler);
+            command_buffer.present_drawable(drawable_ref);
+            if super::api_log::enabled() {
+                super::api_log::log_present_drawable(signal_value);
             }
+            {
+                let _commit = crate::tracy_zone!("goldy.submit_worker.mtl.execute_and_signal");
+                command_buffer.commit();
+            }
+
+            unsafe {
+                let (): () = msg_send![drawable_ptr, release];
+            }
+
+            Ok(())
         })
-        .copy();
-        command_buffer.add_completed_handler(&handler);
-        command_buffer.present_drawable(drawable_ref);
-        if super::api_log::enabled() {
-            super::api_log::log_present_drawable(signal_value);
-        }
-        {
-            let _commit = crate::tracy_zone!("goldy.submit_worker.mtl.execute_and_signal");
-            command_buffer.commit();
-        }
-
-        unsafe {
-            let (): () = msg_send![drawable_ptr, release];
-        }
-
-        Ok(())
     }
 }
 

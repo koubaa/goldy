@@ -1,8 +1,9 @@
 //! Surface (window presentation) management logic.
 //!
 //! The acquire/render/present cycle:
-//! - `acquire()` calls `nextDrawable` and registers the drawable's texture in a
-//!   rotating bindless storage-image slot
+//! - `acquire()` calls `nextDrawable` inside an autorelease pool, retains exactly
+//!   one strong drawable ref and one strong texture ref, then registers the
+//!   texture in a rotating bindless storage-image slot
 //! - `frame_texture()` returns the registered texture handle for the current frame
 //! - `render()` targets the already-acquired drawable
 //! - `present()` presents the drawable and unregisters its temporary texture handle
@@ -49,6 +50,7 @@ use cocoa::base::{id, nil, NO, YES};
 use core_graphics_types::geometry::CGSize;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+use objc::rc::autoreleasepool;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -206,9 +208,12 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
 
 /// Acquire the next swapchain image.
 ///
-/// Calls `nextDrawable` on the CAMetalLayer and registers the drawable's
-/// texture in the bindless descriptor set. The texture handle is available
-/// via `frame_texture()` until `present()` is called.
+/// Calls `nextDrawable` on the CAMetalLayer inside an autorelease pool and
+/// registers the drawable's texture in the bindless descriptor set. The API
+/// returns autoreleased objects; Goldy retains exactly one strong drawable ref
+/// and one strong texture ref (via [`register_surface_texture`]) before the pool
+/// drains. The texture handle is available via `frame_texture()` until
+/// `present()` is called.
 pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
@@ -253,30 +258,33 @@ pub(super) fn acquire(
     }
 
     let layer = state.surfaces.get(&surface).unwrap().layer as id;
-    let drawable: id = {
+    let (drawable_ptr, tex_handle) = autoreleasepool(|| -> Result<(*mut std::ffi::c_void, TextureHandle)> {
         let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
-        unsafe { msg_send![layer, nextDrawable] }
-    };
+        let drawable: id = unsafe { msg_send![layer, nextDrawable] };
 
-    if super::api_log::enabled() {
-        super::api_log::log_next_drawable(drawable != nil);
-    }
+        if super::api_log::enabled() {
+            super::api_log::log_next_drawable(drawable != nil);
+        }
 
-    if drawable == nil {
-        anyhow::bail!("Failed to get next drawable from CAMetalLayer");
-    }
-    unsafe {
-        let () = msg_send![drawable, retain];
-    }
+        if drawable == nil {
+            anyhow::bail!("Failed to get next drawable from CAMetalLayer");
+        }
+        unsafe {
+            let () = msg_send![drawable, retain];
+        }
+
+        let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
+        let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+
+        let tex_handle =
+            register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
+        Ok((drawable as *mut std::ffi::c_void, tex_handle))
+    })?;
+
     {
         let ss = state.surfaces.get_mut(&surface).unwrap();
-        ss.drawable_slots[frame_slot] = Some(drawable as *mut std::ffi::c_void);
+        ss.drawable_slots[frame_slot] = Some(drawable_ptr);
     }
-
-    let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-    let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
-
-    let tex_handle = register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
 
     let image_index = {
         let ss = state.surfaces.get_mut(&surface).expect("surface registered above");
