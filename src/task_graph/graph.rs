@@ -751,6 +751,34 @@ fn merged_compute_render_fp(fp0: u64, fp1: u64) -> u64 {
     h.finish()
 }
 
+/// When the next partition is pure compute, merge upload and compute into one
+/// standalone command buffer so Metal records blit→compute in a single CB.
+fn try_merge_upload_compute_range(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    wave_ranges: &[std::ops::Range<usize>],
+    part_idx: usize,
+    fuse_upload: bool,
+) -> Option<std::ops::Range<usize>> {
+    if !fuse_upload || part_idx + 1 >= wave_ranges.len() {
+        return None;
+    }
+    let r0 = wave_ranges[part_idx].clone();
+    let r1 = wave_ranges[part_idx + 1].clone();
+    let w0 = &schedule.waves[r0.clone()];
+    let w1 = &schedule.waves[r1.clone()];
+    if analysis::partition_waves_have_present(ir, w0)
+        || analysis::partition_waves_have_present(ir, w1)
+        || partition_waves_have_render(ir, w0)
+        || partition_waves_have_render(ir, w1)
+        || !analysis::partition_waves_have_upload_slots(ir, w0)
+        || analysis::partition_waves_have_upload_slots(ir, w1)
+        || !partition_waves_can_retain(ir, w1)
+    {
+        return None;
+    }
+    Some(r0.start..r1.end)
+}
 /// When the next partition is an offscreen render pass, emit and retain compute and render
 /// in one command buffer so the shared frame table and UAV→graphics barriers stay coherent.
 fn try_merge_compute_render_range(
@@ -883,13 +911,9 @@ pub(crate) fn submit_resolved_ir(
     }
 
     let fp = binding_fingerprint(ir);
-    let split_on_barrier_cost = context
-        .device()
-        .capabilities()
-        .split_compute_partitions_on_barrier_cost;
+    let split_on_barrier_cost = context.device().capabilities().split_compute_partitions_on_barrier_cost;
     TaskGraph::get_or_build_partitioned_commands(cache, ir, fp, split_on_barrier_cost);
-    let wave_ranges =
-        analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
     let mut last_tv = context.gpu_progress();
     let mut cross_scratch = CrossSubmitScratch::new();
     let mut boundary = QueueBoundaryState::default();
@@ -1128,12 +1152,14 @@ fn partition_needs_slot_resolver(ir: &GraphIR, waves: &[Wave], has_present: bool
 /// Derived once from the compiled schedule (with the binding fingerprint) so the
 /// hot loop never re-scans waves for present/render/retainability flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FreshSegment {
+pub(crate) struct FreshSegment {
     wave_range: std::ops::Range<usize>,
     has_render: bool,
     has_present: bool,
     /// Upload / unstable-copy partitions must use standalone submission.
     needs_standalone: bool,
+    /// True when any node in the segment references a scheme upload-buffer slot.
+    has_upload_slots: bool,
 }
 
 /// True when adjacent fresh segments should coalesce into one graph CB.
@@ -1147,6 +1173,55 @@ fn try_merge_fresh_segments(plan: &[FreshSegment], idx: usize, separate_graphics
     let a = &plan[idx];
     let b = &plan[idx + 1];
     !a.has_present && !b.has_present && !a.needs_standalone && !b.needs_standalone && !a.has_render && b.has_render
+}
+
+/// True when an upload-only segment may fuse with the immediately following compute
+/// segment into one standalone command buffer (Metal Scheme path).
+fn try_merge_upload_compute_fresh_segments(plan: &[FreshSegment], idx: usize, fuse_upload: bool) -> bool {
+    if !fuse_upload || idx + 1 >= plan.len() {
+        return false;
+    }
+    let a = &plan[idx];
+    let b = &plan[idx + 1];
+    a.has_upload_slots
+        && !a.has_present
+        && !a.has_render
+        && !b.has_upload_slots
+        && !b.has_present
+        && !b.has_render
+        && !b.needs_standalone
+}
+
+/// Post-process a fresh segment plan, merging upload→compute pairs when allowed.
+fn coalesce_fresh_plan_for_fused_upload(plan: Vec<FreshSegment>, fuse_upload: bool) -> Vec<FreshSegment> {
+    if !fuse_upload || plan.len() < 2 {
+        return plan;
+    }
+    let mut merged = Vec::with_capacity(plan.len());
+    let mut idx = 0usize;
+    while idx < plan.len() {
+        if try_merge_upload_compute_fresh_segments(&plan, idx, fuse_upload) {
+            let a = &plan[idx];
+            let b = &plan[idx + 1];
+            merged.push(FreshSegment {
+                wave_range: a.wave_range.start..b.wave_range.end,
+                has_render: false,
+                has_present: false,
+                needs_standalone: true,
+                has_upload_slots: true,
+            });
+            idx += 2;
+        } else {
+            merged.push(plan[idx].clone());
+            idx += 1;
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+pub(crate) fn test_coalesce_fresh_plan(plan: Vec<FreshSegment>, fuse_upload: bool) -> Vec<FreshSegment> {
+    coalesce_fresh_plan_for_fused_upload(plan, fuse_upload)
 }
 
 /// Submit `ir` with optional per-partition CB replay.
@@ -1206,11 +1281,14 @@ fn submit_resolved_ir_partitions_fresh(
     }
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.fresh_plan");
-        let split_on_barrier_cost = context
-            .device()
-            .capabilities()
-            .split_compute_partitions_on_barrier_cost;
-        TaskGraph::get_or_build_fresh_plan(cache, ir, fp, split_on_barrier_cost);
+        let caps = context.device().capabilities();
+        TaskGraph::get_or_build_fresh_plan(
+            cache,
+            ir,
+            fp,
+            caps.split_compute_partitions_on_barrier_cost,
+            caps.fuse_upload_with_compute_partitions,
+        );
     }
 
     let mut resolver = SlotResolver::new();
@@ -1344,12 +1422,8 @@ fn submit_resolved_ir_partitions_replay(
         TaskGraph::get_or_build_schedule(cache, ir, fp);
     }
 
-    let split_on_barrier_cost = context
-        .device()
-        .capabilities()
-        .split_compute_partitions_on_barrier_cost;
-    let wave_ranges =
-        analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
+    let split_on_barrier_cost = context.device().capabilities().split_compute_partitions_on_barrier_cost;
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
 
     let partition_fps: Vec<u64> = {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.partition_fps");
@@ -1393,6 +1467,7 @@ fn submit_resolved_ir_partitions_replay(
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
     let device_owner = session.device_queue_owner(ctx);
+    let fuse_upload = context.device().capabilities().fuse_upload_with_compute_partitions;
     let mut last_tv = context.gpu_progress();
     let mut result = PartitionSubmitResult::default();
 
@@ -1402,6 +1477,51 @@ fn submit_resolved_ir_partitions_replay(
         let mut boundary = QueueBoundaryState::default();
         let mut part_idx = 0usize;
         while part_idx < wave_ranges.len() {
+            let upload_compute_merged = {
+                let schedule = &cache.as_ref().unwrap().schedule;
+                try_merge_upload_compute_range(ir, schedule, &wave_ranges, part_idx, fuse_upload)
+            };
+            if let Some(merged_range) = upload_compute_merged {
+                let merged_waves = {
+                    let schedule = &cache.as_ref().unwrap().schedule;
+                    schedule.waves[merged_range.clone()].to_vec()
+                };
+                let stamp_ctx = partition_stamp_context(separate, false, ctx, device_owner);
+                let base_sync = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
+                    cross_sync_for_stamps(
+                        &mut cross_scratch,
+                        resource_stamps,
+                        ir,
+                        stamp_ctx,
+                        &merged_waves,
+                        separate,
+                    )
+                };
+                let sync = merge_queue_boundary_waits(
+                    base_sync,
+                    separate,
+                    false,
+                    ctx,
+                    device_owner,
+                    boundary.last_compute_tv,
+                    boundary.last_render_tv,
+                );
+                let merged = sidecar.merge_sync(sync.as_ref());
+                let cmds = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.upload_compute_emit");
+                    analysis::emit_waves_to_commands(ir, &merged_waves, Some(&resolver))
+                };
+                let _tz = crate::tracy_zone!("goldy.submit_partition.upload_compute_fused");
+                last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
+                replay.record_last_tv(part_idx, last_tv);
+                replay.record_last_tv(part_idx + 1, last_tv);
+                boundary.record(separate, false, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &merged_waves, last_tv);
+                part_idx += 2;
+                continue;
+            }
+
             let merged_range = {
                 let schedule = &cache.as_ref().unwrap().schedule;
                 try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx, separate)
@@ -2221,10 +2341,7 @@ impl TaskGraph {
             &self.ir,
             schedule,
             Some(resolver),
-            context
-                .device()
-                .capabilities()
-                .split_compute_partitions_on_barrier_cost,
+            context.device().capabilities().split_compute_partitions_on_barrier_cost,
         );
         let mut last_tv = context.gpu_progress();
         for partition in &partitions {
@@ -2903,6 +3020,7 @@ impl TaskGraph {
         ir: &GraphIR,
         fp: u64,
         split_on_barrier_cost: bool,
+        fuse_upload_with_compute: bool,
     ) {
         let _tz = crate::tracy_zone!("goldy.compile_fresh_plan");
         Self::get_or_build_schedule(cache, ir, fp);
@@ -2922,9 +3040,10 @@ impl TaskGraph {
                 has_render: partition_waves_have_render(ir, waves),
                 has_present: analysis::partition_waves_have_present(ir, waves),
                 needs_standalone: !partition_waves_can_retain(ir, waves),
+                has_upload_slots: analysis::partition_waves_have_upload_slots(ir, waves),
             });
         }
-        entry.fresh_plan = Some(plan);
+        entry.fresh_plan = Some(coalesce_fresh_plan_for_fused_upload(plan, fuse_upload_with_compute));
     }
 
     /// Return cached emitted commands for `ir`, building them if necessary.
@@ -3061,8 +3180,7 @@ impl TaskGraph {
         // stored so the slot indices remain aligned with wave_ranges.
         let _tz = crate::tracy_zone!("goldy.compile_partitioned.miss_emit");
         let entry = cache.as_mut().unwrap();
-        let wave_ranges =
-            analysis::partition_wave_ranges(ir, &entry.schedule, split_on_barrier_cost);
+        let wave_ranges = analysis::partition_wave_ranges(ir, &entry.schedule, split_on_barrier_cost);
 
         let mut compute_partitions: Vec<Vec<GpuCommand>> = Vec::with_capacity(wave_ranges.len());
         let mut graph_partitions: Vec<Option<Vec<GraphCommand>>> = Vec::with_capacity(wave_ranges.len());
@@ -5093,10 +5211,12 @@ mod tests {
 mod slice_retention_tests {
     use super::*;
     use crate::backend::mock::MockBackend;
+    use crate::backend::ComputePipelineHandle;
     use crate::buffer::Allocation;
     use crate::compute::ComputePipeline;
     use crate::device::Device;
     use crate::shader::ShaderModule;
+    use crate::task_graph::ResolvedUploadBuffer;
     use crate::task_graph::{IrSubmitState, NodeAccess};
     use std::sync::Arc;
 
@@ -5434,6 +5554,171 @@ mod slice_retention_tests {
         assert_eq!(plan.len(), 1);
         assert!(plan[0].has_render);
         assert!(!plan[0].has_present);
+    }
+
+    fn upload_then_compute_ir(buf_dst: BufferHandle, p: ComputePipelineHandle) -> GraphIR {
+        let upload_src = ResourceId::UploadBuffer(0);
+        let dst = ResourceId::Buffer(buf_dst);
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "upload_copy",
+            bindings: vec![
+                ResourceBinding {
+                    resource: upload_src,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src: upload_src,
+                src_offset: 0,
+                dst,
+                dst_offset: 0,
+                size: 64,
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "compute",
+            bindings: vec![ResourceBinding {
+                resource: dst,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir
+    }
+
+    /// Fresh-plan coalescing leaves segments separate when fuse capability is off.
+    #[test]
+    fn fresh_plan_coalesce_respects_capability_flag() {
+        let plan = vec![
+            FreshSegment {
+                wave_range: 0..1,
+                has_render: false,
+                has_present: false,
+                needs_standalone: true,
+                has_upload_slots: true,
+            },
+            FreshSegment {
+                wave_range: 1..2,
+                has_render: false,
+                has_present: false,
+                needs_standalone: false,
+                has_upload_slots: false,
+            },
+        ];
+        let split = super::test_coalesce_fresh_plan(plan.clone(), false);
+        assert_eq!(split.len(), 2);
+        let fused = super::test_coalesce_fresh_plan(plan, true);
+        assert_eq!(fused.len(), 1);
+        assert!(fused[0].has_upload_slots);
+        assert_eq!(fused[0].wave_range, 0..2);
+    }
+
+    /// Metal-style capability: upload blits and following compute fuse into one submit.
+    #[test]
+    fn fresh_upload_compute_fuses_with_metal_capability() {
+        let mut backend = MockBackend::new();
+        backend.fuse_upload_with_compute_partitions = true;
+        let device = Arc::new(Device::from_backend(Box::new(backend)).unwrap());
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+        let ir = upload_then_compute_ir(buf.handle, p.handle);
+
+        let mut cache = None;
+        let empty_stamps = ResourceKeyMap::default();
+        let mut uploads = std::collections::HashMap::new();
+        uploads.insert(
+            0,
+            ResolvedUploadBuffer {
+                parent: buf.handle,
+                offset: 0,
+                len: 64,
+            },
+        );
+        let mut present_slots = Vec::new();
+        submit_resolved_ir_partitions(
+            &mut cache,
+            None,
+            &ctx,
+            ctx.submit_session(),
+            &ir,
+            PresentSubmitOptions {
+                present_slots: &mut present_slots,
+                deferred_acquire: None,
+                upload_buffers: &uploads,
+                resource_stamps: &empty_stamps,
+                stamp_targets: &[],
+                ir_clean: false,
+                sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+            },
+        )
+        .unwrap();
+
+        device.with_mock(|m| {
+            assert_eq!(
+                m.compute_dispatch_count, 1,
+                "fused upload+compute must be one standalone submit"
+            );
+            let cmds = &m.recorded_compute_commands[0];
+            assert!(
+                cmds.iter().any(|c| matches!(c, GpuCommand::CopyBuffer { .. })),
+                "fused submit must include upload blit commands"
+            );
+            assert!(
+                cmds.iter().any(|c| matches!(c, GpuCommand::Dispatch { .. })),
+                "fused submit must include compute dispatch commands"
+            );
+        });
+        let plan = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap();
+        assert_eq!(plan.len(), 1, "fresh plan must coalesce upload and compute");
+        assert!(plan[0].has_upload_slots);
+    }
+
+    /// Replay path: Metal-style fuse merges upload+compute into one standalone submit.
+    #[test]
+    fn replay_upload_compute_fuses_with_metal_capability() {
+        let mut backend = MockBackend::new();
+        backend.fuse_upload_with_compute_partitions = true;
+        let device = Arc::new(Device::from_backend(Box::new(backend)).unwrap());
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+        let ir = upload_then_compute_ir(buf.handle, p.handle);
+
+        let mut state = IrSubmitState::new();
+        let mut uploads = std::collections::HashMap::new();
+        uploads.insert(
+            0,
+            ResolvedUploadBuffer {
+                parent: buf.handle,
+                offset: 0,
+                len: 64,
+            },
+        );
+        let mut present_slots = Vec::new();
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        state
+            .submit_pipelined_and_retain_with_presents(&ctx, &ir, &mut present_slots, None, &uploads, false)
+            .unwrap();
+
+        device.with_mock(|m| {
+            assert_eq!(
+                m.compute_dispatch_count, 1,
+                "replay path must fuse upload+compute when capability is enabled"
+            );
+        });
     }
 
     // ------------------------------------------------------------------

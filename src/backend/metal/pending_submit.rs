@@ -31,9 +31,7 @@ fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
     let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.apply_host_sidecar_before_gpu");
     for (waiter, value) in &sidecar.host_observed {
         if !waiter.wait_until(*value, std::time::Duration::from_secs(120)) {
-            anyhow::bail!(
-                "host-observed wait timed out waiting for timeline value {value}"
-            );
+            anyhow::bail!("host-observed wait timed out waiting for timeline value {value}");
         }
     }
     for (buffer, offset, data) in &sidecar.deferred_writes {
@@ -45,11 +43,7 @@ fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
             anyhow::bail!("deferred host write: write exceeds buffer bounds");
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                ptr.add(*offset as usize) as *mut u8,
-                data.len(),
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(*offset as usize) as *mut u8, data.len());
         }
     }
     Ok(())

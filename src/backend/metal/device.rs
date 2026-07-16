@@ -60,6 +60,9 @@ pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCap
         // coarse/fine compute in one CB (Classic parity). Present/retainability
         // splits still apply.
         split_compute_partitions_on_barrier_cost: false,
+        // Fuse upload blits with the following compute partition so Scheme matches
+        // Classic's single-CB structure and avoids an extra commit + event wait.
+        fuse_upload_with_compute_partitions: true,
         ..crate::device::DeviceCapabilities::default()
     }
 }

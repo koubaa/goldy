@@ -78,6 +78,9 @@ pub struct MockBackend {
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
+    /// When true, fresh/replay planners fuse upload partitions with the following compute
+    /// partition (Metal Scheme path tests).
+    pub fuse_upload_with_compute_partitions: bool,
     /// Device-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
@@ -264,6 +267,7 @@ impl MockBackend {
             readback_free_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
+            fuse_upload_with_compute_partitions: false,
             device_retired_floor: HashMap::new(),
             surface_pending_acquire: HashMap::new(),
             contexts: HashMap::new(),
@@ -637,6 +641,7 @@ impl GpuBackend for MockBackend {
     fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
         crate::device::DeviceCapabilities {
             host_sidecar_on_submit_worker: true,
+            fuse_upload_with_compute_partitions: self.fuse_upload_with_compute_partitions,
             ..crate::device::DeviceCapabilities::default()
         }
     }

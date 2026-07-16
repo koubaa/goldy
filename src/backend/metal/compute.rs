@@ -205,7 +205,10 @@ fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Resul
 }
 
 /// Resolve host-observed waits and deferred CPU writes for the submission worker.
-fn resolve_host_sidecar(state: &MetalState, sync: Option<&SubmitSync>) -> Result<super::pending_submit::MetalHostSidecar> {
+fn resolve_host_sidecar(
+    state: &MetalState,
+    sync: Option<&SubmitSync>,
+) -> Result<super::pending_submit::MetalHostSidecar> {
     let Some(s) = sync else {
         return Ok(super::pending_submit::MetalHostSidecar {
             host_observed: Vec::new(),
@@ -231,10 +234,7 @@ fn resolve_host_sidecar(state: &MetalState, sync: Option<&SubmitSync>) -> Result
             .get(&w.buffer)
             .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
         if buffer_state.flags.contains(BufferFlags::GPU_ONLY) {
-            anyhow::bail!(
-                "deferred host write requires CPU-writable buffer (handle={})",
-                w.buffer
-            );
+            anyhow::bail!("deferred host write requires CPU-writable buffer (handle={})", w.buffer);
         }
         deferred_writes.push((buffer_state.buffer.clone(), w.offset, Arc::clone(&w.data)));
     }

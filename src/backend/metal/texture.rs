@@ -196,7 +196,11 @@ pub(super) fn create(
     tracing::debug!(
         "Allocated texture {} from {} at bindless local={} global={} storage_image={}",
         handle,
-        if is_heap_allocated { "heap" } else { "device (overflow fallback)" },
+        if is_heap_allocated {
+            "heap"
+        } else {
+            "device (overflow fallback)"
+        },
         arg_buffer_index,
         encoding_index,
         is_storage_image,

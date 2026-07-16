@@ -1265,12 +1265,7 @@ pub(crate) fn partition_wave_ranges(
                 push_partition_with_barrier_heuristic(&mut ranges, schedule, sub, split_on_barrier_cost);
             }
         } else {
-            push_partition_with_barrier_heuristic(
-                &mut ranges,
-                schedule,
-                lp.wave_range.clone(),
-                split_on_barrier_cost,
-            );
+            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone(), split_on_barrier_cost);
         }
     }
 

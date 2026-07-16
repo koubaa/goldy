@@ -4511,7 +4511,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 .collect()
         });
         assert!(
-            frame2_waits.iter().any(|e| e.context == ctx_handle && e.value >= copy_tv),
+            frame2_waits
+                .iter()
+                .any(|e| e.context == ctx_handle && e.value >= copy_tv),
             "frame 2 submit must live-wait on prior copy read via ledger (need wait>={copy_tv}, got {frame2_waits:?})"
         );
     }

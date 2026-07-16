@@ -276,8 +276,7 @@ pub(super) fn acquire(
         let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
         let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
-        let tex_handle =
-            register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
+        let tex_handle = register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
         Ok((drawable as *mut std::ffi::c_void, tex_handle))
     })?;
 

@@ -1313,7 +1313,11 @@ mod imp {
 
         let result: &[u32] = bytemuck::cast_slice(&out);
         for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, new_values[i], "element {i}: expected {:08X} got {val:08X}", new_values[i]);
+            assert_eq!(
+                val, new_values[i],
+                "element {i}: expected {:08X} got {val:08X}",
+                new_values[i]
+            );
         }
     }
 
