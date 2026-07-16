@@ -2875,11 +2875,9 @@ pub(super) fn try_resubmit_retained_with_scope(
                 prior_signal,
             )
         };
-        let prior_wait = (prior_signal > 0).then(|| {
-            super::host_wait::HostWait::Fence {
-                fence: ctx_fence.clone(),
-                value: prior_signal,
-            }
+        let prior_wait = (prior_signal > 0).then(|| super::host_wait::HostWait::Fence {
+            fence: ctx_fence.clone(),
+            value: prior_signal,
         });
         let fence_value = {
             let _tz = tracy_zone!("dx12.resubmit_retained.alloc_timeline");

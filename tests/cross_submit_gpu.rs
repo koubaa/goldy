@@ -577,10 +577,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             1,
             "second submit must be a retained hit"
         );
-        assert!(
-            second.timeline_value() > first_tv,
-            "resubmit must advance the timeline"
-        );
+        assert!(second.timeline_value() > first_tv, "resubmit must advance the timeline");
         assert_eq!(
             read_u32(&grant, &second),
             7,

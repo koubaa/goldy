@@ -58,10 +58,7 @@ fn resolve_epoch_host_wait(
 }
 
 /// Resolve [`SubmitSync::cpu_waits`] and [`SubmitSync::host_observed_waits`] for the worker.
-pub(super) fn resolve_host_waits(
-    contexts: &SharedContextMap,
-    sync: Option<&SubmitSync>,
-) -> Result<Vec<HostWait>> {
+pub(super) fn resolve_host_waits(contexts: &SharedContextMap, sync: Option<&SubmitSync>) -> Result<Vec<HostWait>> {
     let Some(s) = sync else {
         return Ok(Vec::new());
     };
@@ -93,11 +90,7 @@ fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[De
         }
         if let Some(base) = buffer.host_mapped {
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    w.data.as_ptr(),
-                    (base as *mut u8).add(w.offset as usize),
-                    w.data.len(),
-                );
+                std::ptr::copy_nonoverlapping(w.data.as_ptr(), (base as *mut u8).add(w.offset as usize), w.data.len());
             }
         } else {
             anyhow::bail!(
@@ -120,8 +113,7 @@ fn apply_host_sidecar_before_gpu(
         let info = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&wait.semaphore))
             .values(std::slice::from_ref(&wait.value));
-        unsafe { ld.device.wait_semaphores(&info, u64::MAX) }
-            .context("host wait on timeline semaphore")?;
+        unsafe { ld.device.wait_semaphores(&info, u64::MAX) }.context("host wait on timeline semaphore")?;
     }
     apply_deferred_host_writes(buffers, deferred_writes)
 }
@@ -224,12 +216,7 @@ pub(super) struct VulkanGpuProfileWork {
 impl PendingSubmit for VulkanQueueSubmitPending {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit");
-        apply_host_sidecar_before_gpu(
-            &self.ld,
-            &self.host_waits,
-            &self.buffers,
-            &self.deferred_host_writes,
-        )?;
+        apply_host_sidecar_before_gpu(&self.ld, &self.host_waits, &self.buffers, &self.deferred_host_writes)?;
         let wait_infos: Vec<vk::SemaphoreSubmitInfo> = self
             .wait_semaphores
             .iter()
