@@ -499,7 +499,7 @@ impl TextureCopyFootprint {
 /// CPU-side write deferred to the submission worker, after [`SubmitSync::host_observed_waits`]
 /// retire on the host.
 ///
-/// Currently applied by the DX12 submission worker only.
+/// Currently applied by the DX12 and Vulkan submission workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredHostWrite {
     pub buffer: BufferHandle,

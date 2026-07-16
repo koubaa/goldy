@@ -1,41 +1,13 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
-use super::types::{self, SharedContextMap, SharedLogicalDevice, SharedSubmissionContext};
+use super::types::{self, SharedBufferTable, SharedContextMap, SharedLogicalDevice, SharedSubmissionContext};
 use super::{ContextHandle, DeviceHandle};
 use crate::backend::submission_worker::PendingSubmit;
-use crate::backend::SubmitSync;
+use crate::backend::{DeferredHostWrite, SubmitSync};
 use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use ash::vk;
 use std::sync::Arc;
-
-fn apply_cpu_epoch_waits(
-    ld: &SharedLogicalDevice,
-    contexts: &SharedContextMap,
-    sync: Option<&SubmitSync>,
-) -> Result<()> {
-    let Some(s) = sync else {
-        return Ok(());
-    };
-    if s.cpu_waits.is_empty() {
-        return Ok(());
-    }
-    for epoch in &s.cpu_waits {
-        let sem = contexts
-            .read()
-            .unwrap()
-            .get(&epoch.context)
-            .with_context(|| format!("cross-submit cpu wait: invalid context {:?}", epoch.context))?
-            .lock()
-            .unwrap()
-            .timeline_semaphore;
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(std::slice::from_ref(&sem))
-            .values(std::slice::from_ref(&epoch.value));
-        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }.context("cross-submit cpu wait on timeline semaphore")?;
-    }
-    Ok(())
-}
 
 pub(super) fn resolve_cross_submit_waits(
     contexts: &SharedContextMap,
@@ -57,6 +29,93 @@ pub(super) fn resolve_cross_submit_waits(
         waits.push((sem, epoch.value));
     }
     Ok(waits)
+}
+
+/// Host-side wait the submission worker performs before `queue_submit2`.
+#[derive(Clone)]
+pub(super) struct HostWait {
+    semaphore: vk::Semaphore,
+    value: u64,
+}
+
+fn resolve_epoch_host_wait(
+    contexts: &SharedContextMap,
+    epoch: &crate::timeline::Epoch,
+    kind: &str,
+) -> Result<HostWait> {
+    let sem = contexts
+        .read()
+        .unwrap()
+        .get(&epoch.context)
+        .with_context(|| format!("{kind}: invalid context {:?}", epoch.context))?
+        .lock()
+        .unwrap()
+        .timeline_semaphore;
+    Ok(HostWait {
+        semaphore: sem,
+        value: epoch.value,
+    })
+}
+
+/// Resolve [`SubmitSync::cpu_waits`] and [`SubmitSync::host_observed_waits`] for the worker.
+pub(super) fn resolve_host_waits(contexts: &SharedContextMap, sync: Option<&SubmitSync>) -> Result<Vec<HostWait>> {
+    let Some(s) = sync else {
+        return Ok(Vec::new());
+    };
+    let mut waits = Vec::with_capacity(s.cpu_waits.len() + s.host_observed_waits.len());
+    for epoch in &s.cpu_waits {
+        waits.push(resolve_epoch_host_wait(contexts, epoch, "cross-submit cpu wait")?);
+    }
+    for epoch in &s.host_observed_waits {
+        waits.push(resolve_epoch_host_wait(contexts, epoch, "host-observed wait")?);
+    }
+    Ok(waits)
+}
+
+fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[DeferredHostWrite]) -> Result<()> {
+    for w in deferred_writes {
+        let buffers_read = buffers.read().unwrap();
+        let buffer = buffers_read
+            .entries
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+        if w.offset + w.data.len() as u64 > buffer.size {
+            anyhow::bail!(
+                "deferred host write exceeds buffer bounds (handle={}, offset={}, len={}, size={})",
+                w.buffer,
+                w.offset,
+                w.data.len(),
+                buffer.size
+            );
+        }
+        if let Some(base) = buffer.host_mapped {
+            unsafe {
+                std::ptr::copy_nonoverlapping(w.data.as_ptr(), (base as *mut u8).add(w.offset as usize), w.data.len());
+            }
+        } else {
+            anyhow::bail!(
+                "deferred host write requires CPU-writable mapped buffer (handle={})",
+                w.buffer
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_host_sidecar_before_gpu(
+    ld: &SharedLogicalDevice,
+    host_waits: &[HostWait],
+    buffers: &SharedBufferTable,
+    deferred_writes: &[DeferredHostWrite],
+) -> Result<()> {
+    let _tz = crate::tracy_zone!("goldy.vk.pending_submit.apply_host_sidecar_before_gpu");
+    for wait in host_waits {
+        let info = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&wait.semaphore))
+            .values(std::slice::from_ref(&wait.value));
+        unsafe { ld.device.wait_semaphores(&info, u64::MAX) }.context("host wait on timeline semaphore")?;
+    }
+    apply_deferred_host_writes(buffers, deferred_writes)
 }
 
 pub(super) fn vulkan_post_signal_cleanup(
@@ -143,6 +202,9 @@ pub(super) struct VulkanQueueSubmitPending {
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
     wait_semaphores: Vec<(vk::Semaphore, u64)>,
+    host_waits: Vec<HostWait>,
+    deferred_host_writes: Vec<DeferredHostWrite>,
+    buffers: SharedBufferTable,
 }
 
 pub(super) struct VulkanGpuProfileWork {
@@ -154,6 +216,7 @@ pub(super) struct VulkanGpuProfileWork {
 impl PendingSubmit for VulkanQueueSubmitPending {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit");
+        apply_host_sidecar_before_gpu(&self.ld, &self.host_waits, &self.buffers, &self.deferred_host_writes)?;
         let wait_infos: Vec<vk::SemaphoreSubmitInfo> = self
             .wait_semaphores
             .iter()
@@ -220,6 +283,7 @@ impl PendingSubmit for VulkanQueueSubmitPending {
 pub(super) fn enqueue_vulkan_submit(
     ld: &SharedLogicalDevice,
     contexts: &SharedContextMap,
+    buffers: &SharedBufferTable,
     queue: vk::Queue,
     queue_lock: Arc<std::sync::Mutex<()>>,
     _timeline_sem: vk::Semaphore,
@@ -229,8 +293,9 @@ pub(super) fn enqueue_vulkan_submit(
     sync: Option<&SubmitSync>,
 ) -> Result<()> {
     ld.submission_worker.check_error()?;
-    apply_cpu_epoch_waits(ld, contexts, sync)?;
     let wait_semaphores = resolve_cross_submit_waits(contexts, sync)?;
+    let host_waits = resolve_host_waits(contexts, sync)?;
+    let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
     ld.submission_worker.enqueue(
         signal_value,
         Box::new(VulkanQueueSubmitPending {
@@ -240,6 +305,9 @@ pub(super) fn enqueue_vulkan_submit(
             signal_semaphore_infos,
             cmd,
             wait_semaphores,
+            host_waits,
+            deferred_host_writes,
+            buffers: Arc::clone(buffers),
         }),
     )
 }

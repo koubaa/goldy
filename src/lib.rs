@@ -125,7 +125,7 @@ pub use backend::dx12::WARP_ADAPTER_ID;
 #[doc(hidden)]
 pub mod test_support {
     use crate::backend::mock::MockBackend;
-    use crate::device::{DeviceDescriptor, Instance, RequestAdapterOptions};
+    use crate::device::{Adapter, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::{BackendType, Device, DeviceType};
     use std::ops::Deref;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -156,14 +156,14 @@ pub mod test_support {
         }
     }
 
-    fn is_dx12_warp(device: &Device) -> bool {
+    fn is_dx12_warp_adapter(instance: &Instance, adapter: &Adapter) -> bool {
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
-            device.backend_type() == BackendType::Dx12 && device.adapter_id() == crate::WARP_ADAPTER_ID
+            instance.backend_type() == BackendType::Dx12 && adapter.id() == crate::WARP_ADAPTER_ID
         }
         #[cfg(not(all(feature = "dx12", target_os = "windows")))]
         {
-            let _ = device;
+            let _ = (instance, adapter);
             false
         }
     }
@@ -186,56 +186,48 @@ pub mod test_support {
     impl SerialGpuDevice {
         /// Default adapter (`RequestAdapterOptions::default`, honors `GOLDY_DX12_FORCE_WARP`).
         pub fn new() -> Self {
-            Self::from_factory(|instance| {
+            Self::from_adapter_factory(|instance| {
                 instance
                     .request_adapter(&RequestAdapterOptions::default())
                     .expect("adapter")
-                    .request_device(&DeviceDescriptor::default())
-                    .expect("device")
             })
         }
 
         /// Prefer an adapter of `preferred` type, unless `GOLDY_DX12_FORCE_WARP=1` (then WARP).
         pub fn preferring(preferred: DeviceType) -> Self {
-            Self::from_factory(|instance| {
+            Self::from_adapter_factory(|instance| {
                 if env_force_warp() && instance.backend_type() == BackendType::Dx12 {
                     return instance
                         .request_adapter(&RequestAdapterOptions {
                             force_fallback_adapter: true,
                             ..RequestAdapterOptions::default()
                         })
-                        .expect("WARP adapter")
-                        .request_device(&DeviceDescriptor::default())
-                        .expect("WARP device");
+                        .expect("WARP adapter");
                 }
                 let adapters = instance.enumerate_adapters();
-                let adapter = adapters
+                adapters
                     .iter()
                     .find(|a| a.device_type() == preferred)
                     .or(adapters.first())
-                    .expect("no adapter");
-                adapter.request_device(&DeviceDescriptor::default()).expect("device")
+                    .cloned()
+                    .expect("no adapter")
             })
         }
 
-        fn from_factory(create: impl FnOnce(&Instance) -> Device) -> Self {
-            // Lock before device create when FORCE_WARP so two threads cannot both
-            // open WARP devices before either observes adapter_id.
-            let pre_guard = if env_force_warp() {
+        fn from_adapter_factory(select: impl FnOnce(&Instance) -> Adapter) -> Self {
+            let instance = Instance::new().expect("Instance::new");
+            let adapter = select(&instance);
+
+            // Lock before `request_device` when the selected adapter is WARP — adapter
+            // selection is cheap/non-racy; device open is what must be serialized.
+            let _warp_guard = if is_dx12_warp_adapter(&instance, &adapter) {
                 Some(warp_lib_test_serial().lock().unwrap())
             } else {
                 None
             };
 
-            let instance = Instance::new().expect("Instance::new");
-            let device = create(&instance);
+            let device = adapter.request_device(&DeviceDescriptor::default()).expect("device");
             drop(instance);
-
-            let _warp_guard = match pre_guard {
-                Some(g) => Some(g),
-                None if is_dx12_warp(&device) => Some(warp_lib_test_serial().lock().unwrap()),
-                None => None,
-            };
 
             Self { device, _warp_guard }
         }
