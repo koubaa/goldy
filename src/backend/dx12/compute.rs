@@ -666,6 +666,9 @@ fn apply_cpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>)
     }
     // Clone producer fences then drop the map lock before blocking. Holding
     // `context_fences` across `wait_for_fence` stalls create/destroy (write lock).
+    // Used only by sync device first-record / device-retained submits. Fresh compute
+    // enqueue deliberately omits `cpu_waits` — folding them into the worker HostWait
+    // is a measured FPS pessimization (see `enqueue_compute_submit`).
     let pending: Vec<(ID3D12Fence, u64, ContextHandle)> = {
         let fences = scope.context_fences.read().unwrap();
         let mut out = Vec::with_capacity(s.cpu_waits.len());
@@ -683,8 +686,9 @@ fn apply_cpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>)
     Ok(())
 }
 
-fn resolve_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<Vec<(ID3D12Fence, u64)>> {
-    apply_cpu_epoch_waits(scope, sync)?;
+/// Resolve GPU queue waits only (no CPU blocking). Used by async enqueue paths and by
+/// callers that already applied [`apply_cpu_epoch_waits`] for sync device submits.
+fn resolve_gpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<Vec<(ID3D12Fence, u64)>> {
     let Some(s) = sync else {
         return Ok(Vec::new());
     };
@@ -700,6 +704,11 @@ fn resolve_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -
         resolved.push((producer_fence.clone(), epoch.value));
     }
     Ok(resolved)
+}
+
+fn resolve_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<Vec<(ID3D12Fence, u64)>> {
+    apply_cpu_epoch_waits(scope, sync)?;
+    resolve_gpu_epoch_waits(scope, sync)
 }
 
 /// Latest device-global seq retired on the scope's device.
@@ -2754,11 +2763,12 @@ pub(super) fn submit_graph(
 /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
 ///
 /// Compute-retained lists re-execute on the context COMPUTE queue; device-queue
-/// render lists re-execute on [`LogicalDevice::command_queue`]. The retained
-/// slot's allocator is not reset while in flight (`acquire_*_slot` skips
+/// render lists re-execute synchronously on [`LogicalDevice::command_queue`]. The
+/// retained slot's allocator is not reset while in flight (`acquire_*_slot` skips
 /// retained slots). Unlike Vulkan's `SIMULTANEOUS_USE`, DXGI does not allow
 /// re-executing a closed list while a prior execution from the same slot is still
-/// in flight — we retire the previous signal on the CPU before re-execute.
+/// in flight — compute-retained retires that signal via a submission-worker HostWait;
+/// device-retained retires it on the render thread before Execute (worker is compute-only).
 pub(super) fn try_resubmit_retained_with_scope(
     scope: &Dx12SubmitScope<'_>,
     ctx: ContextHandle,
@@ -2865,13 +2875,12 @@ pub(super) fn try_resubmit_retained_with_scope(
                 prior_signal,
             )
         };
-        if prior_signal > 0 {
-            let _tz = tracy_zone!("dx12.resubmit_retained.prior_wait");
-            let completed = unsafe { ctx_fence.GetCompletedValue() };
-            if completed < prior_signal {
-                super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
+        let prior_wait = (prior_signal > 0).then(|| {
+            super::host_wait::HostWait::Fence {
+                fence: ctx_fence.clone(),
+                value: prior_signal,
             }
-        }
+        });
         let fence_value = {
             let _tz = tracy_zone!("dx12.resubmit_retained.alloc_timeline");
             allocate_timeline_value(&logical_device.timeline_next)
@@ -2915,6 +2924,7 @@ pub(super) fn try_resubmit_retained_with_scope(
                 ctx_fence,
                 vec![Some(cmd_list)],
                 sync,
+                prior_wait,
                 fence_value,
             )?;
         }

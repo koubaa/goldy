@@ -127,6 +127,73 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_eq!(read_u32(&grant, &submission), 42);
     }
 
+    /// Pipelined reader + retained writer: `cpu_waits` must retire on the submit worker
+    /// (HostWait prequel) without blocking the render thread before enqueue.
+    fn war_retained_writer_against_pipelined_reader(device: &Device) {
+        let ctx = submission_context(device);
+        let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
+        let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
+        let read_pipe = ComputePipeline::new(device, &read_shader).expect("pipe");
+        let write_pipe = ComputePipeline::new(device, &write_shader).expect("pipe");
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let buf = pool
+            .acquire_buffer_with_data(&[7u32; 1], BufferKind::Scattered)
+            .expect("buf");
+
+        let mut reader = Scheme::new(&ctx);
+        reader
+            .node("read", &read_pipe)
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let mut writer = Scheme::new(&ctx);
+        writer
+            .node("write", &write_pipe)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let grant = writer.grant_read(&buf).expect("grant");
+
+        // Bootstrap: writer may re-record once after the reader first appears (WAR prologue bake).
+        reader.submit().expect("reader record");
+        let first_write = writer.submit().expect("writer record");
+        assert_eq!(read_u32(&grant, &first_write), 42);
+
+        const WARMUP: u64 = 4;
+        for _ in 0..WARMUP {
+            reader.submit().expect("reader warmup");
+            let submission = writer.submit().expect("writer warmup");
+            assert_eq!(read_u32(&grant, &submission), 42);
+        }
+
+        let records_after_warmup = writer.replay_stats().records;
+        #[cfg(not(feature = "metal"))]
+        let resubmits_after_warmup = writer.replay_stats().resubmit_hits;
+
+        const STEADY: u64 = 12;
+        for _ in 0..STEADY {
+            reader.submit().expect("reader resubmit");
+            let submission = writer.submit().expect("writer resubmit");
+            assert_eq!(
+                read_u32(&grant, &submission),
+                42,
+                "retained writer must stay ordered after pipelined reader via cpu_waits"
+            );
+        }
+
+        assert_eq!(
+            writer.replay_stats().records,
+            records_after_warmup,
+            "steady-state writer must not re-record"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            writer.replay_stats().resubmit_hits,
+            resubmits_after_warmup + STEADY,
+            "steady-state frames must be retained hits (cpu_waits on worker)"
+        );
+    }
+
     fn retained_copy_reader(
         ctx: &Context,
         pipe: &ComputePipeline,
@@ -539,6 +606,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
 
         trial!(saxpy_style_chain_closed_form);
         trial!(war_write_after_read_pipelined_overwrite);
+        trial!(war_retained_writer_against_pipelined_reader);
         trial!(retained_reader_observes_independent_writer_across_resubmits);
         trial!(retained_waw_overwrites_independent_upload);
         trial!(retained_reader_cross_context_observes_independent_writer);
