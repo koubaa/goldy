@@ -883,8 +883,13 @@ pub(crate) fn submit_resolved_ir(
     }
 
     let fp = binding_fingerprint(ir);
-    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
-    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+    let split_on_barrier_cost = context
+        .device()
+        .capabilities()
+        .split_compute_partitions_on_barrier_cost;
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp, split_on_barrier_cost);
+    let wave_ranges =
+        analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
     let mut last_tv = context.gpu_progress();
     let mut cross_scratch = CrossSubmitScratch::new();
     let mut boundary = QueueBoundaryState::default();
@@ -1201,7 +1206,11 @@ fn submit_resolved_ir_partitions_fresh(
     }
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.fresh_plan");
-        TaskGraph::get_or_build_fresh_plan(cache, ir, fp);
+        let split_on_barrier_cost = context
+            .device()
+            .capabilities()
+            .split_compute_partitions_on_barrier_cost;
+        TaskGraph::get_or_build_fresh_plan(cache, ir, fp, split_on_barrier_cost);
     }
 
     let mut resolver = SlotResolver::new();
@@ -1335,7 +1344,12 @@ fn submit_resolved_ir_partitions_replay(
         TaskGraph::get_or_build_schedule(cache, ir, fp);
     }
 
-    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+    let split_on_barrier_cost = context
+        .device()
+        .capabilities()
+        .split_compute_partitions_on_barrier_cost;
+    let wave_ranges =
+        analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
 
     let partition_fps: Vec<u64> = {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.partition_fps");
@@ -1369,7 +1383,7 @@ fn submit_resolved_ir_partitions_replay(
 
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.build_partitions");
-        TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+        TaskGraph::get_or_build_partitioned_commands(cache, ir, fp, split_on_barrier_cost);
     }
 
     let mut resolver = SlotResolver::new();
@@ -2203,7 +2217,15 @@ impl TaskGraph {
             return Ok(tv);
         }
 
-        let partitions = analysis::emit_partitioned_commands(&self.ir, schedule, Some(resolver));
+        let partitions = analysis::emit_partitioned_commands(
+            &self.ir,
+            schedule,
+            Some(resolver),
+            context
+                .device()
+                .capabilities()
+                .split_compute_partitions_on_barrier_cost,
+        );
         let mut last_tv = context.gpu_progress();
         for partition in &partitions {
             let _tz = crate::tracy_zone!("goldy.submit_partition");
@@ -2876,7 +2898,12 @@ impl TaskGraph {
     ///
     /// Segments follow [`analysis::partition_wave_ranges`] with present/render/
     /// standalone flags precomputed so the fresh executor does not re-scan waves.
-    fn get_or_build_fresh_plan(cache: &mut Option<CompiledCacheEntry>, ir: &GraphIR, fp: u64) {
+    fn get_or_build_fresh_plan(
+        cache: &mut Option<CompiledCacheEntry>,
+        ir: &GraphIR,
+        fp: u64,
+        split_on_barrier_cost: bool,
+    ) {
         let _tz = crate::tracy_zone!("goldy.compile_fresh_plan");
         Self::get_or_build_schedule(cache, ir, fp);
         let needs_build = cache.as_ref().is_none_or(|e| e.fresh_plan.is_none());
@@ -2886,7 +2913,7 @@ impl TaskGraph {
         }
         tracing::trace!(target: "goldy::schedule_cache", hit = false, fp, "fresh_plan");
         let entry = cache.as_mut().unwrap();
-        let ranges = analysis::partition_wave_ranges(ir, &entry.schedule);
+        let ranges = analysis::partition_wave_ranges(ir, &entry.schedule, split_on_barrier_cost);
         let mut plan = Vec::with_capacity(ranges.len());
         for range in ranges {
             let waves = &entry.schedule.waves[range.clone()];
@@ -2968,7 +2995,12 @@ impl TaskGraph {
     ///
     /// On cache hit only upload `Arc<[u8]>` payloads in the compute slots are refreshed;
     /// render-pass commands are immutable (data arrives via bound parcels, not uploads).
-    fn get_or_build_partitioned_commands(cache: &mut Option<CompiledCacheEntry>, ir: &GraphIR, fp: u64) {
+    fn get_or_build_partitioned_commands(
+        cache: &mut Option<CompiledCacheEntry>,
+        ir: &GraphIR,
+        fp: u64,
+        split_on_barrier_cost: bool,
+    ) {
         let _tz = crate::tracy_zone!("goldy.compile_partitioned");
 
         // Ensure schedule exists.
@@ -3029,7 +3061,8 @@ impl TaskGraph {
         // stored so the slot indices remain aligned with wave_ranges.
         let _tz = crate::tracy_zone!("goldy.compile_partitioned.miss_emit");
         let entry = cache.as_mut().unwrap();
-        let wave_ranges = analysis::partition_wave_ranges(ir, &entry.schedule);
+        let wave_ranges =
+            analysis::partition_wave_ranges(ir, &entry.schedule, split_on_barrier_cost);
 
         let mut compute_partitions: Vec<Vec<GpuCommand>> = Vec::with_capacity(wave_ranges.len());
         let mut graph_partitions: Vec<Option<Vec<GraphCommand>>> = Vec::with_capacity(wave_ranges.len());
@@ -5783,7 +5816,7 @@ mod partitioning_tests {
     fn build_cache(ir: &GraphIR) -> CompiledCacheEntry {
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(ir);
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, ir, fp);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, ir, fp, true);
         cache.unwrap()
     }
 
@@ -5835,7 +5868,7 @@ mod partitioning_tests {
     fn assert_cache_kind_invariant(ir: &GraphIR, entry: &CompiledCacheEntry) {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
-        let ranges = analysis::partition_wave_ranges(ir, &schedule);
+        let ranges = analysis::partition_wave_ranges(ir, &schedule, true);
         let parts = entry.partitioned_commands.as_ref().unwrap();
 
         for (i, range) in ranges.iter().enumerate() {
@@ -6225,10 +6258,10 @@ mod partitioning_tests {
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
         let ptr_before = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
 
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
         let ptr_after = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
         assert_eq!(
             ptr_before, ptr_after,
@@ -6250,10 +6283,10 @@ mod partitioning_tests {
         assert_ne!(fp1, fp2, "test requires distinct binding fingerprints");
 
         let mut cache: Option<CompiledCacheEntry> = None;
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1, true);
         assert_eq!(cache.as_ref().unwrap().fp, fp1);
 
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2, true);
         assert_eq!(
             cache.as_ref().unwrap().fp,
             fp2,
@@ -6341,7 +6374,7 @@ mod partitioning_tests {
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
 
         let ptr_before = {
             let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
@@ -6355,7 +6388,7 @@ mod partitioning_tests {
         if let NodeKind::WriteBuffer { data, .. } = &mut ir.nodes[0].kind {
             *data = Arc::from(vec![9u8; 4]);
         }
-        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
 
         let ptr_after = {
             let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();

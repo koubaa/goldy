@@ -366,6 +366,13 @@ pub struct DeviceCapabilities {
     ///
     /// When `false`, callers must keep synchronous host writes and render-thread reuse gates.
     pub host_sidecar_on_submit_worker: bool,
+
+    /// Whether large pure-compute partitions may be subdivided at their heaviest
+    /// barrier boundary to expose GPU-pipeline overlap between submissions.
+    ///
+    /// Enabled on Vulkan/DX12. Disabled on Metal: cross-CB `MTLSharedEvent` waits
+    /// serialize consecutive partitions and dominate any overlap gains.
+    pub split_compute_partitions_on_barrier_cost: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -387,6 +394,7 @@ impl Default for DeviceCapabilities {
             buffer_page_size: 64 * 1024,
             buffer_decommit_supported: false,
             host_sidecar_on_submit_worker: false,
+            split_compute_partitions_on_barrier_cost: true,
         }
     }
 }
