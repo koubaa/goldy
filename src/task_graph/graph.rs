@@ -293,7 +293,12 @@ impl SubmitSidecarState {
             } else {
                 (Vec::new(), Vec::new())
             };
-        crate::backend::host_sidecar::merge_submit_sync_for_partition(base, &self.extra_queue_epochs, host, writes)
+        let extra = if base.as_ref().is_some_and(|s| !s.is_empty()) {
+            self.extra_queue_epochs.as_slice()
+        } else {
+            &[]
+        };
+        crate::backend::host_sidecar::merge_submit_sync_for_partition(base, extra, host, writes)
     }
 }
 

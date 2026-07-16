@@ -103,7 +103,9 @@ impl ParcelStamp {
     ///
     /// The expected call topology is:
     ///   - Render/submit thread: `scheme.submit()` → `drain_pending_for_submit_gate`
-    ///   - TID_PRESENT: `grant.consume()` → `resolver.resolve(present_tv)`
+    ///   - TID_PRESENT: `grant.consume()` → `resolver.resolve(copy_tv)`
+    ///     where `copy_tv` is the present-partition submit timeline (last read of
+    ///     copy-to-present sources), not the later display-present timeline.
     ///
     /// Do not fold the two roles onto one thread, even in fallback or teardown paths.
     pub(crate) fn drain_pending_for_submit_gate(&self, ctx: ContextHandle) {
