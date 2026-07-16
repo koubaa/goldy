@@ -12,12 +12,13 @@ use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
 use crate::slang::SlangStage;
 use crate::tracy_zone;
+use std::sync::Arc;
 
 /// Fallback workgroup size used when a compute shader's `[numthreads]` annotation
 /// cannot be parsed. Matches the Metal/Slang default used elsewhere in the codebase.
 const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
-use crate::types::{BufferKind, ResourceCategory};
+use crate::types::{BufferFlags, BufferKind, ResourceCategory};
 
 /// True when this submission records GPU encoder work beyond CPU-only `WriteBuffer` nodes.
 ///
@@ -201,6 +202,46 @@ fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Resul
         }
     }
     Ok(())
+}
+
+/// Resolve host-observed waits and deferred CPU writes for the submission worker.
+fn resolve_host_sidecar(state: &MetalState, sync: Option<&SubmitSync>) -> Result<super::pending_submit::MetalHostSidecar> {
+    let Some(s) = sync else {
+        return Ok(super::pending_submit::MetalHostSidecar {
+            host_observed: Vec::new(),
+            deferred_writes: Vec::new(),
+        });
+    };
+    let mut host_observed = Vec::with_capacity(s.host_observed_waits.len());
+    for epoch in &s.host_observed_waits {
+        let waiter = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("host-observed wait: unknown producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        host_observed.push((waiter, epoch.value));
+    }
+    let mut deferred_writes = Vec::with_capacity(s.deferred_host_writes.len());
+    for w in &s.deferred_host_writes {
+        let buffer_state = state
+            .buffers
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+        if buffer_state.flags.contains(BufferFlags::GPU_ONLY) {
+            anyhow::bail!(
+                "deferred host write requires CPU-writable buffer (handle={})",
+                w.buffer
+            );
+        }
+        deferred_writes.push((buffer_state.buffer.clone(), w.offset, Arc::clone(&w.data)));
+    }
+    Ok(super::pending_submit::MetalHostSidecar {
+        host_observed,
+        deferred_writes,
+    })
 }
 
 fn encode_wait_for_epochs(
@@ -1446,12 +1487,14 @@ pub(super) fn submit(
         .lock()
         .unwrap()
         .record_slot_usage(ctx, signal_value, used_slots);
+    let host_sidecar = resolve_host_sidecar(state, sync)?;
     super::pending_submit::enqueue_metal_commit(
         &ld,
         owned_command_buffer,
         signal_value,
         timeline_event,
         waiter,
+        host_sidecar,
         Some(sc_arc),
         "compute",
         true,
@@ -1682,12 +1725,14 @@ pub(super) fn submit_graph(
         .lock()
         .unwrap()
         .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
+    let host_sidecar = resolve_host_sidecar(state, sync)?;
     super::pending_submit::enqueue_metal_commit(
         &ld,
         owned_command_buffer,
         signal_value,
         timeline_event,
         waiter,
+        host_sidecar,
         Some(sc_arc),
         "graph",
         false,

@@ -362,7 +362,7 @@ pub struct DeviceCapabilities {
     pub buffer_decommit_supported: bool,
 
     /// Whether [`crate::Scheme::defer_host_write`] / host-observed waits are applied on the
-    /// submission worker before GPU execute (DX12 and Vulkan).
+    /// submission worker before GPU execute (DX12, Vulkan, and Metal).
     ///
     /// When `false`, callers must keep synchronous host writes and render-thread reuse gates.
     pub host_sidecar_on_submit_worker: bool,

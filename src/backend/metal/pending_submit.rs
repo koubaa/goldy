@@ -14,7 +14,45 @@ use block::ConcreteBlock;
 use cocoa::base::id;
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Host-observed timeline waits and deferred CPU writes resolved at enqueue time.
+pub(super) struct MetalHostSidecar {
+    pub host_observed: Vec<(TimelineWaiter, TimelineValue)>,
+    pub deferred_writes: Vec<(mtl::Buffer, u64, Arc<[u8]>)>,
+}
+
+fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
+    if sidecar.host_observed.is_empty() && sidecar.deferred_writes.is_empty() {
+        return Ok(());
+    }
+    let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.apply_host_sidecar_before_gpu");
+    for (waiter, value) in &sidecar.host_observed {
+        if !waiter.wait_until(*value, std::time::Duration::from_secs(120)) {
+            anyhow::bail!(
+                "host-observed wait timed out waiting for timeline value {value}"
+            );
+        }
+    }
+    for (buffer, offset, data) in &sidecar.deferred_writes {
+        let ptr = buffer.contents();
+        if ptr.is_null() {
+            anyhow::bail!("deferred host write: MTLBuffer contents() returned null");
+        }
+        if offset + data.len() as u64 > buffer.length() {
+            anyhow::bail!("deferred host write: write exceeds buffer bounds");
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                ptr.add(*offset as usize) as *mut u8,
+                data.len(),
+            );
+        }
+    }
+    Ok(())
+}
 
 pub(super) fn preallocate_device_timeline(ld: &SharedLogicalDevice) -> TimelineValue {
     let v = allocate_timeline_value(&ld.timeline_next);
@@ -50,6 +88,7 @@ struct MetalCommitPendingSubmit {
     signal_value: TimelineValue,
     timeline_event: mtl::SharedEvent,
     waiter: TimelineWaiter,
+    host_sidecar: MetalHostSidecar,
     log_kind: &'static str,
     api_log_commit: bool,
     compute_commit_instant: Option<Instant>,
@@ -60,6 +99,7 @@ impl PendingSubmit for MetalCommitPendingSubmit {
         let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.commit", self.log_kind);
         let command_buffer_ref = self.command_buffer.as_ref();
         let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
+        apply_host_sidecar_before_gpu(&self.host_sidecar)?;
         if self.api_log_commit && super::api_log::enabled() {
             super::api_log::log_commit(self.signal_value);
         }
@@ -121,6 +161,7 @@ pub(super) fn enqueue_metal_commit(
     signal_value: TimelineValue,
     timeline_event: mtl::SharedEvent,
     waiter: TimelineWaiter,
+    host_sidecar: MetalHostSidecar,
     sc_arc: Option<SharedMetalSubmissionContext>,
     log_kind: &'static str,
     api_log_commit: bool,
@@ -138,6 +179,7 @@ pub(super) fn enqueue_metal_commit(
             signal_value,
             timeline_event,
             waiter,
+            host_sidecar,
             log_kind,
             api_log_commit,
             compute_commit_instant,

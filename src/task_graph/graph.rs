@@ -1673,7 +1673,7 @@ impl IrSubmitState {
 
     /// Defer a host-visible write until the submission worker, after `refs` retire on the CPU.
     ///
-    /// Currently applied by the DX12 submission worker only.
+    /// Currently applied by the DX12 and Metal submission workers.
     pub fn defer_host_write(
         &mut self,
         refs: &crate::timeline::ReferenceTable,

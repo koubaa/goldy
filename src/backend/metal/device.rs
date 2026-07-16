@@ -55,6 +55,7 @@ pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCap
         buffer_resize_cost: crate::types::BufferResizeCost::Constant,
         buffer_page_size: 16 * 1024,
         buffer_decommit_supported: true,
+        host_sidecar_on_submit_worker: true,
         ..crate::device::DeviceCapabilities::default()
     }
 }
