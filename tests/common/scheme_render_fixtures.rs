@@ -8,7 +8,7 @@ use goldy::{
 use std::sync::Arc;
 
 use super::scheme_render::{acquire_readback_texture, scheme_render_and_readback};
-use crate::render_fixtures::{create_gol_initial_state, GOL_GRID_HEIGHT, GOL_GRID_WIDTH};
+use crate::gol_state::{create_gol_initial_state, GOL_GRID_HEIGHT, GOL_GRID_WIDTH};
 
 pub fn create_device() -> Option<Device> {
     let instance = Instance::new().ok()?;

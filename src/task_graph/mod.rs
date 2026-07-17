@@ -1,87 +1,7 @@
-//! Task graph API for explicit GPU scheduling with automatic barrier insertion.
+//! Shared graph IR, barrier analysis, and submit engine used by [`crate::Scheme`].
 //!
-//! # Motivation
-//!
-//! Goldy's bindless model (heap-backed argument buffers, resource-slot indices)
-//! gives shaders flexible, low-overhead access to resources. However, it makes
-//! the GPU's automatic dependency tracking blind — Metal cannot see through
-//! argument buffer indirection to know which resources a dispatch reads or
-//! writes, so it cannot insert barriers automatically.
-//!
-//! The current workaround (one command buffer per dispatch) is correct but
-//! suboptimal: each command buffer carries scheduling overhead, and Metal
-//! serializes them within a queue, preventing independent dispatches from
-//! overlapping.
-//!
-//! This module pairs bindless **access** with explicit **scheduling** — a
-//! task graph that declares what each node reads and writes, so Goldy
-//! can insert minimal barriers and maximize parallelism on all backends.
-//!
-//! # Usage
-//!
-//! Build a DAG of task nodes with per-resource access declarations, then
-//! submit. Goldy analyzes the graph, inserts minimal barriers, and executes
-//! with maximum parallelism.
-//!
-//! ```rust,ignore
-//! let mut graph = TaskGraph::new();
-//!
-//! // Clears and uploads are first-class nodes — the analyzer inserts the
-//! // correct barrier between this clear and any downstream reader.
-//! graph.clear_buffer(&pool_backing, 0, pool.capacity());
-//!
-//! graph.node("pathtag_reduce", &pipeline_a)
-//!     .with_buffer(&scene_buf, NodeAccess::Read)
-//!     .with_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
-//!     .with_resource_slots_slice(&[scene_idx, tagmonoid_idx])
-//!     .dispatch(64, 1, 1);
-//!
-//! graph.node("bbox_clear", &pipeline_b)
-//!     .with_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
-//!     .with_resource_slots_slice(&[bbox_idx])
-//!     .dispatch(16, 1, 1);
-//!
-//! let tv = graph.submit(&ctx)?;
-//! context.wait_until(tv)?;
-//! ```
-//!
-//! # Node kinds
-//!
-//! A [`TaskGraph`] accepts three types of nodes, all subject to the same
-//! dependency analysis:
-//!
-//! | Builder method            | GPU operation                      |
-//! |---------------------------|------------------------------------|
-//! | [`TaskGraph::node`]       | Compute dispatch (direct/indirect) |
-//! | [`TaskGraph::clear_parcel`] / [`TaskGraph::clear_buffer_view`] | GPU-side buffer zero-fill |
-//! | [`TaskGraph::write_parcel`] | CPU→GPU buffer upload |
-//! | [`TaskGraph::copy_render_target_to_swapchain`] | Offscreen render target → swapchain blit |
-//!
-//! # SWMR scheduling
-//!
-//! [`NodeAccess`] is orthogonal to a buffer's physical
-//! [`BufferKind`](crate::BufferKind). A `Scattered` (read/write) buffer might
-//! be read-only in one dispatch and read-write in another. The graph uses
-//! per-node logical access to enable single-writer/multiple-reader parallelism:
-//!
-//! - Multiple `Read` nodes on the same resource run concurrently.
-//! - A `Write` or `ReadWrite` node serializes against all prior accessors.
-//! - Barriers are inserted only at true RAW/WAR/WAW edges.
-//!
-//! # Backend mapping
-//!
-//! The graph emits [`ComputeCommand::ResourceBarrier`](crate::backend::ComputeCommand)
-//! with per-resource granularity. Each backend handles it:
-//!
-//! - **Metal**: `memoryBarrierWithResources:count:` — precise per-resource
-//!   barriers within a single compute encoder.
-//! - **Vulkan**: falls back to global compute pipeline barrier (per-resource
-//!   `VkBufferMemoryBarrier` is a future optimization).
-//! - **DX12**: falls back to global UAV barrier (per-resource
-//!   `D3D12_RESOURCE_BARRIER` is a future optimization).
-//!
-//! See `docu/research/technical_stack/abstract-gpu-compute-graph.md` for the
-//! full design rationale.
+//! Schemes record a [`GraphIR`], then submit through the IR submit path, which
+//! schedules waves, inserts barriers, and drives backend `submit_graph` paths.
 
 pub(crate) mod analysis;
 pub(crate) mod cb_replay;
@@ -91,8 +11,8 @@ mod graph;
 mod ir;
 pub mod record;
 
-pub(crate) use graph::{apply_stamp_targets, DeferredPresentAcquire, IrSubmitState, ResolvedPresentSlot};
-pub use graph::{NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph};
+pub use graph::ShaderResourceSlot;
+pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, ResolvedPresentSlot};
 pub use ir::{BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
@@ -100,17 +20,17 @@ pub use record::{ComputeNodeRecord, RenderPassRecord};
 use crate::backend::{BufferHandle, TextureHandle};
 use crate::types::TextureFormat;
 
-/// Opaque id for a [`TaskGraph::transient_buffer`] allocation (graph-scoped bump heap).
+/// Opaque id for a transient buffer slot in graph IR (`ResourceId::TransientBuffer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TransientId(pub u32);
+pub(crate) struct TransientId(pub u32);
 
-/// Opaque id for a [`TaskGraph::transient_texture`] allocation (graph-scoped transient).
+/// Opaque id for a transient texture slot in graph IR (`ResourceId::TransientTexture`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransientTextureId(pub u32);
 
 /// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
-/// of a `SwapchainOutput` binding.  Replaced by the real UAV bindless index in
-/// `TaskGraph::lower_swapchain_output` after `surface.begin()`.
+/// of a `SwapchainOutput` binding. Replaced by the real UAV bindless index when
+/// a surface resolves swapchain backing at submit time.
 pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 
 /// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
@@ -118,20 +38,13 @@ pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 /// index when the swapchain pool resolves backing at submit time.
 pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
 
-/// Opaque handle returned by [`TaskGraph::declare_swapchain_output`].
-///
-/// Passed to [`NodeBuilder::with_swapchain_output`] when recording the
-/// fine-pass dispatch.  Carries no data — it exists purely for type-safety so
-/// callers cannot accidentally swap a concrete texture with a swapchain output.
-///
-/// The caller (ekrano's `collect_bindless_indices_into`) must place
-/// [`SWAPCHAIN_SLOT_PLACEHOLDER`] in the `resource_slots` at the position
-/// corresponding to this binding.  `TaskGraph::lower_swapchain_output` then
-/// patches that sentinel with the real UAV index after `surface.begin()`.
+/// Opaque handle for a swapchain output binding in graph IR.
 #[derive(Debug, Clone, Copy)]
-pub struct SwapchainOutputHandle;
+#[allow(dead_code)]
+pub(crate) struct SwapchainOutputHandle;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct TransientBufferSpec {
     pub(crate) id: u32,
     pub(crate) size: u64,
@@ -148,6 +61,7 @@ pub(crate) struct TransientTextureKey {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct TransientTextureSpec {
     pub id: u32,
     pub width: u32,
@@ -185,18 +99,20 @@ pub(crate) enum ResourceId {
     /// Offscreen [`crate::RenderTarget`] color attachment.
     ///
     /// [`NodeKind::RenderPass`] nodes implicitly write their target; consumers
-    /// such as [`super::graph::TaskGraph::copy_render_target_to_swapchain`] declare
+    /// such as scheme copy-to-present nodes declare
     /// an explicit `Read` binding so the scheduler orders copy after render.
     RenderTarget(crate::backend::RenderTargetHandle),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
+    #[allow(dead_code)] // TaskGraph placement-heap path removed; kept for IR/analysis matching
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
+    #[allow(dead_code)]
     TransientTexture(TransientTextureId),
-    /// Swapchain output: late-bound at submit time via [`Surface::submit_graph`](crate::Surface::submit_graph).
+    /// Swapchain output: late-bound at submit time (legacy surface-graph path).
     ///
     /// Records a stable dependency placeholder without requiring an acquired
-    /// swapchain image.  Lowered to [`ResourceId::Texture`] after
-    /// `surface.begin()` runs between early and final partition submission.
+    /// swapchain image.  Lowered to [`ResourceId::Texture`] after acquire.
+    #[allow(dead_code)]
     SwapchainOutput,
     /// Present lease: scheme-scoped name for a swapchain-pool drawable.
     ///

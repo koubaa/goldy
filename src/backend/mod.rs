@@ -625,7 +625,7 @@ pub enum GpuCommand {
     BindResourcesTyped { handles: Vec<ResourceHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
-        /// Debug label from [`crate::task_graph::TaskGraph::node`] when emitted by the analyzer.
+        /// Debug label from [`crate::Scheme::node`] when emitted by the analyzer.
         label: Option<&'static str>,
         workgroups_x: u32,
         workgroups_y: u32,
@@ -735,7 +735,7 @@ pub enum GpuCommand {
     /// to the device-local table by the prologue at the start of each submission.
     FrameTableStaging { data: std::sync::Arc<[u32]> },
     ///
-    /// Within a [`crate::task_graph::TaskGraph`] submission, prefer
+    /// Within a [`crate::Scheme`] submission, prefer
     /// `ResourceBarrier` which is produced by the scheduler with precise
     /// `src_usage` / `dst_usage` derived from the dependency graph.
     Barrier,
@@ -752,7 +752,7 @@ pub enum GpuCommand {
     },
 }
 
-/// Mixed compute + offscreen render commands from [`crate::task_graph::TaskGraph`].
+/// Mixed compute + offscreen render commands from [`crate::Scheme`].
 #[derive(Debug, Clone)]
 pub enum GraphCommand {
     /// Compute / upload / barrier from [`GpuCommand`].

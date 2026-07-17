@@ -12,6 +12,9 @@ pub fn submission_context(device: &Device) -> Context {
 /// Several integration tests hold two live [`Context`]s at once (`two_contexts_*`).
 /// Worst-case concurrent demand is `2 * test_threads`, so cap threads at `pool / 2`.
 /// DX12 WARP stays forced to a single thread (known contention).
+///
+/// Included via `#[path]` into multiple test crates; not every crate calls this.
+#[allow(dead_code)]
 pub fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Device) {
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {

@@ -54,26 +54,29 @@ vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERE
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
 pipeline = goldy.RenderPipeline(device, shader, shader, goldy.RenderPipelineDesc())
 
-# Graphics via TaskGraph (headless)
-graph = goldy.TaskGraph()
-with graph.render_pass("clear", target) as rp:
+# Graphics via Scheme (headless)
+ctx = device.create_context()
+scheme = goldy.Scheme(ctx)
+rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
+with scheme.render_pass("clear", rt) as rp:
     rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
     rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
     rp.set_pipeline(pipeline)
     rp.set_vertex_buffer_parcel(0, vertex_parcel)
     rp.draw(vertex_count=3)
-graph.dispatch(device)
-pixels = target.read_to_cpu()
+scheme.copy_to_texture(rt, readback)
+grant = scheme.grant_read_texture(readback)
+submission = scheme.submit()
+pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(100, 100, 4)
 ```
 
 ## Examples
 
 See the `examples/` directory for complete examples:
 
-- **triangle.py** / **triangle_headless.py** - Colored triangle via TaskGraph (headless readback)
-- **triangle_window.py** - Windowed triangle (requires GLFW)
-- **triangle_headless.py** - Headless triangle via TaskGraph (CI / no display)
-- **game_of_life.py** - Hybrid compute + render graph in a window (requires GLFW)
+- **triangle.py** / **triangle_headless.py** - Colored triangle via Scheme (headless readback)
+- **triangle_window.py** - Windowed triangle via Scheme + present (requires GLFW)
+- **game_of_life.py** - Hybrid compute + render scheme in a window (requires GLFW)
 - **game_of_life_headless.py** - Headless Game of Life smoke test (CI / no display)
 - **adapter_info.py** - Print GPU adapter information
 - **compute_demo.py** - Standalone compute shader example
@@ -102,11 +105,17 @@ pixels = target.read_to_cpu()  # Shape: (height, width, 4), dtype: uint8
 
 ### Context Managers
 
-Pythonic API with `with` statements for task-graph recording:
+Pythonic API with `with` statements for scheme recording:
 ```python
-with graph.compute_node("update", pipeline, workgroups=(8, 8, 1)) as node:
-    node.with_parcel(parcel, goldy.NodeAccess.READ_WRITE)
-    node.with_resource_slots([parcel.resource_index(goldy.ResourceAccess.WRITE)])
+with scheme.render_pass("main", rt) as rp:
+    rp.with_parcel(parcel, goldy.NodeAccess.READ)
+    rp.set_pipeline(pipeline)
+    rp.draw(vertex_count=3)
+
+scheme.node("update", pipeline).with_parcel(
+    parcel, goldy.NodeAccess.READ_WRITE
+).dispatch(4, 1, 1)
+submission = scheme.submit()
 ```
 
 ### Shader Libraries
@@ -143,10 +152,10 @@ device.register_library('mylib', '''
 | `ShaderModule` | Compiled Slang shader |
 | `RenderPipeline` | Complete render state |
 | `RenderTarget` | Off-screen render target |
-| `TaskGraph` | GPU task graph (render passes, swapchain blit, dispatch) |
-| `RenderPass` | Draw commands within a render-pass node |
-| `NodeAccess` | Read/Write/ReadWrite for graph dependency tracking |
-| `ComputeNode` | Record a compute dispatch node on a task graph |
+| `Scheme` | Retained GPU dependency graph (render passes, compute, present) |
+| `SchemeRenderPass` | Draw commands within a render-pass node |
+| `SchemeComputeNode` | Record a compute dispatch node on a scheme |
+| `NodeAccess` | Read/Write/ReadWrite for scheme dependency tracking |
 | `ComputePipeline` | Compute shader pipeline |
 
 ### Enums

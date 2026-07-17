@@ -1,12 +1,12 @@
-//! Scheme screenshot tests — duplicated from `screenshot_tests.rs`.
+//! Scheme screenshot tests.
 //!
-//! Reuses the same reference PNGs. TaskGraph originals are marked legacy in `screenshot_tests.rs`.
+//! Reuses the same reference PNGs as the former TaskGraph screenshot suite.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 mod common;
 
-#[path = "common/render_fixtures.rs"]
-mod render_fixtures;
+#[path = "common/gol_state.rs"]
+mod gol_state;
 #[path = "common/scheme_render.rs"]
 mod scheme_render;
 #[path = "common/scheme_render_fixtures.rs"]

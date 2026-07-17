@@ -39,42 +39,36 @@ dotnet add reference path/to/goldy/dotnet/Goldy/Goldy.csproj
 using Goldy;
 
 using var instance = new Instance();
-using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
-using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);
-using var graph = new TaskGraph();
+using var device = instance.RequestAdapter().RequestDevice();
+using var ctx = device.CreateContext();
+using var retainedPool = new RetainedPool(device);
+using var readback = retainedPool.AcquireTexture(
+    100, 100, TextureFormat.Rgba8Unorm, TextureKind.Direct,
+    TextureFlags.CopySrc | TextureFlags.CopyDst);
 
-using (var pass = graph.RenderPass("clear", target))
+using var scheme = new Scheme(ctx);
+using var rt = scheme.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
+using (var pass = scheme.RenderPass("clear", rt))
     pass.Clear(Color.CornflowerBlue);
 
-graph.Dispatch(device);
-byte[] pixels = target.ReadToCpu();
+scheme.CopyToTexture(rt, readback);
+using var grant = scheme.GrantReadTexture(readback);
+using var submission = scheme.Submit();
+byte[] pixels = grant.Consume(submission);
 ```
 
 See `Goldy.Examples/TriangleHeadless.cs` for a full triangle readback demo.
 
 ### Windowed Rendering
 
-Build a task graph each frame, blit an offscreen `RenderTarget` to the swapchain, then present:
+Record a retained scheme once, submit each frame, consume the present grant:
 
 ```csharp
-using var graph = new TaskGraph();
-graph.Clear();
+using var scheme = new Scheme(ctx);
+var (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
 
-using (var pass = graph.RenderPass("main", sceneRt))
-{
-    pass.BindBuffer(vertexBuffer, NodeAccess.Read);
-    pass.Clear(Color.CornflowerBlue);
-    pass.SetPipeline(pipeline);
-    pass.SetVertexBuffer(0, vertexBuffer);
-    pass.Draw(3);
-}
-
-var swapchain = graph.DeclareSwapchainOutput();
-graph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
-
-using var frame = surface.Acquire();
-surface.SubmitGraphToFrame(graph, frame);
-surface.Present(frame);
+using var submission = scheme.Submit();
+present.Consume(submission);
 ```
 
 See `Goldy.Examples/TriangleWindow.cs` and `GameOfLifeWindow.cs`.
@@ -109,14 +103,9 @@ using var pipeline = new RenderPipeline(device, shader, new RenderPipelineDesc
 All Goldy objects implement `IDisposable`. Use `using` declarations or `using` blocks to ensure GPU resources are released promptly:
 
 ```csharp
-// Preferred: using declaration (C# 8+)
-using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
-
-// Also valid: explicit using block
-using (var target = new RenderTarget(device, 512, 512, TextureFormat.Rgba8Unorm))
-{
-    // target is released when the block exits
-}
+using var device = instance.RequestAdapter().RequestDevice();
+using var ctx = device.CreateContext();
+using var scheme = new Scheme(ctx);
 ```
 
 ## Key Differences from Rust
@@ -127,184 +116,60 @@ using (var target = new RenderTarget(device, 512, 512, TextureFormat.Rgba8Unorm)
 | Error handling | `Result<T, GoldyError>` | Exceptions |
 | Device lifetime | `Arc<Device>` | `IDisposable` / `using` |
 | Retained buffer | `retained_pool.acquire_buffer_with_data(&data, access)` | `retainedPool.AcquireBuffer<T>(data, access)` → `Parcel` |
-| Pixel readback | `Vec<u8>` | `byte[]` |
+| Submission | `scheme.submit()?` | `scheme.Submit()` → `SchemeSubmission` |
 | Enums | `DeviceType::DiscreteGpu` | `DeviceType.DiscreteGpu` |
 
 ## API Reference
 
-### Instance
+### Scheme
 
 ```csharp
-public sealed class Instance : IDisposable
+public sealed class Scheme : IDisposable
 {
-    public Instance();
-    public IEnumerable<AdapterInfo> EnumerateAdapters();
-    public Device CreateDevice(DeviceType deviceType);
-    public Device CreateDeviceById(uint adapterId);
+    public Scheme(Context ctx);
+    public SchemeComputeNodeScope ComputeNode(string label, ComputePipeline pipeline);
+    public SchemeRenderTargetLease LeaseRenderTarget(uint width, uint height, TextureFormat format, ...);
+    public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease);
+    public void CopyToTexture(SchemeRenderTargetLease src, Texture dst);
+    public void CopyToPresent(SchemeRenderTargetLease src, PresentLease dst);
+    public PresentGrant GrantPresent(PresentLease lease);
+    public ReadGrant GrantRead(Parcel parcel);
+    public ReadGrant GrantReadTexture(Texture texture);
+    public SchemeSubmission Submit();
 }
 ```
 
-### Device
+### SchemeRenderPassScope / SchemeComputeNodeScope
 
 ```csharp
-public sealed class Device : IDisposable
+using (var pass = scheme.RenderPass("main", rt))
 {
-    public uint AdapterId { get; }
-    public bool IsValid { get; }
-    public ulong GpuProgress { get; }
-    public void WaitUntil(ulong value);
-    public bool WaitUntilTimeout(ulong value, uint timeoutMs);
-    public bool HasLibrary(string name);
+    pass.WithParcel(vertexParcel, NodeAccess.Read);
+    pass.Clear(Color.CornflowerBlue);
+    pass.SetPipeline(pipeline);
+    pass.SetVertexBuffer(0, vertexParcel);
+    pass.Draw(3);
+}
+
+using (var node = scheme.ComputeNode("update", computePipeline))
+{
+    node.WithParcel(stateBuf, NodeAccess.ReadWrite);
+    node.Dispatch(wgX, wgY, 1);
 }
 ```
 
-### Buffer
+### SwapchainPool / PresentGrant
 
 ```csharp
-public sealed class Buffer : IDisposable
-{
-    public static Buffer New(Device device, ulong size, BufferKind access);
-    public static Buffer WithData<T>(Device device, T[] data, BufferKind access)
-        where T : unmanaged;
-    public void Write<T>(T[] data) where T : unmanaged;
-    public void Write<T>(ulong offset, T[] data) where T : unmanaged;
-    public ulong Size { get; }
-}
+using var swapchain = GlfwSwapchainPool.Create(ctx, window);
+using var screen = swapchain.Lease();
+var present = scheme.GrantPresent(screen);
+// each frame:
+using var submission = scheme.Submit();
+present.Consume(submission);
 ```
 
-### ShaderModule
-
-```csharp
-public sealed class ShaderModule : IDisposable
-{
-    public ShaderModule(Device device, string slangSource);
-}
-```
-
-### RenderPipeline / RenderPipelineDesc
-
-```csharp
-public sealed class RenderPipeline : IDisposable
-{
-    public RenderPipeline(Device device, ShaderModule shader, RenderPipelineDesc desc);
-}
-
-public sealed class RenderPipelineDesc
-{
-    public TextureFormat TargetFormat { get; set; }
-    public PrimitiveTopology Topology { get; set; }
-    // ... vertex layout, depth state
-}
-```
-
-### TaskGraph / RenderPass / ComputeNode
-
-```csharp
-public sealed class TaskGraph : IDisposable
-{
-    public TaskGraph();
-    public void Clear();
-    public void WriteBuffer(Buffer buffer, ulong offset, ReadOnlySpan<byte> data);
-    public RenderPassScope RenderPass(string label, RenderTarget target);
-    public ComputeNodeScope ComputeNode(string label, ComputePipeline pipeline,
-        uint workgroupsX = 1, uint workgroupsY = 1, uint workgroupsZ = 1);
-    public SwapchainOutput DeclareSwapchainOutput();
-    public void CopyRenderTargetToSwapchain(RenderTarget source, SwapchainOutput swapchain);
-    public void Dispatch(Device device);  // headless: submit and block
-}
-
-public sealed class RenderPassScope : IDisposable
-{
-    public void BindBuffer(Buffer buffer, NodeAccess access);
-    public void Clear(Color color);
-    public void SetPipeline(RenderPipeline pipeline);
-    public void SetVertexBuffer(uint slot, Buffer buffer);
-    public void Draw(uint vertexCount, uint instanceCount = 1);
-    public void DrawFullscreen();
-}
-
-public sealed class ComputeNodeScope : IDisposable
-{
-    public ComputeNodeScope BindBuffer(Buffer buffer, NodeAccess access);
-    public ComputeNodeScope BindResourcesRaw(ReadOnlySpan<uint> indices);
-}
-```
-
-Graphics and compute both go through `TaskGraph`.
-
-### RenderTarget
-
-```csharp
-public sealed class RenderTarget : IDisposable
-{
-    public RenderTarget(Device device, uint width, uint height, TextureFormat format);
-    public byte[] ReadToCpu();
-    public void ReadToBuffer(byte[] output);
-    public uint Width { get; }
-    public uint Height { get; }
-    public TextureFormat Format { get; }
-    public int BufferSize { get; }
-}
-```
-
-### Surface / SurfaceFrame
-
-```csharp
-public sealed class Surface : IDisposable
-{
-    public Surface(Device device, nint windowHandle);
-    public SurfaceFrame Acquire();
-    public void SubmitGraphToFrame(TaskGraph graph, SurfaceFrame frame);
-    public void Present(SurfaceFrame frame);
-    public void Resize(uint width, uint height);
-    public uint Width { get; }
-    public uint Height { get; }
-}
-
-public sealed class SurfaceFrame : IDisposable
-{
-    public uint Width { get; }
-    public uint Height { get; }
-}
-```
-
-### Compute
-
-```csharp
-public sealed class ComputePipeline : IDisposable
-{
-    public ComputePipeline(Device device, ShaderModule computeShader);
-}
-```
-
-Record compute via `TaskGraph.ComputeNode` (see `ComputeNodeScope` above). Headless submission uses `TaskGraph.Dispatch`.
-
-### Texture / Sampler
-
-```csharp
-public sealed class Texture : IDisposable
-{
-    public Texture(Device device, uint width, uint height, TextureFormat format,
-                   TextureKind access, TextureFlags flags = TextureFlags.None);
-    public void Write(byte[] data);
-    public uint Width { get; }
-    public uint Height { get; }
-    public TextureFormat Format { get; }
-}
-
-public sealed class Sampler : IDisposable
-{
-    public Sampler(Device device, SamplerDesc desc);
-}
-
-public struct SamplerDesc
-{
-    public FilterMode MagFilter { get; set; }
-    public FilterMode MinFilter { get; set; }
-    public AddressMode AddressModeU { get; set; }
-    public AddressMode AddressModeV { get; set; }
-}
-```
+Graphics and compute both go through `Scheme`.
 
 ### Enums
 
@@ -312,26 +177,11 @@ public struct SamplerDesc
 public enum DeviceType   { DiscreteGpu, IntegratedGpu, Cpu, Other }
 public enum BackendType  { Vulkan, Metal, Dx12 }
 public enum BufferKind   { Scattered, Broadcast }
-public enum TextureKind { Interpolated, Direct }
-public enum FilterMode   { Nearest, Linear }
-public enum AddressMode  { Repeat, MirrorRepeat, ClampToEdge, ClampToBorder }
-
-public enum TextureFormat
-{
-    Rgba8Unorm, Rgba8Srgb, Bgra8Unorm,
-    Rgba16Float, Rgba32Float, Depth32Float,
-}
-
-public struct Color
-{
-    public float R, G, B, A;
-    public Color(float r, float g, float b, float a);
-    public static Color CornflowerBlue { get; }
-    public static Color Black { get; }
-    public static Color White { get; }
-}
+public enum NodeAccess   { Read, Write, ReadWrite }
 ```
 
 ### Headless vs windowed submission
 
-`TaskGraph.Dispatch(device)` analyzes the graph, submits GPU work, and blocks until complete. For windowed presentation, build the graph (render passes, compute nodes, optional swapchain blit), then call `Surface.SubmitGraphToFrame` followed by `Surface.Present`.
+Headless: record a scheme, `GrantRead` or `GrantReadTexture`, `Submit()`, then `grant.Consume(submission)`.
+
+Windowed: record once with `CopyToPresent` + `GrantPresent`; each frame call `Submit()` and `present.Consume(submission)`.

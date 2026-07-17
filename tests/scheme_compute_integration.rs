@@ -10,7 +10,7 @@ mod imp {
     use crate::submission::submission_context;
     use crate::upload::write_to_parcel;
     use goldy::{
-        types::{BackendType, BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
+        types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
         BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
         ReadGrant, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
         Submission,
@@ -1674,41 +1674,6 @@ mod imp {
         assert!(
             nonzero > 0,
             "texture readback all zeros — barrier not recorded correctly"
-        );
-    }
-
-    fn scheme_tracked_texture_read_to_cpu_rejected(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-
-        let width = 8u32;
-        let height = 8u32;
-        let zeros = vec![0u8; (width * height * 4) as usize];
-        let texture = test_alloc_texture(
-            &device,
-            &zeros,
-            width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_SRC,
-        );
-
-        let mut scheme = Scheme::new(&ctx);
-        scheme
-            .node("write_tex_raw", &pipeline)
-            .with_parcel(&texture, NodeAccess::Write)
-            .dispatch(1, 1, 1);
-        let frame = scheme.submit().expect("submit");
-        frame.wait(&ctx).expect("wait");
-
-        let mut output = vec![0u8; texture.byte_size() as usize];
-        let err = texture.read_to_cpu(&mut output).unwrap_err();
-        assert!(
-            err.to_string().contains("tracked by a scheme"),
-            "unexpected error: {err}"
         );
     }
 
@@ -4011,7 +3976,6 @@ mod imp {
         trial!(scheme_scattered_typed_variable_assignment);
         trial!(scheme_compute_write_to_texture);
         trial!(scheme_with_parcel_raw_texture);
-        trial!(scheme_tracked_texture_read_to_cpu_rejected);
         trial!(scheme_wave_inclusive_scan_uniform_64);
         trial!(scheme_wave_inclusive_scan_ramp_64);
         trial!(scheme_wave_inclusive_scan_uniform_256);

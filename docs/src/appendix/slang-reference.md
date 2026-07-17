@@ -232,7 +232,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 
 ### Compute + Render Buffer Sharing
 
-Compute shaders and graphics shaders share the same bindless buffers. The task graph handles the dependency:
+Compute shaders and graphics shaders share the same bindless buffers. The scheme handles the dependency:
 
 ```hlsl
 // Compute: update particles

@@ -27,7 +27,7 @@ int main() {
     try {
         goldy::Instance instance;
         goldy::Device device = instance.request_adapter().request_device();
-        goldy::RenderTarget target(device, 800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
+        goldy::Context ctx(device);
 
         const Vertex vertices[] = {
             {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
@@ -36,7 +36,7 @@ int main() {
         };
 
         goldy::RetainedPool pool(device);
-        goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -56,18 +56,27 @@ int main() {
 
         goldy::RenderPipeline pipeline(device, shader, shader, desc);
 
-        goldy::TaskGraph graph;
+        GoldyTextureFlags readback_flags{};
+        readback_flags._0 = goldy::TextureFlags::CopySrc | goldy::TextureFlags::CopyDst;
+        goldy::Texture readback = pool.acquire_texture(
+            800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM,
+            GOLDY_TEXTURE_KIND_DIRECT, readback_flags);
+
+        goldy::Scheme scheme(ctx);
+        goldy::SchemeRenderTargetLease rt = scheme.lease_render_target(
+            800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM, nullptr);
         {
-            auto pass = graph.render_pass("triangle", target);
-            pass.bind_parcel(vertex_buffer, goldy::NodeAccess::Read)
+            auto pass = scheme.render_pass("triangle", rt);
+            pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read)
                 .clear(goldy::Color::cornflower_blue())
                 .set_pipeline(pipeline)
-                .set_vertex_buffer_parcel(0, vertex_buffer)
+                .set_vertex_buffer(0, vertex_buffer)
                 .draw(0, 3);
         }
-        graph.dispatch(device);
-
-        auto pixels = target.read_to_cpu();
+        scheme.copy_to_texture(rt, readback);
+        goldy::ReadGrant grant = scheme.grant_read_texture(readback);
+        goldy::SchemeSubmission submission = scheme.submit();
+        auto pixels = grant.consume(submission);
         std::cout << "Rendered " << pixels.size() << " bytes\n";
         return 0;
     } catch (const goldy::Exception& e) {
@@ -135,7 +144,7 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 
 ## Platform Support
 
-| Platform | Headless TaskGraph | Windowed Surface |
+| Platform | Headless Scheme | Windowed Surface |
 |----------|-------------------|------------------|
 | Windows x64 | ✅ | ✅ |
 | Linux x64 | ✅ | ❌ (use headless or custom window + C API) |
@@ -155,7 +164,7 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 | `goldy::ShaderModule` | Compiled Slang shader |
 | `goldy::RenderPipeline` | Graphics pipeline |
 | `goldy::RenderTarget` | Offscreen render target (readback) |
-| `goldy::TaskGraph` | Task graph (render passes, swapchain blit, dispatch) |
+| `goldy::Scheme` | Retained dependency graph (render passes, compute, present) |
 | `goldy::Surface` | Window swapchain (Win32 / macOS only) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
 | `goldy::Sampler` | Texture sampler |

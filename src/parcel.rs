@@ -38,16 +38,12 @@ pub(crate) struct InteractionEdge {
 
 pub(crate) type InteractionSet = Vec<InteractionEdge>;
 
-/// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
+/// Shared stamp cell and home-device identity for scheme submit stamping.
 pub(crate) struct ParcelStamp {
     pub(crate) sync: Arc<Mutex<ResourceSync>>,
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
-
-    /// Set when this stamp is registered for scheme/task-graph hazard tracking.
-    /// TODO: delete this when task graph is eliminated
-    scheme_registered: Arc<AtomicBool>,
 }
 
 impl ParcelStamp {
@@ -57,7 +53,6 @@ impl ParcelStamp {
             interaction_set: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
-            scheme_registered: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -67,18 +62,7 @@ impl ParcelStamp {
             interaction_set: Arc::clone(&self.interaction_set),
             pending: Arc::clone(&self.pending),
             home_device: self.home_device.clone(),
-            scheme_registered: Arc::clone(&self.scheme_registered),
         }
-    }
-
-    //TODO: delete this when taskgraph is removed
-    pub(crate) fn mark_scheme_registered(&self) {
-        self.scheme_registered.store(true, Ordering::Relaxed);
-    }
-
-    //TODO: delete this when taskgraph is removed
-    pub(crate) fn is_scheme_registered(&self) -> bool {
-        self.scheme_registered.load(Ordering::Relaxed)
     }
 
     pub(crate) fn merged_references(&self) -> ReferenceTable {
@@ -287,10 +271,6 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn is_scheme_registered(&self) -> bool {
-        self.stamp.is_scheme_registered()
-    }
-
     /// Zoning / telemetry label (buffer vs texture).
     pub fn kind(&self) -> ParcelType {
         match &self.backing {
@@ -355,7 +335,7 @@ impl Parcel {
         matches!(self.settle(ctx), Settle::Ready)
     }
 
-    /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
+    /// Shared stamp cell updated by [`crate::Scheme`] at submit.
     pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
         Arc::new(self.stamp.clone_shared_cells())
     }
@@ -364,7 +344,7 @@ impl Parcel {
         &self.stamp.home_device
     }
 
-    /// Backend buffer handle and graph resource id for [`crate::TaskGraph::write_parcel`].
+    /// Backend buffer handle and graph resource id for [`crate::Scheme::write_parcel`].
     pub(crate) fn write_buffer_target(&self) -> anyhow::Result<(BufferHandle, ResourceId)> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => {
@@ -931,7 +911,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use TaskGraph::write_texture_region() for batched, non-blocking uploads. \
+        note = "Use Scheme::write_texture_region() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
@@ -943,7 +923,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use TaskGraph::write_texture() for batched, non-blocking uploads. \
+        note = "Use Scheme::write_texture() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
@@ -956,11 +936,6 @@ impl Texture {
     )]
     #[allow(deprecated)]
     pub fn read_to_cpu(&self, output: &mut [u8]) -> anyhow::Result<()> {
-        if self.parcel.is_scheme_registered() {
-            anyhow::bail!(
-                "texture is tracked by a scheme; copy to a CPU_READABLE buffer parcel via a scheme instead of Texture::read_to_cpu"
-            );
-        }
         self.parcel.grant_texture_keepalive()?.read_to_cpu(output)
     }
 

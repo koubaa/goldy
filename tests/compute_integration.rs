@@ -1,23 +1,24 @@
 #![allow(deprecated)]
 
-#[path = "common/mod.rs"]
-mod common;
 #[path = "common/submission.rs"]
 mod submission;
 
 #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 mod imp {
-    //! Compute pipeline integration tests.
+    //! Compute pipeline integration tests (skip bucket).
     //!
-    //! These tests verify compute pipeline functionality with actual GPU backends.
-    //! They are only compiled when at least one backend feature is enabled.
+    //! Migrated dispatch/readback tests live in `scheme_compute_integration.rs`.
+    //! This file retains allocation, lifecycle, shader-math, validation, and pool tests
+    //! that do not depend on `TaskGraph`.
 
     use crate::submission::submission_context;
     use goldy::{
-        types::{BackendType, BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
+        types::{BackendType, BufferFlags},
         Buffer, BufferKind, BufferPool, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
-        RequestAdapterOptions, ShaderModule, TaskGraph,
+        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TransientAllocatorConfig,
+        TransientAllocatorStrategy,
     };
+    use std::sync::Arc;
 
     fn request_default_device(instance: &Instance) -> Device {
         instance
@@ -27,8 +28,40 @@ mod imp {
             .expect("Failed to create device")
     }
 
-    /// Simple compute shader that doubles each value in a buffer.
-    const DOUBLE_SHADER: &str = r#"
+    fn make_device() -> Device {
+        request_default_device(&Instance::new().expect("Failed to create instance"))
+    }
+
+    fn test_alloc_buffer(
+        device: &Device,
+        size: u64,
+        kind: BufferKind,
+        stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> Buffer {
+        RetainedPool::new(Arc::new(device.clone()))
+            .acquire_buffer(size, kind, stride, flags, None)
+            .expect("acquire_buffer")
+    }
+
+    fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
+        device: &Device,
+        data: &[T],
+        kind: BufferKind,
+    ) -> Buffer {
+        RetainedPool::new(Arc::new(device.clone()))
+            .acquire_buffer_with_data(data, kind)
+            .expect("acquire_buffer_with_data")
+    }
+
+    /// Advance the context timeline with an empty scheme submission.
+    fn scheme_submit_empty(ctx: &goldy::Context) -> goldy::TimelineValue {
+        let mut scheme = Scheme::new(ctx);
+        scheme.submit().expect("submit empty").timeline_value()
+    }
+
+    fn test_compute_pipeline_creation(device: &Device) {
+        const DOUBLE_SHADER: &str = r#"
     import goldy_exp;
 
     [goldy_compute]
@@ -38,22 +71,8 @@ mod imp {
     }
     "#;
 
-    /// Compute shader that reads from one buffer and writes to another.
-    const COPY_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
-        output[id.x] = input[id.x];
-    }
-    "#;
-
-    fn test_compute_pipeline_creation(device: &Device) {
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
-
-        let pipeline = ComputePipeline::new(&device, &shader);
-
+        let shader = ShaderModule::from_slang(device, DOUBLE_SHADER).expect("Failed to compile shader");
+        let pipeline = ComputePipeline::new(device, &shader);
         assert!(
             pipeline.is_ok(),
             "Failed to create compute pipeline: {:?}",
@@ -62,19 +81,15 @@ mod imp {
     }
 
     fn test_compute_pipeline_no_bindings(device: &Device) {
-        // A minimal compute shader with no bindings
         const MINIMAL_SHADER: &str = r#"
     [shader("compute")]
     [numthreads(1, 1, 1)]
     void cs_main(uint3 id : SV_DispatchThreadID) {
-        // Do nothing - just test pipeline creation
     }
     "#;
 
-        let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
-
-        let pipeline = ComputePipeline::new(&device, &shader);
-
+        let shader = ShaderModule::from_slang(device, MINIMAL_SHADER).expect("Failed to compile shader");
+        let pipeline = ComputePipeline::new(device, &shader);
         assert!(
             pipeline.is_ok(),
             "Failed to create minimal compute pipeline: {:?}",
@@ -82,110 +97,6 @@ mod imp {
         );
     }
 
-    // Scheme migration: see scheme_compute_dispatch_empty
-    fn test_compute_dispatch_empty(device: &Device) {
-        // Test dispatching a compute shader with no resources
-        const MINIMAL_SHADER: &str = r#"
-    [shader("compute")]
-    [numthreads(1, 1, 1)]
-    void cs_main(uint3 id : SV_DispatchThreadID) {
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
-
-        let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
-
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).dispatch(1, 1, 1);
-        let result = graph.dispatch(&ctx);
-        assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
-    }
-
-    // Scheme migration: see scheme_compute_with_uav_parcel
-    fn test_compute_with_uav_buffer(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
-
-        // Create buffer with initial data
-        let initial_data: Vec<u32> = (0..64).collect();
-        let buffer = test_alloc_buffer_with_data(&device, &initial_data, BufferKind::Scattered);
-
-        let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("double", &pipeline)
-            .with_resources(&[&buffer])
-            .dispatch(1, 1, 1);
-        let result = graph.dispatch(&ctx);
-        assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
-
-        // Note: We can't easily read back the buffer without mapping support
-        // This test just verifies the dispatch doesn't crash
-    }
-
-    // Scheme migration: see scheme_compute_with_srv_and_uav_parcels
-    fn test_compute_with_srv_and_uav(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("Failed to compile shader");
-
-        // Create input buffer (read-only)
-        let input_data: Vec<u32> = (0..64).collect();
-        let input_buffer = test_alloc_buffer_with_data(&device, &input_data, BufferKind::Scattered);
-
-        // Create output buffer (read-write)
-        let output_data: Vec<u32> = vec![0; 64];
-        let output_buffer = test_alloc_buffer_with_data(&device, &output_data, BufferKind::Scattered);
-
-        let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("copy", &pipeline)
-            .with_resources(&[&input_buffer, &output_buffer])
-            .dispatch(1, 1, 1);
-        let result = graph.dispatch(&ctx);
-        assert!(result.is_ok(), "Failed to dispatch with SRV+UAV: {:?}", result.err());
-    }
-
-    /// Compute shader that increments each value by 1.
-    const INCREMENT_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> data, ThreadId id) {
-        data[id.x] = data[id.x] + 1;
-    }
-    "#;
-
-    /// Compute shader that sums six input buffers into an output buffer.
-    /// Exercises bindless slots 0–5 (slot indices 4+ were broken before the 16-slot fix).
-    const SIX_SLOT_SUM_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> a, Scattered<uint> b, Scattered<uint> c,
-                 Scattered<uint> d, Scattered<uint> e, Scattered<uint> out,
-                 ThreadId id) {
-        uint idx = id.x;
-        if (idx >= 16) return;
-        out[idx] = a[idx] + b[idx] + c[idx] + d[idx] + e[idx];
-    }
-    "#;
-
-    /// Helper: create a device (discrete or integrated).
-    fn make_device() -> goldy::Device {
-        request_default_device(&goldy::Instance::new().expect("Failed to create instance"))
-    }
-
-    /// Minimal compute shader for headless / validation tests (HLSL-style entry point).
     #[cfg(feature = "vulkan")]
     const MINIMAL_COMPUTE_FOR_VK_VALIDATION: &str = r#"
     [shader("compute")]
@@ -194,8 +105,6 @@ mod imp {
     }
     "#;
 
-    /// True when the active runtime backend is Vulkan (e.g. Linux CI or `GOLDY_BACKEND=vk`).
-    /// On Windows with DX12 as default, returns false so we do not spawn a Vulkan-only subprocess.
     #[cfg(feature = "vulkan")]
     fn vk_api_validation_active_backend_is_vulkan() -> bool {
         let Ok(instance) = Instance::new() else {
@@ -204,8 +113,6 @@ mod imp {
         instance.backend_type() == BackendType::Vulkan
     }
 
-    /// Re-run this integration test binary in a subprocess with Vulkan validation enabled.
-    /// Parent process skips GPU work (avoids validation overhead + layer state on the shared harness).
     #[cfg(feature = "vulkan")]
     fn run_in_subprocess_with_vk_validation(test_name: &str) {
         let exe = std::env::current_exe().expect("current_exe for subprocess");
@@ -227,7 +134,6 @@ mod imp {
         );
     }
 
-    /// Vulkan validation layer regression: timeline semaphores require `timelineSemaphore` device feature.
     #[cfg(feature = "vulkan")]
     fn vk_api_validation_timeline_semaphore() {
         if std::env::var("GOLDY_SUBPROC").is_err() {
@@ -244,9 +150,9 @@ mod imp {
         let shader = ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).dispatch(1, 1, 1);
-        let tv = graph.submit(&ctx).expect("submit");
+        let mut scheme = Scheme::new(&ctx);
+        scheme.node("n0", &pipeline).dispatch(1, 1, 1);
+        let tv = scheme.submit().expect("submit").timeline_value();
 
         let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
         drop(buf);
@@ -254,7 +160,6 @@ mod imp {
         ctx.wait_until(tv).expect("wait_until");
     }
 
-    /// Vulkan validation layer regression: per-device resource teardown (no cross-device pool key bugs).
     #[cfg(feature = "vulkan")]
     fn vk_api_validation_two_device_teardown() {
         if std::env::var("GOLDY_SUBPROC").is_err() {
@@ -265,13 +170,13 @@ mod imp {
             return;
         }
 
-        let submit_minimal = |device: &goldy::Device| {
+        let submit_minimal = |device: &Device| {
             let ctx = submission_context(device);
             let shader = ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
             let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
-            let mut graph = TaskGraph::new();
-            graph.node("minimal", &pipeline).dispatch(1, 1, 1);
-            graph.dispatch(&ctx).expect("dispatch");
+            let mut scheme = Scheme::new(&ctx);
+            scheme.node("minimal", &pipeline).dispatch(1, 1, 1);
+            scheme.submit().expect("submit");
         };
 
         let i1 = Instance::new().expect("i1");
@@ -298,517 +203,28 @@ mod imp {
         drop(i2);
     }
 
-    // ─── Buffer read_to_cpu / clear tests ────────────────────────────────────────
-
-    /// Write data via a compute shader then read it back, verifying correctness
-    /// of the full GPU staging round-trip (write → dispatch → readback).
-    // Scheme migration: see scheme_compute_write_and_readback
-    fn test_compute_write_and_readback(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let initial: Vec<u32> = (0..64).collect();
-        let buffer = test_alloc_buffer_with_data(&device, &initial, BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("double", &pipeline)
-            .with_resources(&[&buffer])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut output = vec![0u8; 64 * 4];
-        buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, (i as u32) * 2, "element {} expected {} got {}", i, i * 2, val);
-        }
-    }
-
-    /// `Buffer::clear` (standalone, immediate) zeros the whole buffer.
-    // Scheme migration: see scheme_parcel_write_zeros_full
-    fn test_buffer_clear_standalone(device: &Device) {
-        let data: Vec<u32> = vec![0xDEAD_BEEF; 64];
-        let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
-
-        buffer.clear(&device, 0, 0).expect("clear (full)");
-
-        let mut output = vec![0u8; 64 * 4];
-        buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, 0, "element {} should be 0 after clear, got {:#x}", i, val);
-        }
-    }
-
-    /// `Buffer::clear` with an explicit range zeros only that slice.
-    // Scheme migration: see scheme_parcel_write_zeros_partial
-    fn test_buffer_clear_partial(device: &Device) {
-        // 64 u32s = 256 bytes. Clear bytes 64–128 (elements 16–31).
-        let sentinel = 0xDEAD_BEEFu32;
-        let data: Vec<u32> = vec![sentinel; 64];
-        let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
-
-        buffer.clear(&device, 64, 64).expect("partial clear");
-
-        let mut output = vec![0u8; 64 * 4];
-        buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            let expected = if (16..32).contains(&i) { 0 } else { sentinel };
-            assert_eq!(val, expected, "element {} expected {:#x} got {:#x}", i, expected, val);
-        }
-    }
-
-    /// `Buffer::clear` with `size = 0` clears from offset to end of buffer.
-    // Scheme migration: see scheme_parcel_write_zeros_to_end
-    fn test_buffer_clear_to_end(device: &Device) {
-        // Fill with sentinel, then clear from element 32 to end (offset 128, size 0).
-        let sentinel = 0xCAFE_BABEu32;
-        let data: Vec<u32> = vec![sentinel; 64];
-        let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
-
-        buffer.clear(&device, 128, 0).expect("clear to end");
-
-        let mut output = vec![0u8; 64 * 4];
-        buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            let expected = if i < 32 { sentinel } else { 0 };
-            assert_eq!(val, expected, "element {} expected {:#x} got {:#x}", i, expected, val);
-        }
-    }
-
-    // ─── Batched ClearBuffer in task graph ────────────────────────────────────────
-
-    /// `TaskGraph::clear_buffer` records a clear node in the graph.
-    /// Clears input before the copy dispatch; output should be all zeros.
-    // Scheme migration: see scheme_zeros_before_copy_dispatch
-    fn test_compute_batched_clear_before_dispatch(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let input: Vec<u32> = vec![0xDEAD_BEEF; 64];
-        let input_buf = test_alloc_buffer_with_data(&device, &input, BufferKind::Scattered);
-        let output_buf = test_alloc_buffer_with_data(&device, &vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph.clear_parcel(&*input_buf, 0, 0).unwrap();
-        graph
-            .node("n0", &pipeline)
-            .with_resources(&[&input_buf, &output_buf])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut out = vec![0u8; 64 * 4];
-        output_buf.read_to_cpu(&device, &mut out).expect("readback");
-
-        let result: &[u32] = bytemuck::cast_slice(&out);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val, 0,
-                "output[{}] should be 0 (copied from cleared input), got {:#x}",
-                i, val
-            );
-        }
-    }
-
-    /// GPU ordering: Dispatch A writes values → ClearBuffer → Dispatch B increments.
-    /// Correct result is 1 (0 + 1). An ordering bug would give 43 (42 + 1 without the clear).
-    // Scheme migration: see scheme_write_to_parcel_zeros_between_submissions
-    fn test_compute_clear_between_dispatches(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy");
-        let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("copy pipeline");
-
-        let inc_shader = ShaderModule::from_slang(&device, INCREMENT_SHADER).expect("compile inc");
-        let inc_pipeline = ComputePipeline::new(&device, &inc_shader).expect("inc pipeline");
-
-        // Input with 42s; output starts empty.
-        let input_buf = test_alloc_buffer_with_data(&device, &vec![42u32; 64], BufferKind::Scattered);
-        let output_buf = test_alloc_buffer_with_data(&device, &vec![0u32; 64], BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &copy_pipeline)
-            .with_resources(&[&input_buf, &output_buf])
-            .dispatch(1, 1, 1);
-        graph.clear_parcel(&*output_buf, 0, 0).unwrap();
-        graph
-            .node("n1", &inc_pipeline)
-            .with_resources(&[&output_buf])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut out = vec![0u8; 64 * 4];
-        output_buf.read_to_cpu(&device, &mut out).expect("readback");
-
-        let result: &[u32] = bytemuck::cast_slice(&out);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val, 1,
-                "output[{}]: expected 1 (clear was ordered after copy), got {} \
-                 (if 43: clear happened before copy; ordering broken)",
-                i, val
-            );
-        }
-    }
-
-    // ─── Indirect dispatch ────────────────────────────────────────────────────────
-
-    /// `dispatch_indirect` reads workgroup counts from a buffer.
-    /// Write [1,1,1] as the dispatch args → shader runs 64 threads → doubles values.
-    fn test_compute_dispatch_indirect(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        // Dispatch args: 1 workgroup in each dimension (3 × u32 = 12 bytes).
-        let args: [u32; 3] = [1, 1, 1];
-        let args_buf = test_alloc_buffer_with_data(&device, &args, BufferKind::Scattered);
-
-        let data: Vec<u32> = (0..64).collect();
-        let data_buf = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_resources(&[&data_buf])
-            .dispatch_indirect_parcel(&*args_buf, 0)
-            .unwrap();
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut output = vec![0u8; 64 * 4];
-        data_buf.read_to_cpu(&device, &mut output).expect("readback");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, (i as u32) * 2, "element {} expected {} got {}", i, i * 2, val);
-        }
-    }
-
-    /// `dispatch_indirect` returns an error when the args buffer has been destroyed.
-    fn test_dispatch_indirect_invalid_buffer(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let data_buf = test_alloc_buffer_with_data(&device, &vec![1u32; 64], BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        {
-            let temp = test_alloc_buffer_with_data(&device, &[1u32, 1, 1], BufferKind::Scattered);
-            graph
-                .node("indirect", &pipeline)
-                .with_resources(&[&data_buf])
-                .dispatch_indirect_parcel(&*temp, 0)
-                .unwrap();
-        }
-        let result = graph.dispatch(&ctx);
-        assert!(
-            result.is_err(),
-            "Expected error dispatching with a destroyed indirect args buffer"
-        );
-    }
-
-    // ─── Many resource slots (>4, exercises 16-slot expansion) ────────────────────
-
-    /// Shader using 6 bindless slots (0–5). Before the 16-slot expansion, slots 4+
-    /// were mapped to garbage indices and this test would produce wrong results.
-    // Scheme migration: see scheme_compute_many_resource_slots
-    fn test_compute_many_resource_slots(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, SIX_SLOT_SUM_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        // Each input buffer contains a constant value; OUT[i] = sum = 1+2+3+4+5 = 15.
-        const N: usize = 16;
-        let a = test_alloc_buffer_with_data(&device, &[1u32; N], BufferKind::Scattered);
-        let b = test_alloc_buffer_with_data(&device, &[2u32; N], BufferKind::Scattered);
-        let c = test_alloc_buffer_with_data(&device, &[3u32; N], BufferKind::Scattered);
-        let d = test_alloc_buffer_with_data(&device, &[4u32; N], BufferKind::Scattered);
-        let e = test_alloc_buffer_with_data(&device, &[5u32; N], BufferKind::Scattered);
-        let out = test_alloc_buffer_with_data(&device, &[0u32; N], BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_resources(&[&a, &b, &c, &d, &e, &out])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut output = vec![0u8; N * 4];
-        out.read_to_cpu(&device, &mut output).expect("readback");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val, 15,
-                "out[{}] expected 15 (1+2+3+4+5), got {} — slot index 4+ may be misbound",
-                i, val
-            );
-        }
-    }
-
-    /// Test that uses a struct type (like Particle) - exercises same Metal code path as compute_particles.
-    fn test_compute_with_struct_buffer(device: &Device) {
-        const PARTICLE_SHADER: &str = r#"
-    import goldy_exp;
-
-    struct Particle {
-        float2 position;
-        float2 velocity;
-    };
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<Particle> particles, ThreadId id) {
-        uint idx = id.x;
-        if (idx >= 4) return;
-        Particle p = particles[idx];
-        p.position += float2(0.01, 0.01);
-        particles[idx] = p;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("Failed to compile shader");
-
-        #[repr(C)]
-        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-        struct Particle {
-            position: [f32; 2],
-            velocity: [f32; 2],
-        }
-        impl goldy::StructuredBufferElement for Particle {}
-
-        let particles = vec![
-            Particle {
-                position: [0.0, 0.0],
-                velocity: [0.1, 0.0],
-            };
-            4
-        ];
-
-        let buffer = test_alloc_buffer_with_data(&device, &particles, BufferKind::Scattered);
-
-        let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
-
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&buffer]).dispatch(1, 1, 1);
-        let result = graph.dispatch(&ctx);
-        assert!(
-            result.is_ok(),
-            "Failed to dispatch with struct buffer: {:?}",
-            result.err()
-        );
-    }
-
-    // ─── Buffer views: sub-buffer descriptor binding ──────────────────────────────
-
-    /// Two views into one buffer. Shader copies from view A to view B.
-    /// Proves that sub-buffer descriptors with offset/range work end-to-end.
-    fn test_buffer_view_copy_between_sub_regions(device: &Device) {
-        use goldy::{ordinal, Init, RetainedPool};
-        use std::sync::Arc;
-
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        const N: usize = 64;
-        let mut src = vec![0u32; N];
-        for (i, slot) in src.iter_mut().enumerate() {
-            *slot = (i + 1) as u32;
-        }
-        let dst = vec![0u32; N];
-
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
-        let cells = pool
-            .acquire_record([ordinal(Init::data(&src)), ordinal(Init::data(&dst))])
-            .expect("acquire_record");
-
-        let idx_a = cells[0]
-            .resource_index(ResourceAccess::ReadWrite)
-            .expect("view A bindless index");
-        let idx_b = cells[1]
-            .resource_index(ResourceAccess::Write)
-            .expect("view B bindless index");
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_parcel(&cells[0], NodeAccess::ReadWrite)
-            .with_parcel(&cells[1], NodeAccess::Write)
-            .with_resource_slots_slice(&[idx_a, idx_b])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut output = vec![0u8; N * 4];
-        cells[1].read_to_cpu(&device, &mut output).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val,
-                (i + 1) as u32,
-                "dest[{}]: expected {} (copied from source view), got {}",
-                i,
-                i + 1,
-                val
-            );
-        }
-    }
-
-    /// Shader doubles values in a view — the other half of the buffer must be untouched.
-    fn test_buffer_view_isolation(device: &Device) {
-        use goldy::{ordinal, Init, RetainedPool};
-        use std::sync::Arc;
-
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        const N: usize = 64;
-        let sentinel = vec![100u32; N];
-        let mut work = vec![0u32; N];
-        for (i, slot) in work.iter_mut().enumerate() {
-            *slot = (i + 1) as u32;
-        }
-
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
-        let cells = pool
-            .acquire_record([ordinal(Init::data(&sentinel)), ordinal(Init::data(&work))])
-            .expect("acquire_record");
-
-        let idx = cells[1]
-            .resource_index(ResourceAccess::Write)
-            .expect("view bindless index");
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_parcel(&cells[1], NodeAccess::Write)
-            .with_resource_slots_slice(&[idx])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut sentinel_out = vec![0u8; N * 4];
-        cells[0].read_to_cpu(&device, &mut sentinel_out).expect("read sentinel");
-        let sentinel_vals: &[u32] = bytemuck::cast_slice(&sentinel_out);
-        assert!(
-            sentinel_vals.iter().all(|&v| v == 100),
-            "sentinel half must be untouched"
-        );
-
-        let mut output = vec![0u8; N * 4];
-        cells[1].read_to_cpu(&device, &mut output).expect("read_to_cpu");
-        let result: &[u32] = bytemuck::cast_slice(&output);
-        for (i, &val) in result.iter().enumerate() {
-            let expected = ((i + 1) as u32) * 2;
-            assert_eq!(
-                val, expected,
-                "view[{}]: expected {} (doubled), got {}",
-                i, expected, val
-            );
-        }
-    }
-
-    // ─── BufferPool convenience wrapper ───────────────────────────────────────────
-
-    /// Allocate typed regions from a pool, write via the backing buffer, dispatch.
-    fn test_buffer_pool_alloc_and_dispatch(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        const N: usize = 64;
-        let pool_size = 256 * 3; // 3 x 256-byte aligned regions
-        let mut pool = BufferPool::new(&device, pool_size as u64).expect("create pool");
-
-        let src_view = pool.alloc::<u32>(N as u64).expect("alloc src");
-        let dst_view = pool.alloc::<u32>(N as u64).expect("alloc dst");
-
-        // Write source data into the backing buffer at the correct offset
-        let src_data: Vec<u32> = (1..=N as u32).collect();
-        src_view.write_data(&src_data).expect("write src data");
-
-        // `COPY_SHADER` reads its source as `Scattered<uint>` (UAV), so bind the UAV index.
-        // `ResourceAccess::Read` would yield the SRV index, which only matches `BufRO<T>` params.
-        let src_idx = src_view
-            .resource_index(ResourceAccess::ReadWrite)
-            .expect("src bindless index");
-        let dst_idx = dst_view
-            .resource_index(ResourceAccess::Write)
-            .expect("dst bindless index");
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_resource_slots_slice(&[src_idx, dst_idx])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        // Read back entire pool and verify the destination region
-        let mut output = vec![0u8; pool_size];
-        pool.read_to_cpu(&device, &mut output).expect("readback");
-
-        // Destination starts at 256 bytes (first aligned offset after 64*4=256)
-        let dst_offset = 256usize;
-        let dst_slice: &[u32] = bytemuck::cast_slice(&output[dst_offset..dst_offset + N * 4]);
-        for (i, &val) in dst_slice.iter().enumerate() {
-            assert_eq!(val, (i + 1) as u32, "pool dst[{}]: expected {}, got {}", i, i + 1, val);
-        }
-
-        assert!(pool.used() > 0);
-        assert!(pool.remaining() < pool.capacity());
-    }
-
-    /// alloc_with_data allocates and uploads in one call; verify via readback.
     fn test_buffer_pool_alloc_with_data(device: &Device) {
         const N: usize = 64;
         let total = BufferPool::padded_size(&[(N, std::mem::size_of::<u32>())]);
-        let mut pool = BufferPool::new(&device, total).expect("create pool");
+        let mut pool = BufferPool::new(device, total).expect("create pool");
         let data: Vec<u32> = (1..=N as u32).collect();
         let view = pool.alloc_with_data(&data).expect("alloc_with_data");
         assert_eq!(view.size(), (N * std::mem::size_of::<u32>()) as u64);
 
         let mut output = vec![0u8; total as usize];
-        pool.read_to_cpu(&device, &mut output).expect("readback");
+        pool.read_to_cpu(device, &mut output).expect("readback");
         let roundtripped: &[u32] = bytemuck::cast_slice(&output[..N * 4]);
         for (i, &val) in roundtripped.iter().enumerate() {
             assert_eq!(val, (i + 1) as u32, "mismatch at index {}", i);
         }
     }
 
-    /// alloc_with_data with empty slice allocates zero-length view.
     fn test_buffer_pool_alloc_with_data_empty(device: &Device) {
-        let mut pool = BufferPool::new(&device, 1024).expect("create pool");
+        let mut pool = BufferPool::new(device, 1024).expect("create pool");
         let view = pool.alloc_with_data::<u32>(&[]).expect("alloc_with_data empty");
         assert_eq!(view.size(), 0);
     }
 
-    // ─── goldy_exp utility correctness ────────────────────────────────────────────
-
-    /// `positive_mod(x, m)` must always return a value in `[0, m)`.
-    ///
-    /// HLSL `fmod` returns negative values when `x < 0`, which breaks UV wrapping.
-    /// This test verifies the double-fmod formula on the actual GPU path.
     fn test_positive_mod_correctness(device: &Device) {
         const SHADER: &str = r#"
     import goldy_exp;
@@ -816,34 +232,31 @@ mod imp {
     [goldy_compute]
     [numthreads(1, 1, 1)]
     void cs_main(Scattered<float> out, ThreadId id) {
-        // scalar: negative dividend
-        out[0] = positive_mod(-1.0, 3.0);    // 2.0
-        out[1] = positive_mod(-3.0, 3.0);    // 0.0
-        out[2] = positive_mod(-0.5, 1.0);    // 0.5
-
-        // scalar: positive / zero inputs (must be unchanged)
-        out[3] = positive_mod(2.5, 3.0);     // 2.5
-        out[4] = positive_mod(0.0, 1.0);     // 0.0
-
-        // float2 overload
+        out[0] = positive_mod(-1.0, 3.0);
+        out[1] = positive_mod(-3.0, 3.0);
+        out[2] = positive_mod(-0.5, 1.0);
+        out[3] = positive_mod(2.5, 3.0);
+        out[4] = positive_mod(0.0, 1.0);
         float2 r = positive_mod(float2(-1.0, -0.5), float2(3.0, 1.0));
-        out[5] = r.x;   // 2.0
-        out[6] = r.y;   // 0.5
+        out[5] = r.x;
+        out[6] = r.y;
     }
     "#;
 
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+        let ctx = submission_context(device);
+        let shader = ShaderModule::from_slang(device, SHADER).expect("compile positive_mod shader");
+        let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
+        let buf = test_alloc_buffer_with_data(device, &[0.0f32; 7], BufferKind::Scattered);
 
-        let buf = test_alloc_buffer_with_data(&device, &[0.0f32; 7], BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n0", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.submit().expect("submit");
 
         let mut raw = vec![0u8; 7 * 4];
-        buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
+        buf.read_to_cpu(device, &mut raw).expect("read_to_cpu");
         let result: &[f32] = bytemuck::cast_slice(&raw);
 
         let eps = 1e-5f32;
@@ -867,8 +280,6 @@ mod imp {
         }
     }
 
-    /// `modelview_right` extracts column 0 from a 4×4 matrix, and
-    /// `billboard_cylindrical_offset` offsets a point along that vector.
     fn test_billboard_math(device: &Device) {
         const SHADER: &str = r#"
     import goldy_exp;
@@ -876,7 +287,6 @@ mod imp {
     [goldy_compute]
     [numthreads(1, 1, 1)]
     void cs_main(Scattered<float> out, ThreadId id) {
-        // Row-major construction. Column 0 = (m[0][0], m[1][0], m[2][0]) = (1, 5, 9).
         float4x4 m = float4x4(
             1, 0, 0, 0,
             5, 1, 0, 0,
@@ -884,21 +294,19 @@ mod imp {
             0, 0, 0, 1
         );
         float3 r = modelview_right(m);
-        out[0] = r.x;   // 1.0
-        out[1] = r.y;   // 5.0
-        out[2] = r.z;   // 9.0
+        out[0] = r.x;
+        out[1] = r.y;
+        out[2] = r.z;
 
-        // center=(1,2,3), cam_right=(1,0,0), offset=5 → (6, 2, 3)
         float3 off = billboard_cylindrical_offset(
             float3(1.0, 2.0, 3.0),
             float3(1.0, 0.0, 0.0),
             5.0
         );
-        out[3] = off.x;  // 6.0
-        out[4] = off.y;  // 2.0
-        out[5] = off.z;  // 3.0
+        out[3] = off.x;
+        out[4] = off.y;
+        out[5] = off.z;
 
-        // Identity matrix: right = (1, 0, 0)
         float4x4 ident = float4x4(
             1, 0, 0, 0,
             0, 1, 0, 0,
@@ -906,24 +314,26 @@ mod imp {
             0, 0, 0, 1
         );
         float3 ident_right = modelview_right(ident);
-        out[6] = ident_right.x;  // 1.0
-        out[7] = ident_right.y;  // 0.0
-        out[8] = ident_right.z;  // 0.0
+        out[6] = ident_right.x;
+        out[7] = ident_right.y;
+        out[8] = ident_right.z;
     }
     "#;
 
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+        let ctx = submission_context(device);
+        let shader = ShaderModule::from_slang(device, SHADER).expect("compile billboard shader");
+        let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
+        let buf = test_alloc_buffer_with_data(device, &[0.0f32; 9], BufferKind::Scattered);
 
-        let buf = test_alloc_buffer_with_data(&device, &[0.0f32; 9], BufferKind::Scattered);
-
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n0", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.submit().expect("submit");
 
         let mut raw = vec![0u8; 9 * 4];
-        buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
+        buf.read_to_cpu(device, &mut raw).expect("read_to_cpu");
         let result: &[f32] = bytemuck::cast_slice(&raw);
 
         let eps = 1e-5f32;
@@ -949,80 +359,6 @@ mod imp {
         }
     }
 
-    // ─── RWStructuredBuffer<T> typed variable assignment ──────────────────────────
-
-    /// Verify `goldy_buf_ro` / `goldy_scattered` can be assigned to locals and used together.
-    /// `goldy_buf_ro` returns `ReadOnlyBuffer<T>` (SRV on DX12, StorageBuffer on Vulkan/Metal).
-    /// Resource slots: slot 0 = read buffer (`bindless_srv_index()` on DX12), slot 1 = UAV.
-    fn test_scattered_typed_variable_assignment(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-
-    struct Pair { uint a; uint b; };
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
-        uint idx = id.x;
-        if (idx >= 8) return;
-        Pair p = input[idx];
-        output[idx].a = p.a + p.b;
-        output[idx].b = p.a * p.b;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile typed-var shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        #[repr(C)]
-        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-        struct Pair {
-            a: u32,
-            b: u32,
-        }
-        impl goldy::StructuredBufferElement for Pair {}
-
-        let input_data: Vec<Pair> = (0..8).map(|i| Pair { a: i + 1, b: i + 10 }).collect();
-        let input_buf = test_alloc_buffer_with_data(&device, &input_data, BufferKind::Scattered);
-        let output_buf = test_alloc_buffer_with_data(&device, &[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered);
-
-        let srv = input_buf.resource_index(ResourceAccess::Read).expect("srv");
-        let uav = output_buf.resource_index(ResourceAccess::Write).expect("uav");
-        let mut graph = TaskGraph::new();
-        graph
-            .node("typed_copy", &pipeline)
-            .with_buffer(&*input_buf, NodeAccess::Read)
-            .with_buffer(&*output_buf, NodeAccess::Write)
-            .with_resource_slots_slice(&[srv, uav])
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
-        output_buf.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[Pair] = bytemuck::cast_slice(&raw);
-
-        for i in 0..8u32 {
-            let expected_a = (i + 1) + (i + 10);
-            let expected_b = (i + 1) * (i + 10);
-            assert_eq!(
-                result[i as usize].a, expected_a,
-                "output[{}].a: expected {}, got {}",
-                i, expected_a, result[i as usize].a
-            );
-            assert_eq!(
-                result[i as usize].b, expected_b,
-                "output[{}].b: expected {}, got {}",
-                i, expected_b, result[i as usize].b
-            );
-        }
-    }
-
-    // ─── Heap overflow: allocations exceeding primary heap ────────────────────────
-
-    /// Allocate 80 MB across 10 buffers (exceeds the default 64 MB primary heap),
-    /// copy from the first to the last via a compute shader, and verify correctness.
-    /// This proves that overflow heap creation and multi-heap `use_heap` work.
     fn test_heap_overflow_allocation(device: &Device) {
         const LARGE_COPY_SHADER: &str = r#"
     import goldy_exp;
@@ -1031,17 +367,17 @@ mod imp {
     [numthreads(64, 1, 1)]
     void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
         uint idx = id.x;
-        if (idx >= 2097152) return;  // 8 MB / 4 bytes = 2M elements
+        if (idx >= 2097152) return;
         output[idx] = input[idx];
     }
     "#;
 
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, LARGE_COPY_SHADER).expect("compile large copy shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+        let ctx = submission_context(device);
+        let shader = ShaderModule::from_slang(device, LARGE_COPY_SHADER).expect("compile large copy shader");
+        let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
 
-        const BUF_SIZE: u64 = 8 * 1024 * 1024; // 8 MB each
-        const NUM_BUFFERS: usize = 10; // 80 MB total > 64 MB primary
+        const BUF_SIZE: u64 = 8 * 1024 * 1024;
+        const NUM_BUFFERS: usize = 10;
         const ELEM_COUNT: usize = (BUF_SIZE / 4) as usize;
 
         let mut buffers = Vec::with_capacity(NUM_BUFFERS);
@@ -1051,20 +387,21 @@ mod imp {
             } else {
                 vec![0u32; ELEM_COUNT]
             };
-            buffers.push(test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered));
+            buffers.push(test_alloc_buffer_with_data(device, &data, BufferKind::Scattered));
         }
 
         let workgroups = (ELEM_COUNT as u32).div_ceil(64);
-        let mut graph = TaskGraph::new();
-        graph
+        let mut scheme = Scheme::new(&ctx);
+        scheme
             .node("n0", &pipeline)
-            .with_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]])
+            .with_parcel(&buffers[0], NodeAccess::Read)
+            .with_parcel(&buffers[NUM_BUFFERS - 1], NodeAccess::Write)
             .dispatch(workgroups, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
+        scheme.submit().expect("submit");
 
         let mut output = vec![0u8; BUF_SIZE as usize];
         buffers[NUM_BUFFERS - 1]
-            .read_to_cpu(&device, &mut output)
+            .read_to_cpu(device, &mut output)
             .expect("readback");
 
         let result: &[u32] = bytemuck::cast_slice(&output);
@@ -1077,520 +414,12 @@ mod imp {
         }
     }
 
-    fn test_compute_write_to_texture(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(8, 8, 1)]
-    void cs_main(DirectSpatial<float4> output, ThreadId id) {
-        uint2 dims;
-        output.GetDimensions(dims.x, dims.y);
-        if (id.x < dims.x && id.y < dims.y) {
-            output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
-        }
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-
-        let width = 16u32;
-        let height = 16u32;
-        let texture = test_alloc_texture(
-            &device,
-            width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_SRC,
-        );
-
-        let wg_x = width.div_ceil(8);
-        let wg_y = height.div_ceil(8);
-        let tex_idx = texture
-            .resource_index(ResourceAccess::Write)
-            .expect("tex resource index");
-        let mut graph = TaskGraph::new();
-        graph
-            .node("write_tex", &pipeline)
-            .with_parcel(&texture, NodeAccess::Write)
-            .with_resource_slots_slice(&[tex_idx])
-            .dispatch(wg_x, wg_y, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut output = vec![0u8; (width * height * 4) as usize];
-        texture.read_to_cpu(&mut output).expect("readback");
-
-        let nonzero = output.iter().filter(|&&b| b != 0).count();
-        assert!(
-            nonzero > 0,
-            "Texture readback is all zeros after compute write ({} bytes)",
-            output.len()
-        );
-        assert_eq!(output[0], 255, "R channel should be 255 (solid red)");
-        assert_eq!(output[1], 0, "G channel should be 0");
-        assert_eq!(output[2], 0, "B channel should be 0");
-        assert_eq!(output[3], 255, "A channel should be 255");
-    }
-
-    // ─── CPU_READABLE buffer tests ────────────────────────────────────────────────
-
-    /// A compute shader that doubles each element (same as `DOUBLE_SHADER`). Used by the
-    /// coherent tests to avoid a dependency on the module-level constant's exact binding layout.
-    const DOUBLE_SHADER_COHERENT: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> data, ThreadId id) {
-        data[id.x] = data[id.x] * 2;
-    }
-    "#;
-
-    /// Create a [`BufferFlags::CPU_READABLE`] storage buffer, run a GPU compute pass that doubles every
-    /// element, then read back via [`Buffer::read_to_cpu`] (handles DX12 UAV → READBACK internally).
-    fn test_cpu_readable_compute_write_and_read(device: &Device) {
-        let ctx = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        const N: usize = 64;
-        let initial: Vec<u32> = (0..N as u32).collect();
-
-        let buffer = test_alloc_buffer_with_bytes_stride_and_flags(
-            &device,
-            bytemuck::cast_slice(&initial),
-            BufferKind::Scattered,
-            size_of::<u32>() as u32,
-            BufferFlags::CPU_READABLE,
-        );
-
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&buffer]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut out = vec![0u8; N * size_of::<u32>()];
-        buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&out);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, (i as u32) * 2, "element {i}: expected {} got {val}", i * 2);
-        }
-    }
-
-    /// Two back-to-back non-blocking submits: `WriteBuffer` into the **same**
-    /// scattered buffer handle, copying to distinct outputs — exercises per-buffer
-    /// staging races fixed by the compute staging belt (Vulkan/DX12).
-    fn test_write_buffer_reuse_across_submissions(device: &Device) {
-        use goldy::{NodeAccess, TaskGraph};
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        const N: usize = 16;
-        let mid = test_alloc_buffer(
-            &device,
-            (N * core::mem::size_of::<u32>()) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        );
-        let out_a = test_alloc_buffer(
-            &device,
-            (N * core::mem::size_of::<u32>()) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        );
-        let out_b = test_alloc_buffer(
-            &device,
-            (N * core::mem::size_of::<u32>()) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        );
-
-        let idx_in = mid.resource_index(ResourceAccess::Write).expect("mid bindless");
-        let idx_out_a = out_a.resource_index(ResourceAccess::Write).expect("out_a bindless");
-        let idx_out_b = out_b.resource_index(ResourceAccess::Write).expect("out_b bindless");
-
-        let data_a: Vec<u32> = (100..100 + N as u32).collect();
-        let data_b: Vec<u32> = (900..900 + N as u32).collect();
-
-        let mut g1 = TaskGraph::new();
-        g1.write_parcel(&*mid, 0, bytemuck::cast_slice(&data_a).to_vec())
-            .expect("write_parcel");
-        g1.node("copy_a", &pipeline)
-            .with_buffer(&*mid, NodeAccess::Read)
-            .with_buffer(&*out_a, NodeAccess::Write)
-            .with_resource_slots_slice(&[idx_in, idx_out_a])
-            .dispatch(1, 1, 1);
-
-        let mut g2 = TaskGraph::new();
-        g2.write_parcel(&*mid, 0, bytemuck::cast_slice(&data_b).to_vec())
-            .expect("write_parcel");
-        g2.node("copy_b", &pipeline)
-            .with_buffer(&*mid, NodeAccess::Read)
-            .with_buffer(&*out_b, NodeAccess::Write)
-            .with_resource_slots_slice(&[idx_in, idx_out_b])
-            .dispatch(1, 1, 1);
-
-        let tv1 = g1.submit(&ctx).expect("submit 1");
-        let tv2 = g2.submit(&ctx).expect("submit 2");
-
-        ctx.wait_until(tv1).expect("wait 1");
-        ctx.wait_until(tv2).expect("wait 2");
-
-        let read_u32 = |buf: &Buffer| -> Vec<u32> {
-            let mut raw = vec![0u8; N * core::mem::size_of::<u32>()];
-            buf.read_to_cpu(&device, &mut raw).expect("readback");
-            bytemuck::cast_slice(&raw).to_vec()
-        };
-
-        let got_a = read_u32(&out_a);
-        let got_b = read_u32(&out_b);
-        assert_eq!(got_a, data_a, "output A corrupted (staging race?)");
-        assert_eq!(got_b, data_b, "output B wrong");
-    }
-
-    /// CPU writes to a [`BufferFlags::CPU_READABLE`] buffer are reflected in reads.
-    ///
-    /// On Vulkan and Metal the buffer lives in host-visible/shared memory, so a plain
-    /// `buffer.write()` followed immediately by `buffer.read_to_cpu()` round-trips.
-    ///
-    /// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so
-    /// `read_to_cpu` copies UAV → READBACK internally.
-    fn test_cpu_readable_cpu_write_read_roundtrip(device: &Device) {
-        const N: usize = 16;
-        let initial: Vec<u32> = vec![0xABCD_1234u32; N];
-
-        let buffer = test_alloc_buffer_with_bytes_stride_and_flags(
-            &device,
-            bytemuck::cast_slice(&initial),
-            BufferKind::Scattered,
-            size_of::<u32>() as u32,
-            BufferFlags::CPU_READABLE,
-        );
-
-        let new_values: Vec<u32> = (100..100 + N as u32).collect();
-        buffer.write(0, bytemuck::cast_slice(&new_values)).expect("write");
-
-        let mut out = vec![0u8; N * size_of::<u32>()];
-        buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&out);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, 100 + i as u32, "element {i}: expected {} got {val}", 100 + i);
-        }
-    }
-
-    /// [`BufferFlags::CPU_WRITABLE`] staging writes use host-mapped memcpy only (no blit+wait).
-    ///
-    /// This asserts CPU→CPU visibility of the mapped write. GPU ordering / same-frame copy
-    /// visibility (the actual staging contract) is covered by
-    /// `scheme_cpu_writable_staging_write_then_copy` in `scheme_compute_integration`.
-    ///
-    /// On Metal/Vulkan the storage buffer is host-visible, so `write()` → `read_to_cpu()`
-    /// roundtrips. On DX12, `write()` only fills the paired UPLOAD mapping; GPU-visible
-    /// DEFAULT contents update only after a `CopyBuffer` (covered by scheme staging tests).
-    /// Skip the CPU→CPU assertion on DX12.
-    fn test_cpu_writable_write_read_roundtrip(device: &Device) {
-        if device.backend_type() == BackendType::Dx12 {
-            return;
-        }
-
-        const N: usize = 16;
-        let initial: Vec<u32> = vec![0u32; N];
-
-        let buffer = test_alloc_buffer_with_bytes_stride_and_flags(
-            &device,
-            bytemuck::cast_slice(&initial),
-            BufferKind::Scattered,
-            size_of::<u32>() as u32,
-            BufferFlags::CPU_WRITABLE,
-        );
-
-        let new_values: Vec<u32> = (0xDEAD_0000u32..).take(N).collect();
-        buffer.write(0, bytemuck::cast_slice(&new_values)).expect("write");
-
-        let mut out = vec![0u8; N * size_of::<u32>()];
-        buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
-
-        let result: &[u32] = bytemuck::cast_slice(&out);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val, new_values[i],
-                "element {i}: expected {:08X} got {val:08X}",
-                new_values[i]
-            );
-        }
-    }
-
-    // ── uniform entry-point parameter tests ──────────────────────────────────────
-    //
-    // `uniform T param` in a `cs_main` signature maps directly to a resource
-    // slot. The tests below exercise:
-    //
-    //  • uint round-trip (basic sanity)
-    //  • zero value is preserved
-    //  • maximum u32 (0xFFFF_FFFF) passes through unmodified
-    //  • float (bit-for-bit round-trip of f32)
-    //  • two independent scalar params in adjacent slots
-    //  • scalar param after two buffer slots
-
-    /// A `uniform uint` entry-point param round-trips a u32.
-    fn test_uniform_param_uint_roundtrip(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-    [goldy_compute]
-    [numthreads(1, 1, 1)]
-    void cs_main(Scattered<uint> out, uint value, ThreadId id) {
-        out[0] = value;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let out = test_alloc_buffer_with_data(&device, &[0u32; 1], BufferKind::Scattered);
-
-        const EXPECTED: u32 = 42;
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        let mut graph = TaskGraph::new();
-        graph
-            .node("uniform_uint", &pipeline)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots(vec![heap_idx])
-            .with_param(EXPECTED)
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: u32 = bytemuck::pod_read_unaligned(&raw);
-        assert_eq!(result, EXPECTED, "uniform uint round-trip failed");
-    }
-
-    /// Zero passes through a `uniform uint` parameter unchanged.
-    fn test_uniform_param_uint_zero(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-    [goldy_compute]
-    [numthreads(1, 1, 1)]
-    void cs_main(Scattered<uint> out, uint value, ThreadId id) {
-        out[0] = value;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let out = test_alloc_buffer_with_data(&device, &[0xDEAD_BEEFu32; 1], BufferKind::Scattered);
-
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        let mut graph = TaskGraph::new();
-        graph
-            .node("uniform_zero", &pipeline)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots(vec![heap_idx])
-            .with_param(0u32)
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: u32 = bytemuck::pod_read_unaligned(&raw);
-        assert_eq!(result, 0, "zero should pass through uniform uint param unchanged");
-    }
-
-    /// Maximum u32 (0xFFFF_FFFF) passes through a `uniform uint` parameter unchanged.
-    fn test_uniform_param_uint_max(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-    [goldy_compute]
-    [numthreads(1, 1, 1)]
-    void cs_main(Scattered<uint> out, uint value, ThreadId id) {
-        out[0] = value;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let out = test_alloc_buffer_with_data(&device, &[0u32; 1], BufferKind::Scattered);
-
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        let mut graph = TaskGraph::new();
-        graph
-            .node("uniform_max", &pipeline)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots(vec![heap_idx])
-            .with_param(u32::MAX)
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: u32 = bytemuck::pod_read_unaligned(&raw);
-        assert_eq!(
-            result,
-            u32::MAX,
-            "u32::MAX should pass through uniform uint param unchanged"
-        );
-    }
-
-    /// A `uniform float` entry-point param reinterprets raw bits as a float.
-    /// We push the bit-pattern of a float and expect the shader to write it back,
-    /// then reinterpret on the CPU side to confirm identity.
-    fn test_uniform_param_float_reinterpret(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-    [goldy_compute]
-    [numthreads(1, 1, 1)]
-    void cs_main(Scattered<float> out, float value, ThreadId id) {
-        out[0] = value;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let out = test_alloc_buffer_with_data(&device, &[0u32; 1], BufferKind::Scattered);
-
-        #[allow(clippy::approx_constant)]
-        let value: f32 = 3.14159;
-        let bits = value.to_bits();
-
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        let mut graph = TaskGraph::new();
-        graph
-            .node("uniform_float", &pipeline)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots(vec![heap_idx])
-            .with_param(bits)
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result_bits: u32 = bytemuck::pod_read_unaligned(&raw);
-        let result_float = f32::from_bits(result_bits);
-        assert_eq!(
-            result_bits, bits,
-            "float bit pattern should survive uniform float param round-trip (got {result_float}, expected {value})"
-        );
-    }
-
-    /// Two independent `uniform uint` params in adjacent slots each retrieve their own value.
-    fn test_uniform_two_independent_scalar_params(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-    [goldy_compute]
-    [numthreads(1, 1, 1)]
-    void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
-        out[0] = a;
-        out[1] = b;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let out = test_alloc_buffer_with_data(&device, &[0u32; 2], BufferKind::Scattered);
-
-        const A: u32 = 0xABCD;
-        const B: u32 = 0x1234;
-
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        let mut graph = TaskGraph::new();
-        graph
-            .node("uniform_two", &pipeline)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots(vec![heap_idx])
-            .with_param(A)
-            .with_param(B)
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 8];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-        assert_eq!(result[0], A, "param a → out[0] mismatch");
-        assert_eq!(result[1], B, "param b → out[1] mismatch");
-    }
-
-    /// A scalar `uniform uint` param after two buffer-slot params correctly
-    /// retrieves its value from the third resource slot.
-    fn test_uniform_scalar_after_two_buffer_params(device: &Device) {
-        const SHADER: &str = r#"
-    import goldy_exp;
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id) {
-        out[id.x] = inp[id.x] + offset;
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-
-        const N: usize = 64;
-        let input: Vec<u32> = (0..N as u32).collect();
-        let inp = test_alloc_buffer_with_data(&device, &input, BufferKind::Scattered);
-        let out = test_alloc_buffer_with_data(&device, &[0u32; N], BufferKind::Scattered);
-
-        const OFFSET: u32 = 100;
-
-        let inp_idx = inp.resource_index(ResourceAccess::ReadWrite).unwrap();
-        let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        let mut graph = TaskGraph::new();
-        graph
-            .node("uniform_offset", &pipeline)
-            .with_buffer(&*inp, NodeAccess::Read)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots(vec![inp_idx, out_idx])
-            .with_param(OFFSET)
-            .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; N * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val,
-                i as u32 + OFFSET,
-                "element {i}: expected {}, got {val}",
-                i as u32 + OFFSET
-            );
-        }
-    }
-
-    // ── flush_deferred_deletions ───────────────────────────────────────────────────
-
-    /// After a submit+wait, `flush_deferred_deletions` reclaims all pending slots
-    /// without requiring a second `wait_until` call.
     fn flush_deferred_deletions_reclaims_slots_after_gpu_idle(device: &Device) {
-        let ctx = submission_context(&device);
-
-        // Allocate, submit some work, then drop the buffer so its slot enters
-        // the pending-free list.
-        let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
-        let tv = {
-            let mut graph = TaskGraph::new();
-            graph.submit(&ctx).expect("submit empty work")
-        };
+        let ctx = submission_context(device);
+        let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
+        let tv = scheme_submit_empty(&ctx);
         ctx.wait_until(tv).expect("wait");
 
-        // Drop happens *after* wait_until, so the GPU is idle but the slot may
-        // still be in the pending list depending on when the backend last ran
-        // its internal cleanup. `flush_deferred_deletions` must drain it.
         drop(buf);
         ctx.flush_deferred_deletions();
 
@@ -1601,26 +430,14 @@ mod imp {
         );
     }
 
-    /// A buffer dropped *between* submits has its slot reclaimed by
-    /// `flush_deferred_deletions` once the matching timeline has been signaled.
     fn flush_deferred_deletions_respects_gpu_progress(device: &Device) {
-        let ctx = submission_context(&device);
+        let ctx = submission_context(device);
+        let tv = scheme_submit_empty(&ctx);
 
-        // Submit work so the timeline advances past zero.
-        let tv = {
-            let mut graph = TaskGraph::new();
-            graph.submit(&ctx).expect("submit")
-        };
-
-        // Drop a buffer while GPU may still be in flight.
-        let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
+        let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
         drop(buf);
 
-        // Without waiting for the GPU, calling flush is safe (no panic/crash).
-        // Slots that haven't been signaled yet should remain pending.
         ctx.flush_deferred_deletions();
-
-        // After waiting, flushing again must fully drain the queue.
         ctx.wait_until(tv).expect("wait");
         ctx.flush_deferred_deletions();
 
@@ -1631,72 +448,10 @@ mod imp {
         );
     }
 
-    /// Calling `flush_deferred_deletions` on a fresh device with no in-flight work
-    /// is a no-op and must not panic.
     fn flush_deferred_deletions_noop_on_idle_device(device: &Device) {
-        let ctx = submission_context(&device);
+        let ctx = submission_context(device);
         ctx.flush_deferred_deletions();
         assert_eq!(ctx.deferred_deletion_pending_count(), 0);
-    }
-
-    // ============================================================================
-    // TransientAllocator integration tests
-    //
-    // Verify the trait, both strategies, and end-to-end frame lifecycle against a
-    // real device. Each test uses a fresh device so they remain isolated.
-    // ============================================================================
-
-    use goldy::{BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy};
-
-    fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
-        device: &goldy::Device,
-        data: &[T],
-        kind: goldy::BufferKind,
-    ) -> goldy::Buffer {
-        use std::sync::Arc;
-        goldy::RetainedPool::new(Arc::new(device.clone()))
-            .acquire_buffer_with_data(data, kind)
-            .expect("acquire_buffer_with_data")
-    }
-
-    fn test_alloc_buffer(
-        device: &goldy::Device,
-        size: u64,
-        kind: goldy::BufferKind,
-        stride: Option<u32>,
-        flags: goldy::types::BufferFlags,
-    ) -> goldy::Buffer {
-        use std::sync::Arc;
-        goldy::RetainedPool::new(Arc::new(device.clone()))
-            .acquire_buffer(size, kind, stride, flags, None)
-            .expect("acquire_buffer")
-    }
-
-    fn test_alloc_texture(
-        device: &goldy::Device,
-        width: u32,
-        height: u32,
-        format: goldy::types::TextureFormat,
-        kind: goldy::types::TextureKind,
-        flags: goldy::types::TextureFlags,
-    ) -> goldy::Texture {
-        use std::sync::Arc;
-        goldy::RetainedPool::new(Arc::new(device.clone()))
-            .acquire_texture(width, height, format, kind, flags, None)
-            .expect("acquire_texture")
-    }
-
-    fn test_alloc_buffer_with_bytes_stride_and_flags(
-        device: &goldy::Device,
-        data: &[u8],
-        kind: goldy::BufferKind,
-        stride: u32,
-        flags: goldy::types::BufferFlags,
-    ) -> goldy::Buffer {
-        use std::sync::Arc;
-        goldy::RetainedPool::new(Arc::new(device.clone()))
-            .acquire_buffer(data.len() as u64, kind, Some(stride), flags, Some(data))
-            .expect("acquire_buffer")
     }
 
     fn small_config() -> TransientAllocatorConfig {
@@ -1707,35 +462,27 @@ mod imp {
         }
     }
 
-    /// Smoke test: each strategy can `create`, then `begin_frame` → `alloc` → `end_frame` with no
-    /// GPU work and not panic. Covers the lazy-init and zero-work path.
     fn transient_allocator_smoke_all_strategies(device: &Device) {
-        let ctx = submission_context(&device);
+        let ctx = submission_context(device);
         for strategy in [TransientAllocatorStrategy::BumpReset, TransientAllocatorStrategy::Heap] {
-            let mut a = strategy.create(&device, small_config()).expect("create allocator");
-            a.begin_frame(&device, 0).expect("begin");
-            let view = a.alloc(&device, 256, Some(4)).expect("alloc");
-            // Submit empty work to advance the timeline.
-            let tv = {
-                let mut graph = TaskGraph::new();
-                graph.submit(&ctx).expect("submit")
-            };
+            let mut a = strategy.create(device, small_config()).expect("create allocator");
+            a.begin_frame(device, 0).expect("begin");
+            let view = a.alloc(device, 256, Some(4)).expect("alloc");
+            let tv = scheme_submit_empty(&ctx);
             drop(view);
-            a.end_frame(&device, tv);
-            // Next frame: should not panic, and BumpReset should wait for tv internally.
-            a.begin_frame(&device, 0).expect("begin frame 2");
-            let _v2 = a.alloc(&device, 256, Some(4)).expect("alloc frame 2");
+            a.end_frame(device, tv);
+            a.begin_frame(device, 0).expect("begin frame 2");
+            let _v2 = a.alloc(device, 256, Some(4)).expect("alloc frame 2");
         }
     }
 
-    /// Strategy::default() is Heap, and parse handles all canonical names.
     fn transient_allocator_strategy_default_and_parse() {
-        assert_eq!(TransientAllocatorStrategy::default(), TransientAllocatorStrategy::Heap,);
+        assert_eq!(TransientAllocatorStrategy::default(), TransientAllocatorStrategy::Heap);
         assert_eq!(
             TransientAllocatorStrategy::parse("bump"),
             Some(TransientAllocatorStrategy::BumpReset),
         );
-        assert_eq!(TransientAllocatorStrategy::parse("epoch"), None,);
+        assert_eq!(TransientAllocatorStrategy::parse("epoch"), None);
         assert_eq!(
             TransientAllocatorStrategy::parse("heap"),
             Some(TransientAllocatorStrategy::Heap),
@@ -1743,830 +490,18 @@ mod imp {
         assert_eq!(TransientAllocatorStrategy::parse("garbage"), None);
     }
 
-    /// Verifies that BumpResetAllocator waits for the previous frame's epoch before resetting.
-    /// We measure the elapsed time of `begin_frame` after a submit-without-wait — if the
-    /// wait kicks in, it should be roughly the GPU latency (non-zero); if it doesn't, the test
-    /// at least proves no deadlock.
-    fn bump_reset_blocks_on_prev_epoch(device: &Device) {
-        let ctx = submission_context(&device);
-        let mut a = BumpResetAllocator::new(&device, small_config()).expect("create");
-
-        a.begin_frame(&device, 0).expect("begin");
-        let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-        let tv = {
-            let mut graph = TaskGraph::new();
-            graph.submit(&ctx).expect("submit")
-        };
-        a.end_frame(&device, tv);
-
-        // begin_frame should wait for `tv` if it hasn't completed. After it returns,
-        // gpu_progress must be at least tv.
-        a.begin_frame(&device, 0).expect("begin 2");
-        assert!(
-            ctx.gpu_progress() >= tv,
-            "BumpReset must not allow reuse until prev epoch has been signaled"
-        );
-    }
-
-    /// `clear()` on either strategy must release all allocations and put the allocator into a
-    /// clean state ready for re-use.
     fn transient_allocator_clear_resets_state(device: &Device) {
-        let ctx = submission_context(&device);
+        let ctx = submission_context(device);
         for strategy in [TransientAllocatorStrategy::BumpReset, TransientAllocatorStrategy::Heap] {
-            let mut a = strategy.create(&device, small_config()).expect("create allocator");
-            a.begin_frame(&device, 0).expect("begin");
-            let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-            let tv = {
-                let mut graph = TaskGraph::new();
-                graph.submit(&ctx).expect("submit")
-            };
-            a.end_frame(&device, tv);
+            let mut a = strategy.create(device, small_config()).expect("create allocator");
+            a.begin_frame(device, 0).expect("begin");
+            let _v = a.alloc(device, 1024, Some(4)).expect("alloc");
+            let tv = scheme_submit_empty(&ctx);
+            a.end_frame(device, tv);
             ctx.wait_until(tv).expect("wait");
             a.clear();
-            // After clear, used_this_frame should be zero and we can begin a new frame.
             assert_eq!(a.used_this_frame(), 0);
-            a.begin_frame(&device, 0).expect("begin after clear");
-        }
-    }
-
-    /// BufferPool::would_fit must agree with alloc_bytes for power-of-two and non-power-of-two
-    /// strides.
-    fn buffer_pool_would_fit_agrees_with_alloc_bytes(device: &Device) {
-        let mut pool = BufferPool::new(&device, 4096).expect("pool");
-
-        assert!(pool.would_fit(1024, Some(4)));
-        let _v = pool.alloc_bytes(1024, Some(4)).expect("alloc");
-
-        // Non-power-of-two stride: 12 (vec3<f32>). LCM(256, 12) = 768.
-        // After consuming 1024 bytes at alignment 256, used == 1024. The next alloc with stride
-        // 12 aligns to 768 → aligned_offset = 1536. Byte size must be a multiple of 12 for
-        // StructuredBuffer views (e.g. 1020 = 85 × 12, not 1024).
-        assert!(pool.would_fit(1020, Some(12)));
-        let _v2 = pool.alloc_bytes(1020, Some(12)).expect("alloc np2");
-
-        // Remaining tail after second slot: 4096 - (1536 + 1020). would_fit must reject oversize allocs.
-        assert!(pool.would_fit(1024, Some(4)));
-        assert!(!pool.would_fit(4096, Some(4)));
-    }
-
-    // ─── Transient buffer (graph-colored) path ─────────────────────────────────────
-
-    const WRITE_IOTA_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> data, ThreadId id) {
-        if (id.x < 64) data[id.x] = id.x + 1;
-    }
-    "#;
-
-    /// Exercises the device-owned placement heap transient-buffer path end-to-end:
-    ///
-    /// 1. Graph has one transient buffer T.
-    /// 2. Dispatch A writes `id.x + 1` into T.
-    /// 3. Dispatch B copies T -> output (a regular CPU-readable buffer).
-    /// 4. `graph.dispatch(&ctx)` resolves transients via the device-owned
-    ///    placement heap (view creation, bindless patching, submission).
-    /// 5. Read back output and verify values.
-    // Legacy TaskGraph — migrated: `scheme_transient_buffer_write_then_copy`
-    fn test_transient_buffer_write_then_copy(device: &Device) {
-        use goldy::{NodeAccess, TaskGraph};
-
-        let ctx = submission_context(&device);
-
-        let write_shader = ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
-        let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
-
-        let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
-        let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
-
-        const N: usize = 64;
-        let byte_size = (N * core::mem::size_of::<u32>()) as u64;
-
-        let output = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
-        let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
-
-        let mut graph = TaskGraph::new();
-        let tid = graph.transient_buffer(byte_size);
-
-        graph
-            .node("write_iota", &write_pipeline)
-            .with_transient_buffer(tid, NodeAccess::Write)
-            .with_resource_slots_slice(&[u32::MAX])
-            .dispatch(1, 1, 1);
-
-        graph
-            .node("copy_out", &copy_pipeline)
-            .with_transient_buffer(tid, NodeAccess::ReadWrite)
-            .with_buffer(&*output, NodeAccess::Write)
-            .with_resource_slots_slice(&[u32::MAX, output_uav])
-            .dispatch(1, 1, 1);
-
-        graph.dispatch(&ctx).expect("dispatch transient graph");
-
-        let mut raw = vec![0u8; byte_size as usize];
-        output.read_to_cpu(&device, &mut raw).expect("read output");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        let expected: Vec<u32> = (1..=N as u32).collect();
-        assert_eq!(
-            result,
-            &expected[..],
-            "transient buffer graph-colored path produced wrong data"
-        );
-    }
-
-    /// Control test: same dispatches but with a regular buffer instead of transient.
-    /// If this passes but the transient version fails, the issue is in the
-    /// graph-colored infrastructure.
-    // Scheme migration: see scheme_regular_buffer_write_then_copy
-    fn test_regular_buffer_write_then_copy(device: &Device) {
-        use goldy::{NodeAccess, TaskGraph};
-
-        let ctx = submission_context(&device);
-
-        let write_shader = ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
-        let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
-
-        let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
-        let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
-
-        const N: usize = 64;
-        let byte_size = (N * core::mem::size_of::<u32>()) as u64;
-
-        let scratch = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
-        let scratch_uav = scratch.resource_index(ResourceAccess::Write).expect("scratch UAV");
-
-        let output = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
-        let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
-
-        let mut graph = TaskGraph::new();
-
-        graph.clear_parcel(&*scratch, 0, byte_size).unwrap();
-
-        graph
-            .node("write_iota", &write_pipeline)
-            .with_buffer(&*scratch, NodeAccess::Write)
-            .with_resource_slots_slice(&[scratch_uav])
-            .dispatch(1, 1, 1);
-
-        graph
-            .node("copy_out", &copy_pipeline)
-            .with_buffer(&*scratch, NodeAccess::Read)
-            .with_buffer(&*output, NodeAccess::Write)
-            .with_resource_slots_slice(&[scratch_uav, output_uav])
-            .dispatch(1, 1, 1);
-
-        graph.dispatch(&ctx).expect("dispatch graph");
-
-        let mut raw = vec![0u8; byte_size as usize];
-        output.read_to_cpu(&device, &mut raw).expect("read output");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        let expected: Vec<u32> = (1..=N as u32).collect();
-        assert_eq!(result, &expected[..], "regular buffer path produced wrong data");
-    }
-
-    /// Scale each element: `data[id.x] = (id.x + 1) * 100`.
-    const WRITE_SCALE_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> data, ThreadId id) {
-        if (id.x < 64) data[id.x] = (id.x + 1u) * 100u;
-    }
-    "#;
-
-    /// Two transients with disjoint wave lifetimes alias the same heap offset via graph
-    /// coloring. Wave 0 writes `t0`; wave 1 overwrites the aliased bytes via `t1` with a
-    /// different pattern; wave 2 copies `t1` to a regular output buffer.
-    // Legacy TaskGraph — TaskGraph-only intra-submission heap aliasing; cross-submission coverage: `scheme_transient_buffer_recycling`
-    fn test_transient_buffer_aliased_disjoint_waves(device: &Device) {
-        use goldy::{NodeAccess, TaskGraph};
-
-        let ctx = submission_context(&device);
-
-        let iota_shader = ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile iota shader");
-        let iota_pipeline = ComputePipeline::new(&device, &iota_shader).expect("create iota pipeline");
-
-        let scale_shader = ShaderModule::from_slang(&device, WRITE_SCALE_SHADER).expect("compile scale shader");
-        let scale_pipeline = ComputePipeline::new(&device, &scale_shader).expect("create scale pipeline");
-
-        let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
-        let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
-
-        const N: usize = 64;
-        let byte_size = (N * core::mem::size_of::<u32>()) as u64;
-
-        let bridge = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
-        let output = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
-        let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
-
-        let mut graph = TaskGraph::new();
-        let t0 = graph.transient_buffer(byte_size);
-        let t1 = graph.transient_buffer(byte_size);
-
-        // Wave 0: populate t0. The bridge write is a schedule-only edge (shader has one slot).
-        graph
-            .node("wave0_iota", &iota_pipeline)
-            .with_transient_buffer(t0, NodeAccess::Write)
-            .with_buffer(&*bridge, NodeAccess::Write)
-            .with_resource_slots_slice(&[u32::MAX])
-            .dispatch(1, 1, 1);
-
-        // Wave 1: bridge read forces wave ordering; overwrite aliased bytes via t1.
-        // Transient is listed first so the single shader slot resolves to t1 (not bridge).
-        graph
-            .node("wave1_scale", &scale_pipeline)
-            .with_transient_buffer(t1, NodeAccess::Write)
-            .with_buffer(&*bridge, NodeAccess::Read)
-            .with_resource_slots_slice(&[u32::MAX])
-            .dispatch(1, 1, 1);
-
-        // Wave 2: copy the final aliased transient to a regular buffer for readback.
-        graph
-            .node("wave2_copy", &copy_pipeline)
-            .with_transient_buffer(t1, NodeAccess::ReadWrite)
-            .with_buffer(&*output, NodeAccess::Write)
-            .with_resource_slots_slice(&[u32::MAX, output_uav])
-            .dispatch(1, 1, 1);
-
-        graph.dispatch(&ctx).expect("dispatch aliased transient graph");
-
-        let mut raw = vec![0u8; byte_size as usize];
-        output.read_to_cpu(&device, &mut raw).expect("read output");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        let expected: Vec<u32> = (1..=N as u32).map(|i| i * 100).collect();
-        assert_eq!(
-            result,
-            &expected[..],
-            "aliased transient buffers produced wrong data — graph coloring or heap placement bug"
-        );
-    }
-
-    // ─── collectives: GPU execution tests ────────────────────────────────────────
-    //
-    // Each test runs a small compute shader that exercises one collective algorithm
-    // from `goldy_exp/collectives.slang` and reads the output back to the CPU to
-    // verify that the GPU-side arithmetic is correct.  These are distinct from the
-    // compile-only `test_collectives_compiles` test in `src/shaders.rs`.
-    //
-    // ⚠  Cross-module [ForceInline] + groupshared writes — Slang #10641
-    //
-    // [ForceInline] functions whose bodies *write* to a groupshared parameter
-    // produce incorrect DXIL when the call site is in a different module.
-    // Every collective except `workgroup_upper_bound` writes to groupshared
-    // internally, so calling them via `import goldy_exp` would trigger the bug
-    // and produce wrong results.
-    //
-    // Workaround (same strategy as ekrano's coarse.slang): each test shader
-    // inlines the algorithm body directly in the entry point.  `import goldy_exp`
-    // is kept for the Goldy binding framework ([goldy_compute], Scattered<T>,
-    // etc.) but the collective bodies are NOT invoked through the module boundary.
-    //
-    // `workgroup_upper_bound` is the one exception: it only reads groupshared
-    // (never writes inside the function), so the cross-module call is safe.
-
-    // ── workgroup_inclusive_scan_wave_uint_sum ─────────────────────────────────
-
-    /// Inlined body of `workgroup_inclusive_scan_wave_uint_sum<64>`, uniform
-    /// input (all threads contribute 1).  Expected output[i] = i + 1.
-    const WAVE_SCAN_64_UNIFORM: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_scratch[32];
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix  = local_id.x;
-        uint val = 1u;
-        uint lc  = WaveGetLaneCount();
-        uint nw  = 64 / lc;
-        uint wave_ix = ix / lc;
-        uint inclusive = WavePrefixSum(val) + val;
-        uint total     = WaveActiveSum(val);
-        if (WaveIsFirstLane())
-            sh_scratch[wave_ix] = total;
-        GroupMemoryBarrierWithGroupSync();
-        if (ix == 0) {
-            uint run = 0;
-            for (uint i = 0; i < nw; i++) {
-                uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-        OUT[ix] = sh_scratch[wave_ix] + inclusive;
-    }
-    "#;
-
-    /// Same algorithm with ramp input (thread i contributes i+1).
-    /// Expected output[i] = T(i+1) = (i+1)*(i+2)/2.
-    const WAVE_SCAN_64_RAMP: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_scratch[32];
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix  = local_id.x;
-        uint val = ix + 1u;
-        uint lc  = WaveGetLaneCount();
-        uint nw  = 64 / lc;
-        uint wave_ix = ix / lc;
-        uint inclusive = WavePrefixSum(val) + val;
-        uint total     = WaveActiveSum(val);
-        if (WaveIsFirstLane())
-            sh_scratch[wave_ix] = total;
-        GroupMemoryBarrierWithGroupSync();
-        if (ix == 0) {
-            uint run = 0;
-            for (uint i = 0; i < nw; i++) {
-                uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-        OUT[ix] = sh_scratch[wave_ix] + inclusive;
-    }
-    "#;
-
-    /// WG_SIZE=256, uniform input — regression test for the production size used
-    /// in ekrano's coarse shader.  Expected output[i] = i + 1.
-    ///
-    /// sh_scratch must hold one entry per wave.  SM6.0 mandates WaveGetLaneCount() is at
-    /// least 4, giving at most 256/4 = 64 waves, so [64] is the safe minimum.  `[32]`
-    /// overflows on WARP where WaveGetLaneCount() == 4.
-    const WAVE_SCAN_256_UNIFORM: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_scratch[64];
-    [goldy_compute]
-    [numthreads(256, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix  = local_id.x;
-        uint val = 1u;
-        uint lc  = WaveGetLaneCount();
-        uint nw  = 256 / lc;
-        uint wave_ix = ix / lc;
-        uint inclusive = WavePrefixSum(val) + val;
-        uint total     = WaveActiveSum(val);
-        if (WaveIsFirstLane())
-            sh_scratch[wave_ix] = total;
-        GroupMemoryBarrierWithGroupSync();
-        if (ix == 0) {
-            uint run = 0;
-            for (uint i = 0; i < nw; i++) {
-                uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-        OUT[ix] = sh_scratch[wave_ix] + inclusive;
-    }
-    "#;
-
-    // ── workgroup_reduce ────────────────────────────────────────────────────────
-
-    /// Inlined right-sweep reduce (uint, N=64), all-ones input.
-    /// Thread 0 accumulates the total; expected output[0] = 64.
-    const REDUCE_64_UNIFORM: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_scratch[64];
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix  = local_id.x;
-        uint val = 1u;
-        sh_scratch[ix] = val;
-        for (uint i = 0; i < 6; i++) {
-            GroupMemoryBarrierWithGroupSync();
-            if (ix + (1u << i) < 64u)
-                val = val + sh_scratch[ix + (1u << i)];
-            GroupMemoryBarrierWithGroupSync();
-            sh_scratch[ix] = val;
-        }
-        OUT[ix] = val;
-    }
-    "#;
-
-    // ── workgroup_inclusive_scan ────────────────────────────────────────────────
-
-    /// Inlined left-sweep inclusive scan (uint, N=64), all-ones input.
-    /// Expected output[i] = i + 1.
-    const INCLUSIVE_SCAN_64_UNIFORM: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_scratch[64];
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix  = local_id.x;
-        uint val = 1u;
-        sh_scratch[ix] = val;
-        for (uint i = 0; i < 6; i++) {
-            GroupMemoryBarrierWithGroupSync();
-            if (ix >= (1u << i))
-                val = sh_scratch[ix - (1u << i)] + val;
-            GroupMemoryBarrierWithGroupSync();
-            sh_scratch[ix] = val;
-        }
-        OUT[ix] = val;
-    }
-    "#;
-
-    // ── workgroup_broadcast ─────────────────────────────────────────────────────
-
-    /// Inlined broadcast of value 42 over 64 threads.  All output[i] must = 42.
-    const BROADCAST_64: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_slot[1];
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix = local_id.x;
-        if (ix == 0) sh_slot[0] = 42u;
-        GroupMemoryBarrierWithGroupSync();
-        OUT[ix] = sh_slot[0];
-    }
-    "#;
-
-    // ── workgroup_upper_bound ───────────────────────────────────────────────────
-    // workgroup_upper_bound only *reads* groupshared (never writes inside the
-    // function), so the cross-module call is safe — this test exercises the
-    // goldy_exp version directly.
-
-    /// `workgroup_upper_bound` with prefix_sums[i] = i+1 over 64 threads.
-    /// upper_bound(k) in {1,2,...,64} = k for all k in [0, 63].
-    const UPPER_BOUND_64: &str = r#"
-    import goldy_exp;
-    groupshared uint sh_ps[64];
-    [goldy_compute]
-    [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
-        uint ix = local_id.x;
-        sh_ps[ix] = ix + 1u; // build linear prefix-sum: [1, 2, 3, ..., 64]
-        GroupMemoryBarrierWithGroupSync();
-        OUT[ix] = workgroup_upper_bound<6>(ix, sh_ps);
-    }
-    "#;
-
-    fn test_wave_inclusive_scan_uniform_64(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_UNIFORM).expect("compile WAVE_SCAN_64_UNIFORM");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 64 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val,
-                i as u32 + 1,
-                "wave_scan_uniform_64[{i}]: expected {} got {val}",
-                i + 1
-            );
-        }
-    }
-
-    fn test_wave_inclusive_scan_ramp_64(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 64 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        // Expected: triangular numbers T(1)=1, T(2)=3, T(3)=6, ... T(k)=k*(k+1)/2
-        for (i, &val) in result.iter().enumerate() {
-            let k = (i + 1) as u32;
-            let expected = k * (k + 1) / 2;
-            assert_eq!(val, expected, "wave_scan_ramp_64[{i}]: expected {expected} got {val}");
-        }
-    }
-
-    fn test_wave_inclusive_scan_uniform_256(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, WAVE_SCAN_256_UNIFORM).expect("compile WAVE_SCAN_256_UNIFORM");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 256 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 256 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val,
-                i as u32 + 1,
-                "wave_scan_uniform_256[{i}]: expected {} got {val}",
-                i + 1
-            );
-        }
-    }
-
-    fn test_workgroup_reduce_uint_correct(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 64 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        // Thread 0 accumulates the total (64 ones = 64); other threads hold partial sums.
-        assert_eq!(
-            result[0], 64,
-            "workgroup_reduce: thread 0 must hold total 64, got {}",
-            result[0]
-        );
-    }
-
-    fn test_workgroup_inclusive_scan_uint_correct(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader =
-            ShaderModule::from_slang(&device, INCLUSIVE_SCAN_64_UNIFORM).expect("compile INCLUSIVE_SCAN_64_UNIFORM");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 64 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(
-                val,
-                i as u32 + 1,
-                "workgroup_inclusive_scan[{i}]: expected {} got {val}",
-                i + 1
-            );
-        }
-    }
-
-    fn test_workgroup_broadcast_correct(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 64 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, 42, "workgroup_broadcast[{i}]: expected 42 got {val}");
-        }
-    }
-
-    fn test_workgroup_upper_bound_linear(device: &Device) {
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
-
-        let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
-
-        let mut raw = vec![0u8; 64 * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        // prefix_sums = [1, 2, ..., 64]; upper_bound(k) = k for k in [0, 63].
-        for (i, &val) in result.iter().enumerate() {
-            assert_eq!(val, i as u32, "workgroup_upper_bound[{i}]: expected {i} got {val}");
-        }
-    }
-
-    /// Round-trip test for `TextureKind::DirectInterpolated`:
-    /// 1. Write a known pattern into the texture via UAV (storage image) in a compute pass.
-    /// 2. Read it back via SRV (sampled image) using hardware bilinear (at texel centres, so
-    ///    the result should be exact) in a second compute pass.
-    /// 3. Assert that the round-tripped values match the original.
-    ///
-    /// This validates that both the storage and sampled bindless slots point to the same
-    /// underlying resource on all supported backends.
-    fn texture_dual_view_round_trip(device: &Device) {
-        const W: u32 = 4;
-        const H: u32 = 4;
-        const N: usize = (W * H) as usize;
-
-        /// Write pass: fill a DirectSpatial (UAV) texture with known RGBA values.
-        const WRITE_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(4, 4, 1)]
-    void cs_main(DirectSpatial<float4> dst, ThreadId id) {
-        uint x = id.x;
-        uint y = id.y;
-        // Encode pixel coordinates as (x/255, y/255, 0, 1)
-        dst[uint2(x, y)] = float4(float(x) / 255.0, float(y) / 255.0, 0.0, 1.0);
-    }
-    "#;
-
-        /// Read pass: sample the Interpolated (SRV) view at texel centres and write to a buffer.
-        const READ_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(4, 4, 1)]
-    void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId id) {
-        uint x = id.x;
-        uint y = id.y;
-        float2 uv = (float2(x, y) + 0.5) / float2(4.0, 4.0);
-        float4 v = src.Sample(smp, uv);
-        // Pack 8-bit rgba into a single uint.
-        uint r = uint(v.x * 255.0 + 0.5);
-        uint g = uint(v.y * 255.0 + 0.5);
-        uint b = uint(v.z * 255.0 + 0.5);
-        uint a = uint(v.w * 255.0 + 0.5);
-        out[y * 4 + x] = r | (g << 8) | (b << 16) | (a << 24);
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-
-        // Check that the device supports DirectInterpolated (all backends should).
-        let tex = test_alloc_texture(
-            &device,
-            W,
-            H,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::DirectInterpolated,
-            TextureFlags::empty(),
-        );
-
-        let storage_idx = tex
-            .resource_index(ResourceAccess::Write)
-            .expect("DirectInterpolated must have a storage resource index");
-        let sampled_idx = tex
-            .resource_index(ResourceAccess::Read)
-            .expect("DirectInterpolated must have a sampled bindless index");
-        // storage_idx and sampled_idx index into *different* descriptor pools (UAV vs SRV),
-        // so the same integer value is valid — they just happen to both be the first slot in
-        // their respective pools. What matters is that both are present (both Some).
-
-        // Write pass (UAV).
-        let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
-        let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
-        let mut graph_enc = TaskGraph::new();
-        graph_enc
-            .node("n0", &write_pipeline)
-            .with_resource_slots_slice(&[storage_idx])
-            .dispatch(1, 1, 1);
-        graph_enc.dispatch(&ctx).expect("write dispatch");
-
-        // Read pass (SRV + sampler).
-        let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
-        let out = test_alloc_buffer(
-            &device,
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        );
-        let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
-        let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
-        let mut graph_enc2 = TaskGraph::new();
-        graph_enc2
-            .node("read", &read_pipeline)
-            .with_parcel(&tex, NodeAccess::Read)
-            .with_buffer(&*out, NodeAccess::Write)
-            .with_resource_slots_slice(&[
-                sampled_idx,
-                sampler.resource_index(ResourceAccess::Read).unwrap(),
-                out.resource_index(ResourceAccess::Write).unwrap(),
-            ])
-            .dispatch(1, 1, 1);
-        graph_enc2.dispatch(&ctx).expect("read dispatch");
-
-        let mut raw = vec![0u8; N * 4];
-        out.read_to_cpu(&device, &mut raw).expect("readback");
-        let result: &[u32] = bytemuck::cast_slice(&raw);
-
-        for y in 0..H as usize {
-            for x in 0..W as usize {
-                let expected_r = x as u8;
-                let expected_g = y as u8;
-                let packed = result[y * W as usize + x];
-                let r = (packed & 0xFF) as u8;
-                let g = ((packed >> 8) & 0xFF) as u8;
-                let b = ((packed >> 16) & 0xFF) as u8;
-                let a = ((packed >> 24) & 0xFF) as u8;
-                assert_eq!(r, expected_r, "r mismatch at ({x},{y})");
-                assert_eq!(g, expected_g, "g mismatch at ({x},{y})");
-                assert_eq!(b, 0, "b mismatch at ({x},{y})");
-                assert_eq!(a, 255, "a mismatch at ({x},{y})");
-            }
-        }
-    }
-
-    // ── multi-context ─────────────────────────────────────────────────────────────
-
-    /// Two contexts on one device can both submit work and the deferred deletion
-    /// queue on context A drains when A's timeline retires — without requiring
-    /// context B to have made any progress.
-    ///
-    /// This guards against reintroducing a device-global retirement horizon
-    /// (`device_retired`) as the reclaim gate, which would stall context A's
-    /// cleanup if context B is idle (Phase 5b regression test).
-    fn two_contexts_reclaim_independently(device: &Device) {
-        let ctx_a = submission_context(&device);
-        let _ctx_b = submission_context(&device);
-
-        // Allocate a buffer and do some work on ctx_a.
-        let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
-        let tv_a = {
-            let mut graph = TaskGraph::new();
-            graph.submit(&ctx_a).expect("ctx_a submit")
-        };
-
-        // Drop the buffer — its descriptor slot enters ctx_a's deferred queue.
-        drop(buf);
-
-        // ctx_b has never submitted; its timeline is still at seq 0.
-        // With a correct per-context reclaim gate, waiting for ctx_a's timeline
-        // must be sufficient to drain ctx_a's queue.
-        ctx_a.wait_until(tv_a).expect("ctx_a wait_until");
-        ctx_a.flush_deferred_deletions();
-
-        assert_eq!(
-            ctx_a.deferred_deletion_pending_count(),
-            0,
-            "ctx_a must reclaim without waiting for ctx_b (no device-global horizon)"
-        );
-    }
-
-    /// Both contexts on one device can complete a roundtrip dispatch independently
-    /// and in sequence, exercising allocator-slot reuse across both.
-    fn two_contexts_both_submit_and_complete(device: &Device) {
-        let ctx_a = submission_context(&device);
-        let ctx_b = submission_context(&device);
-
-        let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
-
-        let data_a: Vec<u32> = (0..64).collect();
-        let buf_a = test_alloc_buffer_with_data(&device, &data_a, BufferKind::Scattered);
-        let data_b: Vec<u32> = (100..164).collect();
-        let buf_b = test_alloc_buffer_with_data(&device, &data_b, BufferKind::Scattered);
-
-        // Submit from both contexts.
-        let mut graph_enc_a = TaskGraph::new();
-        graph_enc_a
-            .node("n0", &pipeline)
-            .with_resources(&[&buf_a])
-            .dispatch(1, 1, 1);
-        let tv_a = graph_enc_a.submit(&ctx_a).expect("ctx_a submit");
-
-        let mut graph_enc_b = TaskGraph::new();
-        graph_enc_b
-            .node("n0", &pipeline)
-            .with_resources(&[&buf_b])
-            .dispatch(1, 1, 1);
-        let tv_b = graph_enc_b.submit(&ctx_b).expect("ctx_b submit");
-
-        ctx_a.wait_until(tv_a).expect("ctx_a wait");
-        ctx_b.wait_until(tv_b).expect("ctx_b wait");
-
-        // Both buffers should have been doubled.
-        let mut raw_a = vec![0u8; 64 * 4];
-        buf_a.read_to_cpu(&device, &mut raw_a).expect("read buf_a");
-        let result_a: &[u32] = bytemuck::cast_slice(&raw_a);
-
-        let mut raw_b = vec![0u8; 64 * 4];
-        buf_b.read_to_cpu(&device, &mut raw_b).expect("read buf_b");
-        let result_b: &[u32] = bytemuck::cast_slice(&raw_b);
-
-        for i in 0..64 {
-            assert_eq!(result_a[i], i as u32 * 2, "buf_a[{i}]");
-            assert_eq!(result_b[i], (100 + i as u32) * 2, "buf_b[{i}]");
+            a.begin_frame(device, 0).expect("begin after clear");
         }
     }
 
@@ -2594,60 +529,17 @@ mod imp {
 
         trial!(test_compute_pipeline_creation);
         trial!(test_compute_pipeline_no_bindings);
-        trial!(test_compute_dispatch_empty);
-        trial!(test_compute_with_uav_buffer);
-        trial!(test_compute_with_srv_and_uav);
-        trial!(test_compute_write_and_readback);
-        trial!(test_buffer_clear_standalone);
-        trial!(test_buffer_clear_partial);
-        trial!(test_buffer_clear_to_end);
-        trial!(test_compute_batched_clear_before_dispatch);
-        trial!(test_compute_clear_between_dispatches);
-        trial!(test_compute_dispatch_indirect);
-        trial!(test_dispatch_indirect_invalid_buffer);
-        trial!(test_compute_many_resource_slots);
-        trial!(test_compute_with_struct_buffer);
-        trial!(test_buffer_view_copy_between_sub_regions);
-        trial!(test_buffer_view_isolation);
-        trial!(test_buffer_pool_alloc_and_dispatch);
         trial!(test_buffer_pool_alloc_with_data);
         trial!(test_buffer_pool_alloc_with_data_empty);
         trial!(test_positive_mod_correctness);
         trial!(test_billboard_math);
-        trial!(test_scattered_typed_variable_assignment);
         trial!(test_heap_overflow_allocation);
-        trial!(test_compute_write_to_texture);
-        trial!(test_cpu_readable_compute_write_and_read);
-        trial!(test_write_buffer_reuse_across_submissions);
-        trial!(test_cpu_readable_cpu_write_read_roundtrip);
-        trial!(test_cpu_writable_write_read_roundtrip);
-        trial!(test_uniform_param_uint_roundtrip);
-        trial!(test_uniform_param_uint_zero);
-        trial!(test_uniform_param_uint_max);
-        trial!(test_uniform_param_float_reinterpret);
-        trial!(test_uniform_two_independent_scalar_params);
-        trial!(test_uniform_scalar_after_two_buffer_params);
         trial!(flush_deferred_deletions_reclaims_slots_after_gpu_idle);
         trial!(flush_deferred_deletions_respects_gpu_progress);
         trial!(flush_deferred_deletions_noop_on_idle_device);
         trial!(transient_allocator_smoke_all_strategies);
         trial0!(transient_allocator_strategy_default_and_parse);
-        trial!(bump_reset_blocks_on_prev_epoch);
         trial!(transient_allocator_clear_resets_state);
-        trial!(buffer_pool_would_fit_agrees_with_alloc_bytes);
-        trial!(test_transient_buffer_write_then_copy);
-        trial!(test_regular_buffer_write_then_copy);
-        trial!(test_transient_buffer_aliased_disjoint_waves);
-        trial!(test_wave_inclusive_scan_uniform_64);
-        trial!(test_wave_inclusive_scan_ramp_64);
-        trial!(test_wave_inclusive_scan_uniform_256);
-        trial!(test_workgroup_reduce_uint_correct);
-        trial!(test_workgroup_inclusive_scan_uint_correct);
-        trial!(test_workgroup_broadcast_correct);
-        trial!(test_workgroup_upper_bound_linear);
-        trial!(texture_dual_view_round_trip);
-        trial!(two_contexts_reclaim_independently);
-        trial!(two_contexts_both_submit_and_complete);
         #[cfg(feature = "vulkan")]
         trial0!(vk_api_validation_timeline_semaphore);
         #[cfg(feature = "vulkan")]

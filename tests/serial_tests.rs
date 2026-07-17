@@ -15,8 +15,8 @@ mod imp {
 
     use crate::submission::submission_context;
     use goldy::{
-        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
-        RequestAdapterOptions, ShaderModule, TaskGraph,
+        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
+        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
     };
     use std::sync::Arc;
 
@@ -39,7 +39,7 @@ mod imp {
         stride: Option<u32>,
         flags: BufferFlags,
     ) -> Buffer {
-        goldy::RetainedPool::new(Arc::new(device.clone()))
+        RetainedPool::new(Arc::new(device.clone()))
             .acquire_buffer(size, kind, stride, flags, None)
             .expect("acquire_buffer")
     }
@@ -68,9 +68,12 @@ mod imp {
         // requirements and is drainable immediately by any sibling trial's wait_until.
         let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
 
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
-        let tv = graph.submit(&ctx).expect("submit");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n0", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let tv = scheme.submit().expect("submit").timeline_value();
 
         assert_eq!(
             ctx.deferred_deletion_pending_count(),

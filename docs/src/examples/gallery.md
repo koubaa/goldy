@@ -26,13 +26,13 @@ These examples cover fundamental Goldy patterns: vertex buffers, the Surface API
 
 ## Compute Workflows
 
-Examples that use `ComputePipeline` and `TaskGraph` for GPU-side data processing, including the compute-to-surface pattern.
+Examples that use `ComputePipeline` and `Scheme` for GPU-side data processing, including the compute-to-surface pattern.
 
 | Example | What it demonstrates | Source |
 |---------|---------------------|--------|
-| **`compute_particles`** | Full compute + graphics loop. A compute shader updates 1024 particle positions and velocities each frame; a graphics shader renders them as instanced colored quads. Uses `TaskGraph` for dependency scheduling. | [`compute_particles.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_particles.rs) |
+| **`compute_particles`** | Full compute + graphics loop. A compute shader updates 1024 particle positions and velocities each frame; a graphics shader renders them as instanced colored quads. Uses a retained scheme for dependency scheduling. | [`compute_particles.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_particles.rs) |
 | **`game_of_life`** | Conway's Game of Life on the GPU. A compute shader applies cellular-automaton rules on a 128×128 grid using **ping-pong sub-views** in one retained mosaic `Parcel`. A separate graphics pass renders the result. | [`game_of_life.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/game_of_life.rs) |
-| **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`, no raster pass, no vertex buffers. A compute shader writes directly to the swapchain texture via `frame.texture()` and `TaskGraph`. Demonstrates the compute-to-surface workflow. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) |
+| **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`, no raster pass, no vertex buffers. A compute shader writes directly to a `PresentLease` via `with_present` + `grant_present`. Demonstrates the compute-to-surface workflow. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) |
 
 ## Graphics Pipelines
 
@@ -79,36 +79,34 @@ More complex examples combining multiple Goldy features or demonstrating interac
 
 ## Common Patterns
 
-### Surface API Render Loop (Rust)
+### Present-on-Scheme Render Loop (Rust)
 
 ```rust
-frame_graph.clear();
-let mut pass = frame_graph.render_pass("main", &scene_rt);
-pass.with_buffer_mut(&vertices, NodeAccess::Read);
+// Record once at init (and on resize):
+let mut pass = scheme.render_pass("main", &scene_rt);
+pass.with_parcel(&vertices, NodeAccess::Read);
 pass.clear(background_color);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.draw(0..vertex_count, 0..1);
-pass.finish_recorded();
+pass.finish();
+scheme.copy_to_present(&scene_rt, &screen);
+let present = scheme.grant_present(&screen);
 
-let swapchain = frame_graph.declare_swapchain_output();
-frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
-
-let frame = surface.begin()?;
-let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
-frame.present()?;
+// Each frame:
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
-### Compute + Graphics with TaskGraph
+### Compute + Graphics with Scheme
 
 ```rust
-let mut graph = TaskGraph::new();
-graph
+let mut scheme = Scheme::new(&ctx);
+scheme
     .node("update", &compute_pipeline)
-    .with_buffer(&buffer, NodeAccess::ReadWrite)
-    .with_resource_slots(&[buffer.resource_index(ResourceAccess::Read).unwrap()])
+    .with_parcel(&buffer, NodeAccess::ReadWrite)
     .dispatch(workgroups, 1, 1);
-graph.dispatch(&device)?;
+scheme.submit()?;
 ```
 
 ### Slang Shader Template

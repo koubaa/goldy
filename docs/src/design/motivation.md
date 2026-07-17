@@ -32,13 +32,13 @@ Bindless resource access replaces all of this with a single concept: resources l
 
 This isn't exotic — it's how game engines have been working internally for years. Goldy makes it the public API rather than hiding it behind compatibility abstractions.
 
-## Why a Task Graph
+## Why a Dependency Graph (Scheme)
 
 Bindless access means shaders can read *any* resource at any time. The traditional model of inserting barriers at the call site ("I'm about to read this buffer, so transition it now") breaks down when the set of resources a dispatch touches isn't known until the shader runs.
 
-Goldy uses a task graph to solve this. You declare tasks and their resource dependencies; Goldy derives the barriers, layout transitions, and execution order automatically. This is both safer (no missed barriers) and simpler (no manual synchronization) than the alternative.
+Goldy uses a retained **scheme** — a dependency graph you record once and submit many times — to solve this. You declare nodes and their resource dependencies; Goldy derives the barriers, layout transitions, and execution order automatically. This is both safer (no missed barriers) and simpler (no manual synchronization) than the alternative.
 
-The task graph also enables Goldy to batch and reorder work across the frame, which matters for compute-heavy workloads where multiple dispatches feed into each other before anything reaches the screen.
+The scheme also enables Goldy to batch and reorder work across the frame, which matters for compute-heavy workloads where multiple dispatches feed into each other before anything reaches the screen.
 
 ## Why Slang
 

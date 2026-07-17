@@ -235,7 +235,7 @@ pub enum NodeKind {
     /// Offscreen render pass targeting a [`crate::RenderTarget`].
     ///
     /// Declare all buffers and textures read by draw commands via
-    /// [`super::graph::RenderPassBuilder`] so barriers serialize correctly
+    /// [`crate::scheme::SchemeRenderPassBuilder`] so barriers serialize correctly
     /// against compute work.
     RenderPass {
         target: RenderTargetHandle,

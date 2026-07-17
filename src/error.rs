@@ -1,6 +1,6 @@
 /// Typed error variants for the goldy public API.
 ///
-/// Returned by [`crate::Context::submit`], [`crate::Context::dispatch`], [`crate::Context::wait_until`],
+/// Returned by [`crate::Scheme::submit`], [`crate::Context::wait_until`],
 /// and [`crate::Context::wait_until_timeout`] so callers can distinguish recoverable
 /// conditions (timeout) from permanent ones (device loss) without string-matching.
 #[derive(Debug, thiserror::Error)]

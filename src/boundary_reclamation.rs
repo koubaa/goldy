@@ -19,7 +19,7 @@ mod tests {
     use crate::context::Context;
     use crate::device::Device;
     use crate::signal::Signal;
-    use crate::task_graph::TaskGraph;
+    use crate::test_support::scheme_advance_timeline;
     use crate::transient_allocator::{
         BumpResetAllocator, HeapTransientAllocator, TransientAllocator, TransientAllocatorConfig,
     };
@@ -41,6 +41,12 @@ mod tests {
         }
     }
 
+    fn scheme_submit(ctx: &Context) -> crate::TimelineValue {
+        let tv = scheme_advance_timeline(ctx);
+        assert!(tv > 0, "scheme submit must advance timeline");
+        tv
+    }
+
     fn heap_config() -> TransientAllocatorConfig {
         TransientAllocatorConfig {
             initial_size: 64 * 1024,
@@ -57,8 +63,7 @@ mod tests {
     fn u0_vram_ring_empties_after_submit_wait_flush() {
         let device = test_device();
         let ctx = test_ctx(&device);
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
 
         let alive = Arc::new(99u32);
         let weak = Arc::downgrade(&alive);
@@ -98,8 +103,7 @@ mod tests {
         alloc.begin_frame(&device, 0).unwrap();
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
         let far_epoch = tv + 100;
 
         alloc.free(offset, 1024, Some(far_epoch));
@@ -128,8 +132,7 @@ mod tests {
     fn u3_signal_boundary_crossed_services_vram_ring() {
         let device = test_device();
         let ctx = test_ctx(&device);
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
 
         let alive = Arc::new(42u32);
         let weak = Arc::downgrade(&alive);
@@ -159,8 +162,7 @@ mod tests {
     fn pull_path_reclaims_without_signal_drain() {
         let device = test_device();
         let ctx = test_ctx(&device);
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
 
         let alive = Arc::new(77u32);
         let weak = Arc::downgrade(&alive);
@@ -182,8 +184,7 @@ mod tests {
     fn boundary_crossed_is_idempotent_for_same_epoch() {
         let device = test_device();
         let ctx = test_ctx(&device);
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
 
         let alive = Arc::new(11u32);
         let weak = Arc::downgrade(&alive);
@@ -212,10 +213,8 @@ mod tests {
     fn boundary_crossed_stale_epoch_is_no_op_after_high_water() {
         let device = test_device();
         let ctx = test_ctx(&device);
-        let mut graph1 = TaskGraph::new();
-        let tv1 = ctx.submit(&mut graph1).expect("submit 1");
-        let mut graph2 = TaskGraph::new();
-        let tv2 = ctx.submit(&mut graph2).expect("submit 2");
+        let tv1 = scheme_submit(&ctx);
+        let tv2 = scheme_submit(&ctx);
         assert!(tv2 > tv1, "mock timeline must advance");
 
         let alive1 = Arc::new(1u32);
@@ -254,8 +253,7 @@ mod tests {
         alloc.begin_frame(&device, 0).expect("begin 1");
         let v1 = alloc.alloc(&device, 512, Some(4)).expect("alloc");
         let original_offset = v1.offset();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
 
         // Retire to a far epoch the GPU has NOT reached.
         let far_epoch = tv + 100;

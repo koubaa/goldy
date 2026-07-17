@@ -1,4 +1,4 @@
-//! Smoke tests for [`goldy::FrameOrchestrator`] and [`goldy::Device::submit_pipelined`].
+//! Smoke tests for [`goldy::FrameOrchestrator`] end-frame paths.
 
 use goldy::{DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions};
 
@@ -21,8 +21,7 @@ fn orchestrator_double_begin_fails() {
         .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
         .is_err());
 
-    orch.end_frame_standalone(h, ctx.gpu_progress(), ())
-        .expect("end");
+    orch.end_frame_externally_ordered(h).expect("end");
 }
 
 #[test]

@@ -14,12 +14,13 @@ use std::sync::{Arc, Mutex};
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule, TaskGraph};
+/// use goldy::{ComputePipeline, Context, DeviceDescriptor, Instance, RequestAdapterOptions, Scheme, ShaderModule};
 ///
 /// let instance = Instance::new()?;
 /// let device = instance
 ///     .request_adapter(&RequestAdapterOptions::default())?
 ///     .request_device(&DeviceDescriptor::default())?;
+/// let ctx = device.create_context()?;
 ///
 /// let shader = ShaderModule::from_slang(&device, r#"
 ///     import goldy_exp;
@@ -32,8 +33,9 @@ use std::sync::{Arc, Mutex};
 /// "#)?;
 ///
 /// let pipeline = ComputePipeline::new(&device, &shader)?;
-/// let mut graph = TaskGraph::new();
-/// graph.node("main", &pipeline).dispatch(1, 1, 1);
+/// let mut scheme = Scheme::new(&ctx);
+/// scheme.node("main", &pipeline).dispatch(1, 1, 1);
+/// scheme.submit()?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct ComputePipeline {

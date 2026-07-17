@@ -1,6 +1,6 @@
 # Compute to Surface
 
-Compute-to-surface lets a compute shader write directly to the swapchain texture, bypassing the rasterization pipeline entirely. There is no `RenderPipeline`, no vertex buffers, and no raster pass — just a compute dispatch that fills pixels.
+Compute-to-surface lets a compute shader write directly to a swapchain drawable, bypassing the rasterization pipeline entirely. There is no `RenderPipeline`, no vertex buffers, and no raster pass — just a compute dispatch that fills pixels.
 
 ## When to use compute-to-surface
 
@@ -13,48 +13,44 @@ Use compute-to-surface when your rendering is naturally a per-pixel computation 
 
 Use traditional rendering when you need the rasterization pipeline's features: triangle assembly, depth testing, MSAA, alpha blending, or vertex/fragment shader stages.
 
-## Getting the swapchain texture
+## Present lease
 
-Acquire a frame from the surface and call `frame.texture()` to get a writable `Texture` handle to the current swapchain image:
-
-```rust
-let frame = surface.begin()?;
-let texture = frame.texture();
-```
-
-This texture is valid until the frame is presented. You can obtain its bindless handle and pass it to a compute shader like any other texture:
+Create a [`SwapchainPool`](../surfaces/overview.md) and call `lease()` to obtain a stable [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) identity. The physical swapchain image rotates each submission; the lease id is recorded once in the scheme.
 
 ```rust
-let texture_handle = texture
-    .handle(ResourceAccess::Read)
-    .expect("Surface texture has no bindless handle");
+let swapchain = SwapchainPool::new(&ctx, &window, 3)?;
+let screen = swapchain.lease();
 ```
 
-## Building the task graph
+Bind the lease in a compute node with `with_present(&screen)`. Goldy handles barrier insertion between compute writes and the presentation engine.
 
-Create a `TaskGraph` with a compute node that writes to the swapchain texture. The task graph handles barrier insertion between compute writes and the presentation engine:
+## Building the scheme
+
+Record a retained scheme with a compute node that writes to the present lease:
 
 ```rust
 let wg_x = width.div_ceil(8);
 let wg_y = height.div_ceil(8);
 
-let mut graph = TaskGraph::new();
-graph.node("compute", &compute_pipeline)
-    .with_buffer(&uniform_buffer, NodeAccess::Read)
-    .with_resource_slots(&[uniform_handle.index(), texture_handle.index()])
+let mut scheme = Scheme::new(&ctx);
+scheme
+    .node("compute", &compute_pipeline)
+    .with_parcel(&uniform_buffer, NodeAccess::Read)
+    .with_present(&screen)
     .dispatch(wg_x, wg_y, 1);
+let present = scheme.grant_present(&screen);
 ```
 
 ## Submitting and presenting
 
-Use `frame.submit_compute(graph)` to record the compute work into the frame, then present:
+Each frame, submit the scheme and consume the present grant:
 
 ```rust
-frame.submit_compute(&graph)?;
-frame.present()?;
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
-`submit_compute` resolves any transient resources (buffers, textures), compiles the task graph into a command stream, and records it into the frame's command buffer. Presentation happens when you call `present()` — the compute shader has already written the pixels.
+`submit` resolves transient resources, compiles the scheme into a command stream, and submits to the GPU. Presentation happens when you call `present.consume` — the compute shader has already written the pixels.
 
 ## The compute shader
 
@@ -96,75 +92,59 @@ let wg_y = height.div_ceil(8);
 
 Guard against out-of-bounds writes in the shader when the resolution isn't a multiple of the workgroup size.
 
-## Full example
-
-A complete compute-to-surface application rendering an animated plasma effect:
+## Full example sketch
 
 ```rust
 use goldy::{
-    Buffer, ComputePipeline, BufferKind, DeviceType, Instance,
-    NodeAccess, PresentMode, ShaderModule, Surface, SurfaceConfig, TaskGraph,
+    BufferKind, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PresentMode,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
 };
 
-// Create device and surface
 let instance = Instance::new()?;
-let device = instance.create_device(DeviceType::DiscreteGpu)?;
+let device = instance
+    .request_adapter(&RequestAdapterOptions::default())?
+    .request_device(&DeviceDescriptor::default())?;
+let ctx = device.create_context()?;
 
-let surface = Surface::new_with_config(
-    &device,
+let swapchain = SwapchainPool::new_with_config(
+    &ctx,
     &window,
+    3,
     SurfaceConfig {
         present_mode: PresentMode::Fifo,
         depth_format: None,
     },
 )?;
+let screen = swapchain.lease();
 
-// Compile compute shader and create pipeline
 let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
-// Create uniform buffer
 let mut retained_pool = RetainedPool::new(device.clone());
 let uniform_buffer = retained_pool.acquire_buffer_with_data(
-    &[Uniforms {
-        width: surface.width(),
-        height: surface.height(),
-        time: 0.0,
-        _padding: 0.0,
-    }],
+    &[Uniforms { width, height, time: 0.0, _padding: 0.0 }],
     BufferKind::Scattered,
 )?;
 
+let mut scheme = Scheme::new(&ctx);
+scheme
+    .node("compute", &compute_pipeline)
+    .with_parcel(&uniform_buffer, NodeAccess::Read)
+    .with_present(&screen)
+    .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
+let present = scheme.grant_present(&screen);
+
 // --- Render loop ---
+let mut upload = Scheme::new(&ctx);
+upload.commit_write_parcel(
+    &uniform_buffer,
+    0,
+    bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }).to_vec(),
+)?;
+upload.submit()?;
 
-// Update uniforms
-uniform_buffer.write(0, bytemuck::bytes_of(&Uniforms {
-    width, height, time: elapsed, _padding: 0.0,
-}))?;
-
-// Acquire frame and get swapchain texture
-let frame = surface.begin()?;
-let texture = frame.texture();
-
-let uniform_handle = uniform_buffer
-    .handle(ResourceAccess::Read)
-    .expect("Uniform buffer has no bindless SRV handle");
-let texture_handle = texture
-    .handle(ResourceAccess::Read)
-    .expect("Surface texture has no bindless handle");
-
-// Build and submit compute graph
-let wg_x = width.div_ceil(8);
-let wg_y = height.div_ceil(8);
-
-let mut graph = TaskGraph::new();
-graph.node("compute", &compute_pipeline)
-    .with_buffer(&uniform_buffer, NodeAccess::Read)
-    .with_resource_slots(&[uniform_handle.index(), texture_handle.index()])
-    .dispatch(wg_x, wg_y, 1);
-
-frame.submit_compute(&graph)?;
-frame.present()?;
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
-The uniform buffer uses `bindless_srv_handle()` because the shader accesses it through `BufRO<Uniforms>`, which maps to a read-only SRV on DX12. On Vulkan and Metal this falls back to the unified storage-buffer index.
+See [`examples/compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) for the complete winit application.

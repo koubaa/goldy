@@ -1,35 +1,33 @@
-# Task Graph Rendering
+# Scheme Rendering
 
-Graphics commands are recorded through [`RenderPassBuilder`](../../src/task_graph/graph.rs) nodes inside a [`TaskGraph`](../../src/task_graph/graph.rs). The graph declares resource dependencies (buffers, textures, parcels) and submits all GPU work in one dispatch.
+Graphics commands are recorded through [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html) render-pass nodes. The scheme declares resource dependencies (buffers, textures, parcels) and is retained across submissions.
 
-Windowed apps render to an offscreen [`RenderTarget`](../surfaces/overview.md), blit to the swapchain, then present. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the canonical loop.
+Windowed apps render to an offscreen leased target, copy to a [`PresentLease`](../surfaces/overview.md), then consume a [`PresentGrant`]. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the canonical loop.
 
 ## Per-Frame Loop (windowed)
 
 ```rust
-use goldy::{Color, NodeAccess, RenderTarget, Surface, TaskGraph};
+use goldy::{Color, NodeAccess, Scheme, SwapchainPool};
 
-frame_graph.clear();
-
-let mut pass = frame_graph.render_pass("main", &scene_rt);
-pass.with_buffer_mut(&vertex_buffer, NodeAccess::Read);
+// Record once at init (and on resize):
+let mut pass = scheme.render_pass("main", &scene_rt);
+pass.with_parcel(&vertex_buffer, NodeAccess::Read);
 pass.clear(Color::CORNFLOWER_BLUE);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertex_buffer);
 pass.draw(0..3, 0..1);
-pass.finish_recorded();
+pass.finish();
+scheme.copy_to_present(&scene_rt, &screen);
+let present = scheme.grant_present(&screen);
 
-let swapchain = frame_graph.declare_swapchain_output();
-frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
-
-let frame = surface.begin()?;
-let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
-frame.present()?;
+// Each frame:
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
 ## Render Pass Builder
 
-`render_pass(label, target)` returns a builder that records draw commands for one offscreen target.
+`render_pass(label, target)` returns a builder that records draw commands for one offscreen leased target.
 
 ### Clearing
 
@@ -56,46 +54,51 @@ pass.draw_fullscreen();             // 3-vertex fullscreen triangle
 pass.draw_quads(4);                 // instanced quads
 ```
 
-### Graph Dependencies
+### Scheme Dependencies
 
 Declare which resources the pass reads or writes so the runtime can track parcel lifetimes:
 
 ```rust
-pass.with_buffer_mut(&buf, NodeAccess::Read);
+pass.with_parcel(&buf, NodeAccess::Read);
 pass.with_texture(&tex, NodeAccess::Read);
-pass.with_parcel(&parcel, NodeAccess::Write);
 ```
 
-Call `finish_recorded()` when done recording commands for this pass node.
+Call `finish()` when done recording commands for this pass node.
 
 ## Offscreen-Only (tests, readback)
 
-For headless rendering without a window, dispatch the graph on a device context:
+For headless rendering without a window, record a scheme, copy to a readback texture, and consume a read grant:
 
 ```rust
-let ctx = device.create_context()?;
-let mut graph = TaskGraph::new();
-let mut pass = graph.render_pass("clear", &target);
+let mut scheme = Scheme::new(&ctx);
+let rt = scheme.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
+let mut pass = scheme.render_pass("clear", &rt);
 pass.clear(Color::RED);
-pass.finish_recorded();
-graph.dispatch(&ctx)?;
-let pixels = target.read_to_cpu()?;
+pass.finish();
+scheme.copy_to_texture(&rt, &readback_texture);
+let grant = scheme.grant_read_texture(&readback_texture);
+let submission = scheme.submit()?;
+let pixels = grant.consume(&submission)?;
 ```
 
 ## Hybrid Compute + Graphics
 
-Put compute `dispatch` nodes and `render_pass` nodes in the **same** graph, then submit once:
+Put compute `node` dispatches and `render_pass` nodes in the **same** scheme, then submit once:
 
 ```rust
-frame_graph.write_buffer(&staging, &data);
-frame_graph.dispatch("sim", &compute_pipeline, (wg, 1, 1));
-// ... render_pass on scene_rt ...
-frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
-surface.submit_graph_to_frame(&mut frame_graph, frame)?;
+scheme.commit_write_parcel(&staging, 0, data)?;
+scheme.node("sim", &compute_pipeline)
+    .with_parcel(&state_buf, NodeAccess::ReadWrite)
+    .dispatch(wg, 1, 1);
+let mut pass = scheme.render_pass("draw", &scene_rt);
+// ...
+scheme.copy_to_present(&scene_rt, &screen);
+let present = scheme.grant_present(&screen);
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
 ## Notes
 
-- Depth buffers live on the offscreen `RenderTarget` (`RenderTarget::new_with_depth`), not on the swapchain surface.
-- Imperative graphics draw recording was removed; clients use `RenderPassBuilder::finish_recorded()`.
-- Compute-only swapchain output (no raster) uses `SwapchainOutput` directly — see [Compute to Surface](../compute/compute-to-surface.md).
+- Depth buffers live on leased render targets (`lease_render_target(..., Some(DepthFormat::...))`), not on the swapchain surface.
+- Compute-only swapchain output (no raster) uses `with_present` on a compute node — see [Compute to Surface](../compute/compute-to-surface.md).

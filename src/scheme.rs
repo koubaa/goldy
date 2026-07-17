@@ -1,9 +1,9 @@
 //! Retained scheme — the primary submission unit of the diwan machine.
 //!
 //! A [`Scheme`] is goldy's realization of the diwan scheme (spec §2): a set of dispatches
-//! and precedences, first-class, retained across submissions. Unlike [`crate::TaskGraph`],
-//! which is rebuilt each frame, a scheme persists; structural mutation sets a COW dirty bit,
-//! and a clean scheme resubmits with zero recording cost.
+//! and precedences, first-class, retained across submissions. Schemes persist across
+//! frames; structural mutation sets a COW dirty bit, and a clean scheme resubmits with
+//! zero recording cost.
 //!
 //! **Construction**: `Scheme::new(&ctx)` — bound to one context for its lifetime.
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
@@ -1072,7 +1072,7 @@ impl Scheme {
 
     /// Append a zero-fill node for `parcel[offset..offset+size]`.
     ///
-    /// Mirrors [`crate::TaskGraph::clear_parcel`].
+    /// Zero-fill a buffer region via an upload micro-scheme.
     pub fn commit_clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
         self.dirty = true;
         let buffer = parcel
@@ -1105,7 +1105,7 @@ impl Scheme {
 
     /// Append a CPU→GPU full-texture upload node.
     ///
-    /// Mirrors [`crate::TaskGraph::write_texture`].
+    /// Upload a full texture via an upload micro-scheme.
     pub fn commit_write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
         let expected = texture.byte_size();
         if data.len() != expected as usize {
@@ -1135,7 +1135,7 @@ impl Scheme {
 
     /// Append a CPU→GPU partial-texture upload node for a rectangular sub-region.
     ///
-    /// Mirrors [`crate::TaskGraph::write_texture_region`].
+    /// Upload a texture subregion via an upload micro-scheme.
     pub fn commit_write_texture_region(
         &mut self,
         texture: &crate::Texture,
@@ -1766,7 +1766,7 @@ impl Scheme {
 
     /// Copy a texture (UAV-writable parcel) into a present lease drawable.
     ///
-    /// Analogous to [`TaskGraph::copy_texture_to_swapchain`](crate::TaskGraph::copy_texture_to_swapchain)
+    /// Copy a texture into a present lease (swapchain drawable).
     /// but targets a scheme [`PresentLease`] instead of the task-graph swapchain output.
     ///
     /// Record this after all compute nodes that write `src`. The present slot is
@@ -2325,6 +2325,15 @@ impl SchemeBindable for crate::Buffer {
     }
 }
 
+impl SchemeBindable for crate::buffer::Allocation {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+        (
+            Some((ResourceId::Buffer(self.handle), None)),
+            self.resource_index(access),
+        )
+    }
+}
+
 impl<T> SchemeBindable for Lease<T> {
     fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = &scheme.leases[self.id.0 as usize];
@@ -2352,7 +2361,7 @@ impl SchemeBindable for crate::Texture {
     fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
         // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
-        // fall back to the UAV bindless index — mirroring the TaskGraph path's behaviour in
+        // fall back to the UAV bindless index — matching historical submit behaviour in
         // `collect_bindless_indices_into`.
         let slot = self.resource_index(access).or_else(|| {
             if access == ResourceAccess::Read {

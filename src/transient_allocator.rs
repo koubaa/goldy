@@ -649,9 +649,14 @@ mod tests {
 
     use crate::backend::mock::MockBackend;
     use crate::device::Device;
+    use crate::test_support::scheme_advance_timeline;
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    fn scheme_submit(ctx: &crate::Context) -> crate::TimelineValue {
+        scheme_advance_timeline(ctx)
     }
 
     fn heap_config() -> TransientAllocatorConfig {
@@ -694,9 +699,8 @@ mod tests {
         for frame in 0..5 {
             alloc.begin_frame(&device, 0).expect("begin");
             let _v = alloc.alloc(&device, 2048, Some(4)).expect("alloc");
-            let mut graph = crate::task_graph::TaskGraph::new();
             let ctx = device.create_context().expect("context");
-            let tv = ctx.submit(&mut graph).expect("submit");
+            let tv = scheme_submit(&ctx);
             alloc.end_frame(&device, tv);
             ctx.wait_until(tv).expect("wait");
 
@@ -883,8 +887,7 @@ mod tests {
         alloc.begin_frame(&device, 0).unwrap();
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
-        let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&device.create_context().unwrap());
 
         alloc.free(offset, 1024, Some(tv));
         alloc.end_frame(&device, tv);
@@ -903,8 +906,7 @@ mod tests {
 
         a.begin_frame(&device, 0).expect("begin 1");
         let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
-        let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&device.create_context().unwrap());
 
         a.end_frame(&device, tv);
         device.create_context().unwrap().wait_until(tv).expect("wait");
@@ -932,9 +934,8 @@ mod tests {
             "None-epoch range must not be reused before end_frame stamps it"
         );
 
-        let mut graph = crate::task_graph::TaskGraph::new();
         let ctx = device.create_context().unwrap();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
         alloc.end_frame(&device, tv);
 
         ctx.wait_until(tv).unwrap();
@@ -956,9 +957,8 @@ mod tests {
         alloc.begin_frame(&device, 0).expect("begin 1");
         let v1 = alloc.alloc(&device, 512, Some(4)).expect("alloc");
         let v1_off = v1.offset();
-        let mut graph = crate::task_graph::TaskGraph::new();
         let ctx = device.create_context().unwrap();
-        let tv = ctx.submit(&mut graph).expect("submit");
+        let tv = scheme_submit(&ctx);
         alloc.end_frame(&device, tv);
 
         // Do not wait — begin_frame should internally wait for tv before reset.

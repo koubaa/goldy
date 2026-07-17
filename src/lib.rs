@@ -72,7 +72,7 @@ pub use scheme::{
     PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, UploadBuffer,
 };
 pub use swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
-pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
+pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
 pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
 
@@ -98,10 +98,7 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
-pub use task_graph::{
-    GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph, TransientId, TransientTextureId,
-};
-pub use task_graph::{SwapchainOutputHandle, SWAPCHAIN_SLOT_PLACEHOLDER};
+pub use task_graph::{GraphIR, NodeAccess};
 
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use transient_allocator::{
@@ -136,6 +133,19 @@ pub mod test_support {
 
     pub fn with_mock<R>(device: &Device, f: impl FnOnce(&mut MockBackend) -> R) -> R {
         device.with_mock_backend(f)
+    }
+
+    /// Advance `ctx`'s timeline with a minimal scheme submit (one clear-parcel node).
+    pub fn scheme_advance_timeline(ctx: &crate::Context) -> crate::TimelineValue {
+        use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
+        let device = Arc::new(ctx.device().clone());
+        let mut pool = RetainedPool::new(device);
+        let buf = pool
+            .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("buf");
+        let mut scheme = Scheme::new(ctx);
+        scheme.commit_clear_parcel(&buf, 0, 256).expect("clear");
+        scheme.submit().expect("submit").timeline_value()
     }
 
     /// Process-wide gate for DX12 WARP lib tests. MockBackend never takes this lock.

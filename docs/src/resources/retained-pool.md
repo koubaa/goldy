@@ -5,7 +5,7 @@
 ## Quick start
 
 ```rust
-use goldy::{BufferKind, BufferFlags, RetainedPool, field, Init, NodeAccess, TaskGraph};
+use goldy::{BufferKind, BufferFlags, RetainedPool, field, Init, NodeAccess, Scheme};
 
 let mut pool = RetainedPool::new(device.clone());
 
@@ -22,7 +22,7 @@ let uniform_buf = pool.acquire_buffer(
     Some(&raw_bytes),
 )?;
 
-// Uninitialized buffer (rewrite each frame with write_parcel):
+// Uninitialized buffer (rewrite each frame with commit_write_parcel):
 let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
 // Texture parcel:
@@ -35,12 +35,14 @@ let cells = pool.acquire_record([
 ])?;
 ```
 
-## Task graph binding
+## Scheme binding
 
 ```rust
-frame_graph.write_parcel(&*uniform, 0, bytemuck::bytes_of(&data).to_vec())?;
+let mut upload = Scheme::new(&ctx);
+upload.commit_write_parcel(&*uniform, 0, bytemuck::bytes_of(&data).to_vec())?;
+upload.submit()?;
 
-let mut pass = frame_graph.render_pass("draw", &rt);
+let mut pass = scheme.render_pass("draw", &rt);
 pass.with_parcel(&*vb, NodeAccess::Read);
 pass.set_vertex_buffer(0, &*vb);
 pass.draw(0..3, 0..1);

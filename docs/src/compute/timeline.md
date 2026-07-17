@@ -6,16 +6,19 @@ Timeline read/wait APIs live on [`Context`](https://docs.rs/goldy/latest/goldy/s
 
 ## TimelineValue
 
-Every non-blocking submission returns a `TimelineValue`:
+Every scheme submission returns a `TimelineValue` via [`Submission::timeline_value`](https://docs.rs/goldy/latest/goldy/struct.Submission.html):
 
 ```rust
 let ctx = device.create_context();
-let tv: TimelineValue = graph.submit(&device)?;
+let mut scheme = Scheme::new(&ctx);
+// ... record nodes ...
+let submission = scheme.submit()?;
+let tv: TimelineValue = submission.timeline_value();
 ```
 
 This value represents a point on the device's timeline. When the GPU finishes executing that submission, the timeline advances past `tv`.
 
-`TaskGraph::submit` returns a timeline value. Surface presentation via `Frame::present` also returns one.
+Present-on-scheme paths also stamp a timeline when [`PresentGrant::consume`](https://docs.rs/goldy/latest/goldy/struct.PresentGrant.html) completes scanout.
 
 ## Querying GPU progress
 
@@ -35,14 +38,16 @@ This is a lightweight query (single atomic read on most backends) suitable for p
 `ctx.wait_until(value)` blocks the current thread until the GPU timeline reaches at least `value`:
 
 ```rust
-let tv = graph.submit(&device)?;
+let submission = scheme.submit()?;
 
 // CPU work while GPU executes...
 prepare_next_frame();
 
 // Block until this specific submission completes
-ctx.wait_until(tv)?;
+ctx.wait_until(submission.timeline_value())?;
 ```
+
+Or call `submission.wait(&ctx)?` directly.
 
 For bounded waits, use `wait_until_timeout`:
 
@@ -52,16 +57,6 @@ if !completed {
     // GPU hasn't finished yet — handle timeout
 }
 ```
-
-## Blocking dispatch
-
-For simple cases where you don't need CPU/GPU overlap, `dispatch` combines submit + wait:
-
-```rust
-graph.dispatch(&device)?; // submits and blocks until complete
-```
-
-`dispatch` waits internally via the device's context; you do not need a separate `Context` for that path.
 
 ## How this differs from fence-based synchronization
 
@@ -85,23 +80,24 @@ Because timeline values are ordered, you can reason about completion transitivel
 
 ```rust
 let ctx = device.create_context();
-let tv = graph.submit(&device)?;
-ctx.wait_until(tv)?;
+let grant = scheme.grant_read(&buffer);
+let submission = scheme.submit()?;
+submission.wait(&ctx)?;
 
-let result: Vec<f32> = buffer.read_data(0)?;
+let result = grant.consume(&submission)?;
 ```
 
 ### Multi-frame pipelining
 
-For production renderers, use [`FrameOrchestrator`](./pipelined-frames.md). It manages the in-flight slot ring, depth cap, retirement callbacks, and surface-path timeline patching with no boilerplate:
+For production renderers, use [`FrameOrchestrator`](./pipelined-frames.md). It manages the in-flight slot ring, depth cap, retirement callbacks, and present-path timeline patching with no boilerplate:
 
 ```rust
-let mut orch: FrameOrchestrator<MyCleanup> = FrameOrchestrator::new(&device, 3);
+let mut orch: FrameOrchestrator<MyCleanup> = FrameOrchestrator::new(&ctx, 3);
 
 loop {
     let handle = orch.begin_frame(|dev, retired| my_cleanup(dev, retired))?;
-    // ... record and submit ...
-    orch.end_frame_standalone(handle, &mut graph, None, cleanup)?;
+    let submission = scheme.submit()?;
+    orch.end_frame_standalone(handle, submission.timeline_value(), cleanup)?;
 }
 
 orch.drain_all(|dev, retired| my_cleanup(dev, retired))?;
@@ -123,8 +119,8 @@ loop {
     update_uniforms(&uniform_buffer)?;
 
     // Submit frame N+1 — GPU starts working, CPU continues
-    let tv = graph.submit(&device)?;
-    pending = Some(tv);
+    let submission = scheme.submit()?;
+    pending = Some(submission.timeline_value());
 
     // CPU work for the next iteration...
 }
@@ -136,7 +132,8 @@ Check completion in a non-blocking render loop:
 
 ```rust
 let ctx = device.create_context();
-let tv = graph.submit(&device)?;
+let submission = scheme.submit()?;
+let tv = submission.timeline_value();
 
 loop {
     if ctx.gpu_progress() >= tv {
@@ -148,4 +145,4 @@ loop {
 
 ### Resource lifetime
 
-Dropping a `Buffer` or `Texture` may be deferred internally: the GPU memory stays alive until all submissions that reference it have completed. Submit (or present a frame) before dropping resources that must outlive those commands.
+Dropping a `Buffer` or `Texture` may be deferred internally: the GPU memory stays alive until all submissions that reference it have completed. Submit (or consume a present grant) before dropping resources that must outlive those commands.
