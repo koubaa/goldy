@@ -1,6 +1,6 @@
 //! Smoke tests for [`goldy::FrameOrchestrator`] and [`goldy::Device::submit_pipelined`].
 
-use goldy::{DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions, TaskGraph};
+use goldy::{DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions};
 
 #[test]
 fn orchestrator_double_begin_fails() {
@@ -21,7 +21,7 @@ fn orchestrator_double_begin_fails() {
         .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
         .is_err());
 
-    orch.end_frame_standalone(h, &mut TaskGraph::new(), None, ())
+    orch.end_frame_standalone(h, ctx.gpu_progress(), ())
         .expect("end");
 }
 

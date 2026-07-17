@@ -40,7 +40,8 @@ struct FrameSlot<T> {
 ///
 /// Typical use:
 /// 1. [`Self::begin_frame`] (with retire closure)  
-/// 2. Record dispatch into one or more [`TaskGraph`]s; call [`Self::flush`] for mid-frame submits.  
+/// 2. Record and submit GPU work (e.g. via [`crate::Scheme`]); call [`Self::flush`] for
+///    mid-frame TaskGraph submits when using that path.  
 /// 3. [`Self::end_frame_standalone`], [`Self::end_frame_for_present`], or [`Self::end_frame_for_surface`].  
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
@@ -170,35 +171,26 @@ impl<T> FrameOrchestrator<T> {
         Ok(())
     }
 
-    /// End a standalone (headless / render-to-texture) frame: submit remaining work, push the
-    /// cleanup slot with a known timeline, clear the open handle.
+    /// End a standalone (headless / render-to-texture) frame whose GPU work was already
+    /// submitted (e.g. via [`crate::Scheme::submit`]).
     ///
-    /// When [`Self::retains_command_buffers`] is true the same retention logic as [`Self::flush`] applies:
-    /// zero-cost resubmission is attempted first, falling back to a retain-and-record submit.
-    ///
-    /// If `graph` is empty, `fallback_timeline` is used (e.g. the value from previous
-    /// [`Self::flush`] calls). If that is `None`, [`Context::gpu_progress`](crate::Context::gpu_progress) is used.
+    /// Pushes a retirement-ring slot stamped with `timeline`, clears the open handle, and
+    /// emits a Tracy frame mark.
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
-        graph: &mut TaskGraph,
-        fallback_timeline: Option<TimelineValue>,
+        timeline: TimelineValue,
         cleanup: T,
     ) -> Result<TimelineValue, GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
-        let tv = if graph.is_empty() {
-            fallback_timeline.unwrap_or_else(|| self.context.gpu_progress())
-        } else {
-            self.submit_with_retention(graph)?
-        };
         self.ring.push_back(FrameSlot {
-            timeline: Some(tv),
+            timeline: Some(timeline),
             data: cleanup,
         });
         self.open = None;
         tracy_frame_mark!();
-        Ok(tv)
+        Ok(timeline)
     }
 
     /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
