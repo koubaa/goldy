@@ -8,13 +8,14 @@ use crate::context::Context;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::timeline::TimelineValue;
+use crate::tracy_frame_mark;
 use crate::tracy_zone;
 use anyhow::anyhow;
 use std::collections::VecDeque;
 
 /// Token returned from [`FrameOrchestrator::begin_frame`]; must be passed to
-/// [`FrameOrchestrator::end_frame_for_present`], [`FrameOrchestrator::end_frame_externally_ordered`],
-/// or [`FrameOrchestrator::abort_frame`].
+/// [`FrameOrchestrator::end_frame_standalone`], [`FrameOrchestrator::end_frame_for_present`],
+/// [`FrameOrchestrator::end_frame_externally_ordered`], or [`FrameOrchestrator::abort_frame`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameHandle(pub(crate) u64);
 
@@ -37,7 +38,8 @@ struct FrameSlot<T> {
 /// Typical use:
 /// 1. [`Self::begin_frame`] (with retire closure)
 /// 2. Record and submit work via [`crate::Scheme`]
-/// 3. [`Self::end_frame_for_present`] or [`Self::end_frame_externally_ordered`]
+/// 3. [`Self::end_frame_standalone`], [`Self::end_frame_for_present`], or
+///    [`Self::end_frame_externally_ordered`]
 /// 4. For swapchain frames, [`Self::note_presented`] after present.
 pub struct FrameOrchestrator<T> {
     context: Context,
@@ -129,6 +131,28 @@ impl<T> FrameOrchestrator<T> {
         self.next_id = self.next_id.wrapping_add(1);
         self.open = Some(h);
         Ok(h)
+    }
+
+    /// End a standalone (headless / render-to-texture) frame whose GPU work was already
+    /// submitted (e.g. via [`crate::Scheme::submit`]).
+    ///
+    /// Pushes a retirement-ring slot stamped with `timeline`, clears the open handle, and
+    /// emits a Tracy frame mark.
+    pub fn end_frame_standalone(
+        &mut self,
+        handle: FrameHandle,
+        timeline: TimelineValue,
+        cleanup: T,
+    ) -> Result<TimelineValue, GoldyError> {
+        let _tz = tracy_zone!("orchestrator.end_frame_standalone");
+        self.expect_open(handle)?;
+        self.ring.push_back(FrameSlot {
+            timeline: Some(timeline),
+            data: cleanup,
+        });
+        self.open = None;
+        tracy_frame_mark!();
+        Ok(timeline)
     }
 
     /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
