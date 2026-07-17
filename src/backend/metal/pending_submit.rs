@@ -63,12 +63,8 @@ fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
                 w.logical_size
             );
         }
-        let offset_usize = usize::try_from(w.offset).map_err(|_| {
-            anyhow::anyhow!(
-                "deferred host write: offset {} does not fit usize",
-                w.offset
-            )
-        })?;
+        let offset_usize = usize::try_from(w.offset)
+            .map_err(|_| anyhow::anyhow!("deferred host write: offset {} does not fit usize", w.offset))?;
         let ptr = w.buffer.contents();
         if ptr.is_null() {
             anyhow::bail!("deferred host write: MTLBuffer contents() returned null");

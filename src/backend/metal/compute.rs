@@ -243,10 +243,7 @@ fn resolve_host_sidecar(
             .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
         // Align with DX12's `cpu_writable_upload_mapped` gate: only CPU_WRITABLE staging.
         if !buffer_state.flags.contains(BufferFlags::CPU_WRITABLE) {
-            anyhow::bail!(
-                "deferred host write requires CPU_WRITABLE buffer (handle={})",
-                w.buffer
-            );
+            anyhow::bail!("deferred host write requires CPU_WRITABLE buffer (handle={})", w.buffer);
         }
         let end = w.offset.checked_add(w.data.len() as u64).ok_or_else(|| {
             anyhow::anyhow!(
