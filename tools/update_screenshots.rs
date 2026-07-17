@@ -5,14 +5,22 @@
 //! cargo run --bin update-screenshots --features update-screenshots
 //! ```
 
-#[path = "../tests/common/render_fixtures.rs"]
-mod render_fixtures;
+#[path = "../tests/common/gol_state.rs"]
+mod gol_state;
+#[path = "../tests/common/scheme_render.rs"]
+mod scheme_render;
+#[path = "../tests/common/scheme_render_fixtures.rs"]
+mod scheme_render_fixtures;
 
 use goldy::{Color, Vertex2D};
+use scheme_render_fixtures::{
+    create_device, scheme_render_clear, scheme_render_depth_occlusion, scheme_render_game_of_life,
+    scheme_render_triangle,
+};
 use std::path::Path;
 
 fn main() {
-    let device = render_fixtures::create_device().expect("GPU device (DiscreteGpu)");
+    let device = create_device().expect("GPU device (DiscreteGpu)");
 
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/screenshots");
 
@@ -20,13 +28,13 @@ fn main() {
         &out_dir.join("solid_red.png"),
         64,
         64,
-        &render_fixtures::render_clear(&device, 64, 64, Color::RED),
+        &scheme_render_clear(&device, 64, 64, Color::RED),
     );
     save_png(
         &out_dir.join("solid_blue.png"),
         64,
         64,
-        &render_fixtures::render_clear(&device, 64, 64, Color::BLUE),
+        &scheme_render_clear(&device, 64, 64, Color::BLUE),
     );
 
     let rgb_verts = [
@@ -38,7 +46,7 @@ fn main() {
         &out_dir.join("rgb_triangle.png"),
         256,
         256,
-        &render_fixtures::render_triangle(&device, 256, 256, Color::BLACK, rgb_verts),
+        &scheme_render_triangle(&device, 256, 256, Color::BLACK, rgb_verts),
     );
 
     let white_verts = [
@@ -50,27 +58,27 @@ fn main() {
         &out_dir.join("white_triangle.png"),
         128,
         128,
-        &render_fixtures::render_triangle(&device, 128, 128, Color::BLACK, white_verts),
+        &scheme_render_triangle(&device, 128, 128, Color::BLACK, white_verts),
     );
 
     save_png(
         &out_dir.join("game_of_life_50.png"),
         512,
         512,
-        &render_fixtures::render_game_of_life(&device, 50),
+        &scheme_render_game_of_life(&device, 50),
     );
     save_png(
         &out_dir.join("game_of_life_100.png"),
         512,
         512,
-        &render_fixtures::render_game_of_life(&device, 100),
+        &scheme_render_game_of_life(&device, 100),
     );
 
     save_png(
         &out_dir.join("depth_occlusion.png"),
         64,
         64,
-        &render_fixtures::render_depth_occlusion(&device, 64, 64),
+        &scheme_render_depth_occlusion(&device, 64, 64),
     );
 
     println!("Updated PNGs in {}", out_dir.display());

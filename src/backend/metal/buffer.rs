@@ -582,6 +582,13 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
             .unwrap_or_default();
 
         let (retained_slots, barrier) = if let Some(device) = state.devices.get(&device_handle) {
+            let slots = {
+                let registry = device.descriptors.lock().unwrap();
+                registry.buffer_retained_slot_keys(buffer_handle)
+            };
+            // Unpin retained CBs that baked this buffer's slots before reclaiming them.
+            super::compute::evict_retained_graphs_using_slots(state, device_handle, &slots);
+
             let mut registry = device.descriptors.lock().unwrap();
             let requirements = registry.bindless_retirement_requirements_for_buffer(buffer_handle, base);
             let barrier = requirements.iter().map(|(_, seq)| *seq).max().unwrap_or(0);

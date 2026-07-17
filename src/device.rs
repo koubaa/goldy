@@ -4,22 +4,22 @@
 //!
 //! Goldy uses a single-threaded command submission model with lock-free command recording:
 //!
-//! - **Graph Recording**: [`RenderPassBuilder`](crate::RenderPassBuilder) and [`TaskGraph`](crate::TaskGraph)
-//!   record commands without touching the GPU backend. You can build graphs on any thread.
-//!   
+//! - **Scheme Recording**: [`crate::Scheme`] records commands without touching the GPU backend.
+//!   You can build schemes on any thread.
+//!
 //! - **Resource Creation**: Creating resources ([`crate::Buffer`],
 //!   [`RenderPipeline`](crate::RenderPipeline), etc.) acquires the backend lock.
 //!   These operations are safe from any thread but serialize internally.
 //!
-//! - **Command Submission**: Submitting via [`TaskGraph::dispatch`](crate::TaskGraph::dispatch) or
-//!   [`Surface::submit_graph_to_frame`](crate::Surface::submit_graph_to_frame) acquires the backend lock.
+//! - **Command Submission**: Submitting via [`crate::Scheme::submit`] or
+//!   [`crate::surface::Frame::present`] acquires the backend lock.
 //!
 //! ## Best Practices
 //!
 //! For optimal performance:
 //! 1. Create resources during initialization, not per-frame
-//! 2. Build task graphs on any thread; declare buffer/parcel dependencies on each node
-//! 3. Submit graphs from a single thread (typically the main/render thread)
+//! 2. Record schemes on any thread; declare buffer/parcel dependencies on each node
+//! 3. Submit from a single thread (typically the main/render thread)
 //!
 //! This model is sufficient for most applications. Future versions may add
 //! multi-queue support for parallel command submission if needed.
@@ -419,8 +419,8 @@ impl Default for DeviceCapabilities {
 ///
 /// Internally, `Device` uses a `Mutex` to serialize backend operations. This means:
 /// - Resource creation is thread-safe but serializes internally
-/// - Task graph recording via [`RenderPassBuilder`](crate::RenderPassBuilder) is lock-free
-/// - Graph submission acquires the lock
+/// - Scheme recording via [`crate::Scheme`] is lock-free on the CPU side
+/// - Scheme submission acquires the lock
 ///
 /// See the [module documentation](self) for best practices.
 ///
@@ -783,7 +783,7 @@ impl Device {
 
     /// Latest device-global submission sequence retired on the GPU.
     ///
-    /// Epochs from any [`crate::context::Context::submit`] on this device share one value space; use this
+    /// Epochs from any [`crate::Scheme::submit`] on this device share one value space; use this
     /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
     pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
         self.inner
@@ -1044,10 +1044,10 @@ impl Device {
         self.inner.backend.lock().unwrap().release_idle_shader_compiler();
     }
 
-    /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
+    /// No-op: texture uploads are scheduled via [`crate::Scheme`].
     #[deprecated(
         since = "0.1.0",
-        note = "Texture uploads are batched via TaskGraph::write_texture / write_texture_region; there is nothing to flush."
+        note = "Texture uploads are batched via Scheme::write_texture / write_texture_region; there is nothing to flush."
     )]
     pub fn flush_texture_uploads(&self) -> Result<()> {
         Ok(())

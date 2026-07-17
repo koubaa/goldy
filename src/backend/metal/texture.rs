@@ -428,6 +428,9 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
             super::types::MetalSlotKey::Texture(texture.arg_buffer_index)
         };
         let barrier = if let Some(device) = state.devices.get(&device_handle) {
+            if !texture.slot_owned_externally {
+                super::compute::evict_retained_graphs_using_slots(state, device_handle, &[key]);
+            }
             let mut registry = device.descriptors.lock().unwrap();
             registry.unregister_texture(texture_handle);
             let mut barrier = base_barrier;

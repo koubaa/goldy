@@ -7,7 +7,6 @@ use crate::backend::ContextHandle;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::parcel::BytesByKind;
-use crate::task_graph::TaskGraph;
 use crate::timeline::{is_ready, ReferenceTable, TimelineValue};
 use crate::transient_pool::TransientPool;
 use std::collections::HashMap;
@@ -292,7 +291,7 @@ impl Context {
             .peek_oldest_in_flight(self.inner.handle)
     }
 
-    /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this context.
+    /// The largest [`TimelineValue`] ever returned by a scheme submit on this context.
     pub fn high_water_timeline(&self) -> TimelineValue {
         self.inner.high_water_timeline.load(Ordering::Relaxed)
     }
@@ -422,57 +421,6 @@ impl Context {
         backend.in_flight_command_buffer_count(self.inner.handle)
     }
 
-    /// Submit a compiled [`TaskGraph`] on this context's timeline.
-    pub fn submit(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
-        if !graph.has_transient_resources() {
-            let tv = graph
-                .submit_with_backend(self, self.submit_session(), None, &HashMap::new(), true)
-                .map_err(|e| self.classify(e))?;
-            graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
-            self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
-            return Ok(tv);
-        }
-
-        let tv = self
-            .submit_with_placement_heap(graph, true)
-            .map_err(|e| self.classify(e))?;
-        graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
-        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
-        Ok(tv)
-    }
-
-    /// Like [`submit`](Self::submit) but does not block on transient GPU completion.
-    pub fn submit_pipelined(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
-        let _tz = crate::tracy_zone!("context.submit_pipelined");
-        if !graph.has_transient_resources() {
-            let tv = graph
-                .submit_with_backend(self, self.submit_session(), None, &HashMap::new(), false)
-                .map_err(|e| self.classify(e))?;
-            graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
-            self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
-            return Ok(tv);
-        }
-
-        let tv = self
-            .submit_with_placement_heap(graph, false)
-            .map_err(|e| self.classify(e))?;
-        graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
-        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
-        Ok(tv)
-    }
-
-    pub fn submit_pipelined_and_retain(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
-        if graph.has_transient_resources() {
-            return self.submit_pipelined(graph);
-        }
-        let tv = graph
-            .submit_with_backend_and_retain(self, self.submit_session())
-            .map_err(|e| self.classify(e))?;
-        graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
-        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
-        Ok(tv)
-    }
-
     /// True when every context in `refs` has retired the stamped timeline values.
     ///
     /// Prefer [`crate::Parcel::is_settled`] when checking a single parcel the caller holds.
@@ -513,15 +461,10 @@ impl Context {
         Ok(result)
     }
 
-    pub fn dispatch(&self, graph: &mut TaskGraph) -> Result<(), GoldyError> {
-        let v = self.submit(graph)?;
-        self.wait_until(v)
-    }
-
     /// Snapshot of this context's placement-heap state for diagnostics.
     ///
     /// Returns `None` if the heap hasn't been created yet (no transient-resource
-    /// graphs have been submitted on this context).
+    /// scheme submits have run on this context).
     pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
         heap_guard.as_ref().map(|h| h.stats())
@@ -550,112 +493,13 @@ impl Context {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
         heap_guard.as_ref().map(|h| h.texture_create_count()).unwrap_or(0)
     }
-
-    pub(crate) const DEFAULT_PIPELINE_DEPTH: u64 = 4;
-
-    fn submit_with_placement_heap(
-        &self,
-        graph: &mut TaskGraph,
-        wait_for_transient_completion: bool,
-    ) -> anyhow::Result<TimelineValue> {
-        use crate::task_graph::{ResolvedTransientBuffer, ResolvedTransientTexture, SlotResolver};
-        use anyhow::Context;
-
-        let device = self.device();
-        let (schedule, _) = graph.schedule_and_split_wave();
-        let node_waves = crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
-
-        let has_buffers = graph.has_transient_buffers();
-
-        let (alloc_size, base_align, layout_opt) = if has_buffers {
-            let (ts, ba, lay) = graph.transient_heap_size_and_layout(&node_waves)?;
-            let sz = (ts + ba - 1).max(256);
-            (sz, ba, Some(lay))
-        } else {
-            (0u64, 1u64, None)
-        };
-
-        // Query GPU-retired timeline BEFORE locking the heap so we can use it
-        // inside get_or_create_textures without acquiring the backend lock a
-        // second time while the heap guard is held.
-        let retired_timeline = device.timeline_retired();
-
-        let mut heap_guard = self.inner.placement_heap.lock().unwrap();
-
-        if heap_guard.is_none() {
-            let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
-            *heap_guard = Some(
-                crate::placement_heap::PlacementHeap::with_capacity(device, cap)
-                    .context("failed to create device placement heap")?,
-            );
-        }
-        let heap = heap_guard.as_mut().unwrap();
-
-        if has_buffers {
-            let depth = Self::DEFAULT_PIPELINE_DEPTH as usize;
-            heap.configure_pages(alloc_size, depth, device)?;
-        }
-
-        let mut resolver = SlotResolver::new();
-
-        // Obtain the page slot BEFORE advance_page so that transient textures
-        // are tied to the same slot as transient buffers.  Concurrent renders on
-        // the same device get distinct page slots (0, 1, 2, 3, 0, …), so each
-        // render writes to a different set of textures on the GPU.
-        let tex_page_slot = heap.current_page_slot();
-        let tex_handles =
-            graph.resolve_transient_textures_with_heap(device, heap, &node_waves, tex_page_slot, retired_timeline)?;
-        for (id, handle) in &tex_handles {
-            resolver
-                .textures
-                .insert(*id, ResolvedTransientTexture { handle: *handle });
-        }
-
-        if has_buffers {
-            let layout = layout_opt.unwrap();
-            let raw_offset = heap.advance_page();
-            let base_offset = raw_offset.div_ceil(base_align) * base_align;
-
-            let buf_handle = heap.buffer().handle;
-            for spec in graph.transient_specs() {
-                let offset = base_offset + layout[&spec.id];
-                let view_stride = spec.stride.max(1);
-                let (uav, srv, _hit) = heap.get_or_create_view(spec.id, offset, spec.size, view_stride, device)?;
-
-                resolver.buffers.insert(
-                    spec.id,
-                    ResolvedTransientBuffer {
-                        parent: buf_handle,
-                        offset,
-                        len: spec.size,
-                        uav_index: uav,
-                        srv_index: srv,
-                    },
-                );
-            }
-        }
-
-        // Submit while heap_guard is still held so that stamp_pending happens before
-        // any other thread can observe last_timeline.  Releasing heap_guard before
-        // stamping creates a window where a concurrent submit sees last_timeline = None
-        // and evicts in-flight transient textures synchronously, causing GPU UAF.
-        // Lock order is always heap → backend; no other code path reverses this.
-        let tv =
-            graph.submit_ir_with_resolver(self, self.submit_session(), &resolver, wait_for_transient_completion)?;
-
-        if let Some(heap) = heap_guard.as_mut() {
-            heap.stamp_pending(tv);
-        }
-
-        Ok(tv)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::backend::mock::MockBackend;
     use crate::device::Device;
-    use crate::task_graph::TaskGraph;
+    use crate::test_support::scheme_advance_timeline;
     use std::sync::Arc;
 
     fn test_device() -> Device {
@@ -693,11 +537,10 @@ mod tests {
     }
 
     #[test]
-    fn context_wait_until_after_submit() {
+    fn context_wait_until_after_scheme_submit() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_advance_timeline(&ctx);
         ctx.wait_until(tv).unwrap();
         assert!(ctx.gpu_progress() >= tv);
     }
@@ -710,129 +553,15 @@ mod tests {
     }
 
     #[test]
-    fn high_water_timeline_advances_after_submit() {
+    fn high_water_timeline_advances_after_scheme_submit() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
         assert_eq!(ctx.high_water_timeline(), 0);
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_advance_timeline(&ctx);
         assert!(tv > 0);
         assert_eq!(ctx.high_water_timeline(), tv);
-        let tv2 = ctx.submit(&mut graph).unwrap();
+        let tv2 = scheme_advance_timeline(&ctx);
         assert!(tv2 > tv);
         assert_eq!(ctx.high_water_timeline(), tv2);
-    }
-
-    #[test]
-    fn defer_until_resources_are_not_dropped_before_epoch() {
-        let device = test_device();
-        let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
-
-        let alive = std::sync::Arc::new(99u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-
-        ctx.defer_until(tv + 100, alive);
-
-        ctx.flush_deferred_deletions();
-        assert!(
-            weak.upgrade().is_some(),
-            "resource should still be alive after flush at tv"
-        );
-    }
-
-    #[test]
-    fn defer_until_resources_dropped_after_flush_at_epoch() {
-        let device = test_device();
-        let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
-
-        let alive = std::sync::Arc::new(42u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-
-        ctx.defer_until(tv, alive);
-
-        ctx.wait_until(tv).unwrap();
-        ctx.flush_deferred_deletions();
-        assert!(
-            weak.upgrade().is_none(),
-            "resource should be dropped after flush at epoch"
-        );
-    }
-
-    #[test]
-    fn defer_release_drops_all_on_device_drop() {
-        let device = test_device();
-        let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
-
-        let alive = std::sync::Arc::new(7u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-
-        ctx.defer_until(tv + 9999, alive);
-
-        drop(ctx);
-        drop(device);
-        assert!(weak.upgrade().is_none(), "device drop should drain deferred resources");
-    }
-
-    #[test]
-    fn independent_context_timelines() {
-        let device = test_device();
-        let ctx_a = device.create_context().unwrap();
-        let ctx_b = device.create_context().unwrap();
-        assert_eq!(ctx_a.gpu_progress(), 0);
-        assert_eq!(ctx_b.gpu_progress(), 0);
-
-        let mut graph = TaskGraph::new();
-        let tv_a = ctx_a.submit(&mut graph).unwrap();
-        assert!(tv_a > 0);
-        assert_eq!(ctx_a.gpu_progress(), tv_a);
-        assert_eq!(ctx_b.gpu_progress(), 0, "context B must not observe A's submit");
-    }
-
-    #[test]
-    fn drop_one_context_leaves_other_usable() {
-        let device = test_device();
-        let ctx_a = device.create_context().unwrap();
-        let ctx_b = device.create_context().unwrap();
-        drop(ctx_a);
-
-        let mut graph = TaskGraph::new();
-        let tv = ctx_b.submit(&mut graph).unwrap();
-        assert!(tv > 0);
-        assert_eq!(ctx_b.gpu_progress(), tv);
-    }
-
-    /// Deferred payloads are reclaimed when `device_retired` passes their epoch, even if
-    /// another context drives `boundary_crossed` with a lower per-context signal epoch.
-    #[test]
-    fn multi_context_deferred_reclamation_uses_device_retired() {
-        let device = test_device();
-        let ctx_a = device.create_context().unwrap();
-        let ctx_b = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-
-        let _tv1 = ctx_a.submit(&mut graph).unwrap();
-        let _tv2 = ctx_b.submit(&mut graph).unwrap();
-        let tv3 = ctx_a.submit(&mut graph).unwrap();
-        assert_eq!(tv3, 3);
-
-        let alive = std::sync::Arc::new(42u32);
-        let weak = std::sync::Arc::downgrade(&alive);
-        ctx_a.defer_until(tv3, alive);
-
-        // Context B's latest boundary epoch is 2; per-context progress alone would not drain 3.
-        assert_eq!(ctx_b.gpu_progress(), 2);
-        assert!(device.timeline_retired() >= tv3);
-
-        ctx_b.boundary_crossed(2);
-        assert!(
-            weak.upgrade().is_none(),
-            "epoch 3 should reclaim when boundary_crossed uses device_retired (>= 3)"
-        );
     }
 }

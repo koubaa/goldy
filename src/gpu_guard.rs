@@ -11,13 +11,12 @@
 //! # Example
 //!
 //! ```no_run
-//! # use goldy::{Context, GpuGuard, RetainedPool, BufferKind, BufferFlags};
-//! # use goldy::task_graph::TaskGraph;
+//! # use goldy::{Context, GpuGuard, RetainedPool, BufferKind, BufferFlags, Scheme};
 //! # use std::sync::Arc;
 //! # fn example(context: &Context, pool: &mut RetainedPool) -> anyhow::Result<()> {
 //! let buf = pool.acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
-//! let mut graph = TaskGraph::new(); // ... build your graph using &*buf ...
-//! let tv = context.submit(&mut graph)?;
+//! let mut scheme = Scheme::new(context); // ... record nodes using &buf ...
+//! let tv = scheme.submit()?.timeline_value();
 //!
 //! let mut guard = GpuGuard::new(context, tv);
 //! guard.hold(buf); // buf is now safe: dropped only after tv retires
@@ -114,7 +113,6 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::context::Context;
     use crate::device::Device;
-    use crate::task_graph::TaskGraph;
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
@@ -153,11 +151,14 @@ mod tests {
         // No panic, no assertion failure — just confirming no crash.
     }
 
+    fn scheme_submit(ctx: &Context) -> TimelineValue {
+        crate::test_support::scheme_advance_timeline(ctx)
+    }
+
     #[test]
     fn gpu_guard_resources_not_dropped_before_epoch() {
         let ctx = test_ctx();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_submit(&ctx);
 
         let alive = std::sync::Arc::new(99u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -179,8 +180,7 @@ mod tests {
     #[test]
     fn gpu_guard_resources_dropped_after_epoch_and_flush() {
         let ctx = test_ctx();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_submit(&ctx);
 
         let alive = std::sync::Arc::new(42u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -204,8 +204,7 @@ mod tests {
         // one real submitted epoch (tv) and one far-future epoch (tv + 100) that hasn't
         // been submitted and therefore remains unretired after wait_until(tv).
         let ctx = test_ctx();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_submit(&ctx);
         let tv_future = tv + 100;
 
         let alive_past = std::sync::Arc::new(1u32);
@@ -246,8 +245,7 @@ mod tests {
     fn gpu_guard_resources_cleaned_up_on_device_drop() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_submit(&ctx);
 
         let alive = std::sync::Arc::new(7u32);
         let weak = std::sync::Arc::downgrade(&alive);
@@ -270,8 +268,7 @@ mod tests {
     fn gpu_guard_hold_multiple_resource_types() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let tv = ctx.submit(&mut graph).unwrap();
+        let tv = scheme_submit(&ctx);
 
         // Allocate a real buffer and hold it in a guard.
         let buf = device

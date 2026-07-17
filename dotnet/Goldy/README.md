@@ -10,30 +10,39 @@ using Goldy;
 // Create instance and device
 using var instance = new Instance();
 using var device = instance.RequestAdapter().RequestDevice();
+using var ctx = device.CreateContext();
 
-// Headless triangle via TaskGraph
+// Headless triangle via Scheme
 using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
 using var pipeline = new RenderPipeline(device, shader, shader, new RenderPipelineDesc
 {
     VertexAttributes = VertexLayouts.Vertex2D,
     TargetFormat = TextureFormat.Rgba8Unorm,
 });
-using var target = new RenderTarget(device, 100, 100, TextureFormat.Rgba8Unorm);
-using var graph = new TaskGraph();
-using (var pass = graph.RenderPass("clear", target))
+using var retainedPool = new RetainedPool(device);
+using var readback = retainedPool.AcquireTexture(
+    100, 100, TextureFormat.Rgba8Unorm, TextureKind.Direct,
+    TextureFlags.CopySrc | TextureFlags.CopyDst);
+
+using var scheme = new Scheme(ctx);
+using var rt = scheme.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
+using (var pass = scheme.RenderPass("clear", rt))
     pass.Clear(Color.CornflowerBlue);
-graph.Dispatch(device);
-byte[] pixels = target.ReadToCpu();
+
+scheme.CopyToTexture(rt, readback);
+using var grant = scheme.GrantReadTexture(readback);
+using var submission = scheme.Submit();
+byte[] pixels = grant.Consume(submission);
 ```
 
 ## Features
 
 - Modern GPU API targeting Vulkan 1.4+, DX12, and Metal
 - Slang shader compiler integration
-- Zero-allocation render loop design
+- Retained scheme recording API
 - SafeHandle-based resource management
 - Compute shader support
-- Windowed rendering via Surface API
+- Windowed rendering via SwapchainPool + present grants
 
 ## Requirements
 
@@ -44,4 +53,3 @@ byte[] pixels = target.ReadToCpu();
 ## License
 
 MIT License. See the [goldy repository](https://github.com/koubaa/goldy/blob/main/LICENSE) for the full text.
-

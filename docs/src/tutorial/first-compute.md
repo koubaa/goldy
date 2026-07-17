@@ -1,10 +1,12 @@
 # Your First Compute Shader
 
-This tutorial renders an animated plasma effect by dispatching a compute shader directly to the swapchain texture — no graphics pipeline, no vertex buffers, no render passes.
+This tutorial renders an animated plasma effect by dispatching a compute shader directly to a swapchain drawable — no graphics pipeline, no vertex buffers, no render passes.
+
+See [`examples/compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) for the full source.
 
 ## The Shader
 
-The compute shader uses `goldy_exp` virtual entry points. It reads uniforms via `BufRO<Uniforms>` and writes pixels to the swapchain texture via `DirectSpatial<float4>`:
+The compute shader uses `goldy_exp` virtual entry points. It reads uniforms via `BufRO<Uniforms>` and writes pixels via `DirectSpatial<float4>`:
 
 ```c
 import goldy_exp;
@@ -79,73 +81,61 @@ let uniform_buffer = retained_pool.acquire_buffer_with_data(
 )?;
 ```
 
-Pass a typed `&[Uniforms]` slice, not raw bytes. `acquire_buffer_with_data` uses `size_of::<T>()` as the structured-buffer stride, which backends rely on for correct addressing.
+### Compute Pipeline and Scheme
 
-### Compute Pipeline
-
-Compile the Slang source and create a `ComputePipeline`:
+Compile the Slang source, create a `ComputePipeline`, and record a retained scheme once:
 
 ```rust
 let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
+
+let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+let screen = swapchain.lease();
+
+let mut scheme = Scheme::new(&ctx);
+let wg_x = width.div_ceil(8);
+let wg_y = height.div_ceil(8);
+scheme
+    .node("compute", &compute_pipeline)
+    .with_parcel(&uniform_buffer, NodeAccess::Read)
+    .with_present(&screen)
+    .dispatch(wg_x, wg_y, 1);
+let present = scheme.grant_present(&screen);
 ```
 
 ### Rendering a Frame
 
-Each frame follows this pattern: update uniforms, acquire the swapchain texture, build a `TaskGraph`, submit, present.
+Each frame: upload new uniform values via a small upload scheme, submit the main scheme, consume the present grant.
 
 ```rust
 fn render_frame(state: &mut RenderState) -> Result<()> {
-    let (width, height) = state.surface.size();
+    let (width, height) = state.swapchain.size();
     let elapsed = state.start_time.elapsed().as_secs_f32();
 
-    state.uniform_buffer.write(
-        0,
-        bytemuck::bytes_of(&Uniforms {
-            width,
-            height,
-            time: elapsed,
-            _padding: 0.0,
-        }),
-    )?;
+    let uniforms = Uniforms {
+        width,
+        height,
+        time: elapsed,
+        _padding: 0.0,
+    };
 
-    let frame = state.surface.begin()?;
-    let texture = frame.texture();
+    let mut upload = Scheme::new(&state.ctx);
+    upload.commit_write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+    upload.submit()?;
 
-    let wg_x = width.div_ceil(8);
-    let wg_y = height.div_ceil(8);
-
-    let uniform_handle = state.uniform_buffer
-        .handle(ResourceAccess::Read)
-        .expect("Uniform buffer has no bindless SRV handle");
-    let texture_handle = texture
-        .handle(ResourceAccess::Read)
-        .expect("Surface texture has no bindless handle");
-
-    let mut graph = TaskGraph::new();
-    graph
-        .node("compute", &state.compute_pipeline)
-        .with_buffer(&state.uniform_buffer, NodeAccess::Read)
-        .with_resource_slots(&[uniform_handle.index(), texture_handle.index()])
-        .dispatch(wg_x, wg_y, 1);
-
-    frame.submit_compute(&graph)?;
-    frame.present()?;
+    let submission = state.scheme.submit()?;
+    state.present.consume(&submission)?;
     Ok(())
 }
 ```
 
 ### Step by Step
 
-**Update uniforms** — `Buffer::write` uploads new time/size values each frame.
+**Update uniforms** — `Scheme::commit_write_parcel` on a short-lived upload scheme stages the new time/size values before the main submit.
 
-**Acquire the frame** — `surface.begin()` returns a `Frame`. `frame.texture()` gives you the swapchain `Texture` for this frame.
+**Record the scheme once** — `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the swapchain drawable lease. `dispatch()` sets the workgroup count. `grant_present()` records the present easement.
 
-**Get bindless handles** — `bindless_srv_handle()` returns the read-only descriptor index for the uniform buffer. `bindless_handle()` returns the storage-image descriptor index for the swapchain texture. These indices are passed to the shader as the `BufRO<Uniforms>` and `DirectSpatial<float4>` slots respectively.
-
-**Build the TaskGraph** — `graph.node()` creates a compute node bound to a pipeline. `with_buffer()` declares the dependency (the uniform buffer is read). `with_resource_slots()` passes the bindless descriptor indices as push-constant slots. `dispatch()` sets the workgroup count.
-
-**Submit and present** — `frame.submit_compute(&graph)` records and submits the compute work to the GPU. `frame.present()` presents the swapchain image. The compute shader already wrote the pixels — there is no blit or copy step.
+**Submit and present** — `scheme.submit()` records and submits GPU work. `present.consume(&submission)` presents the swapchain image. The compute shader already wrote the pixels — there is no blit or copy step.
 
 ## Run It
 
@@ -157,5 +147,5 @@ You should see an animated plasma pattern filling the window, rendered entirely 
 
 ## Next Steps
 
-- [Task Graph](../compute/task-graph.md) — multi-node graphs, transient resources, indirect dispatch
+- [Compute to Surface](../compute/compute-to-surface.md) — present-on-scheme details
 - [Examples](../examples/overview.md) — particles, game of life, and more compute examples

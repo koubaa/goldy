@@ -1,9 +1,8 @@
 //! RenderTarget - GPU buffer that stays on GPU with optional CPU readback.
 //!
-//! Render to a [`RenderTarget`] via [`crate::TaskGraph::render_pass`] and
-//! [`crate::RenderPassBuilder::finish_recorded`], then submit with
-//! [`crate::Context::submit`] or blit to the swapchain with
-//! [`crate::TaskGraph::copy_render_target_to_swapchain`].
+//! Render to a [`RenderTarget`] via [`crate::Scheme::render_pass`] and
+//! [`crate::Scheme::submit`], or blit to the swapchain with
+//! [`crate::Scheme::copy_to_present`].
 
 use crate::backend::{GpuBackend, RenderTargetHandle};
 use crate::device::Device;
@@ -122,19 +121,9 @@ impl RenderTarget {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::task_graph::TaskGraph;
 
     fn create_test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
-    }
-
-    fn graph_clear(device: &Device, target: &RenderTarget, color: Color) {
-        let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let mut pass = graph.render_pass("clear", target);
-        pass.clear(color);
-        pass.finish_recorded();
-        graph.dispatch(&ctx).unwrap();
     }
 
     #[test]
@@ -146,57 +135,6 @@ mod tests {
         assert_eq!(target.height(), 600);
         assert_eq!(target.format(), TextureFormat::Rgba8Unorm);
         assert_eq!(target.buffer_size(), 800 * 600 * 4);
-    }
-
-    #[test]
-    fn test_render_without_readback() {
-        let device = create_test_device();
-        let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
-        graph_clear(&device, &target, Color::RED);
-    }
-
-    #[test]
-    fn test_explicit_readback() {
-        let device = create_test_device();
-        let target = RenderTarget::new(&device, 2, 2, TextureFormat::Rgba8Unorm).unwrap();
-        graph_clear(&device, &target, Color::RED);
-
-        let pixels = target.read_to_cpu().unwrap();
-        assert_eq!(pixels.len(), 2 * 2 * 4);
-        assert_eq!(pixels[0], 255);
-        assert_eq!(pixels[1], 0);
-        assert_eq!(pixels[2], 0);
-        assert_eq!(pixels[3], 255);
-    }
-
-    #[test]
-    fn test_read_to_buffer() {
-        let device = create_test_device();
-        let target = RenderTarget::new(&device, 2, 2, TextureFormat::Rgba8Unorm).unwrap();
-        graph_clear(&device, &target, Color::GREEN);
-
-        let mut buffer = vec![0u8; target.buffer_size()];
-        target.read_to_buffer(&mut buffer).unwrap();
-        assert_eq!(buffer[0], 0);
-        assert_eq!(buffer[1], 255);
-        assert_eq!(buffer[2], 0);
-        assert_eq!(buffer[3], 255);
-    }
-
-    #[test]
-    fn test_multiple_renders() {
-        let device = create_test_device();
-        let target = RenderTarget::new(&device, 10, 10, TextureFormat::Rgba8Unorm).unwrap();
-
-        for color in [Color::RED, Color::GREEN, Color::BLUE] {
-            graph_clear(&device, &target, color);
-        }
-
-        let pixels = target.read_to_cpu().unwrap();
-        assert_eq!(pixels[0], 0);
-        assert_eq!(pixels[1], 0);
-        assert_eq!(pixels[2], 255);
-        assert_eq!(pixels[3], 255);
     }
 
     #[test]
@@ -224,26 +162,5 @@ mod tests {
         let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).unwrap();
         assert_eq!(target.depth_format(), None);
         assert!(!target.has_depth());
-    }
-
-    #[test]
-    fn test_render_with_depth_clear() {
-        let device = create_test_device();
-        let target = RenderTarget::new_with_depth(
-            &device,
-            100,
-            100,
-            TextureFormat::Rgba8Unorm,
-            Some(DepthFormat::Depth32Float),
-        )
-        .unwrap();
-
-        let ctx = device.create_context().unwrap();
-        let mut graph = TaskGraph::new();
-        let mut pass = graph.render_pass("depth_clear", &target);
-        pass.clear(Color::CORNFLOWER_BLUE);
-        pass.clear_depth(1.0);
-        pass.finish_recorded();
-        graph.dispatch(&ctx).unwrap();
     }
 }

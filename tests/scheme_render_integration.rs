@@ -1,7 +1,6 @@
-//! Scheme render integration tests — duplicated from TaskGraph coverage.
+//! Scheme render integration tests — graphics easement coverage (render pass, readback, depth).
 //!
-//! Original tests in `render_target_integration.rs` and `surface_graph_integration.rs`
-//! remain until ekrano migration completes.
+//! Covers render-target and surface-style workflows previously exercised via TaskGraph.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 #[path = "common/scheme_render.rs"]

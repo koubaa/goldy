@@ -12,7 +12,7 @@ Both Goldy and [wgpu](https://wgpu.rs/) are Rust GPU libraries with multi-backen
 | **Minimum hardware** | Wide compatibility (Vulkan 1.0+) | Modern only (Vulkan 1.4+, DX12, Metal 2+) |
 | **Shader language** | WGSL (primary), SPIR-V, GLSL, naga | Slang (compiles to SPIR-V, DXIL, MSL) |
 | **Resource model** | Descriptor-based (bind groups) | Typed bindless |
-| **Synchronization** | Manual pass ordering | Task graph |
+| **Synchronization** | Manual pass ordering | Retained scheme (dependency graph) |
 | **Metal support** | Via MoltenVK or wgpu-hal | Native Metal backend |
 | **Compute model** | Supported but secondary | First-class (compute-to-surface) |
 
@@ -34,7 +34,7 @@ pass.set_bind_group(0, &group, &[]);
 Goldy uses **bindless access**. Resources get a slot index at creation time, and shaders access them directly by index. There are no layouts, groups, or binding calls:
 
 ```rust
-// Goldy: retained parcel already has a bindless slot; bind it in the task graph
+// Goldy: bindless parcel already has a slot; bind it in the scheme
 let mut pool = RetainedPool::new(device.clone());
 let parcel = pool.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
 pass.with_parcel(&parcel, NodeAccess::Read);
@@ -42,11 +42,11 @@ pass.with_parcel(&parcel, NodeAccess::Read);
 
 The bindless approach eliminates an entire layer of API surface and the pipeline layout permutations that come with it.
 
-## Synchronization: Manual vs Task Graph
+## Synchronization: Manual vs Dependency Graph
 
 wgpu provides implicit synchronization within a render/compute pass but requires you to order passes correctly. Resource transitions between passes are handled by wgpu internally, following WebGPU's implicit rules.
 
-Goldy uses an explicit **task graph**. You declare tasks and their resource dependencies; Goldy derives barriers, layout transitions, and execution order. This gives the runtime a global view of the frame for optimal scheduling and makes synchronization bugs structurally impossible.
+Goldy uses a retained **scheme** — a dependency graph recorded once and submitted each frame. You declare nodes and their resource dependencies; Goldy derives barriers, layout transitions, and execution order. This gives the runtime a global view of the frame for optimal scheduling and makes synchronization bugs structurally impossible.
 
 ## Shader Language: WGSL vs Slang
 
@@ -68,7 +68,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
 
 wgpu supports compute shaders, but the API is oriented around render passes. Compute-to-render workflows require manual buffer management and pass ordering.
 
-Goldy treats compute and graphics as peers. Compute-to-surface is a built-in pattern: a compute dispatch writes to a buffer or texture, and a subsequent render pass reads from it, with the task graph handling the dependency automatically.
+Goldy treats compute and graphics as peers. Compute-to-surface is a built-in pattern: a compute dispatch writes to a buffer or texture, and a subsequent render pass reads from it, with the scheme handling the dependency automatically.
 
 ## Metal: Native vs MoltenVK
 

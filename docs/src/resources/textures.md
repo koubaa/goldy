@@ -74,7 +74,7 @@ bitflags! {
 
 ## Writing Data
 
-Prefer `TaskGraph::write_texture()` for batched, non-blocking uploads. The synchronous methods below stall the GPU:
+Prefer `Scheme::commit_write_texture()` for batched, non-blocking uploads. The synchronous methods below stall the GPU:
 
 ```rust
 #[allow(deprecated)]

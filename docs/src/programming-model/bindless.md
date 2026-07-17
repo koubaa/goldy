@@ -38,7 +38,7 @@ Goldy's descriptor heaps are organized into five pools, one per access pattern. 
 
 ## ResourceHandle and ResourceAccess
 
-`ResourceAccess` (`Read`, `Write`, `ReadWrite`) selects which descriptor pool entry to use at dispatch time — SRV vs UAV, CBV vs storage, sampled vs storage image. This is distinct from [`NodeAccess`](../compute/task-graph.md) used by the task graph for scheduling hazards.
+`ResourceAccess` (`Read`, `Write`, `ReadWrite`) selects which descriptor pool entry to use at dispatch time — SRV vs UAV, CBV vs storage, sampled vs storage image. This is distinct from `NodeAccess`, which the scheme uses for scheduling hazards (`Read`, `Write`, `ReadWrite`).
 
 `ResourceHandle` carries both the raw index and the resource category:
 
@@ -74,7 +74,7 @@ Any user-defined struct type (e.g. `MyUniforms`) declared as a parameter is auto
 When you call `with_parcel` on a compute or render pass builder, Goldy queues each parcel as a push-constant slot. At `dispatch` / `set_pipeline` time it consults the pipeline's reflected slot kinds to pick the correct SRV vs UAV (or CBV) handle and validates categories against the shader signature:
 
 ```rust
-graph
+scheme
     .node("update", &pipeline)
     .with_parcel(&params_buf, NodeAccess::Read)
     .with_parcel(&particle_buf, NodeAccess::ReadWrite)
@@ -88,7 +88,7 @@ If slot 0 expects `Broadcast` (from the shader's `MyUniforms cfg` parameter) but
 | | Traditional (Vulkan/DX12) | Goldy Resource Model |
 |---|---|---|
 | **Setup** | Declare descriptor set layouts, allocate pools, create and update descriptor sets | Create resources; indices assigned automatically |
-| **Binding** | Bind descriptor sets before each draw/dispatch | Pass `ResourceHandle` values as push constants |
+| **Binding** | Bind descriptor sets before each draw/dispatch | Pass parcels via `with_parcel` on scheme nodes |
 | **Shader access** | `layout(set=0, binding=1) buffer ...` | `Scattered<T> data` as a function parameter |
 | **Validation** | Runtime errors or silent corruption on mismatch | Category + stride checks at dispatch time |
 | **Cross-backend** | Layout declarations differ per API | Same shader code on Vulkan, DX12, and Metal |
@@ -130,13 +130,13 @@ let particle_buf = retained_pool.acquire_buffer_with_data(&particles, BufferKind
 let shader = ShaderModule::from_slang(&device, PARTICLE_UPDATE_SOURCE)?;
 let pipeline = ComputePipeline::new(&device, &shader)?;
 
-let mut graph = TaskGraph::new();
-graph
+let mut scheme = Scheme::new(&ctx);
+scheme
     .node("update", &pipeline)
     .with_parcel(&params_buf, NodeAccess::Read)
     .with_parcel(&particle_buf, NodeAccess::ReadWrite)
     .dispatch((particle_count + 63) / 64, 1, 1);
-graph.dispatch(&device)?;
+scheme.submit()?;
 ```
 
 The shader author writes natural function parameters. The Rust side binds parcels in declaration order via `with_parcel`. Goldy handles the rest — slot packing, category validation, and cross-backend descriptor plumbing.

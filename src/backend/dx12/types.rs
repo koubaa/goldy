@@ -914,6 +914,32 @@ impl DescriptorRegistry {
         deferred
     }
 
+    /// Bindless slots currently assigned to `handle` (without reclaiming).
+    pub(crate) fn buffer_slot_keys(&self, handle: BufferHandle) -> Vec<DeferredSlot> {
+        let rr = &self.resource_registry;
+        let mut slots = Vec::new();
+        if let Some(&offset) = rr.buffer_offsets.get(&handle) {
+            slots.push(DeferredSlot::CbvSrvUav(offset));
+        }
+        if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
+            slots.push(DeferredSlot::CbvSrvUav(offset));
+        }
+        slots
+    }
+
+    /// Bindless slots currently assigned to a texture handle (without reclaiming).
+    pub(crate) fn texture_slot_keys(&self, handle: TextureHandle) -> Vec<DeferredSlot> {
+        let rr = &self.resource_registry;
+        let mut slots = Vec::new();
+        if let Some(&offset) = rr.texture_offsets.get(&handle) {
+            slots.push(DeferredSlot::CbvSrvUav(offset));
+        }
+        if let Some(&offset) = rr.texture_uav_offsets.get(&handle) {
+            slots.push(DeferredSlot::CbvSrvUav(offset));
+        }
+        slots
+    }
+
     /// Reclaim all descriptor slots for a destroyed texture handle.
     pub(crate) fn reclaim_texture_slots(&mut self, handle: TextureHandle) {
         let slots = self.resource_registry.extract_texture_slots(handle);

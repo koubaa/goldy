@@ -88,7 +88,7 @@ impl RetainedPool {
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// For in-place per-frame CPU rewrites, use [`crate::TaskGraph::write_parcel`] on the
+    /// For in-place per-frame CPU rewrites, use [`crate::Scheme::commit_write_parcel`] on the
     /// buffer's whole parcel (`&*buffer` or `buffer.whole()`).
     pub fn acquire_buffer(
         &mut self,
@@ -403,41 +403,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        let mut graph = crate::TaskGraph::new();
-        assert!(graph
-            .write_parcel(&*buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
+        let mut scheme = crate::Scheme::new(&ctx);
+        assert!(scheme
+            .commit_write_parcel(&*buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
             .is_ok());
-        graph.dispatch(&ctx).unwrap();
-    }
-
-    #[test]
-    fn bind_parcel_wires_parcel_resource_id() {
-        use crate::compute::ComputePipeline;
-        use crate::shader::ShaderModule;
-        use crate::task_graph::{ResourceId, TaskGraph};
-
-        let device = test_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (fmt, acc, flags) = rgba_interpolated();
-        let parcel = pool.acquire_texture(4, 4, fmt, acc, flags, None).unwrap();
-        let expected = parcel.resource_id();
-
-        let shader = ShaderModule::from_slang(&device, "void main() {}").unwrap();
-        let pipeline = ComputePipeline::new(&device, &shader).unwrap();
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("a", &pipeline)
-            .with_parcel(&parcel, crate::task_graph::NodeAccess::Read)
-            .dispatch(1, 1, 1);
-
-        let binding = graph.ir().nodes[0].bindings[0].resource;
-        assert_eq!(binding, expected);
-        match binding {
-            ResourceId::Texture(h) => {
-                assert_eq!(h, parcel.texture_handle().unwrap());
-            }
-            _ => panic!("expected texture resource"),
-        }
+        scheme.submit().unwrap();
     }
 }

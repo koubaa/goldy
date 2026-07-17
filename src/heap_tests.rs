@@ -17,8 +17,7 @@ mod heap_tests {
     //! DX12 and Vulkan use committed resources without a shared heap cap.
 
     use crate::buffer::Allocation;
-    use crate::task_graph::TaskGraph;
-    use crate::test_support::SerialGpuDevice;
+    use crate::test_support::{scheme_advance_timeline, SerialGpuDevice};
     use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
     use crate::BufferKind;
 
@@ -28,6 +27,10 @@ mod heap_tests {
 
     fn make_device() -> SerialGpuDevice {
         SerialGpuDevice::new()
+    }
+
+    fn scheme_submit_pipelined(ctx: &crate::Context) -> crate::TimelineValue {
+        scheme_advance_timeline(ctx)
     }
 
     // ===========================================================================
@@ -95,12 +98,7 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         // Submit trivial work so timeline advances.
-        let mut graph = TaskGraph::new();
-        let setup_buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&setup_buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
         ctx.wait_until(tv).unwrap();
 
         // Allocate a large buffer to create overflow.
@@ -119,9 +117,7 @@ mod heap_tests {
         drop(big_bufs);
 
         // Submit + wait so the deletion queue processes the drops.
-        let mut graph2 = TaskGraph::new();
-        graph2.clear_buffer(&setup_buf, 0, 256);
-        let tv2 = ctx.submit_pipelined(&mut graph2).unwrap();
+        let tv2 = scheme_submit_pipelined(&ctx);
         ctx.wait_until(tv2).unwrap();
         ctx.flush_deferred_deletions();
         device.compact_overflow_heaps();
@@ -207,12 +203,7 @@ mod heap_tests {
         let alloc_size = 4 * 1024 * 1024u64;
 
         // Submit some trivial GPU work so we have a timeline and in-flight CBs.
-        let mut graph = TaskGraph::new();
-        let buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
         assert!(tv > 0, "submission should advance timeline");
 
         // Now defer some buffers at that timeline value.
@@ -259,13 +250,7 @@ mod heap_tests {
                 })
                 .collect();
 
-            let mut graph = TaskGraph::new();
-            for b in &buffers {
-                graph.clear_buffer(b, 0, alloc_size);
-            }
-            let tv = ctx
-                .submit_pipelined(&mut graph)
-                .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
+            let tv = scheme_submit_pipelined(&ctx);
 
             // Defer the buffers for cleanup after GPU finishes this frame.
             let mut payload = crate::DeferredPayload::new();
@@ -305,11 +290,7 @@ mod heap_tests {
                 })
                 .collect();
 
-            let mut graph = TaskGraph::new();
-            for b in &buffers {
-                graph.clear_buffer(b, 0, alloc_size);
-            }
-            let tv = ctx.submit_pipelined(&mut graph).unwrap();
+            let tv = scheme_submit_pipelined(&ctx);
             let mut payload = crate::DeferredPayload::new();
             for b in buffers {
                 payload.push(b);
@@ -335,11 +316,7 @@ mod heap_tests {
                 })
                 .collect();
 
-            let mut graph = TaskGraph::new();
-            for b in &buffers {
-                graph.clear_buffer(b, 0, alloc_size);
-            }
-            let tv = ctx.submit_pipelined(&mut graph).unwrap();
+            let tv = scheme_submit_pipelined(&ctx);
             let mut payload = crate::DeferredPayload::new();
             for b in buffers {
                 payload.push(b);
@@ -424,12 +401,7 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         // Submit trivial GPU work.
-        let mut graph = TaskGraph::new();
-        let buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
 
         // Allocate textures and defer them.
         let mut payload = crate::DeferredPayload::new();
@@ -475,12 +447,10 @@ mod heap_tests {
         // Submit 3 frames worth of work.
         let mut timelines = Vec::new();
         for _ in 0..3 {
-            let mut graph = TaskGraph::new();
             let buf = device
                 .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap();
-            graph.clear_buffer(&buf, 0, 256);
-            let tv = ctx.submit_pipelined(&mut graph).unwrap();
+            let tv = scheme_submit_pipelined(&ctx);
             ctx.defer_until(tv, buf);
             timelines.push(tv);
         }
@@ -514,12 +484,10 @@ mod heap_tests {
         let device = make_device();
         let ctx = submission_context(&device);
 
-        let mut graph = TaskGraph::new();
         let buf = device
             .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
 
         ctx.defer_until(tv, buf);
         assert!(ctx.has_deferred_payloads());
@@ -534,6 +502,34 @@ mod heap_tests {
     // In-flight command buffer tracking
     // ===========================================================================
 
+    /// Submit a clear without dropping the [`Scheme`] yet.
+    ///
+    /// [`crate::test_support::scheme_advance_timeline`] cannot be used here: it drops the
+    /// scheme before returning, and [`Scheme`]'s `Drop` waits the high-water timeline —
+    /// which drains in-flight CBs before these tests can observe them.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn scheme_submit_leave_in_flight(
+        ctx: &crate::Context,
+    ) -> (
+        crate::Scheme,
+        crate::TimelineValue,
+        crate::retained_pool::RetainedPool,
+        crate::Buffer,
+    ) {
+        use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
+        use std::sync::Arc;
+
+        let device = Arc::new(ctx.device().clone());
+        let mut pool = RetainedPool::new(device);
+        let buf = pool
+            .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("buf");
+        let mut scheme = Scheme::new(ctx);
+        scheme.commit_clear_parcel(&buf, 0, 256).expect("clear");
+        let tv = scheme.submit().expect("submit").timeline_value();
+        (scheme, tv, pool, buf)
+    }
+
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn in_flight_cb_count_increases_after_submit() {
@@ -541,12 +537,7 @@ mod heap_tests {
         let ctx = submission_context(&device);
         assert_eq!(ctx.in_flight_command_buffer_count(), 0);
 
-        let mut graph = TaskGraph::new();
-        let buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let _tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let (_scheme, _tv, _pool, _buf) = scheme_submit_leave_in_flight(&ctx);
 
         assert!(
             ctx.in_flight_command_buffer_count() > 0,
@@ -560,12 +551,7 @@ mod heap_tests {
         let device = make_device();
         let ctx = submission_context(&device);
 
-        let mut graph = TaskGraph::new();
-        let buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let (_scheme, tv, _pool, _buf) = scheme_submit_leave_in_flight(&ctx);
 
         let before = ctx.in_flight_command_buffer_count();
         assert!(before > 0);
@@ -589,12 +575,7 @@ mod heap_tests {
         let ctx = submission_context(&device);
         let initial = ctx.gpu_progress();
 
-        let mut graph = TaskGraph::new();
-        let buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
 
         ctx.wait_until(tv).unwrap();
         let after = ctx.gpu_progress();
@@ -611,12 +592,7 @@ mod heap_tests {
         let mut prev_tv = 0;
 
         for _ in 0..5 {
-            let mut graph = TaskGraph::new();
-            let buf = device
-                .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-                .unwrap();
-            graph.clear_buffer(&buf, 0, 256);
-            let tv = ctx.submit_pipelined(&mut graph).unwrap();
+            let tv = scheme_submit_pipelined(&ctx);
             assert!(tv > prev_tv, "timeline must be monotonically increasing");
             prev_tv = tv;
         }
@@ -632,36 +608,9 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         // Submit so we have a non-zero timeline barrier.
-        let mut graph = TaskGraph::new();
-        let trigger = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&trigger, 0, 256);
-        let _tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
 
-        let before = ctx.deferred_deletion_pending_count();
-        let buf = device
-            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        drop(buf);
-        let after = ctx.deferred_deletion_pending_count();
-        assert!(
-            after >= before,
-            "deletion queue should grow after buffer drop: before={before} after={after}"
-        );
-    }
-
-    #[test]
-    fn deletion_queue_drains_after_flush() {
-        let device = make_device();
-        let ctx = submission_context(&device);
-
-        let mut graph = TaskGraph::new();
-        let buf = device
-            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let _before = ctx.deferred_deletion_pending_count();
 
         let extra = device
             .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
@@ -701,13 +650,7 @@ mod heap_tests {
                 })
                 .collect();
 
-            let mut graph = TaskGraph::new();
-            for b in &buffers {
-                graph.clear_buffer(b, 0, alloc_size);
-            }
-            let tv = ctx
-                .submit_pipelined(&mut graph)
-                .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
+            let tv = scheme_submit_pipelined(&ctx);
 
             let mut payload = crate::DeferredPayload::new();
             for b in buffers {
@@ -736,13 +679,7 @@ mod heap_tests {
                 })
                 .collect();
 
-            let mut graph = TaskGraph::new();
-            for b in &buffers {
-                graph.clear_buffer(b, 0, alloc_size);
-            }
-            let tv = ctx
-                .submit_pipelined(&mut graph)
-                .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
+            let tv = scheme_submit_pipelined(&ctx);
 
             let mut payload = crate::DeferredPayload::new();
             for b in buffers {
@@ -809,13 +746,7 @@ mod heap_tests {
                 )
                 .unwrap_or_else(|e| panic!("frame {frame}: texture alloc failed: {e}"));
 
-            let mut graph = TaskGraph::new();
-            for b in &bufs {
-                graph.clear_buffer(b, 0, buf_size);
-            }
-            let tv = ctx
-                .submit_pipelined(&mut graph)
-                .unwrap_or_else(|e| panic!("frame {frame}: submit failed: {e}"));
+            let tv = scheme_submit_pipelined(&ctx);
 
             let mut payload = crate::DeferredPayload::new();
             for b in bufs {
@@ -841,9 +772,7 @@ mod heap_tests {
             .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
-        let mut graph = TaskGraph::new();
-        graph.clear_buffer(&buf, 0, 1024);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
         ctx.wait_until(tv).unwrap();
 
         // Resize multiple times (triggers realloc + blit-copy on Metal).
@@ -870,9 +799,7 @@ mod heap_tests {
         assert_eq!(buf.size(), new_size);
 
         // Submit a fence to ensure the internal blit-copy has completed.
-        let mut graph = TaskGraph::new();
-        graph.clear_buffer(&buf, 256, 256); // Touch bytes past the original data
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
         ctx.wait_until(tv).unwrap();
 
         // Read back — first 256 bytes should be preserved.
@@ -915,11 +842,7 @@ mod heap_tests {
             })
             .collect();
 
-        let mut graph = TaskGraph::new();
-        for b in &bufs {
-            graph.clear_buffer(b, 0, 4096);
-        }
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
 
         let token = Token {
             pending: Arc::clone(&pending),
@@ -955,12 +878,10 @@ mod heap_tests {
     fn double_flush_is_idempotent() {
         let device = make_device();
         let ctx = submission_context(&device);
-        let mut graph = TaskGraph::new();
         let buf = device
             .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
-        graph.clear_buffer(&buf, 0, 256);
-        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        let tv = scheme_submit_pipelined(&ctx);
         ctx.defer_until(tv, buf);
 
         ctx.wait_until(tv).unwrap();

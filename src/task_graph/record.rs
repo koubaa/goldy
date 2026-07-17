@@ -1,10 +1,9 @@
-//! Owned render-pass recorder for language bindings (no lifetime coupling to [`TaskGraph`]).
+//! Owned render-pass recorder for language bindings (no lifetime coupling to [`crate::Scheme`]).
 //!
-//! [`RenderPassRecord`] mirrors [`super::graph::RenderPassBuilder`] but can be held across
-//! FFI calls while commands accumulate, then committed with [`RenderPassRecord::commit`].
+//! [`RenderPassRecord`] mirrors scheme render-pass recording but can be held across
+//! FFI calls while commands accumulate, then committed with [`RenderPassRecord::commit_scheme`].
 
-use super::graph::TaskGraph;
-use super::ir::{DispatchDim, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use super::ir::{DispatchDim, NodeAccess, ResourceBinding};
 use super::ResourceId;
 use crate::backend::RenderCommand;
 use crate::buffer::{Allocation, BufferSource, BufferView};
@@ -59,7 +58,7 @@ impl PendingRenderSlot {
     }
 }
 
-/// Accumulates one offscreen render-pass node before [`Self::commit`].
+/// Accumulates one offscreen render-pass node before [`Self::commit_scheme`].
 pub struct RenderPassRecord {
     label: &'static str,
     target: crate::backend::RenderTargetHandle,
@@ -236,18 +235,6 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn commit(self, graph: &mut TaskGraph) {
-        graph.extend_stamp_targets(self.stamp_targets);
-        graph.push_task_node(TaskNode {
-            label: self.label,
-            bindings: self.bindings,
-            kind: NodeKind::RenderPass {
-                target: self.target,
-                commands: self.commands,
-            },
-        });
-    }
-
     /// Begin accumulating a render pass targeting a scheme-held render-target lease.
     pub fn new_for_scheme_lease(
         label: &'static str,
@@ -288,7 +275,7 @@ fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     }
 }
 
-/// Accumulates one compute dispatch node before [`Self::commit_dispatch`].
+/// Accumulates one compute dispatch node before [`Self::commit_dispatch_scheme`].
 pub struct ComputeNodeRecord {
     label: &'static str,
     pipeline: crate::backend::ComputePipelineHandle,
@@ -389,20 +376,6 @@ impl ComputeNodeRecord {
             access,
         });
         self
-    }
-
-    pub fn commit_dispatch(self, graph: &mut TaskGraph, x: u32, y: u32, z: u32) {
-        graph.extend_stamp_targets(self.stamp_targets);
-        graph.push_task_node(TaskNode {
-            label: self.label,
-            bindings: self.bindings,
-            kind: NodeKind::Dispatch {
-                pipeline: self.pipeline,
-                resource_slots: self.resource_slots,
-                user_slots: self.user_slots,
-                dispatch: DispatchDim::Direct { x, y, z },
-            },
-        });
     }
 
     /// Commit this compute node into a retained [`crate::Scheme`].

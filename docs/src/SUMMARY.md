@@ -16,7 +16,6 @@
 
 # Compute Workflows
 
-- [Task Graph](./compute/task-graph.md)
 - [Device Timeline](./compute/timeline.md)
 - [Pipelined Frames](./compute/pipelined-frames.md)
 - [Compute to Surface](./compute/compute-to-surface.md)

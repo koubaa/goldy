@@ -20,7 +20,7 @@ pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 /// instead of `reflect_type_size_with_category(Uniform)` (cbuffer-padded size).  A
 /// single-float struct like `SimParams` was previously reported as stride 16 instead
 /// of 4, causing false validation errors for correctly-created buffers.
-const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v3";
+const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v4";
 
 /// Content hash of the `shaders/goldy_exp/*.slang` library sources, baked in at
 /// build time by `build.rs`.  Changes when any library file is edited, so compiled
@@ -88,6 +88,41 @@ fn stage_tag(s: SlangStage) -> u8 {
     }
 }
 
+/// Hash all `*.slang` files in `search_paths` (sorted by filename) into `h`.
+///
+/// Imported modules such as `ekrano_shared.slang` live on these paths; mixing this
+/// hash into [`compile_cache_key`] ensures edits there invalidate cached bytecode
+/// even when the entry-point translation unit is unchanged.
+fn hash_search_path_slang_sources(mut h: u64, search_paths: &[&str]) -> u64 {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for path in search_paths {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            continue;
+        };
+        for ent in entries.flatten() {
+            let fp = ent.path();
+            if fp.extension().and_then(|e| e.to_str()) != Some("slang") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&fp) else {
+                continue;
+            };
+            let name = fp
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            files.push((name, bytes));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    h = fnv_mix(h, &(files.len() as u64).to_le_bytes());
+    for (name, bytes) in files {
+        h = hash_string(h, &name);
+        h = fnv_mix(h, &bytes);
+    }
+    h
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Stable disk-cache key for a Slang compile.
 ///
@@ -97,6 +132,7 @@ pub(crate) fn compile_cache_key(
     source: &str,
     target: ShaderTarget,
     entry_points: &[(&str, SlangStage)],
+    search_paths: &[&str],
     defines: &[(&str, &str)],
     layout_checks: &[OwnedLayoutCheck],
     optimization_level: OptimizationLevel,
@@ -131,6 +167,7 @@ pub(crate) fn compile_cache_key(
     // Mix in the goldy_exp library hash so that edits to access.slang, bindless.slang,
     // etc. produce different cache keys even when the user's shader source is unchanged.
     h = hash_string(h, GOLDY_EXP_HASH);
+    h = hash_search_path_slang_sources(h, search_paths);
     h = fnv_mix(h, &[optimization_level as u8]);
     h
 }
@@ -397,8 +434,8 @@ mod tests {
     #[test]
     fn compile_cache_key_deterministic() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let k1 = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
-        let k2 = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let k1 = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
+        let k2 = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         assert_eq!(k1, k2);
     }
 
@@ -408,62 +445,62 @@ mod tests {
         let d1 = vec![("a", "x"), ("b", "y")];
         let d2 = vec![("b", "y"), ("a", "x")];
         assert_eq!(
-            compile_cache_key(src, tgt, &eps, &d1, &layouts, opt),
-            compile_cache_key(src, tgt, &eps, &d2, &layouts, opt),
+            compile_cache_key(src, tgt, &eps, &[], &d1, &layouts, opt),
+            compile_cache_key(src, tgt, &eps, &[], &d2, &layouts, opt),
         );
     }
 
     #[test]
     fn compile_cache_key_sensitive_to_source() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let base_key = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         let alt = "float4 main() : SV_Target0 { return 1; }";
-        assert_ne!(base_key, compile_cache_key(alt, tgt, &eps, &defs, &layouts, opt));
+        assert_ne!(base_key, compile_cache_key(alt, tgt, &eps, &[], &defs, &layouts, opt));
     }
 
     #[test]
     fn compile_cache_key_sensitive_to_target() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let base_key = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         assert_ne!(
             base_key,
-            compile_cache_key(src, ShaderTarget::Dxil, &eps, &defs, &layouts, opt),
+            compile_cache_key(src, ShaderTarget::Dxil, &eps, &[], &defs, &layouts, opt),
         );
     }
 
     #[test]
     fn compile_cache_key_sensitive_to_entry_point() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let base_key = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         let eps2 = vec![("other", SlangStage::Fragment)];
-        assert_ne!(base_key, compile_cache_key(src, tgt, &eps2, &defs, &layouts, opt));
+        assert_ne!(base_key, compile_cache_key(src, tgt, &eps2, &[], &defs, &layouts, opt));
     }
 
     #[test]
     fn compile_cache_key_sensitive_to_defines() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let base_key = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         let defs2 = vec![("A", "2"), ("B", "2")];
-        assert_ne!(base_key, compile_cache_key(src, tgt, &eps, &defs2, &layouts, opt));
+        assert_ne!(base_key, compile_cache_key(src, tgt, &eps, &[], &defs2, &layouts, opt));
     }
 
     #[test]
     fn compile_cache_key_sensitive_to_optimization_level() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let base_key = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         assert_ne!(
             base_key,
-            compile_cache_key(src, tgt, &eps, &defs, &layouts, OptimizationLevel::Maximal,),
+            compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, OptimizationLevel::Maximal,),
         );
     }
 
     #[test]
     fn compile_cache_key_sensitive_to_layout_checks() {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
-        let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let base_key = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
         let mut layouts2 = layouts.clone();
         layouts2[0].rust_size = 32;
-        assert_ne!(base_key, compile_cache_key(src, tgt, &eps, &defs, &layouts2, opt));
+        assert_ne!(base_key, compile_cache_key(src, tgt, &eps, &[], &defs, &layouts2, opt));
     }
 
     /// Disk cache keys must follow the same effective source as Slang (`compile_with_reflection`).
@@ -489,11 +526,12 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             effective_slang_source_for_compile(goldy_src).as_ref(),
             tgt,
             &eps,
+            &[],
             &defs,
             &layouts,
             opt,
         );
-        let k_transformed_only = compile_cache_key(transformed.as_str(), tgt, &eps, &defs, &layouts, opt);
+        let k_transformed_only = compile_cache_key(transformed.as_str(), tgt, &eps, &[], &defs, &layouts, opt);
         assert_eq!(
             k_effective, k_transformed_only,
             "cache key must hash post-transform source, matching transform_virtual_main output"
@@ -515,11 +553,12 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
             OptimizationLevel::Default,
         );
         assert_ne!(
-            compile_cache_key(goldy_src, tgt, &eps, &defs, &layouts, opt),
+            compile_cache_key(goldy_src, tgt, &eps, &[], &defs, &layouts, opt),
             compile_cache_key(
                 effective_slang_source_for_compile(goldy_src).as_ref(),
                 tgt,
                 &eps,
+                &[],
                 &defs,
                 &layouts,
                 opt,
@@ -539,11 +578,12 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
             OptimizationLevel::Default,
         );
         assert_eq!(
-            compile_cache_key(src, tgt, &eps, &defs, &layouts, opt),
+            compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt),
             compile_cache_key(
                 effective_slang_source_for_compile(src).as_ref(),
                 tgt,
                 &eps,
+                &[],
                 &defs,
                 &layouts,
                 opt,
@@ -712,8 +752,8 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
         // build.rs emits a new GOLDY_EXP_HASH whenever a .slang file changes and the
         // constant is baked into the binary, so any deployed build with a goldy_exp
         // edit automatically carries a different GOLDY_EXP_HASH.
-        let k1 = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
-        let k2 = compile_cache_key("// different library source", tgt, &eps, &defs, &layouts, opt);
+        let k1 = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
+        let k2 = compile_cache_key("// different library source", tgt, &eps, &[], &defs, &layouts, opt);
         assert_ne!(k1, k2);
     }
 
@@ -770,11 +810,25 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
 
     /// Reflection schema constant is present and matches the expected version.
     #[test]
-    fn reflection_stride_schema_is_v3() {
+    fn reflection_stride_schema_is_v4() {
         assert_eq!(
-            REFLECTION_STRIDE_SCHEMA, "bind-stride-v3",
-            "schema must be v3 after the Broadcast-stride fix"
+            REFLECTION_STRIDE_SCHEMA, "bind-stride-v4",
+            "schema must be v4 after search-path cache invalidation"
         );
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_search_path_slang() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let dir = std::env::temp_dir().join(format!("goldy_cache_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_string_lossy();
+        let empty = compile_cache_key(src, tgt, &eps, &[], &defs, &layouts, opt);
+        std::fs::write(dir.join("helper.slang"), "struct Helper { uint x; };").unwrap();
+        let with_helper = compile_cache_key(src, tgt, &eps, &[path.as_ref()], &defs, &layouts, opt);
+        assert_ne!(empty, with_helper);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

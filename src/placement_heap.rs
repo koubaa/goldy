@@ -19,17 +19,16 @@
 //! per-frame bindless-slot churn that previously caused ~100 µs overhead before
 //! `surface.submit_partition_early`.
 //!
-//! ### One-graph-per-context invariant
+//! ### One-scheme-per-context invariant
 //!
-//! The view cache is keyed on `TransientId` (a `u32` from `0..N` per graph). Since
-//! `TransientId` is assigned by declaration order and reset to 0 on each
-//! [`TaskGraph::clear`](crate::TaskGraph::clear), `TransientId(0)` from graph A and
-//! `TransientId(0)` from graph B would collide. The heap is owned per-`Context`
-//! (`ContextInner::placement_heap`), so **this heap assumes exactly one `TaskGraph`
-//! per context**; independent contexts each get their own heap and `TransientId`
-//! namespace and never share transient `BufferView`/`Texture` handles. Debug-assertions
-//! telemetry in [`TaskGraph`](crate::TaskGraph) enforces deterministic declaration order
-//! across frames.
+//! The view cache is keyed on `TransientId` (a `u32` from `0..N` per scheme). Declarations
+//! must be deterministic across retained resubmits: the N-th transient in every frame must
+//! describe the same logical resource so `slot_id = N` stays stable. The heap is owned
+//! per-`Context` (`ContextInner::placement_heap`), so **this heap assumes one active
+//! [`crate::Scheme`] recording per context**; independent contexts each get their own heap and
+//! `TransientId` namespace and never share transient `BufferView`/`Texture` handles.
+//! Debug-assertions telemetry in [`Scheme`](crate::Scheme) enforces declaration-order
+//! invariants across frames.
 
 use crate::backend::TextureHandle;
 use crate::buffer::{Allocation, BufferView};
@@ -72,6 +71,7 @@ struct CachedView {
 /// `Texture::new` and the bindless descriptor allocation.
 struct CachedTexture {
     texture: TextureBacking,
+    #[allow(dead_code)]
     key: TransientTextureKey,
 }
 
@@ -86,6 +86,7 @@ struct CachedTexture {
 /// stable-slot cache. In steady state (same spec, same placement) all backend
 /// descriptor work is skipped. Eviction via `Device::defer_release` ensures
 /// GPU safety when shapes or placements change.
+#[allow(dead_code)] // TaskGraph transient submit path removed; retained for Context diagnostics / tests
 pub struct PlacementHeap {
     buffer: Allocation,
     page_size: u64,
@@ -282,17 +283,16 @@ impl PlacementHeap {
     ///
     /// ## Slot identity contract
     ///
-    /// The `slot_id` is the raw `TransientId` value assigned by `TaskGraph::transient_buffer*`.
-    /// Because `TaskGraph::clear` resets the counter to 0, the N-th declaration in any frame
-    /// produces `slot_id = N`. Cache correctness therefore requires that the calling recording
-    /// phase is **deterministic**: the same logical buffer is always declared N-th. The
-    /// `#[cfg(debug_assertions)]` telemetry in `TaskGraph` asserts this invariant.
+    /// The `slot_id` is the raw `TransientId` value assigned by scheme transient declarations.
+    /// Cache correctness requires deterministic declaration order across retained resubmits:
+    /// the same logical buffer must always be declared N-th so `slot_id = N` stays stable.
+    /// `#[cfg(debug_assertions)]` telemetry in [`Scheme`](crate::Scheme) asserts this invariant.
     ///
-    /// ## One-graph-per-device
+    /// ## One-scheme-per-context
     ///
-    /// Slot IDs are not namespaced. If two `TaskGraph`s are submitted through the same device,
+    /// Slot IDs are not namespaced. If two schemes record transients through the same context,
     /// their IDs collide. This method panics in debug builds if concurrent submissions
-    /// would violate cache correctness (see the one-graph-per-device section above).
+    /// would violate cache correctness (see the one-scheme-per-context section above).
     pub fn get_or_create_view(
         &mut self,
         slot_id: u32,
@@ -348,6 +348,7 @@ impl PlacementHeap {
     /// old texture is evicted via `defer_release` and a new one is created.
     ///
     /// Returns a `Vec<TextureHandle>` aligned with `color_keys`.
+    #[allow(dead_code)]
     pub(crate) fn get_or_create_textures(
         &mut self,
         device: &Device,
@@ -511,6 +512,7 @@ impl PlacementHeap {
     }
 
     /// Reference to the backing buffer (for creating views).
+    #[allow(dead_code)]
     pub(crate) fn buffer(&self) -> &Allocation {
         &self.buffer
     }

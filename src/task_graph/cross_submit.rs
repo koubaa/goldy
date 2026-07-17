@@ -1,4 +1,4 @@
-//! Cross-submission hazard analysis for independent [`Scheme`] / [`TaskGraph`] submits.
+//! Cross-submission hazard analysis for independent [`Scheme`] submits.
 //!
 //! Intra-submission barriers are computed by [`super::analysis`]; this module derives
 //! scoped memory barriers and cross-context queue-waits from the runtime's ledger

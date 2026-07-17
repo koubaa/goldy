@@ -1,9 +1,9 @@
 //! Retained scheme — the primary submission unit of the diwan machine.
 //!
 //! A [`Scheme`] is goldy's realization of the diwan scheme (spec §2): a set of dispatches
-//! and precedences, first-class, retained across submissions. Unlike [`crate::TaskGraph`],
-//! which is rebuilt each frame, a scheme persists; structural mutation sets a COW dirty bit,
-//! and a clean scheme resubmits with zero recording cost.
+//! and precedences, first-class, retained across submissions. Schemes persist across
+//! frames; structural mutation sets a COW dirty bit, and a clean scheme resubmits with
+//! zero recording cost.
 //!
 //! **Construction**: `Scheme::new(&ctx)` — bound to one context for its lifetime.
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
@@ -1072,7 +1072,7 @@ impl Scheme {
 
     /// Append a zero-fill node for `parcel[offset..offset+size]`.
     ///
-    /// Mirrors [`crate::TaskGraph::clear_parcel`].
+    /// Zero-fill a buffer region via an upload micro-scheme.
     pub fn commit_clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
         self.dirty = true;
         let buffer = parcel
@@ -1105,7 +1105,7 @@ impl Scheme {
 
     /// Append a CPU→GPU full-texture upload node.
     ///
-    /// Mirrors [`crate::TaskGraph::write_texture`].
+    /// Upload a full texture via an upload micro-scheme.
     pub fn commit_write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
         let expected = texture.byte_size();
         if data.len() != expected as usize {
@@ -1135,7 +1135,7 @@ impl Scheme {
 
     /// Append a CPU→GPU partial-texture upload node for a rectangular sub-region.
     ///
-    /// Mirrors [`crate::TaskGraph::write_texture_region`].
+    /// Upload a texture subregion via an upload micro-scheme.
     pub fn commit_write_texture_region(
         &mut self,
         texture: &crate::Texture,
@@ -1399,6 +1399,12 @@ impl Scheme {
         &mut self,
         mut acquired: Vec<AcquiredPresent>,
     ) -> Result<Submission, GoldyError> {
+        if !self.submit_state.all_stamps_alive() {
+            // Dropping a retained-pool resource invalidates schemes that still bind it.
+            self.submit_state.invalidate_retention();
+            return Err(GoldyError::StaleResource);
+        }
+
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         let structurally_dirty = self.dirty;
         {
@@ -1766,7 +1772,7 @@ impl Scheme {
 
     /// Copy a texture (UAV-writable parcel) into a present lease drawable.
     ///
-    /// Analogous to [`TaskGraph::copy_texture_to_swapchain`](crate::TaskGraph::copy_texture_to_swapchain)
+    /// Copy a texture into a present lease (swapchain drawable).
     /// but targets a scheme [`PresentLease`] instead of the task-graph swapchain output.
     ///
     /// Record this after all compute nodes that write `src`. The present slot is
@@ -2156,18 +2162,42 @@ impl Scheme {
 
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
+
+        // This node kind is a single-slot readback recorded repeatedly on an otherwise
+        // retained `Scheme` (see doc comment above): each call replaces the prior
+        // `CopyTexture` node outright rather than accumulating one per call. When `src`
+        // changes across calls (e.g. the caller re-created its source texture), the old
+        // source is no longer bound by any node in this IR. Forget its stamp registration
+        // too, or a resource that is merely retired-and-replaced — not actually still
+        // referenced — permanently fails `all_stamps_alive` once its owning retained-pool
+        // resource is dropped, even though this scheme no longer binds it.
+        let mut replaced_srcs = Vec::new();
+        self.ir.nodes.retain(|node| match node.kind {
+            NodeKind::CopyTexture {
+                src: old_src,
+                dst_buffer_layout: Some(_),
+                ..
+            } => {
+                replaced_srcs.push(old_src);
+                false
+            }
+            _ => true,
+        });
+        for old_src in replaced_srcs {
+            let still_bound = old_src == src_h
+                || self
+                    .ir
+                    .nodes
+                    .iter()
+                    .any(|n| n.bindings.iter().any(|b| b.resource == ResourceId::Texture(old_src)));
+            if !still_bound {
+                self.submit_state.forget_resource_stamp(ResourceId::Texture(old_src));
+            }
+        }
+
         self.submit_state
             .register_stamp_parts(ResourceId::Texture(src_h), stamp);
 
-        self.ir.nodes.retain(|node| {
-            !matches!(
-                node.kind,
-                NodeKind::CopyTexture {
-                    dst_buffer_layout: Some(_),
-                    ..
-                }
-            )
-        });
         self.ir.nodes.push(TaskNode {
             label: "copy_texture",
             bindings: vec![
@@ -2325,6 +2355,15 @@ impl SchemeBindable for crate::Buffer {
     }
 }
 
+impl SchemeBindable for crate::buffer::Allocation {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+        (
+            Some((ResourceId::Buffer(self.handle), None)),
+            self.resource_index(access),
+        )
+    }
+}
+
 impl<T> SchemeBindable for Lease<T> {
     fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = &scheme.leases[self.id.0 as usize];
@@ -2352,7 +2391,7 @@ impl SchemeBindable for crate::Texture {
     fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
         // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
-        // fall back to the UAV bindless index — mirroring the TaskGraph path's behaviour in
+        // fall back to the UAV bindless index — matching historical submit behaviour in
         // `collect_bindless_indices_into`.
         let slot = self.resource_index(access).or_else(|| {
             if access == ResourceAccess::Read {
@@ -2816,11 +2855,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         (scheme, buffer)
     }
 
-    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> Scheme {
-        recording_scheme_with_parcel(device, pool, ctx).0
+    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> (Scheme, crate::Buffer) {
+        recording_scheme_with_parcel(device, pool, ctx)
     }
 
-    fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> (Scheme, crate::test_support::CbReuseOverride) {
+    fn clean_scheme(
+        device: &Arc<Device>,
+        pool: &mut RetainedPool,
+    ) -> (Scheme, crate::Buffer, crate::test_support::CbReuseOverride) {
         let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
@@ -2839,7 +2881,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.replay_stats().records, 1);
         #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
-        (scheme, cb)
+        // Keep `parcel` alive: dropping a retained buffer bound to the scheme marks its
+        // stamp dead and subsequent submits return `StaleResource`.
+        (scheme, parcel, cb)
     }
 
     fn leased_texture_scheme(
@@ -2873,7 +2917,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn clean_submits_resubmit_without_rerecord() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2894,7 +2938,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2915,7 +2959,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -2969,7 +3013,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
         let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
@@ -2982,7 +3026,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
         let frame = scheme.submit().unwrap();
         frame.wait(&ctx).unwrap();
         assert!(ctx.gpu_progress() >= frame.timeline_value());
@@ -2993,7 +3037,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
         let frame = scheme.submit().unwrap();
         assert!(frame.timeline_value() > 0, "submit must return a frame token");
         // Non-blocking: a second submit must succeed without waiting on the first frame.
@@ -3193,11 +3237,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame1 = scheme.submit().expect("submit 1");
         drop(parcel);
         drop(pool);
-        let frame2 = scheme.submit().expect("submit 2 after parcel drop");
-        let loan1 = grant.consume(&frame1).expect("read frame1");
-        let loan2 = grant.consume(&frame2).expect("read frame2");
+        // Retained ownership outranks the scheme: dropping the bound buffer kills its stamp.
+        assert!(
+            matches!(scheme.submit(), Err(GoldyError::StaleResource)),
+            "resubmit after dropping a bound retained buffer must fail"
+        );
+        let loan1 = grant.consume(&frame1).expect("read frame1 after parcel drop");
         assert_eq!(loan1.len(), 32);
-        assert_eq!(loan2.len(), 32);
     }
 
     #[test]

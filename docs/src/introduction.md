@@ -4,7 +4,7 @@
 
 # Goldy: Modern GPU Library
 
-**Goldy** is a Rust GPU library built around a typed bindless programming model, a dependency-driven task graph, and first-class compute support — targeting Vulkan 1.4+, DX12, and Metal Tier 2+ with native backends (no translation layers).
+**Goldy** is a Rust GPU library built around a typed bindless programming model, a dependency-driven scheme, and first-class compute support — targeting Vulkan 1.4+, DX12, and Metal Tier 2+ with native backends (no translation layers).
 
 ## Typed Bindless Programming
 
@@ -32,29 +32,37 @@ void cs_main(MyUniforms cfg, Scattered<uint> data, ThreadId id) {
 
 Struct parameters are automatically treated as broadcast (constant buffer) data.
 
-## Task Graph
+## Scheme
 
-`TaskGraph` provides explicit dependency scheduling for bindless compute work. You declare what each node reads and writes; Goldy inserts optimal barriers, parallelizes independent dispatches across waves, and aliases transient resources:
+[`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html) is Goldy's public recording API. You declare nodes, render passes, and resource dependencies once; the scheme is retained across submissions. Goldy inserts barriers, parallelizes independent work, and aliases transient resources:
 
 ```rust
-let mut graph = TaskGraph::new();
-graph
+let mut scheme = Scheme::new(&ctx);
+scheme
     .node("simulate", &sim_pipeline)
-    .with_buffer(&particles, NodeAccess::ReadWrite)
-    .with_resource_slots(&[particles_handle.index()])
+    .with_parcel(&particles, NodeAccess::ReadWrite)
     .dispatch(group_count, 1, 1);
+let submission = scheme.submit()?;
 ```
 
 ## Compute-to-Surface
 
-Compute shaders can write directly to swapchain textures — no graphics pipeline, no vertex buffers, no render passes. Acquire a frame, get its texture handle, dispatch, present:
+Compute shaders can write directly to swapchain drawables via a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) — no graphics pipeline, no vertex buffers, no raster pass. Record once, submit each frame, consume the present grant:
 
 ```rust
-let frame = surface.begin()?;
-let texture = frame.texture();
-// ... build TaskGraph, dispatch compute ...
-frame.submit_compute(&graph)?;
-frame.present()?;
+let swapchain = SwapchainPool::new(&ctx, &window, 3)?;
+let screen = swapchain.lease();
+
+scheme
+    .node("compute", &compute_pipeline)
+    .with_parcel(&uniform_buffer, NodeAccess::Read)
+    .with_present(&screen)
+    .dispatch(wg_x, wg_y, 1);
+let present = scheme.grant_present(&screen);
+
+// Each frame:
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
 ## Multi-Backend, Single Shader Language

@@ -7,8 +7,6 @@
 use crate::context::Context;
 use crate::device::Device;
 use crate::error::GoldyError;
-use crate::surface::{Frame, Surface};
-use crate::task_graph::TaskGraph;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
 use crate::tracy_zone;
@@ -16,9 +14,8 @@ use anyhow::anyhow;
 use std::collections::VecDeque;
 
 /// Token returned from [`FrameOrchestrator::begin_frame`]; must be passed to
-/// [`FrameOrchestrator::flush`], [`FrameOrchestrator::end_frame_standalone`],
-/// [`FrameOrchestrator::end_frame_for_present`], or
-/// [`FrameOrchestrator::end_frame_for_surface`].
+/// [`FrameOrchestrator::end_frame_standalone`], [`FrameOrchestrator::end_frame_for_present`],
+/// [`FrameOrchestrator::end_frame_externally_ordered`], or [`FrameOrchestrator::abort_frame`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameHandle(pub(crate) u64);
 
@@ -39,10 +36,11 @@ struct FrameSlot<T> {
 /// Owns an in-flight ring of per-frame cleanup slots and enforces a maximum pipelining depth.
 ///
 /// Typical use:
-/// 1. [`Self::begin_frame`] (with retire closure)  
-/// 2. Record dispatch into one or more [`TaskGraph`]s; call [`Self::flush`] for mid-frame submits.  
-/// 3. [`Self::end_frame_standalone`], [`Self::end_frame_for_present`], or [`Self::end_frame_for_surface`].  
-/// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
+/// 1. [`Self::begin_frame`] (with retire closure)
+/// 2. Record and submit work via [`crate::Scheme`]
+/// 3. [`Self::end_frame_standalone`], [`Self::end_frame_for_present`], or
+///    [`Self::end_frame_externally_ordered`]
+/// 4. For swapchain frames, [`Self::note_presented`] after present.
 pub struct FrameOrchestrator<T> {
     context: Context,
     max_depth: usize,
@@ -51,10 +49,6 @@ pub struct FrameOrchestrator<T> {
     next_id: u64,
     /// `Some` between [`Self::begin_frame`] and a matching end-frame call.
     open: Option<FrameHandle>,
-    /// Retention fingerprint stored by the most recent successful [`Self::submit_with_retention`]
-    /// call.  `None` until the first retain-eligible submit.  Used when `max_depth == 1` to
-    /// attempt zero-cost resubmission on subsequent frames.
-    last_retention_key: Option<u64>,
 }
 
 impl<T> FrameOrchestrator<T> {
@@ -67,7 +61,6 @@ impl<T> FrameOrchestrator<T> {
             ring: VecDeque::new(),
             next_id: 1,
             open: None,
-            last_retention_key: None,
         }
     }
 
@@ -97,8 +90,8 @@ impl<T> FrameOrchestrator<T> {
 
     /// Discard the currently open frame without pushing a cleanup slot.
     ///
-    /// Call this when a `run_frame` error makes it impossible to call `end_frame_standalone` or
-    /// `end_frame_for_surface`. Leaves the ring intact so subsequent frames can begin normally.
+    /// Call this when a `run_frame` error makes it impossible to call an end-frame
+    /// method. Leaves the ring intact so subsequent frames can begin normally.
     pub fn abort_frame(&mut self, handle: FrameHandle) {
         if self.open == Some(handle) {
             self.open = None;
@@ -140,73 +133,34 @@ impl<T> FrameOrchestrator<T> {
         Ok(h)
     }
 
-    /// Mid-frame submit: dispatches the current graph and starts a fresh one.
+    /// End a standalone (headless / render-to-texture) frame whose GPU work was already
+    /// submitted (e.g. via [`crate::Scheme::submit`]).
     ///
-    /// When [`Self::retains_command_buffers`] is true the graph is submitted via
-    /// [`crate::Context::submit_pipelined_and_retain`] and on subsequent frames zero-cost
-    /// resubmission is attempted first via [`crate::Context::try_resubmit_retained`].
-    /// All other strategies use [`crate::Context::submit_pipelined`] unconditionally.
-    ///
-    /// This creates a real command-buffer boundary on all backends, including windowed/
-    /// surface frames where the fine pass and present are submitted later via
-    /// [`Self::end_frame_for_surface`].  Because Metal (and Vulkan/DX12) execute command
-    /// buffers on the same queue in submission order, the fine command buffer automatically
-    /// waits for the coarse one to complete — no explicit fence is required.
-    pub fn flush(
-        &mut self,
-        handle: FrameHandle,
-        graph: &mut TaskGraph,
-        last_timeline: &mut Option<TimelineValue>,
-    ) -> Result<(), GoldyError> {
-        let _tz = tracy_zone!("orchestrator.flush");
-        self.expect_open(handle)?;
-        if graph.is_empty() {
-            return Ok(());
-        }
-        let tv = self.submit_with_retention(graph)?;
-        *last_timeline = Some(tv);
-        // TODO(retained-graph): clear()+rebuild each flush — see `TaskGraph::clear` docs.
-        graph.clear();
-        Ok(())
-    }
-
-    /// End a standalone (headless / render-to-texture) frame: submit remaining work, push the
-    /// cleanup slot with a known timeline, clear the open handle.
-    ///
-    /// When [`Self::retains_command_buffers`] is true the same retention logic as [`Self::flush`] applies:
-    /// zero-cost resubmission is attempted first, falling back to a retain-and-record submit.
-    ///
-    /// If `graph` is empty, `fallback_timeline` is used (e.g. the value from previous
-    /// [`Self::flush`] calls). If that is `None`, [`Context::gpu_progress`](crate::Context::gpu_progress) is used.
+    /// Pushes a retirement-ring slot stamped with `timeline`, clears the open handle, and
+    /// emits a Tracy frame mark.
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
-        graph: &mut TaskGraph,
-        fallback_timeline: Option<TimelineValue>,
+        timeline: TimelineValue,
         cleanup: T,
     ) -> Result<TimelineValue, GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
-        let tv = if graph.is_empty() {
-            fallback_timeline.unwrap_or_else(|| self.context.gpu_progress())
-        } else {
-            self.submit_with_retention(graph)?
-        };
         self.ring.push_back(FrameSlot {
-            timeline: Some(tv),
+            timeline: Some(timeline),
             data: cleanup,
         });
         self.open = None;
         tracy_frame_mark!();
-        Ok(tv)
+        Ok(timeline)
     }
 
     /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
     /// [`crate::Grant::consume`] on a [`crate::PresentGrant`].
     ///
-    /// Same retirement semantics as [`Self::end_frame_for_surface`]: pushes a ring slot
+    /// Same retirement semantics as a surface frame closed before present: pushes a ring slot
     /// whose timeline is filled later via [`Self::note_presented`], and does **not** emit a
-    /// Tracy frame mark (the mark belongs at present time, like the TaskGraph surface path).
+    /// Tracy frame mark (the mark belongs at present time).
     pub fn end_frame_for_present(
         &mut self,
         handle: FrameHandle,
@@ -235,123 +189,7 @@ impl<T> FrameOrchestrator<T> {
         Ok(())
     }
 
-    /// Submit `graph`, using command-buffer retention when [`Self::retains_command_buffers`].
-    ///
-    /// - **depth == 1**: tries [`crate::Context::try_resubmit_retained`] first
-    ///   (zero CPU recording cost on a hit); on a miss (first frame or fingerprint change)
-    ///   falls back to [`crate::Context::submit_pipelined_and_retain`] so the next frame can hit.
-    ///   The last successful retention key is stored in `self.last_retention_key`.
-    /// - **All other strategies**: always [`crate::Context::submit_pipelined`].  Retention would be
-    ///   unsafe at pipeline depth > 1 because the same CB can still be in-flight from the
-    ///   previous frame when a new submission begins.
-    fn submit_with_retention(&mut self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
-        if !self.retains_command_buffers() {
-            return self.context.submit_pipelined(graph);
-        }
-
-        // When CB replay is disabled globally, skip whole-graph fingerprinting and
-        // resubmit attempts; TaskGraph retain path also routes to fresh submits.
-        if crate::validation_env::retained_cb_reuse_disabled() {
-            self.last_retention_key = None;
-            return self.context.submit_pipelined_and_retain(graph);
-        }
-
-        // Compute the full content fingerprint — covers pipeline, dispatch dims, push constants.
-        let fp = graph.compute_retention_fingerprint();
-
-        // Attempt zero-cost resubmission when the fingerprint matches the stored CB.
-        if self.last_retention_key == Some(fp) {
-            match self.context.try_resubmit_retained(fp)? {
-                Some(tv) => {
-                    tracing::trace!(
-                        target: "goldy::retention",
-                        key = fp,
-                        "retention hit — resubmitted without re-recording"
-                    );
-                    return Ok(tv);
-                }
-                None => {
-                    // Key matched but CB was evicted (e.g. a previous fallback path);
-                    // fall through to record-and-retain below.
-                    tracing::trace!(
-                        target: "goldy::retention",
-                        key = fp,
-                        "retention miss — CB evicted, re-recording"
-                    );
-                }
-            }
-        } else {
-            tracing::trace!(
-                target: "goldy::retention",
-                old_key = ?self.last_retention_key,
-                new_key = fp,
-                "retention fingerprint changed — re-recording"
-            );
-        }
-
-        // Record the command buffer and store it for the next frame.
-        let tv = self.context.submit_pipelined_and_retain(graph)?;
-        self.last_retention_key = Some(fp);
-        Ok(tv)
-    }
-
-    /// End a surface frame: submit the graph via [`Surface::submit_graph`]
-    /// (deferred acquire), push a ring slot whose timeline is filled later by
-    /// [`Self::note_presented`], and return the acquired [`Frame`] for the
-    /// caller to present.
-    ///
-    /// When the graph is empty, falls back to [`Surface::begin`] so the caller
-    /// still receives a `Frame` (useful for cleared-only frames).
-    pub fn end_frame_for_surface(
-        &mut self,
-        handle: FrameHandle,
-        graph: &mut TaskGraph,
-        surface: &Surface,
-        cleanup: T,
-    ) -> Result<Frame, GoldyError> {
-        let _tz = tracy_zone!("orchestrator.end_frame_for_surface");
-        self.expect_open(handle)?;
-        let frame = if graph.is_empty() {
-            surface.begin().map_err(GoldyError::from)?
-        } else {
-            surface.submit_graph(graph).map_err(GoldyError::from)?
-        };
-        self.ring.push_back(FrameSlot {
-            timeline: None,
-            data: cleanup,
-        });
-        self.open = None;
-        Ok(frame)
-    }
-
-    /// End a surface frame using a frame that was acquired before graph recording began.
-    ///
-    /// This keeps the same retirement semantics as [`Self::end_frame_for_surface`] while allowing
-    /// callers to overlap WSI image acquisition with CPU graph construction and early GPU work.
-    pub fn end_frame_for_acquired_surface(
-        &mut self,
-        handle: FrameHandle,
-        graph: &mut TaskGraph,
-        surface: &Surface,
-        frame: Frame,
-        cleanup: T,
-    ) -> Result<Frame, GoldyError> {
-        let _tz = tracy_zone!("orchestrator.end_frame_for_acquired_surface");
-        self.expect_open(handle)?;
-        let frame = if graph.is_empty() {
-            frame
-        } else {
-            surface.submit_graph_to_frame(graph, frame).map_err(GoldyError::from)?
-        };
-        self.ring.push_back(FrameSlot {
-            timeline: None,
-            data: cleanup,
-        });
-        self.open = None;
-        Ok(frame)
-    }
-
-    /// After [`Frame::present`], stamp the most recent surface slot with the returned timeline.
+    /// After [`crate::Frame::present`], stamp the most recent surface slot with the returned timeline.
     pub fn note_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.ring.back_mut() {
             if back.timeline.is_none() {

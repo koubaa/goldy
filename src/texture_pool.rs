@@ -9,7 +9,7 @@
 //! **Semantics:** dropping an owned [`crate::Texture`] destroys the GPU resource.
 //! Pooling is opt-in: call [`TexturePool::release`] only after GPU work using the
 //! texture has completed (e.g. after [`Context::wait_until`](crate::Context::wait_until)
-//! with the timeline from [`TaskGraph::submit`](crate::task_graph::TaskGraph::submit)).
+//! with the timeline from [`Scheme::submit`](crate::Scheme::submit)).
 
 use crate::device::Device;
 use crate::types::{TextureFlags, TextureFormat, TextureKind};

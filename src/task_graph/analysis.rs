@@ -25,16 +25,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::Result;
-
 use super::ir::{BarrierSet, BarrierUsage, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, UsageKindFlags, Wave};
-// NodeAccess is used in the test module via `super::*`
+// NodeAccess / Result are used in the test module (and cfg(test) helpers) via `super::*`
 #[cfg(test)]
 use super::ir::NodeAccess;
 use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
 use crate::frame_table::FrameTableStaging;
+#[cfg(test)]
+use anyhow::Result;
 
 fn push_compute_resource_bind(
     commands: &mut Vec<GpuCommand>,
@@ -325,7 +325,8 @@ pub(crate) fn graph_node_waves(ir: &GraphIR) -> Result<Vec<u32>> {
 ///
 /// This is O(N) and avoids the full `build_edges` + `schedule_waves` pass that
 /// [`graph_node_waves`] performs. Use this whenever a `CompiledSchedule` is
-/// already in hand (e.g. from `TaskGraph::schedule_and_split_wave`).
+/// already in hand (e.g. from a precomputed schedule).
+#[cfg(test)]
 pub(crate) fn node_to_wave_map(schedule: &CompiledSchedule, n: usize) -> Vec<u32> {
     let mut map = vec![0u32; n];
     for (w, wave) in schedule.waves.iter().enumerate() {
@@ -344,6 +345,7 @@ pub(crate) fn node_to_wave_map(schedule: &CompiledSchedule, n: usize) -> Vec<u32
 ///
 /// Used to pack transient heap allocations: non-overlapping wave intervals may
 /// alias the same memory.
+#[cfg(test)]
 pub(crate) fn transient_wave_intervals(ir: &GraphIR, node_waves: &[u32]) -> Result<HashMap<u32, (u32, u32)>> {
     if ir.nodes.is_empty() {
         return Ok(HashMap::new());
@@ -372,6 +374,7 @@ pub(crate) fn transient_wave_intervals(ir: &GraphIR, node_waves: &[u32]) -> Resu
 ///
 /// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
 /// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
+#[cfg(test)]
 pub(crate) fn transient_texture_wave_intervals(ir: &GraphIR, node_waves: &[u32]) -> Result<HashMap<u32, (u32, u32)>> {
     if ir.nodes.is_empty() {
         return Ok(HashMap::new());
@@ -928,9 +931,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             if let NodeKind::RenderPass { .. } = &node.kind {
-                panic!(
-                    "emit_commands: graph contains render_pass; use emit_graph_commands / TaskGraph::compile_graph_commands"
-                );
+                panic!("emit_commands: graph contains render_pass; use emit_graph_commands");
             }
         }
     }
@@ -960,6 +961,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
 /// # Panics
 ///
 /// If the graph contains [`NodeKind::RenderPass`], use [`emit_graph_commands`] instead.
+#[cfg(test)]
 pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
     emit_waves_to_commands(ir, &schedule.waves, resolver)
 }
@@ -988,6 +990,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option
 ///
 /// **Invariant**: `partitions.into_iter().flatten().collect::<Vec<_>>()`
 /// always equals the output of [`emit_commands`] for the same inputs.
+#[cfg(test)]
 pub fn emit_partitioned_commands(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
@@ -1298,15 +1301,6 @@ fn wave_has_present_binding(ir: &GraphIR, wave: &Wave) -> bool {
     })
 }
 
-/// Returns true if any node in `waves` is an offscreen [`NodeKind::RenderPass`].
-pub(crate) fn waves_contain_render_pass(ir: &GraphIR, waves: &[Wave]) -> bool {
-    waves.iter().any(|w| {
-        w.node_indices
-            .iter()
-            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
-    })
-}
-
 /// Emit [`GraphCommand`]s for a slice of compiled waves (compute + optional render).
 pub(crate) fn emit_graph_commands_for_waves(
     ir: &GraphIR,
@@ -1525,15 +1519,6 @@ pub(crate) fn emit_graph_commands_for_waves(
     }
 
     commands
-}
-
-/// Emit [`GraphCommand`]s (compute + optional offscreen render) from the analyzed graph.
-pub fn emit_graph_commands(
-    ir: &GraphIR,
-    schedule: &CompiledSchedule,
-    resolver: Option<&SlotResolver>,
-) -> Vec<GraphCommand> {
-    emit_graph_commands_for_waves(ir, &schedule.waves, resolver)
 }
 
 #[cfg(test)]

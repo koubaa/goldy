@@ -635,6 +635,7 @@ impl SlangCompiler {
             effective.as_ref(),
             target,
             entry_points,
+            search_paths,
             defines,
             layout_checks,
             optimization_level,

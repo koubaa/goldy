@@ -1,26 +1,35 @@
 # Rendering Outputs
 
-`Surface` manages a swapchain for zero-copy GPU-to-display presentation. It wraps the platform window handle, acquires drawable textures each frame, and presents finished frames to the display.
+Goldy supports two presentation paths:
 
-## Creating a Surface
+- **Present-on-scheme** (recommended) — [`SwapchainPool`](https://docs.rs/goldy/latest/goldy/struct.SwapchainPool.html) + [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) + [`PresentGrant`](https://docs.rs/goldy/latest/goldy/struct.PresentGrant.html). Record copy or compute-to-present once in a retained [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html); submit each frame.
+- **Legacy Surface API** — [`Surface`](https://docs.rs/goldy/latest/goldy/struct.Surface.html) acquire/present bracket (still used internally by `SwapchainPool`).
 
-A `Surface` requires a `Device` and a window that implements `HasWindowHandle + HasDisplayHandle` (from the `raw-window-handle` crate).
+All windowed Rust examples use present-on-scheme.
+
+## SwapchainPool and PresentLease
+
+A `SwapchainPool` wraps the platform window and supplies drawable backings for stable present leases:
 
 ```rust
-use goldy::{Surface, SurfaceConfig, PresentMode, DepthFormat};
+use goldy::{SwapchainPool, SurfaceConfig, PresentMode, DepthFormat};
 
-// Simplest form — Auto present mode, no depth buffer
-let surface = Surface::new(&device, &window)?;
+let swapchain = SwapchainPool::new(&ctx, &window, 3)?;
 
 // With explicit configuration
-let surface = Surface::new_with_config(&device, &window, SurfaceConfig {
-    present_mode: PresentMode::Fifo,
-    depth_format: Some(DepthFormat::Depth32Float),
-})?;
-
+let swapchain = SwapchainPool::new_with_config(
+    &ctx,
+    &window,
+    3,
+    SurfaceConfig {
+        present_mode: PresentMode::Fifo,
+        depth_format: Some(DepthFormat::Depth32Float),
+    },
+)?;
+let screen = swapchain.lease();
 ```
 
-Depth testing uses an offscreen `RenderTarget::new_with_depth` in the task graph, not the swapchain surface.
+Depth testing uses an offscreen scheme-leased render target, not the swapchain drawable.
 
 ## SurfaceConfig
 
@@ -45,134 +54,83 @@ pub struct SurfaceConfig {
 | `Immediate` | No sync, may tear. Maximum throughput for benchmarks. | Metal `displaySyncEnabled=NO`, Vulkan `IMMEDIATE`, DX12 `Present(0)` |
 | `Auto` | Goldy chooses (`Mailbox` if available, then `Fifo`). | — |
 
-Change the present mode at runtime without recreating the surface:
+Change the present mode at runtime:
 
 ```rust
-surface.set_present_mode(PresentMode::Immediate)?;
-let current = surface.present_mode();
+swapchain.set_present_mode(PresentMode::Immediate)?;
+let current = swapchain.present_mode();
 ```
 
-## Frame Acquisition Cycle
+## Present-on-Scheme Frame Cycle
 
-Each frame builds a task graph, blits an offscreen render target to the swapchain, then presents:
+Record once at init (and on resize), submit each frame:
 
 ```rust
-loop {
-    frame_graph.clear();
+let mut pass = scheme.render_pass("main", &scene_rt);
+pass.with_parcel(&vertices, NodeAccess::Read);
+pass.clear(Color::CORNFLOWER_BLUE);
+pass.set_pipeline(&pipeline);
+pass.set_vertex_buffer(0, &vertices);
+pass.draw(0..3, 0..1);
+pass.finish();
+scheme.copy_to_present(&scene_rt, &screen);
+let present = scheme.grant_present(&screen);
 
-    let mut pass = frame_graph.render_pass("main", &scene_rt);
-    pass.with_buffer_mut(&vertices, NodeAccess::Read);
-    pass.clear(Color::CORNFLOWER_BLUE);
-    pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, &vertices);
-    pass.draw(0..3, 0..1);
-    pass.finish_recorded();
-
-    let swapchain = frame_graph.declare_swapchain_output();
-    frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
-
-    let frame = surface.begin()?;
-    let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
-    frame.present()?;
-}
+// Each frame:
+let submission = scheme.submit()?;
+present.consume(&submission)?;
 ```
 
-`surface.acquire()` is a legacy alias for `surface.begin()`.
+For pure compute-to-surface, bind the present lease in a compute node with `with_present(&screen)` instead of a render pass + copy.
 
-## Frame
+## Legacy Surface API
 
-`Frame` represents a single swapchain image bracket. It tracks whether the frame has been presented and auto-presents on drop if you forget.
-
-### Frame Properties
+`Surface` manages a swapchain for direct acquire/present workflows. It wraps the platform window handle and acquires drawable textures each frame.
 
 ```rust
+let surface = Surface::new(&device, &window)?;
 let frame = surface.begin()?;
-
-frame.width();   // frame dimensions (may differ from surface after resize)
-frame.height();
-```
-
-### Graphics Path — submit_graph_to_frame
-
-Record draw commands in `RenderPassBuilder` nodes, then submit the graph with the acquired frame:
-
-```rust
-let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
+// ... lower-level frame bracket ...
 frame.present()?;
 ```
 
-### Compute Path — Frame::submit_compute
+New applications should prefer `SwapchainPool` + `Scheme`. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs).
 
-For compute-to-surface workflows, access the frame's texture directly and submit a `TaskGraph`:
-
-```rust
-let frame = surface.begin()?;
-let tex = frame.texture();  // the swapchain texture as a storage image
-
-// Build a task graph that writes to tex...
-frame.submit_compute(&task_graph)?;
-frame.present()?;
-```
-
-`frame.texture()` returns a `&Texture` with `TextureKind::Direct`, suitable for binding as a storage image in compute shaders.
-
-### Presenting
-
-`frame.present()` consumes the `Frame`, submits all recorded work, and queues the image for display. It returns a `TimelineValue` that can be used with `Device::wait_until()`.
+## Swapchain Queries
 
 ```rust
-let timeline = frame.present()?;
+swapchain.width();
+swapchain.height();
+swapchain.size();        // (width, height)
+swapchain.format();      // TextureFormat of the swapchain images
 ```
 
-If a `Frame` is dropped without calling `present()`, it auto-presents to avoid leaking the swapchain image. This is safe but wastes a frame.
-
-## Surface Queries
-
-```rust
-surface.width();
-surface.height();
-surface.size();        // (width, height)
-surface.format();      // TextureFormat of the swapchain images
-
-// Validate that a pipeline's target format matches
-surface.validate_pipeline_format(pipeline_format)?;
-```
-
-## Resize Handling
-
-Call `resize()` when the window size changes. Zero-size dimensions are silently ignored (common during window minimize).
-
-```rust
-fn on_resize(surface: &mut Surface, width: u32, height: u32) -> Result<()> {
-    surface.resize(width, height)?;
-    Ok(())
-}
-```
-
-## Texture Format
-
-The swapchain format is chosen by the backend at surface creation (typically `Bgra8UnormSrgb`). Always use `surface.format()` when creating pipelines to ensure a match:
+Always use `swapchain.format()` when creating pipelines to ensure a match:
 
 ```rust
 let desc = RenderPipelineDesc {
-    target_format: surface.format(),
+    target_format: swapchain.format(),
     ..Default::default()
 };
 ```
 
-## Frame Lifetime
+## Resize Handling
 
-`Frame` follows Rust ownership semantics:
-
-- `begin()` acquires the swapchain image and returns a `Frame`
-- `texture()` borrows the frame — valid until `present()` is called
-- `present()` consumes the `Frame` — the borrow checker prevents use-after-present
-- Dropping without presenting auto-presents (prevents swapchain deadlock)
+Call `resize()` when the window size changes. Zero-size dimensions are silently ignored (common during window minimize). Rebuild the scheme and present grant when dimensions change.
 
 ```rust
-let frame = surface.begin()?;
-let tex = frame.texture();
-// tex is valid here
-frame.present()?;
-// tex is now invalid — Rust prevents accessing it
+swapchain.resize(width, height)?;
+// rebuild scheme + present grant
+```
+
+## Present Grant Lifetime
+
+- Record `grant_present(&screen)` once when building the scheme.
+- Each frame: `scheme.submit()` then `present.consume(&submission)`.
+- Each submission may be consumed at most once per grant.
+
+```rust
+let submission = scheme.submit()?;
+present.consume(&submission)?;
+// submission consumed — do not reuse
 ```

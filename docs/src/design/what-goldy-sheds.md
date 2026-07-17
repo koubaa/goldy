@@ -23,7 +23,7 @@ This also eliminates **pipeline layouts as objects**. In Vulkan, each unique com
 
 In Vulkan and DX12, you manually insert memory barriers and image layout transitions to tell the GPU when a resource changes from "written by compute" to "read by fragment" (or any other transition). Missing a barrier is a silent correctness bug; inserting too many is a performance bug.
 
-Goldy's task graph handles this automatically. You declare what each task reads and writes; Goldy derives the minimal set of barriers and transitions. This is both safer and typically more efficient than hand-placed barriers, because the task graph has a global view of the frame.
+Goldy's scheme (dependency graph) handles this automatically. You declare what each node reads and writes; Goldy derives the minimal set of barriers and transitions. This is both safer and typically more efficient than hand-placed barriers, because the scheme has a global view of the frame.
 
 ## No Shader Permutation Systems
 
@@ -56,14 +56,18 @@ Blend mode, depth testing, and vertex format are still part of the pipeline — 
 
 OpenCL introduced compute to GPUs as an entirely separate API with its own device model, memory model, and dispatch semantics. Even "unified" APIs like Vulkan treat compute as a second-class citizen — compute pipelines and graphics pipelines share almost no code paths.
 
-In Goldy, compute is a first-class citizen on the same footing as graphics. Compute shaders use the same bindless resource model, the same buffer types, and the same task graph. A compute dispatch that writes to a buffer and a draw call that reads from it are just nodes in the same graph.
+In Goldy, compute is a first-class citizen on the same footing as graphics. Compute shaders use the same bindless resource model, the same buffer types, and the same scheme. A compute dispatch that writes to a buffer and a draw call that reads from it are just nodes in the same dependency graph.
 
 ```rust
-// Compute updates particles, render draws them — same resources, same graph
-graph.add_compute("update", &compute_shader, &[&particle_buf], [workgroups, 1, 1]);
-graph.add_render("draw", &render_pipeline, &[&particle_buf], &surface);
+// Compute updates particles, render draws them — same scheme
+scheme.node("update", &compute_pipeline)
+    .with_parcel(&particle_buf, NodeAccess::ReadWrite)
+    .dispatch(workgroups, 1, 1);
+let mut pass = scheme.render_pass("draw", &scene_rt);
+pass.with_parcel(&particle_buf, NodeAccess::Read);
+// ...
 ```
 
 ## The Design Principle
 
-Each of these omissions follows the same logic: if modern hardware doesn't need a concept for correctness or performance, Goldy doesn't expose it. The result is an API where the concepts that remain — buffers, textures, shaders, pipelines, task graph — each carry their weight.
+Each of these omissions follows the same logic: if modern hardware doesn't need a concept for correctness or performance, Goldy doesn't expose it. The result is an API where the concepts that remain — buffers, textures, shaders, pipelines, scheme — each carry their weight.

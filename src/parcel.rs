@@ -38,16 +38,15 @@ pub(crate) struct InteractionEdge {
 
 pub(crate) type InteractionSet = Vec<InteractionEdge>;
 
-/// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
+/// Shared stamp cell and home-device identity for scheme submit stamping.
 pub(crate) struct ParcelStamp {
     pub(crate) sync: Arc<Mutex<ResourceSync>>,
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
-
-    /// Set when this stamp is registered for scheme/task-graph hazard tracking.
-    /// TODO: delete this when task graph is eliminated
-    scheme_registered: Arc<AtomicBool>,
+    /// Cleared when the owning retained-pool [`Buffer`]/[`Texture`] is dropped.
+    /// Schemes that still bind this stamp must fail submit with [`crate::GoldyError::StaleResource`].
+    alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ParcelStamp {
@@ -57,7 +56,7 @@ impl ParcelStamp {
             interaction_set: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
-            scheme_registered: Arc::new(AtomicBool::new(false)),
+            alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -67,18 +66,16 @@ impl ParcelStamp {
             interaction_set: Arc::clone(&self.interaction_set),
             pending: Arc::clone(&self.pending),
             home_device: self.home_device.clone(),
-            scheme_registered: Arc::clone(&self.scheme_registered),
+            alive: Arc::clone(&self.alive),
         }
     }
 
-    //TODO: delete this when taskgraph is removed
-    pub(crate) fn mark_scheme_registered(&self) {
-        self.scheme_registered.store(true, Ordering::Relaxed);
+    pub(crate) fn is_alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    //TODO: delete this when taskgraph is removed
-    pub(crate) fn is_scheme_registered(&self) -> bool {
-        self.scheme_registered.load(Ordering::Relaxed)
+    pub(crate) fn mark_dead(&self) {
+        self.alive.store(false, std::sync::atomic::Ordering::Release);
     }
 
     pub(crate) fn merged_references(&self) -> ReferenceTable {
@@ -287,10 +284,6 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn is_scheme_registered(&self) -> bool {
-        self.stamp.is_scheme_registered()
-    }
-
     /// Zoning / telemetry label (buffer vs texture).
     pub fn kind(&self) -> ParcelType {
         match &self.backing {
@@ -355,16 +348,21 @@ impl Parcel {
         matches!(self.settle(ctx), Settle::Ready)
     }
 
-    /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
+    /// Shared stamp cell updated by [`crate::Scheme`] at submit.
     pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
         Arc::new(self.stamp.clone_shared_cells())
+    }
+
+    /// Mark this parcel's stamp dead so schemes that still bind it fail submit.
+    pub(crate) fn mark_stamp_dead(&self) {
+        self.stamp.mark_dead();
     }
 
     pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
         &self.stamp.home_device
     }
 
-    /// Backend buffer handle and graph resource id for [`crate::TaskGraph::write_parcel`].
+    /// Backend buffer handle and graph resource id for [`crate::Scheme::write_parcel`].
     pub(crate) fn write_buffer_target(&self) -> anyhow::Result<(BufferHandle, ResourceId)> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => {
@@ -532,6 +530,8 @@ enum BufferStorage {
         parent: Arc<Allocation>,
         field_names: Vec<Option<String>>,
     },
+    /// Placeholder after [`Buffer::detach_allocation`] / extract paths (Drop skips stamp-death via `handoff`).
+    Detached,
 }
 
 /// An acquired GPU buffer — possibly partitioned into independently bindable parcels.
@@ -543,6 +543,8 @@ pub struct Buffer {
     units: Vec<Parcel>,
     bookkeeping: Option<BookkeepingGuard>,
     home_device: Weak<DeviceInner>,
+    /// When true, [`Drop`] skips stamp-death (resource handed off, not destroyed).
+    handoff: bool,
 }
 
 impl Buffer {
@@ -558,6 +560,7 @@ impl Buffer {
             units: vec![parcel],
             bookkeeping: Some(bookkeeping),
             home_device,
+            handoff: false,
         }
     }
 
@@ -582,6 +585,7 @@ impl Buffer {
             units,
             bookkeeping: Some(bookkeeping),
             home_device,
+            handoff: false,
         }
     }
 
@@ -610,7 +614,7 @@ impl Buffer {
 
     fn field_index(&self, name: &str) -> Option<usize> {
         match &self.storage {
-            BufferStorage::Single(_) => None,
+            BufferStorage::Single(_) | BufferStorage::Detached => None,
             BufferStorage::Partitioned { field_names, .. } => {
                 field_names.iter().position(|n| n.as_deref() == Some(name))
             }
@@ -636,6 +640,7 @@ impl Buffer {
         match &self.storage {
             BufferStorage::Single(b) => b.byte_size(),
             BufferStorage::Partitioned { parent, .. } => parent.byte_size(),
+            BufferStorage::Detached => 0,
         }
     }
 
@@ -674,7 +679,7 @@ impl Buffer {
     pub fn write(&self, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         match &self.storage {
             BufferStorage::Single(b) => b.write(offset, data),
-            BufferStorage::Partitioned { .. } => {
+            BufferStorage::Partitioned { .. } | BufferStorage::Detached => {
                 anyhow::bail!("Buffer::write requires a single-unit buffer; write to a specific parcel instead")
             }
         }
@@ -689,7 +694,7 @@ impl Buffer {
     pub fn clear(&self, device: &crate::Device, offset: u64, size: u64) -> anyhow::Result<()> {
         match &self.storage {
             BufferStorage::Single(b) => b.clear(device, offset, size),
-            BufferStorage::Partitioned { .. } => {
+            BufferStorage::Partitioned { .. } | BufferStorage::Detached => {
                 anyhow::bail!("Buffer::clear requires a single-unit buffer; clear a specific parcel instead")
             }
         }
@@ -714,10 +719,9 @@ impl Buffer {
             anyhow::bail!("into_transient_parcel requires a single-unit buffer");
         }
         self.release_bookkeeping();
-        match self.storage {
-            BufferStorage::Single(arc) => Ok(Parcel::from_whole_buffer(arc, self.home_device)),
-            BufferStorage::Partitioned { .. } => unreachable!(),
-        }
+        self.handoff = true;
+        // Clone the unit parcel; `handoff` skips stamp-death when `self` drops.
+        Ok(self.units[0].clone())
     }
 
     /// Iterate all bindable parcels for dependency registration.
@@ -728,15 +732,20 @@ impl Buffer {
     /// Extract the backing allocation from a single-unit buffer.
     #[allow(dead_code)] // retained-pool migration tests
     pub(crate) fn detach_allocation(mut self) -> anyhow::Result<Allocation> {
+        if matches!(
+            self.storage,
+            BufferStorage::Partitioned { .. } | BufferStorage::Detached
+        ) {
+            anyhow::bail!("detach_allocation requires a single-unit buffer");
+        }
         self.release_bookkeeping();
-        match self.storage {
-            BufferStorage::Single(b) => {
-                // Drop the whole-buffer parcel before unwrapping; it holds a second Arc ref.
-                self.units.clear();
-                Arc::try_unwrap(b)
-                    .map_err(|_| anyhow::anyhow!("detach_allocation requires sole ownership of the backing allocation"))
-            }
-            BufferStorage::Partitioned { .. } => {
+        self.handoff = true;
+        // Drop the whole-buffer parcel before unwrapping; it holds a second Arc ref.
+        self.units.clear();
+        match std::mem::replace(&mut self.storage, BufferStorage::Detached) {
+            BufferStorage::Single(b) => Arc::try_unwrap(b)
+                .map_err(|_| anyhow::anyhow!("detach_allocation requires sole ownership of the backing allocation")),
+            BufferStorage::Partitioned { .. } | BufferStorage::Detached => {
                 anyhow::bail!("detach_allocation requires a single-unit buffer")
             }
         }
@@ -747,6 +756,7 @@ impl Buffer {
         match &self.storage {
             BufferStorage::Single(b) => b.gpu_buffer_handle(),
             BufferStorage::Partitioned { parent, .. } => parent.gpu_buffer_handle(),
+            BufferStorage::Detached => panic!("Buffer::backing_handle after detach"),
         }
     }
 
@@ -755,6 +765,21 @@ impl Buffer {
         match &self.storage {
             BufferStorage::Single(b) => b.flags(),
             BufferStorage::Partitioned { parent, .. } => parent.flags(),
+            BufferStorage::Detached => BufferFlags::empty(),
+        }
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        if self.handoff {
+            return;
+        }
+        // RetainedPool outranks Scheme: dropping this buffer invalidates every scheme stamp
+        // that still references it. Backend destroy (via Allocation Drop) then evicts retained
+        // CBs that pin its bindless slots so deferred free can proceed.
+        for parcel in &self.units {
+            parcel.mark_stamp_dead();
         }
     }
 }
@@ -766,6 +791,9 @@ pub struct Texture {
     parcel: Parcel,
     bookkeeping: Option<BookkeepingGuard>,
     home_device: Weak<DeviceInner>,
+    /// When true, [`Drop`] skips stamp-death (resource handed off, or a non-owning
+    /// [`Texture::borrow`] / [`Clone`] view that must not invalidate the shared stamp).
+    handoff: bool,
 }
 
 impl Clone for Texture {
@@ -774,6 +802,9 @@ impl Clone for Texture {
             parcel: self.parcel.clone(),
             bookkeeping: None,
             home_device: self.home_device.clone(),
+            // Non-owning view: Drop must not kill the shared stamp. Only the owning
+            // Texture (or an explicit handoff extract) marks the stamp dead.
+            handoff: true,
         }
     }
 }
@@ -788,6 +819,7 @@ impl Texture {
             parcel: Parcel::from_texture(backing, home_device.clone()),
             bookkeeping: Some(bookkeeping),
             home_device,
+            handoff: false,
         }
     }
 
@@ -796,6 +828,7 @@ impl Texture {
             parcel,
             bookkeeping: Some(bookkeeping),
             home_device,
+            handoff: false,
         }
     }
 
@@ -804,6 +837,7 @@ impl Texture {
             parcel,
             bookkeeping: None,
             home_device,
+            handoff: false,
         }
     }
 
@@ -812,6 +846,7 @@ impl Texture {
             parcel: Parcel::from_texture(backing, home_device.clone()),
             bookkeeping: None,
             home_device,
+            handoff: false,
         }
     }
 
@@ -905,12 +940,15 @@ impl Texture {
     }
 
     /// Non-owning view sharing this texture's parcel stamp.
+    ///
+    /// Dropping the view does **not** mark the stamp dead; only the owning [`Texture`] does.
     pub fn borrow(&self) -> Self {
         let backing = self.parcel.grant_texture_keepalive().expect("texture parcel").borrow();
         Self {
             parcel: self.parcel.clone_stamp_with_texture(backing),
             bookkeeping: None,
             home_device: self.home_device.clone(),
+            handoff: true,
         }
     }
 
@@ -931,7 +969,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use TaskGraph::write_texture_region() for batched, non-blocking uploads. \
+        note = "Use Scheme::write_texture_region() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
@@ -943,7 +981,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use TaskGraph::write_texture() for batched, non-blocking uploads. \
+        note = "Use Scheme::write_texture() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
@@ -956,11 +994,6 @@ impl Texture {
     )]
     #[allow(deprecated)]
     pub fn read_to_cpu(&self, output: &mut [u8]) -> anyhow::Result<()> {
-        if self.parcel.is_scheme_registered() {
-            anyhow::bail!(
-                "texture is tracked by a scheme; copy to a CPU_READABLE buffer parcel via a scheme instead of Texture::read_to_cpu"
-            );
-        }
         self.parcel.grant_texture_keepalive()?.read_to_cpu(output)
     }
 
@@ -977,12 +1010,35 @@ impl Texture {
         if let Some(guard) = self.bookkeeping.take() {
             self.parcel.attach_bookkeeping(guard);
         }
-        self.parcel
+        // Move the parcel out. `ManuallyDrop` skips [`Texture::Drop`] (stamp-death) and
+        // avoids `clone()` which would drop bookkeeping and free the lease early.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            let parcel = std::ptr::read(&this.parcel);
+            std::ptr::drop_in_place(&mut this.bookkeeping);
+            std::ptr::drop_in_place(&mut this.home_device);
+            parcel
+        }
     }
 
     pub(crate) fn into_parcel(mut self) -> Parcel {
         self.release_bookkeeping();
-        self.parcel
+        let mut this = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            let parcel = std::ptr::read(&this.parcel);
+            std::ptr::drop_in_place(&mut this.bookkeeping);
+            std::ptr::drop_in_place(&mut this.home_device);
+            parcel
+        }
+    }
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        if self.handoff {
+            return;
+        }
+        self.parcel.mark_stamp_dead();
     }
 }
 

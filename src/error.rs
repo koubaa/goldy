@@ -1,6 +1,6 @@
 /// Typed error variants for the goldy public API.
 ///
-/// Returned by [`crate::Context::submit`], [`crate::Context::dispatch`], [`crate::Context::wait_until`],
+/// Returned by [`crate::Scheme::submit`], [`crate::Context::wait_until`],
 /// and [`crate::Context::wait_until_timeout`] so callers can distinguish recoverable
 /// conditions (timeout) from permanent ones (device loss) without string-matching.
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +27,13 @@ pub enum GoldyError {
     /// the specified `timeout_ms`. The device itself is still healthy.
     #[error("GPU submit timed out")]
     SubmitTimeout,
+
+    /// A [`Scheme`](crate::Scheme) still references a retained-pool resource that was dropped.
+    ///
+    /// Retained-pool resources outrank schemes: dropping a buffer/texture invalidates every
+    /// scheme that bound it. Re-record the scheme without the dead resource, or drop the scheme.
+    #[error("scheme references a dropped retained resource")]
+    StaleResource,
 
     /// An unexpected backend error that does not map to the typed variants above.
     #[error(transparent)]

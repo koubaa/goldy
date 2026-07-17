@@ -15,8 +15,8 @@ mod imp {
 
     use crate::submission::submission_context;
     use goldy::{
-        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
-        RequestAdapterOptions, ShaderModule, TaskGraph,
+        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
+        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
     };
     use std::sync::Arc;
 
@@ -39,7 +39,7 @@ mod imp {
         stride: Option<u32>,
         flags: BufferFlags,
     ) -> Buffer {
-        goldy::RetainedPool::new(Arc::new(device.clone()))
+        RetainedPool::new(Arc::new(device.clone()))
             .acquire_buffer(size, kind, stride, flags, None)
             .expect("acquire_buffer")
     }
@@ -68,9 +68,12 @@ mod imp {
         // requirements and is drainable immediately by any sibling trial's wait_until.
         let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
 
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
-        let tv = graph.submit(&ctx).expect("submit");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n0", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let tv = scheme.submit().expect("submit").timeline_value();
 
         assert_eq!(
             ctx.deferred_deletion_pending_count(),
@@ -78,6 +81,8 @@ mod imp {
             "bindless buffer destroys are queued on the device-level deletion queue, not per-context"
         );
 
+        // Dropping the retained buffer must not require dropping the scheme first:
+        // destroy evicts retained CBs that pin its slots, and marks the scheme stamp dead.
         drop(buf);
 
         ctx.wait_until(tv).expect("wait_until");
@@ -91,6 +96,11 @@ mod imp {
             device.device_deferred_deletion_pending_count(),
             0,
             "wait_until should drain device deferred destruction for completed timeline values"
+        );
+
+        assert!(
+            matches!(scheme.submit(), Err(goldy::GoldyError::StaleResource)),
+            "submit after dropping a bound retained buffer must fail"
         );
     }
 

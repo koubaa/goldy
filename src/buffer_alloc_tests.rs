@@ -201,9 +201,8 @@ mod buffer_alloc_tests {
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     #[test]
     fn dx12_reserved_buffer_resize_compute_smoke() {
-        use crate::task_graph::NodeAccess;
         use crate::types::BufferResizeCost;
-        use crate::{BackendType, ComputePipeline, DeviceType, ShaderModule, TaskGraph};
+        use crate::{BackendType, ComputePipeline, DeviceType, NodeAccess, Scheme, ShaderModule};
         const SMOKY_SHADER: &str = r#"
     import goldy_exp;
 
@@ -240,13 +239,13 @@ mod buffer_alloc_tests {
 
         let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut graph = TaskGraph::new();
-        graph
+        let mut scheme = Scheme::new(&ctx);
+        scheme
             .node("n0", &pipeline)
-            .with_allocation(&buf, NodeAccess::ReadWrite)
-            .with_resource_slots_slice(&[bindless])
+            .with_parcel(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch");
+        let tv = scheme.submit().expect("dispatch").timeline_value();
+        ctx.wait_until(tv).expect("wait dispatch");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
             .expect("read2");
@@ -263,13 +262,14 @@ mod buffer_alloc_tests {
 
         let initial2: Vec<u32> = (0..16).collect();
         buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_allocation(&buf, NodeAccess::ReadWrite)
-            .with_resource_slots_slice(&[bindless])
+        // Fresh scheme: avoid retained-CB replay against Allocation-backed parcels.
+        let mut scheme2 = Scheme::new(&ctx);
+        scheme2
+            .node("n1", &pipeline)
+            .with_parcel(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        graph.dispatch(&ctx).expect("dispatch2");
+        let tv2 = scheme2.submit().expect("dispatch2").timeline_value();
+        ctx.wait_until(tv2).expect("wait dispatch2");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
             .expect("read3");
