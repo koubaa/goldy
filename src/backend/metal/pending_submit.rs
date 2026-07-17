@@ -93,9 +93,12 @@ impl PendingSubmit for MetalCommitPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         autoreleasepool(|| {
             let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.commit", self.log_kind);
+            // Match DX12/Vulkan: host-observed waits + deferred writes run *before*
+            // taking `queue_lock`. A stuck 120s wait must not pin the device queue and
+            // block presents; failure leaves the timeline unsignaled via worker error.
+            apply_host_sidecar_before_gpu(&self.host_sidecar)?;
             let command_buffer_ref = self.command_buffer.as_ref();
             let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
-            apply_host_sidecar_before_gpu(&self.host_sidecar)?;
             if self.api_log_commit && super::api_log::enabled() {
                 super::api_log::log_commit(self.signal_value);
             }

@@ -205,6 +205,14 @@ fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Resul
 }
 
 /// Resolve host-observed waits and deferred CPU writes for the submission worker.
+///
+/// **Enqueue-time resolution:** Metal binds `BufferHandle → mtl::Buffer` here on the
+/// render/submit-enqueue thread and ships owned `MTLBuffer` refs in the sidecar. DX12
+/// instead keeps `BufferHandle`s and re-resolves `cpu_writable_upload_mapped` at execute
+/// time on the worker. If a buffer is physically reallocated between enqueue and commit,
+/// Metal therefore writes the *old* allocation — consistent with the command buffer that
+/// was recorded against those handles, but a semantic divergence from DX12's execute-time
+/// lookup.
 fn resolve_host_sidecar(
     state: &MetalState,
     sync: Option<&SubmitSync>,
@@ -233,8 +241,12 @@ fn resolve_host_sidecar(
             .buffers
             .get(&w.buffer)
             .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
-        if buffer_state.flags.contains(BufferFlags::GPU_ONLY) {
-            anyhow::bail!("deferred host write requires CPU-writable buffer (handle={})", w.buffer);
+        // Align with DX12's `cpu_writable_upload_mapped` gate: only CPU_WRITABLE staging.
+        if !buffer_state.flags.contains(BufferFlags::CPU_WRITABLE) {
+            anyhow::bail!(
+                "deferred host write requires CPU_WRITABLE buffer (handle={})",
+                w.buffer
+            );
         }
         deferred_writes.push((buffer_state.buffer.clone(), w.offset, Arc::clone(&w.data)));
     }
