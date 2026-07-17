@@ -1523,6 +1523,18 @@ impl IrSubmitState {
         }
     }
 
+    /// Drop a previously registered stamp for `resource_id`, if any.
+    ///
+    /// Call this when a resource is unbound from the IR (e.g. a single-slot node like
+    /// [`crate::Scheme::copy_texture`] is re-recorded with a different `src`) so the
+    /// retired resource's (possibly now-dead) stamp does not keep failing
+    /// [`Self::all_stamps_alive`] forever on an otherwise-live, retained scheme.
+    pub fn forget_resource_stamp(&mut self, resource_id: ResourceId) {
+        if let Some(key) = ResourceKey::from_resource_id(resource_id) {
+            self.resource_stamps.remove(&key);
+        }
+    }
+
     /// Register stamps for every parcel unit in a buffer (dependency tracking only).
     pub fn register_buffer_stamps(&mut self, buffer: &crate::Buffer) {
         for parcel in buffer.parcels() {

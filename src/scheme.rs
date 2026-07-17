@@ -2162,18 +2162,42 @@ impl Scheme {
 
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
+
+        // This node kind is a single-slot readback recorded repeatedly on an otherwise
+        // retained `Scheme` (see doc comment above): each call replaces the prior
+        // `CopyTexture` node outright rather than accumulating one per call. When `src`
+        // changes across calls (e.g. the caller re-created its source texture), the old
+        // source is no longer bound by any node in this IR. Forget its stamp registration
+        // too, or a resource that is merely retired-and-replaced — not actually still
+        // referenced — permanently fails `all_stamps_alive` once its owning retained-pool
+        // resource is dropped, even though this scheme no longer binds it.
+        let mut replaced_srcs = Vec::new();
+        self.ir.nodes.retain(|node| match node.kind {
+            NodeKind::CopyTexture {
+                src: old_src,
+                dst_buffer_layout: Some(_),
+                ..
+            } => {
+                replaced_srcs.push(old_src);
+                false
+            }
+            _ => true,
+        });
+        for old_src in replaced_srcs {
+            let still_bound = old_src == src_h
+                || self
+                    .ir
+                    .nodes
+                    .iter()
+                    .any(|n| n.bindings.iter().any(|b| b.resource == ResourceId::Texture(old_src)));
+            if !still_bound {
+                self.submit_state.forget_resource_stamp(ResourceId::Texture(old_src));
+            }
+        }
+
         self.submit_state
             .register_stamp_parts(ResourceId::Texture(src_h), stamp);
 
-        self.ir.nodes.retain(|node| {
-            !matches!(
-                node.kind,
-                NodeKind::CopyTexture {
-                    dst_buffer_layout: Some(_),
-                    ..
-                }
-            )
-        });
         self.ir.nodes.push(TaskNode {
             label: "copy_texture",
             bindings: vec![
