@@ -1192,6 +1192,9 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, 
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.write().unwrap().entries.remove(&texture_handle) {
         if let Some(dev) = state.devices.get(&tex.device_handle) {
+            let slots = dev.descriptors.lock().unwrap().texture_slot_keys(texture_handle);
+            super::compute::evict_retained_graphs_using_slots(state, tex.device_handle, &slots);
+
             if tex.transient_placed {
                 dev.descriptors.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;

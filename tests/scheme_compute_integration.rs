@@ -3608,7 +3608,7 @@ mod imp {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
 
-        let run = |reader_first: bool| -> Scheme {
+        let run = |reader_first: bool| -> (Scheme, CrossRetentionBuffers) {
             let buffers = cross_retention_buffers(&device);
             let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
             let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
@@ -3621,11 +3621,13 @@ mod imp {
                     cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
                 }
             }
-            worker
+            // Keep `buffers` alive: dropping retained buffers bound to `worker` marks
+            // stamps dead and steady-state submits would return `StaleResource`.
+            (worker, buffers)
         };
 
         for reader_first in [true, false] {
-            let mut worker = run(reader_first);
+            let (mut worker, _buffers) = run(reader_first);
             let warmup_records = worker.replay_stats().records;
             assert!(
                 warmup_records <= 2,

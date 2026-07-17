@@ -2984,6 +2984,37 @@ pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::Cont
     }
 }
 
+/// Evict retained CBs on `device` whose baked bindless slots intersect `slots`.
+pub(super) fn evict_retained_graphs_using_slots(
+    state: &super::types::VulkanState,
+    device: super::DeviceHandle,
+    slots: &[super::types::SlotKey],
+) {
+    if slots.is_empty() {
+        return;
+    }
+    let slot_set: std::collections::HashSet<_> = slots.iter().copied().collect();
+    let to_evict: Vec<(super::ContextHandle, u64)> = {
+        let contexts = state.contexts.read().unwrap();
+        let mut out = Vec::new();
+        for (&ctx, sc_arc) in contexts.iter() {
+            if super::context::context_device(state, ctx) != device {
+                continue;
+            }
+            let sc = sc_arc.lock().unwrap();
+            for (&key, retained) in &sc.retained_compute_cbs {
+                if retained.used_slots.iter().any(|s| slot_set.contains(s)) {
+                    out.push((ctx, key));
+                }
+            }
+        }
+        out
+    };
+    for (ctx, key) in to_evict {
+        evict_retained(state, ctx, key);
+    }
+}
+
 fn reap_timeline_cmd_buffers_up_to_with_view(
     view: &VulkanSubmitView<'_>,
     ctx: super::ContextHandle,

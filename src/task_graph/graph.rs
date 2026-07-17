@@ -1563,6 +1563,11 @@ impl IrSubmitState {
         &self.resource_stamps
     }
 
+    /// True when every registered parcel stamp is still alive (owning Buffer/Texture not dropped).
+    pub fn all_stamps_alive(&self) -> bool {
+        self.resource_stamps.values().all(|s| s.is_alive()) && self.stamp_targets.iter().all(|s| s.is_alive())
+    }
+
     /// Per-partition timeline values from the most recent successful submit.
     pub fn partition_last_tvs(&self) -> &[Option<TimelineValue>] {
         self.replay.as_ref().map(|r| r.last_tvs()).unwrap_or(&[])

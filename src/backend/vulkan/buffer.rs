@@ -1215,6 +1215,9 @@ pub(super) fn destroy(state: &super::types::VulkanState, buffer_handle: BufferHa
         return;
     };
     if let Some(device) = state.devices.get(&buffer.device_handle) {
+        let slots = device.descriptors.lock().unwrap().buffer_slot_keys(buffer_handle);
+        super::compute::evict_retained_graphs_using_slots(state, buffer.device_handle, &slots);
+
         let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
         let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
         let requirements = {

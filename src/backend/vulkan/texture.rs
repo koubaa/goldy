@@ -1048,6 +1048,13 @@ pub(super) fn destroy(
     };
     if let Some(texture) = texture {
         if let Some(logical_device) = devices.get(&texture.device_handle) {
+            let slots = logical_device
+                .descriptors
+                .lock()
+                .unwrap()
+                .texture_slot_keys(texture_handle);
+            super::compute::evict_retained_graphs_using_slots(state, texture.device_handle, &slots);
+
             if texture.transient_heap_suballoc {
                 logical_device
                     .descriptors

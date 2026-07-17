@@ -3016,6 +3016,37 @@ pub(super) fn evict_retained(state: &Dx12State, ctx: ContextHandle, key: u64) {
     }
 }
 
+/// Evict retained graphs on `device` whose baked bindless slots intersect `slots`.
+pub(super) fn evict_retained_graphs_using_slots(
+    state: &Dx12State,
+    device: DeviceHandle,
+    slots: &[super::types::DeferredSlot],
+) {
+    if slots.is_empty() {
+        return;
+    }
+    let slot_set: std::collections::HashSet<_> = slots.iter().copied().collect();
+    let to_evict: Vec<(ContextHandle, u64)> = {
+        let contexts = state.contexts.read().unwrap();
+        let mut out = Vec::new();
+        for (&ctx, sc_arc) in contexts.iter() {
+            if super::context::context_device(state, ctx) != device {
+                continue;
+            }
+            let sc = sc_arc.lock().unwrap();
+            for (&key, graph) in &sc.retained_graphs {
+                if graph.used_slots.iter().any(|s| slot_set.contains(s)) {
+                    out.push((ctx, key));
+                }
+            }
+        }
+        out
+    };
+    for (ctx, key) in to_evict {
+        evict_retained(state, ctx, key);
+    }
+}
+
 /// Check if the fence for the given token has signaled.
 #[allow(
     dead_code,

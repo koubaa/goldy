@@ -152,6 +152,16 @@ impl DescriptorRegistry {
         slots
     }
 
+    /// Bindless slots currently assigned to `handle` (without reclaiming).
+    pub(crate) fn buffer_slot_keys(&self, handle: BufferHandle) -> Vec<SlotKey> {
+        self.resource_registry.buffer_slot_keys(handle)
+    }
+
+    /// Bindless slots currently assigned to a texture handle (without reclaiming).
+    pub(crate) fn texture_slot_keys(&self, handle: TextureHandle) -> Vec<SlotKey> {
+        self.resource_registry.texture_slot_keys(handle)
+    }
+
     /// Reclaim all descriptor slots for a destroyed texture handle.
     pub(crate) fn reclaim_texture_slots(&mut self, handle: TextureHandle) {
         let slots = self.resource_registry.extract_texture_slots(handle);

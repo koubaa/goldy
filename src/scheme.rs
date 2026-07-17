@@ -1399,6 +1399,12 @@ impl Scheme {
         &mut self,
         mut acquired: Vec<AcquiredPresent>,
     ) -> Result<Submission, GoldyError> {
+        if !self.submit_state.all_stamps_alive() {
+            // Dropping a retained-pool resource invalidates schemes that still bind it.
+            self.submit_state.invalidate_retention();
+            return Err(GoldyError::StaleResource);
+        }
+
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         let structurally_dirty = self.dirty;
         {
@@ -2825,11 +2831,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         (scheme, buffer)
     }
 
-    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> Scheme {
-        recording_scheme_with_parcel(device, pool, ctx).0
+    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> (Scheme, crate::Buffer) {
+        recording_scheme_with_parcel(device, pool, ctx)
     }
 
-    fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> (Scheme, crate::test_support::CbReuseOverride) {
+    fn clean_scheme(
+        device: &Arc<Device>,
+        pool: &mut RetainedPool,
+    ) -> (Scheme, crate::Buffer, crate::test_support::CbReuseOverride) {
         let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
@@ -2848,7 +2857,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.replay_stats().records, 1);
         #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
-        (scheme, cb)
+        // Keep `parcel` alive: dropping a retained buffer bound to the scheme marks its
+        // stamp dead and subsequent submits return `StaleResource`.
+        (scheme, parcel, cb)
     }
 
     fn leased_texture_scheme(
@@ -2882,7 +2893,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn clean_submits_resubmit_without_rerecord() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2903,7 +2914,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -2924,7 +2935,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -2978,7 +2989,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
         let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
@@ -2991,7 +3002,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
         let frame = scheme.submit().unwrap();
         frame.wait(&ctx).unwrap();
         assert!(ctx.gpu_progress() >= frame.timeline_value());
@@ -3002,7 +3013,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
-        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
         let frame = scheme.submit().unwrap();
         assert!(frame.timeline_value() > 0, "submit must return a frame token");
         // Non-blocking: a second submit must succeed without waiting on the first frame.
@@ -3202,11 +3213,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame1 = scheme.submit().expect("submit 1");
         drop(parcel);
         drop(pool);
-        let frame2 = scheme.submit().expect("submit 2 after parcel drop");
-        let loan1 = grant.consume(&frame1).expect("read frame1");
-        let loan2 = grant.consume(&frame2).expect("read frame2");
+        // Retained ownership outranks the scheme: dropping the bound buffer kills its stamp.
+        assert!(
+            matches!(scheme.submit(), Err(GoldyError::StaleResource)),
+            "resubmit after dropping a bound retained buffer must fail"
+        );
+        let loan1 = grant.consume(&frame1).expect("read frame1 after parcel drop");
         assert_eq!(loan1.len(), 32);
-        assert_eq!(loan2.len(), 32);
     }
 
     #[test]

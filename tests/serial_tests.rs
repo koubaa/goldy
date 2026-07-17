@@ -81,11 +81,8 @@ mod imp {
             "bindless buffer destroys are queued on the device-level deletion queue, not per-context"
         );
 
-        // Scheme submit retains CBs and pins bindless slots (Metal). Drop the scheme
-        // before destroying the buffer so those pins clear; otherwise wait_until cannot
-        // drain the device deletion queue (TaskGraph submit did not retain by default).
-        drop(scheme);
-
+        // Dropping the retained buffer must not require dropping the scheme first:
+        // destroy evicts retained CBs that pin its slots, and marks the scheme stamp dead.
         drop(buf);
 
         ctx.wait_until(tv).expect("wait_until");
@@ -99,6 +96,11 @@ mod imp {
             device.device_deferred_deletion_pending_count(),
             0,
             "wait_until should drain device deferred destruction for completed timeline values"
+        );
+
+        assert!(
+            matches!(scheme.submit(), Err(goldy::GoldyError::StaleResource)),
+            "submit after dropping a bound retained buffer must fail"
         );
     }
 

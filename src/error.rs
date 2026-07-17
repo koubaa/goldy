@@ -28,6 +28,13 @@ pub enum GoldyError {
     #[error("GPU submit timed out")]
     SubmitTimeout,
 
+    /// A [`Scheme`](crate::Scheme) still references a retained-pool resource that was dropped.
+    ///
+    /// Retained-pool resources outrank schemes: dropping a buffer/texture invalidates every
+    /// scheme that bound it. Re-record the scheme without the dead resource, or drop the scheme.
+    #[error("scheme references a dropped retained resource")]
+    StaleResource,
+
     /// An unexpected backend error that does not map to the typed variants above.
     #[error(transparent)]
     Backend(#[from] anyhow::Error),

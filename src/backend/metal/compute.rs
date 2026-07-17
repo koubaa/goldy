@@ -176,6 +176,36 @@ fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Op
     }
 }
 
+/// Evict every retained graph on `device` whose baked bindless slots intersect `slots`.
+///
+/// Called when a buffer/texture is destroyed so retained-CB pins do not block deferred
+/// free, and so schemes cannot silently replay against a dead resource.
+pub(super) fn evict_retained_graphs_using_slots(
+    state: &MetalState,
+    device: DeviceHandle,
+    slots: &[super::types::MetalSlotKey],
+) {
+    if slots.is_empty() {
+        return;
+    }
+    let slot_set: std::collections::HashSet<_> = slots.iter().copied().collect();
+    let mut to_evict: Vec<(ContextHandle, u64)> = Vec::new();
+    for (&ctx, sc_arc) in &state.contexts {
+        if super::context::context_device(state, ctx) != device {
+            continue;
+        }
+        let sc = sc_arc.lock().unwrap();
+        for (&key, graph) in &sc.retained_graphs {
+            if graph.used_slots.iter().any(|s| slot_set.contains(s)) {
+                to_evict.push((ctx, key));
+            }
+        }
+    }
+    for (ctx, key) in to_evict {
+        let _ = remove_retained_graph(state, ctx, key);
+    }
+}
+
 /// Encode GPU-side waits on producer-context shared events before consumer work.
 fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Result<()> {
     let Some(s) = sync else {
