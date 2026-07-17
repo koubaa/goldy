@@ -2819,6 +2819,12 @@ mod imp {
 
     // ─── CPU_WRITABLE staging ─────────────────────────────────────────────────────
 
+    /// CPU_WRITABLE `Buffer::write` then same-frame scheme `copy_buffer_parcel`.
+    ///
+    /// Covers the staging contract: a settled/fresh host write is GPU-visible via the
+    /// recorded copy without a Metal blit+wait on the write path (see `Buffer::write` /
+    /// `BufferFlags::CPU_WRITABLE`). Distinct from the CPU→CPU roundtrip in
+    /// `compute_integration::test_cpu_writable_write_read_roundtrip`.
     fn scheme_cpu_writable_staging_write_then_copy(device: &Device) {
         let ctx = submission_context(&device);
 

@@ -654,7 +654,23 @@ impl Buffer {
         self.units.iter().all(|u| u.is_settled(ctx))
     }
 
-    /// CPU write into a single-unit buffer (host-visible when [`crate::types::BufferFlags::CPU_READABLE`]).
+    /// CPU write into a single-unit buffer.
+    ///
+    /// For [`crate::types::BufferFlags::CPU_WRITABLE`] buffers, this is a host-mapped
+    /// memcpy (Metal/Vulkan) or a write into the paired UPLOAD mapping (DX12). It is
+    /// **not** serialized behind in-flight GPU work: the caller must only write when the
+    /// buffer is **settled** ([`Self::is_settled`] / host-observed progress past last use)
+    /// or **fresh** (never GPU-referenced). Writing while the GPU still reads the buffer
+    /// is a data race on Metal/Vulkan; on DX12 the staged bytes apply at the next
+    /// `CopyBuffer` instead.
+    ///
+    /// Prefer [`crate::Scheme::stage_upload_buffer`] / epoch-gated staging pools, which
+    /// select settled or newly allocated parcels. GPU visibility of a staging write is
+    /// covered by same-frame scheme copy tests (e.g. `scheme_cpu_writable_staging_write_then_copy`),
+    /// not by CPU→CPU `read_to_cpu` roundtrips alone.
+    ///
+    /// For other flags, backends may use a queue-ordered path (e.g. Metal blit+wait for
+    /// non-`CPU_WRITABLE` Shared buffers).
     pub fn write(&self, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         match &self.storage {
             BufferStorage::Single(b) => b.write(offset, data),

@@ -633,10 +633,11 @@ pub(super) fn cpu_writable_flat_slice(
 
 /// Write data to a buffer at the specified offset.
 ///
-/// [`BufferFlags::CPU_WRITABLE`] staging buffers (scheme upload parcels) are persistently
-/// mapped in Shared storage; a host `contents()` memcpy is sufficient and matches
-/// Vulkan/DX12. The caller (`UploadBufferPool`) only writes settled or freshly allocated
-/// parcels, so no queue-ordered blit or synchronous wait is required.
+/// [`BufferFlags::CPU_WRITABLE`] buffers are persistently mapped (Shared storage). A host
+/// `contents()` memcpy is sufficient and matches Vulkan host-visible writes / DX12's
+/// UPLOAD mapping. Per the public [`crate::Buffer::write`] contract, callers must only
+/// write when the buffer is **settled** or **fresh** — there is no queue-ordered blit to
+/// serialize behind in-flight GPU readers.
 ///
 /// For other buffers, see [`clear`] for the full rationale. The short version: a CPU
 /// `copy_nonoverlapping` on `contents()` is **not** queue-ordered with subsequent compute

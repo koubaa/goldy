@@ -323,6 +323,10 @@ impl Allocation {
     }
 
     /// Write data to the buffer.
+    ///
+    /// See [`crate::Buffer::write`] for the public contract. For
+    /// [`crate::types::BufferFlags::CPU_WRITABLE`], the write must target a settled or
+    /// fresh buffer; backends do not queue-order it behind in-flight GPU readers.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         if data.is_empty() {
             return Ok(());

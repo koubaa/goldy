@@ -1291,6 +1291,10 @@ mod imp {
 
     /// [`BufferFlags::CPU_WRITABLE`] staging writes use host-mapped memcpy only (no blit+wait).
     ///
+    /// This asserts CPU→CPU visibility of the mapped write. GPU ordering / same-frame copy
+    /// visibility (the actual staging contract) is covered by
+    /// `scheme_cpu_writable_staging_write_then_copy` in `scheme_compute_integration`.
+    ///
     /// On Metal/Vulkan the storage buffer is host-visible, so `write()` → `read_to_cpu()`
     /// roundtrips. On DX12, `write()` only fills the paired UPLOAD mapping; GPU-visible
     /// DEFAULT contents update only after a `CopyBuffer` (covered by scheme staging tests).
