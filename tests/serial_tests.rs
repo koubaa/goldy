@@ -81,6 +81,11 @@ mod imp {
             "bindless buffer destroys are queued on the device-level deletion queue, not per-context"
         );
 
+        // Scheme submit retains CBs and pins bindless slots (Metal). Drop the scheme
+        // before destroying the buffer so those pins clear; otherwise wait_until cannot
+        // drain the device deletion queue (TaskGraph submit did not retain by default).
+        drop(scheme);
+
         drop(buf);
 
         ctx.wait_until(tv).expect("wait_until");
