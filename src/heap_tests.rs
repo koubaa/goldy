@@ -502,6 +502,29 @@ mod heap_tests {
     // In-flight command buffer tracking
     // ===========================================================================
 
+    /// Submit a clear without dropping the [`Scheme`] yet.
+    ///
+    /// [`crate::test_support::scheme_advance_timeline`] cannot be used here: it drops the
+    /// scheme before returning, and [`Scheme`]'s `Drop` waits the high-water timeline —
+    /// which drains in-flight CBs before these tests can observe them.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn scheme_submit_leave_in_flight(
+        ctx: &crate::Context,
+    ) -> (crate::Scheme, crate::TimelineValue, crate::retained_pool::RetainedPool, crate::Buffer) {
+        use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
+        use std::sync::Arc;
+
+        let device = Arc::new(ctx.device().clone());
+        let mut pool = RetainedPool::new(device);
+        let buf = pool
+            .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("buf");
+        let mut scheme = Scheme::new(ctx);
+        scheme.commit_clear_parcel(&buf, 0, 256).expect("clear");
+        let tv = scheme.submit().expect("submit").timeline_value();
+        (scheme, tv, pool, buf)
+    }
+
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn in_flight_cb_count_increases_after_submit() {
@@ -509,7 +532,7 @@ mod heap_tests {
         let ctx = submission_context(&device);
         assert_eq!(ctx.in_flight_command_buffer_count(), 0);
 
-        let tv = scheme_submit_pipelined(&ctx);
+        let (_scheme, _tv, _pool, _buf) = scheme_submit_leave_in_flight(&ctx);
 
         assert!(
             ctx.in_flight_command_buffer_count() > 0,
@@ -523,7 +546,7 @@ mod heap_tests {
         let device = make_device();
         let ctx = submission_context(&device);
 
-        let tv = scheme_submit_pipelined(&ctx);
+        let (_scheme, tv, _pool, _buf) = scheme_submit_leave_in_flight(&ctx);
 
         let before = ctx.in_flight_command_buffer_count();
         assert!(before > 0);

@@ -136,6 +136,10 @@ pub mod test_support {
     }
 
     /// Advance `ctx`'s timeline with a minimal scheme submit (one clear-parcel node).
+    ///
+    /// Drops the temporary [`crate::Scheme`] before returning, which waits the
+    /// high-water timeline. Do not use this when you need to observe in-flight
+    /// command buffers immediately after submit.
     pub fn scheme_advance_timeline(ctx: &crate::Context) -> crate::TimelineValue {
         use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
         let device = Arc::new(ctx.device().clone());

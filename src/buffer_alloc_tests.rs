@@ -244,7 +244,8 @@ mod buffer_alloc_tests {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        scheme.submit().expect("dispatch");
+        let tv = scheme.submit().expect("dispatch").timeline_value();
+        ctx.wait_until(tv).expect("wait dispatch");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
             .expect("read2");
@@ -267,7 +268,8 @@ mod buffer_alloc_tests {
             .node("n1", &pipeline)
             .with_parcel(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        scheme2.submit().expect("dispatch2");
+        let tv2 = scheme2.submit().expect("dispatch2").timeline_value();
+        ctx.wait_until(tv2).expect("wait dispatch2");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
             .expect("read3");
