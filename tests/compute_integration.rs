@@ -1291,9 +1291,15 @@ mod imp {
 
     /// [`BufferFlags::CPU_WRITABLE`] staging writes use host-mapped memcpy only (no blit+wait).
     ///
-    /// On Metal this must not block on `wait_until_completed` during `write()`; bytes must be
-    /// visible immediately for the subsequent scheme upload copy recorded in the same frame.
+    /// On Metal/Vulkan the storage buffer is host-visible, so `write()` → `read_to_cpu()`
+    /// roundtrips. On DX12, `write()` only fills the paired UPLOAD mapping; GPU-visible
+    /// DEFAULT contents update only after a `CopyBuffer` (covered by scheme staging tests).
+    /// Skip the CPU→CPU assertion on DX12.
     fn test_cpu_writable_write_read_roundtrip(device: &Device) {
+        if device.backend_type() == BackendType::Dx12 {
+            return;
+        }
+
         const N: usize = 16;
         let initial: Vec<u32> = vec![0u32; N];
 
