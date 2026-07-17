@@ -21,7 +21,20 @@ use std::time::Instant;
 /// Host-observed timeline waits and deferred CPU writes resolved at enqueue time.
 pub(super) struct MetalHostSidecar {
     pub host_observed: Vec<(TimelineWaiter, TimelineValue)>,
-    pub deferred_writes: Vec<(mtl::Buffer, u64, Arc<[u8]>)>,
+    pub deferred_writes: Vec<MetalDeferredHostWrite>,
+}
+
+/// Deferred CPU write with the buffer's logical size captured at enqueue.
+///
+/// Bounds are checked against [`Self::logical_size`] (not `MTLBuffer::length()`), using
+/// checked arithmetic so a wrapping `offset + len` cannot bypass the guard and feed
+/// `ptr.add` an invalid offset from safe Rust.
+pub(super) struct MetalDeferredHostWrite {
+    pub buffer: mtl::Buffer,
+    pub offset: u64,
+    /// API-visible size from [`super::types::BufferState::size`] at enqueue.
+    pub logical_size: u64,
+    pub data: Arc<[u8]>,
 }
 
 fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
@@ -34,16 +47,34 @@ fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
             anyhow::bail!("host-observed wait timed out waiting for timeline value {value}");
         }
     }
-    for (buffer, offset, data) in &sidecar.deferred_writes {
-        let ptr = buffer.contents();
+    for w in &sidecar.deferred_writes {
+        let end = w.offset.checked_add(w.data.len() as u64).ok_or_else(|| {
+            anyhow::anyhow!(
+                "deferred host write: offset+len overflow (offset={}, len={})",
+                w.offset,
+                w.data.len()
+            )
+        })?;
+        if end > w.logical_size {
+            anyhow::bail!(
+                "deferred host write: write exceeds logical buffer size (offset={}, len={}, logical_size={})",
+                w.offset,
+                w.data.len(),
+                w.logical_size
+            );
+        }
+        let offset_usize = usize::try_from(w.offset).map_err(|_| {
+            anyhow::anyhow!(
+                "deferred host write: offset {} does not fit usize",
+                w.offset
+            )
+        })?;
+        let ptr = w.buffer.contents();
         if ptr.is_null() {
             anyhow::bail!("deferred host write: MTLBuffer contents() returned null");
         }
-        if offset + data.len() as u64 > buffer.length() {
-            anyhow::bail!("deferred host write: write exceeds buffer bounds");
-        }
         unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(*offset as usize) as *mut u8, data.len());
+            std::ptr::copy_nonoverlapping(w.data.as_ptr(), ptr.add(offset_usize) as *mut u8, w.data.len());
         }
     }
     Ok(())

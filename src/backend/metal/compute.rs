@@ -248,7 +248,29 @@ fn resolve_host_sidecar(
                 w.buffer
             );
         }
-        deferred_writes.push((buffer_state.buffer.clone(), w.offset, Arc::clone(&w.data)));
+        let end = w.offset.checked_add(w.data.len() as u64).ok_or_else(|| {
+            anyhow::anyhow!(
+                "deferred host write: offset+len overflow (handle={}, offset={}, len={})",
+                w.buffer,
+                w.offset,
+                w.data.len()
+            )
+        })?;
+        if end > buffer_state.size {
+            anyhow::bail!(
+                "deferred host write exceeds logical buffer size (handle={}, offset={}, len={}, size={})",
+                w.buffer,
+                w.offset,
+                w.data.len(),
+                buffer_state.size
+            );
+        }
+        deferred_writes.push(super::pending_submit::MetalDeferredHostWrite {
+            buffer: buffer_state.buffer.clone(),
+            offset: w.offset,
+            logical_size: buffer_state.size,
+            data: Arc::clone(&w.data),
+        });
     }
     Ok(super::pending_submit::MetalHostSidecar {
         host_observed,
