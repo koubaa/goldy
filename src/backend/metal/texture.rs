@@ -5,7 +5,7 @@ use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_S
 use super::utils::format_to_mtl;
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use ::metal as mtl;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,18 +29,21 @@ fn submit_texture_upload_sync(state: &mut MetalState, device_handle: DeviceHandl
 ///
 /// When the texture heap is saturated (overflow cap reached), performs a non-blocking
 /// drain-and-retry first, then if still full, waits for the oldest in-flight command
-/// buffer to complete, drains again, and retries. Mirrors the buffer heap self-regulation
-/// in `allocate_mtl_storage_buffer`.
+/// buffer to complete, drains again, and retries. If heaps remain full, falls back to a
+/// standalone `device.new_texture` allocation (mirrors the buffer heap pressure valve) so
+/// resize churn cannot hard-fail the frame.
+///
+/// Returns `(texture, is_heap_allocated)`.
 fn allocate_mtl_texture(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     descriptor: &mtl::TextureDescriptorRef,
-) -> Result<mtl::Texture> {
+) -> Result<(mtl::Texture, bool)> {
     {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         // Attempt 1: fast path.
         if let Some(tex) = logical_device.texture_heap.lock().unwrap().allocate(descriptor) {
-            return Ok(tex);
+            return Ok((tex, true));
         }
     }
 
@@ -56,7 +59,7 @@ fn allocate_mtl_texture(
     {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         if let Some(tex) = logical_device.texture_heap.lock().unwrap().allocate(descriptor) {
-            return Ok(tex);
+            return Ok((tex, true));
         }
     }
 
@@ -78,15 +81,21 @@ fn allocate_mtl_texture(
         let mut th = logical_device.texture_heap.lock().unwrap();
         th.compact_overflow();
         if let Some(tex) = th.allocate(descriptor) {
-            return Ok(tex);
+            return Ok((tex, true));
         }
     }
 
+    // Attempt 4 (pressure-relief valve): overflow heaps are pinned by in-use textures
+    // (e.g. resize churn with pooled obsolete sizes). Satisfy from a standalone device
+    // texture so the caller can proceed; steady state returns to the heap once drops
+    // free overflow heaps. Signals Oversubscribed for diagnostics / client policy.
     crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
         reason: crate::signal::OversubscribedReason::TextureHeap,
         size_hint: descriptor.width() * descriptor.height(),
     });
-    bail!("Metal texture heap is full — all overflow heaps exhausted");
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let tex = logical_device.device.new_texture(descriptor);
+    Ok((tex, false))
 }
 
 /// Create a texture.
@@ -141,7 +150,7 @@ pub(super) fn create(
     descriptor.set_usage(mtl_usage);
     descriptor.set_storage_mode(MTLStorageMode::Shared);
 
-    let texture = allocate_mtl_texture(state, device_handle, &descriptor)?;
+    let (texture, is_heap_allocated) = allocate_mtl_texture(state, device_handle, &descriptor)?;
 
     let logical_device = state.devices.get_mut(&device_handle).context("Invalid device handle")?;
 
@@ -185,8 +194,13 @@ pub(super) fn create(
         None
     };
     tracing::debug!(
-        "Allocated texture {} from heap at bindless local={} global={} storage_image={}",
+        "Allocated texture {} from {} at bindless local={} global={} storage_image={}",
         handle,
+        if is_heap_allocated {
+            "heap"
+        } else {
+            "device (overflow fallback)"
+        },
         arg_buffer_index,
         encoding_index,
         is_storage_image,
@@ -225,7 +239,7 @@ pub(super) fn create(
             sampled_arg_buffer_index,
             is_storage_image,
             slot_owned_externally: false,
-            is_heap_allocated: true,
+            is_heap_allocated,
         },
     );
 

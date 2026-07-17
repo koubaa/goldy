@@ -12,12 +12,13 @@ use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
 use crate::slang::SlangStage;
 use crate::tracy_zone;
+use std::sync::Arc;
 
 /// Fallback workgroup size used when a compute shader's `[numthreads]` annotation
 /// cannot be parsed. Matches the Metal/Slang default used elsewhere in the codebase.
 const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
-use crate::types::{BufferKind, ResourceCategory};
+use crate::types::{BufferFlags, BufferKind, ResourceCategory};
 
 /// True when this submission records GPU encoder work beyond CPU-only `WriteBuffer` nodes.
 ///
@@ -201,6 +202,77 @@ fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Resul
         }
     }
     Ok(())
+}
+
+/// Resolve host-observed waits and deferred CPU writes for the submission worker.
+///
+/// **Enqueue-time resolution:** Metal binds `BufferHandle → mtl::Buffer` here on the
+/// render/submit-enqueue thread and ships owned `MTLBuffer` refs in the sidecar. DX12
+/// instead keeps `BufferHandle`s and re-resolves `cpu_writable_upload_mapped` at execute
+/// time on the worker. If a buffer is physically reallocated between enqueue and commit,
+/// Metal therefore writes the *old* allocation — consistent with the command buffer that
+/// was recorded against those handles, but a semantic divergence from DX12's execute-time
+/// lookup.
+fn resolve_host_sidecar(
+    state: &MetalState,
+    sync: Option<&SubmitSync>,
+) -> Result<super::pending_submit::MetalHostSidecar> {
+    let Some(s) = sync else {
+        return Ok(super::pending_submit::MetalHostSidecar {
+            host_observed: Vec::new(),
+            deferred_writes: Vec::new(),
+        });
+    };
+    let mut host_observed = Vec::with_capacity(s.host_observed_waits.len());
+    for epoch in &s.host_observed_waits {
+        let waiter = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("host-observed wait: unknown producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        host_observed.push((waiter, epoch.value));
+    }
+    let mut deferred_writes = Vec::with_capacity(s.deferred_host_writes.len());
+    for w in &s.deferred_host_writes {
+        let buffer_state = state
+            .buffers
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+        // Align with DX12's `cpu_writable_upload_mapped` gate: only CPU_WRITABLE staging.
+        if !buffer_state.flags.contains(BufferFlags::CPU_WRITABLE) {
+            anyhow::bail!("deferred host write requires CPU_WRITABLE buffer (handle={})", w.buffer);
+        }
+        let end = w.offset.checked_add(w.data.len() as u64).ok_or_else(|| {
+            anyhow::anyhow!(
+                "deferred host write: offset+len overflow (handle={}, offset={}, len={})",
+                w.buffer,
+                w.offset,
+                w.data.len()
+            )
+        })?;
+        if end > buffer_state.size {
+            anyhow::bail!(
+                "deferred host write exceeds logical buffer size (handle={}, offset={}, len={}, size={})",
+                w.buffer,
+                w.offset,
+                w.data.len(),
+                buffer_state.size
+            );
+        }
+        deferred_writes.push(super::pending_submit::MetalDeferredHostWrite {
+            buffer: buffer_state.buffer.clone(),
+            offset: w.offset,
+            logical_size: buffer_state.size,
+            data: Arc::clone(&w.data),
+        });
+    }
+    Ok(super::pending_submit::MetalHostSidecar {
+        host_observed,
+        deferred_writes,
+    })
 }
 
 fn encode_wait_for_epochs(
@@ -1446,12 +1518,14 @@ pub(super) fn submit(
         .lock()
         .unwrap()
         .record_slot_usage(ctx, signal_value, used_slots);
+    let host_sidecar = resolve_host_sidecar(state, sync)?;
     super::pending_submit::enqueue_metal_commit(
         &ld,
         owned_command_buffer,
         signal_value,
         timeline_event,
         waiter,
+        host_sidecar,
         Some(sc_arc),
         "compute",
         true,
@@ -1682,12 +1756,14 @@ pub(super) fn submit_graph(
         .lock()
         .unwrap()
         .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
+    let host_sidecar = resolve_host_sidecar(state, sync)?;
     super::pending_submit::enqueue_metal_commit(
         &ld,
         owned_command_buffer,
         signal_value,
         timeline_event,
         waiter,
+        host_sidecar,
         Some(sc_arc),
         "graph",
         false,

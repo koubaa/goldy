@@ -553,7 +553,10 @@ impl Frame {
     }
 
     /// Timeline already associated with this frame's GPU submit, if any.
-    #[cfg(test)]
+    ///
+    /// For scheme present this is the present-partition timeline (including
+    /// `copy_texture_to_present`), which is when copy sources such as `out_image`
+    /// finish being read — earlier than the display present timeline.
     pub(crate) fn submit_timeline(&self) -> Option<TimelineValue> {
         self.submit_tv
     }

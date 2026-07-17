@@ -967,16 +967,18 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option
 /// Partition the compiled schedule into multiple command streams for pipelined
 /// backend submission.
 ///
-/// The partitioning heuristic selects the single wave boundary (wave index > 0)
-/// that has the largest `barriers_before` cost (sum of buffers and textures that
-/// need synchronisation), which corresponds to the heaviest cross-phase data
-/// dependency — typically the coarse→fine boundary in a rendering pipeline.
+/// When `split_on_barrier_cost` is true, the partitioning heuristic selects the
+/// single wave boundary (wave index > 0) that has the largest `barriers_before`
+/// cost (sum of buffers and textures that need synchronisation), which
+/// corresponds to the heaviest cross-phase data dependency — typically the
+/// coarse→fine boundary in a rendering pipeline.
 ///
 /// Returns a `Vec` of one or two partitions:
 ///
-/// - **Single partition**: returned when the schedule has fewer than 3 waves or
-///   when every wave boundary has zero barrier cost (no cross-wave dependencies).
-///   The result is equivalent to calling [`emit_commands`] and wrapping it.
+/// - **Single partition**: returned when the schedule has fewer than 3 waves,
+///   every wave boundary has zero barrier cost, or `split_on_barrier_cost` is
+///   false (Metal). The result is equivalent to calling [`emit_commands`] and
+///   wrapping it.
 ///
 /// - **Two partitions**: `[early_cmds, late_cmds]`.  Waves `0..split` go into
 ///   `early_cmds` and waves `split..` go into `late_cmds`.  The leading
@@ -990,8 +992,9 @@ pub fn emit_partitioned_commands(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
     resolver: Option<&SlotResolver>,
+    split_on_barrier_cost: bool,
 ) -> Vec<Vec<GpuCommand>> {
-    partition_wave_ranges(ir, schedule)
+    partition_wave_ranges(ir, schedule, split_on_barrier_cost)
         .into_iter()
         .map(|range| {
             let waves = &schedule.waves[range];
@@ -1211,10 +1214,11 @@ fn push_partition_with_barrier_heuristic(
     ranges: &mut Vec<std::ops::Range<usize>>,
     schedule: &CompiledSchedule,
     wave_range: std::ops::Range<usize>,
+    enable: bool,
 ) {
     let waves = &schedule.waves[wave_range.clone()];
     let len = waves.len();
-    if len >= 3 {
+    if enable && len >= 3 {
         let (split_offset, max_cost) = waves
             .iter()
             .enumerate()
@@ -1238,25 +1242,30 @@ fn push_partition_with_barrier_heuristic(
 /// Actualized partitions refine the logical partition layout produced by
 /// [`describe_logical_partitions`] with:
 /// - retainability splits (buffer-only upload waves vs texture upload waves), and
-/// - an optional barrier-cost heuristic: large pure-compute logical partitions
-///   (≥ 3 waves, nonzero barrier cost) are subdivided at their heaviest wave boundary
-///   to expose GPU-pipeline overlap between submissions.
+/// - an optional barrier-cost heuristic (`split_on_barrier_cost`): large pure-compute
+///   logical partitions (≥ 3 waves, nonzero barrier cost) are subdivided at their
+///   heaviest wave boundary to expose GPU-pipeline overlap between submissions.
+///   Disabled on Metal (see [`crate::device::DeviceCapabilities::split_compute_partitions_on_barrier_cost`]).
 ///
 /// The present-boundary and render-kind splits from the logical layer are always
 /// respected; the heuristics are applied only *within* pure-compute non-present partitions.
 ///
 /// This function always returns at least one range covering all waves.
-pub(crate) fn partition_wave_ranges(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn partition_wave_ranges(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    split_on_barrier_cost: bool,
+) -> Vec<std::ops::Range<usize>> {
     let logical = describe_logical_partitions(ir, schedule);
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(logical.len());
 
     for lp in &logical {
         if lp.is_pure_compute() && lp.wave_range.len() >= 2 {
             for sub in split_wave_range_at_retainability(ir, schedule, lp.wave_range.clone()) {
-                push_partition_with_barrier_heuristic(&mut ranges, schedule, sub);
+                push_partition_with_barrier_heuristic(&mut ranges, schedule, sub, split_on_barrier_cost);
             }
         } else {
-            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone());
+            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone(), split_on_barrier_cost);
         }
     }
 
@@ -1708,7 +1717,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let ranges = partition_wave_ranges(&ir, &schedule);
+        let ranges = partition_wave_ranges(&ir, &schedule, true);
         assert_eq!(
             ranges.len(),
             2,
@@ -3027,7 +3036,7 @@ mod tests {
     fn partitions(ir: &GraphIR) -> Vec<Vec<GpuCommand>> {
         let edges = build_edges(ir);
         let schedule = schedule_waves(ir, &edges);
-        emit_partitioned_commands(ir, &schedule, None)
+        emit_partitioned_commands(ir, &schedule, None, true)
     }
 
     /// Helper: run the full analysis pipeline and return flat commands.
@@ -3106,6 +3115,27 @@ mod tests {
         }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
         assert_eq!(strip_frame_table(&flat), strip_frame_table(&flat_commands(&ir)));
+    }
+
+    #[test]
+    fn partition_three_wave_diamond_stays_single_when_barrier_split_disabled() {
+        let ir = GraphIR {
+            nodes: vec![
+                node_bound("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node_bound("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node_bound("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node_bound("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let parts = emit_partitioned_commands(&ir, &schedule, None, false);
+        assert_eq!(
+            parts.len(),
+            1,
+            "Metal-style disabled barrier split must keep one compute partition"
+        );
+        assert_eq!(parts[0], flat_commands(&ir));
     }
 
     #[test]

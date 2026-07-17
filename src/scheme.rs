@@ -302,7 +302,17 @@ impl Grant for PresentGrant {
         let surface_frame = slot
             .take()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
+        // Copy sources (e.g. ekrano `out_image`) finish at the present-partition
+        // submit timeline, not at display present. Resolving the easement with
+        // present_tv would force the next writer to GPU-wait on present completion
+        // and serialize behind drawable recycle.
+        //
+        // Fall back to present_tv when the partition stamped 0 / no submit_tv
+        // (e.g. grant_present-only schemes with no copy work) — timeline 0 is
+        // reserved as PromiseState::Pending and cannot be resolved.
+        let copy_tv = surface_frame.submit_timeline().filter(|&tv| tv != 0);
         let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
+        let easement_tv = copy_tv.unwrap_or(present_tv);
         let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
             GoldyError::Backend(anyhow::anyhow!(
                 "present resolver index {} out of range for submission ({} present grants)",
@@ -311,7 +321,7 @@ impl Grant for PresentGrant {
             ))
         })?;
         if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            resolver.resolve(present_tv);
+            resolver.resolve(easement_tv);
         }
         Ok(())
     }
@@ -1348,7 +1358,7 @@ impl Scheme {
 
     /// Defer a host-visible buffer write until the submission worker after `refs` retire on the CPU.
     ///
-    /// Applied by the DX12 and Vulkan submission workers when
+    /// Applied by the DX12, Vulkan, and Metal submission workers when
     /// [`crate::DeviceCapabilities::host_sidecar_on_submit_worker`] is true.
     pub fn defer_host_write(
         &mut self,
@@ -4188,7 +4198,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn present_consume_resolves_with_present_timeline_not_compute() {
+    fn present_consume_resolves_with_copy_timeline_not_display_present() {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
@@ -4202,6 +4212,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
         let submission = scheme.submit().expect("submit");
         let compute_tv = submission.timeline_value();
+        let frame_submit_tv = submission
+            .present_frame_submit_timeline(0)
+            .expect("present frame must carry submit timeline");
+        assert_eq!(
+            frame_submit_tv, compute_tv,
+            "mock present partition TV should match submission high-water when no grant staging follows"
+        );
 
         present.consume(&submission).expect("present");
 
@@ -4211,13 +4228,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             stamp.pending.lock().unwrap()[0].poll()
         };
         match poll_state {
-            PromiseState::Resolved(present_tv) => {
-                assert!(
-                    present_tv > compute_tv,
-                    "present easement must resolve to the later present/copy timeline (present={present_tv}, compute={compute_tv})"
+            PromiseState::Resolved(easement_tv) => {
+                assert_eq!(
+                    easement_tv, frame_submit_tv,
+                    "present easement must resolve to the copy/present-partition timeline (easement={easement_tv}, copy={frame_submit_tv})"
                 );
             }
-            other => panic!("expected Resolved present timeline, got {other:?}"),
+            other => panic!("expected Resolved copy timeline, got {other:?}"),
         }
     }
 
@@ -4406,7 +4423,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         present.consume(&sub1).expect("present frame 1");
 
-        // Frame 2 submit gate folds the resolved present epoch into foreign_reads.
+        // Frame 2 submit gate folds the resolved copy easement into foreign_reads.
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
             let sync = registered.sync.lock().unwrap();
@@ -4416,10 +4433,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         };
         assert!(
             present_read_tv >= frame1_tv,
-            "folded present read epoch must be at least the frame-1 submit tv"
+            "folded copy-read epoch must be at least the frame-1 submit tv"
         );
 
-        // Loop-carried WAR (present read frame N, fine write frame N+1) must plan a live wait.
+        // Loop-carried WAR (copy read frame N, fine write frame N+1) must plan a live wait.
         let mut write_only = ResourceKeyMap::default();
         write_only.insert(
             key,
@@ -4469,7 +4486,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let compute_tv = sub1.timeline_value();
         present.consume(&sub1).expect("present frame 1");
 
-        let present_tv = {
+        let copy_tv = {
             let stamp = scheme
                 .submit_state
                 .resource_stamps()
@@ -4480,9 +4497,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 other => panic!("present promise must be resolved after consume, got {other:?}"),
             }
         };
-        assert!(
-            present_tv >= compute_tv,
-            "present epoch must cover the frame-1 submit (present={present_tv}, compute={compute_tv})"
+        assert_eq!(
+            copy_tv, compute_tv,
+            "easement epoch must be the present-partition/copy timeline (copy={copy_tv}, compute={compute_tv})"
         );
 
         let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
@@ -4494,8 +4511,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 .collect()
         });
         assert!(
-            frame2_waits.iter().any(|e| e.context == ctx_handle && e.value >= present_tv),
-            "frame 2 submit must live-wait on prior present read via ledger (need wait>={present_tv}, got {frame2_waits:?})"
+            frame2_waits
+                .iter()
+                .any(|e| e.context == ctx_handle && e.value >= copy_tv),
+            "frame 2 submit must live-wait on prior copy read via ledger (need wait>={copy_tv}, got {frame2_waits:?})"
         );
     }
 

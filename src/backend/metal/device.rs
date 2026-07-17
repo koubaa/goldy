@@ -55,6 +55,14 @@ pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCap
         buffer_resize_cost: crate::types::BufferResizeCost::Constant,
         buffer_page_size: 16 * 1024,
         buffer_decommit_supported: true,
+        host_sidecar_on_submit_worker: true,
+        // Metal CB boundaries + MTLSharedEvent waits serialize partitions; keep
+        // coarse/fine compute in one CB (Classic parity). Present/retainability
+        // splits still apply.
+        split_compute_partitions_on_barrier_cost: false,
+        // Fuse upload blits with the following compute partition so Scheme matches
+        // Classic's single-CB structure and avoids an extra commit + event wait.
+        fuse_upload_with_compute_partitions: true,
         ..crate::device::DeviceCapabilities::default()
     }
 }
@@ -156,19 +164,19 @@ fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHe
     //
     // All Goldy integration tests pass with that scheme, but Ekrano still
     // regresses (~185 FPS vs ~200 FPS Tracked baseline) for two reasons:
-    //   1. Intra-graph partition waits: emit_partitioned_commands splits large
-    //      graphs into two CBs submitted back-to-back; the second CB must wait
-    //      for the first via MTLSharedEvent (MTLFence can't cross CB boundaries),
-    //      which serialises consecutive partitions and eliminates GPU pipelining.
-    //      Metal's hardware hazard tracking avoids this cost entirely.
+    //   1. Intra-graph partition waits: when barrier-cost compute splits are
+    //      enabled, large graphs become two CBs submitted back-to-back; the
+    //      second CB must wait for the first via MTLSharedEvent (MTLFence can't
+    //      cross CB boundaries), which serialises consecutive partitions.
+    //      Metal disables that heuristic via
+    //      `split_compute_partitions_on_barrier_cost = false`.
     //   2. Encoder-split overhead: every ResourceBarrier forces end_encoding +
     //      new_compute_command_encoder + use_heaps_for_compute, which is paid
     //      once per wave rather than once per CB submission.
     //
     // The net result is that the synchronisation overhead for Untracked exceeds
     // the savings from bypassing implicit hazard tracking for this workload.
-    // Revisit if Apple exposes a lighter cross-CB barrier primitive, or if
-    // Ekrano moves to single-CB submission for its graphs.
+    // Revisit if Apple exposes a lighter cross-CB barrier primitive.
     buffer_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
     let buffer_heap = device.new_heap(&buffer_heap_desc);
     let heap_allocator = HeapAllocator::new(device.clone(), buffer_heap, heap_size);

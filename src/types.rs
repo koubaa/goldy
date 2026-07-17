@@ -434,6 +434,13 @@ bitflags! {
         /// a DEFAULT heap UAV for GPU access; [`crate::Scheme::copy_buffer_parcel`] copies
         /// staging → device each submission.
         ///
+        /// **Write contract:** [`crate::Buffer::write`] on a `CPU_WRITABLE` buffer does
+        /// **not** queue-order the host write behind in-flight GPU readers. Callers must
+        /// only write when the buffer is **settled** (host-observed GPU progress past its
+        /// last use) or **fresh** (never GPU-referenced). [`crate::Scheme`] upload parcels
+        /// and [`crate::Parcel::is_settled`] enforce this; arbitrary reuse with live GPU
+        /// readers is a race (Vulkan/Metal host-visible semantics; DX12 applies at copy time).
+        ///
         /// Only valid for [`BufferKind::Scattered`]. Cannot be combined with
         /// [`Self::CPU_READABLE`] or [`Self::GPU_ONLY`].
         const CPU_WRITABLE = 1 << 4;

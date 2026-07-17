@@ -362,10 +362,25 @@ pub struct DeviceCapabilities {
     pub buffer_decommit_supported: bool,
 
     /// Whether [`crate::Scheme::defer_host_write`] / host-observed waits are applied on the
-    /// submission worker before GPU execute (DX12 and Vulkan).
+    /// submission worker before GPU execute (DX12, Vulkan, and Metal).
     ///
     /// When `false`, callers must keep synchronous host writes and render-thread reuse gates.
     pub host_sidecar_on_submit_worker: bool,
+
+    /// Whether large pure-compute partitions may be subdivided at their heaviest
+    /// barrier boundary to expose GPU-pipeline overlap between submissions.
+    ///
+    /// Enabled on Vulkan/DX12. Disabled on Metal: cross-CB `MTLSharedEvent` waits
+    /// serialize consecutive partitions and dominate any overlap gains.
+    pub split_compute_partitions_on_barrier_cost: bool,
+
+    /// Whether the fresh Scheme submit path may fuse an upload-only partition with
+    /// the immediately following compute partition into one command buffer.
+    ///
+    /// Enabled on Metal so blit uploads and compute dispatches share one
+    /// `MTLCommandBuffer` (blit encoder → compute encoder). Disabled elsewhere:
+    /// upload and compute partitions remain separate submissions.
+    pub fuse_upload_with_compute_partitions: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -387,6 +402,8 @@ impl Default for DeviceCapabilities {
             buffer_page_size: 64 * 1024,
             buffer_decommit_supported: false,
             host_sidecar_on_submit_worker: false,
+            split_compute_partitions_on_barrier_cost: true,
+            fuse_upload_with_compute_partitions: false,
         }
     }
 }

@@ -633,17 +633,21 @@ pub(super) fn cpu_writable_flat_slice(
 
 /// Write data to a buffer at the specified offset.
 ///
-/// See [`clear`] for the full rationale. The short version: a CPU
-/// `copy_nonoverlapping` on `contents()` is **not** queue-ordered with
-/// subsequent compute dispatches, so we pair it with a queue-ordered blit
-/// copy (from a transient staging buffer) so the next command buffer
-/// submitted to this device queue is guaranteed to observe the written
-/// bytes. The observable symptom in ekrano/velato was the `config` uniform
-/// buffer returning stale `config.lines_size` to the binning shader, which
-/// then flagged `STAGE_FLATTEN` overflow even when the actual flatten
-/// output was tiny — only visible around scene transitions where the
-/// previous frame's config had happened to be re-uploaded into the same
-/// pool-recycled physical buffer.
+/// [`BufferFlags::CPU_WRITABLE`] buffers are persistently mapped (Shared storage). A host
+/// `contents()` memcpy is sufficient and matches Vulkan host-visible writes / DX12's
+/// UPLOAD mapping. Per the public [`crate::Buffer::write`] contract, callers must only
+/// write when the buffer is **settled** or **fresh** — there is no queue-ordered blit to
+/// serialize behind in-flight GPU readers.
+///
+/// For other buffers, see [`clear`] for the full rationale. The short version: a CPU
+/// `copy_nonoverlapping` on `contents()` is **not** queue-ordered with subsequent compute
+/// dispatches, so we pair it with a queue-ordered blit copy (from a transient staging
+/// buffer) so the next command buffer submitted to this device queue is guaranteed to
+/// observe the written bytes. The observable symptom in ekrano/velato was the `config`
+/// uniform buffer returning stale `config.lines_size` to the binning shader, which then
+/// flagged `STAGE_FLATTEN` overflow even when the actual flatten output was tiny — only
+/// visible around scene transitions where the previous frame's config had happened to be
+/// re-uploaded into the same pool-recycled physical buffer.
 pub(super) fn write(state: &MetalState, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
     let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
@@ -661,6 +665,10 @@ pub(super) fn write(state: &MetalState, buffer_handle: BufferHandle, offset: u64
             let ptr = buffer.buffer.contents().add(offset as usize);
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
         }
+    }
+
+    if buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+        return Ok(());
     }
 
     let device_handle = buffer.device_handle;
