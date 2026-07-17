@@ -14,7 +14,7 @@ mod imp {
     use crate::submission::submission_context;
     use goldy::{
         types::{BackendType, BufferFlags},
-        Buffer, BufferKind, BufferPool, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
+        Buffer, BufferKind, BufferPool, ComputePipeline, Device, DeviceDescriptor, Grant, Instance, NodeAccess,
         RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TransientAllocatorConfig,
         TransientAllocatorStrategy,
     };
@@ -253,11 +253,10 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        scheme.submit().expect("submit");
-
-        let mut raw = vec![0u8; 7 * 4];
-        buf.read_to_cpu(device, &mut raw).expect("read_to_cpu");
-        let result: &[f32] = bytemuck::cast_slice(&raw);
+        let grant = scheme.grant_read(buf.whole()).expect("grant_read");
+        let frame = scheme.submit().expect("submit");
+        let loan = grant.consume(&frame).expect("grant consume");
+        let result: &[f32] = bytemuck::cast_slice(&loan);
 
         let eps = 1e-5f32;
         let cases: &[(usize, f32, &str)] = &[
@@ -330,11 +329,10 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        scheme.submit().expect("submit");
-
-        let mut raw = vec![0u8; 9 * 4];
-        buf.read_to_cpu(device, &mut raw).expect("read_to_cpu");
-        let result: &[f32] = bytemuck::cast_slice(&raw);
+        let grant = scheme.grant_read(buf.whole()).expect("grant_read");
+        let frame = scheme.submit().expect("submit");
+        let loan = grant.consume(&frame).expect("grant consume");
+        let result: &[f32] = bytemuck::cast_slice(&loan);
 
         let eps = 1e-5f32;
         let cases: &[(usize, f32, &str)] = &[
@@ -397,14 +395,10 @@ mod imp {
             .with_parcel(&buffers[0], NodeAccess::Read)
             .with_parcel(&buffers[NUM_BUFFERS - 1], NodeAccess::Write)
             .dispatch(workgroups, 1, 1);
-        scheme.submit().expect("submit");
-
-        let mut output = vec![0u8; BUF_SIZE as usize];
-        buffers[NUM_BUFFERS - 1]
-            .read_to_cpu(device, &mut output)
-            .expect("readback");
-
-        let result: &[u32] = bytemuck::cast_slice(&output);
+        let grant = scheme.grant_read(buffers[NUM_BUFFERS - 1].whole()).expect("grant_read");
+        let frame = scheme.submit().expect("submit");
+        let loan = grant.consume(&frame).expect("grant consume");
+        let result: &[u32] = bytemuck::cast_slice(&loan);
         for i in (0..ELEM_COUNT).step_by(1024) {
             assert_eq!(
                 result[i], i as u32,

@@ -510,7 +510,12 @@ mod heap_tests {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     fn scheme_submit_leave_in_flight(
         ctx: &crate::Context,
-    ) -> (crate::Scheme, crate::TimelineValue, crate::retained_pool::RetainedPool, crate::Buffer) {
+    ) -> (
+        crate::Scheme,
+        crate::TimelineValue,
+        crate::retained_pool::RetainedPool,
+        crate::Buffer,
+    ) {
         use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
         use std::sync::Arc;
 
