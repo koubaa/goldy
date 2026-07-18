@@ -169,80 +169,144 @@ impl fmt::Debug for GrantStagingPool {
     }
 }
 
-struct SubmissionData {
+/// Cloneable GPU submission identity and timeline (no exchange claims).
+#[derive(Debug, Clone)]
+pub struct SubmissionHandle {
+    core: Arc<SubmissionCore>,
+}
+
+#[derive(Debug)]
+struct SubmissionCore {
     scheme_id: u64,
     timeline: TimelineValue,
+}
+
+impl SubmissionHandle {
+    /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
+    pub fn timeline_value(&self) -> TimelineValue {
+        self.core.timeline
+    }
+
+    /// Block until this submission's GPU work has completed.
+    pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
+        ctx.wait_until(self.core.timeline)?;
+        Ok(())
+    }
+
+    pub(crate) fn scheme_id(&self) -> u64 {
+        self.core.scheme_id
+    }
+}
+
+impl From<SubmissionHandle> for TimelineValue {
+    fn from(handle: SubmissionHandle) -> Self {
+        handle.timeline_value()
+    }
+}
+
+/// Dense index of a present/exchange claim slot on a [`Submission`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClaimKey {
+    pub(crate) present_idx: u32,
+}
+
+/// Stable erased relationship recorded in one [`Scheme`].
+///
+/// Reusable across submissions. Extract each submission's product with [`Self::claim`].
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    pub(crate) scheme_id: u64,
+    pub(crate) key: ClaimKey,
+}
+
+/// Unique receipt returned by [`Scheme::submit`].
+///
+/// Owns untaken exchange claims and read-grant staging cells. Clone the
+/// [`SubmissionHandle`] for timeline identity that must outlive claim extraction.
+/// Dropping this receipt discards every claim that has not been taken.
+pub struct Submission {
+    handle: SubmissionHandle,
     /// Per-grant staging buffer for this submission; taken by [`ReadGrant::consume`].
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
     staging_pools: Vec<Arc<GrantStagingPool>>,
-    /// Acquired swapchain frames for present grants; consumed by [`PresentGrant::consume`].
-    present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
-    /// Resolvers for present easement timeline promises; resolved by [`PresentGrant::consume`].
-    present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
+    /// Erased exchange claims; taken by [`Transaction::claim`] or [`PresentGrant::consume`].
+    claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
 }
 
-impl Drop for SubmissionData {
+impl Drop for Submission {
     fn drop(&mut self) {
-        let ready_after = self.timeline;
+        let ready_after = self.handle.timeline_value();
         for (cell, pool) in self.cells.iter().zip(self.staging_pools.iter()) {
             if let Some(handle) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 pool.return_handle(handle, ready_after);
             }
         }
-        for frame_mutex in &self.present_frames {
-            if let Ok(mut slot) = frame_mutex.lock() {
-                if let Some(frame) = slot.take() {
-                    frame.cancel();
+        for claim_mutex in &self.claims {
+            if let Ok(mut slot) = claim_mutex.lock() {
+                if let Some(claim) = slot.take() {
+                    claim.discard_best_effort();
                 }
             }
         }
     }
 }
 
-impl fmt::Debug for SubmissionData {
+impl fmt::Debug for Submission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SubmissionData")
-            .field("scheme_id", &self.scheme_id)
-            .field("timeline", &self.timeline)
+        f.debug_struct("Submission")
+            .field("scheme_id", &self.handle.scheme_id())
+            .field("timeline", &self.handle.timeline_value())
             .field("cells", &self.cells.len())
             .field("staging_pools", &self.staging_pools.len())
-            .field("present_frames", &self.present_frames.len())
-            .field("present_resolvers", &self.present_resolvers.len())
+            .field("claims", &self.claims.len())
             .finish()
     }
 }
 
-/// Per-submission identity returned by [`Scheme::submit`].
-///
-/// Not [`crate::surface::Frame`] (the swapchain acquire/present token).
-///
-/// A lightweight token. The timeline value identifies which submission this represents;
-/// use [`Self::wait`] to block until that submission's GPU work completes (including
-/// grant-read staging copies when grants are recorded).
-#[derive(Debug, Clone)]
-pub struct Submission {
-    data: Arc<SubmissionData>,
-}
-
 impl Submission {
+    /// Cloneable timeline / scheme identity (does not share claim ownership).
+    pub fn handle(&self) -> SubmissionHandle {
+        self.handle.clone()
+    }
+
     /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
     pub fn timeline_value(&self) -> TimelineValue {
-        self.data.timeline
+        self.handle.timeline_value()
     }
 
     /// Block until this submission's GPU work has completed.
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
-        ctx.wait_until(self.data.timeline)?;
-        Ok(())
+        self.handle.wait(ctx)
+    }
+
+    pub(crate) fn take_claim(&mut self, scheme_id: u64, key: ClaimKey) -> Result<crate::exchange::Claim, GoldyError> {
+        if self.handle.scheme_id() != scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "Transaction belongs to a different scheme than this submission"
+            )));
+        }
+        let idx = key.present_idx as usize;
+        let claim_mutex = self.claims.get(idx).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "claim index {} out of range for submission ({} claims)",
+                idx,
+                self.claims.len()
+            ))
+        })?;
+        let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let implementation = slot
+            .take()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
+        Ok(crate::exchange::Claim::from_impl(implementation))
     }
 
     /// Submit timeline stamped on the acquired present frame, if still held.
     #[cfg(test)]
     pub(crate) fn present_frame_submit_timeline(&self, idx: usize) -> Option<TimelineValue> {
-        let frame_mutex = self.data.present_frames.get(idx)?;
-        let slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        slot.as_ref().and_then(|f| f.submit_timeline())
+        let claim_mutex = self.claims.get(idx)?;
+        let slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref()?.debug_submit_timeline()
     }
 }
 
@@ -278,6 +342,16 @@ impl PresentGrant {
     pub fn grant_id(&self) -> u32 {
         self.grant_id
     }
+
+    /// Erased transaction handle for [`Transaction::claim`].
+    pub fn transaction(&self) -> Transaction {
+        Transaction {
+            scheme_id: self.scheme_id,
+            key: ClaimKey {
+                present_idx: self.grant_id,
+            },
+        }
+    }
 }
 
 impl Grant for PresentGrant {
@@ -285,45 +359,30 @@ impl Grant for PresentGrant {
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
         let _tz = crate::tracy_zone!("scheme.grant_present.consume");
-        if submission.data.scheme_id != self.scheme_id {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "PresentGrant belongs to a different scheme than this submission"
-            )));
-        }
-        let idx = self.grant_id as usize;
-        let frame_mutex = submission.data.present_frames.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "present grant index {} out of range for submission ({} present grants)",
-                idx,
-                submission.data.present_frames.len()
-            ))
-        })?;
-        let mut slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        let surface_frame = slot
-            .take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
-        // Copy sources (e.g. ekrano `out_image`) finish at the present-partition
-        // submit timeline, not at display present. Resolving the easement with
-        // present_tv would force the next writer to GPU-wait on present completion
-        // and serialize behind drawable recycle.
-        //
-        // Fall back to present_tv when the partition stamped 0 / no submit_tv
-        // (e.g. grant_present-only schemes with no copy work) — timeline 0 is
-        // reserved as PromiseState::Pending and cannot be resolved.
-        let copy_tv = surface_frame.submit_timeline().filter(|&tv| tv != 0);
-        let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
-        let easement_tv = copy_tv.unwrap_or(present_tv);
-        let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "present resolver index {} out of range for submission ({} present grants)",
-                idx,
-                submission.data.present_resolvers.len()
-            ))
-        })?;
-        if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            resolver.resolve(easement_tv);
-        }
-        Ok(())
+        // Compatibility path: extract and consume the erased surface claim.
+        // Source WAR was already resolved at submit from the known copy timeline.
+        let claim = {
+            // Take without requiring &mut Submission so Grant stays &Submission.
+            if submission.handle.scheme_id() != self.scheme_id {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "PresentGrant belongs to a different scheme than this submission"
+                )));
+            }
+            let idx = self.grant_id as usize;
+            let claim_mutex = submission.claims.get(idx).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present grant index {} out of range for submission ({} claims)",
+                    idx,
+                    submission.claims.len()
+                ))
+            })?;
+            let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let implementation = slot.take().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission"))
+            })?;
+            crate::exchange::Claim::from_impl(implementation)
+        };
+        claim.consume()
     }
 }
 
@@ -489,29 +548,28 @@ impl<T> Grant for ReadGrant<T> {
     type Output = Loan<T>;
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
-        if submission.data.scheme_id != self.scheme_id {
+        if submission.handle.scheme_id() != self.scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "ReadGrant belongs to a different scheme than this submission"
             )));
         }
         submission.wait(&self.ctx)?;
         let idx = self.grant_id.0 as usize;
-        if validation_env::scheme_validation_enabled() && idx >= submission.data.cells.len() {
+        if validation_env::scheme_validation_enabled() && idx >= submission.cells.len() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "grant index {} out of range for submission ({} grants)",
                 idx,
-                submission.data.cells.len()
+                submission.cells.len()
             )));
         }
         let handle = submission
-            .data
             .cells
             .get(idx)
             .ok_or_else(|| {
                 GoldyError::Backend(anyhow::anyhow!(
                     "grant index {} out of range for submission ({} grants)",
                     idx,
-                    submission.data.cells.len()
+                    submission.cells.len()
                 ))
             })?
             .lock()
@@ -1634,16 +1692,35 @@ impl Scheme {
         present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
         present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
     ) -> Result<Submission, GoldyError> {
+        // Resolve source WAR from the known copy/present-partition timeline immediately.
+        // Claim consumption waits for presentation independently; it must not gate source reuse.
+        let mut claims = Vec::with_capacity(present_frames.len());
+        for (frame_mutex, resolver_mutex) in present_frames.into_iter().zip(present_resolvers) {
+            let frame = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+            let resolver = resolver_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+            if let Some(resolver) = resolver {
+                match frame.as_ref().and_then(|f| f.submit_timeline()).filter(|&tv| tv != 0) {
+                    Some(tv) => resolver.resolve(tv),
+                    // No usable copy timeline: abandon so the next writer is not blocked forever.
+                    None => drop(resolver),
+                }
+            }
+            let claim = frame
+                .map(|f| Box::new(crate::exchange::SurfaceClaimImpl::new(f)) as Box<dyn crate::exchange::ClaimImpl>);
+            claims.push(Mutex::new(claim));
+        }
+
         if self.grants.is_empty() {
             return Ok(Submission {
-                data: Arc::new(SubmissionData {
-                    scheme_id: self.scheme_id,
-                    timeline: tv_dispatch,
-                    cells: Vec::new(),
-                    staging_pools: Vec::new(),
-                    present_frames,
-                    present_resolvers,
-                }),
+                handle: SubmissionHandle {
+                    core: Arc::new(SubmissionCore {
+                        scheme_id: self.scheme_id,
+                        timeline: tv_dispatch,
+                    }),
+                },
+                cells: Vec::new(),
+                staging_pools: Vec::new(),
+                claims,
             });
         }
 
@@ -1708,14 +1785,15 @@ impl Scheme {
         self.ctx.advance_high_water_timeline(tv_copy);
 
         Ok(Submission {
-            data: Arc::new(SubmissionData {
-                scheme_id: self.scheme_id,
-                timeline: tv_copy,
-                cells,
-                staging_pools,
-                present_frames,
-                present_resolvers,
-            }),
+            handle: SubmissionHandle {
+                core: Arc::new(SubmissionCore {
+                    scheme_id: self.scheme_id,
+                    timeline: tv_copy,
+                }),
+            },
+            cells,
+            staging_pools,
+            claims,
         })
     }
 
@@ -3017,7 +3095,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
-        assert_eq!(TimelineValue::from(frame.clone()), tv);
+        assert_eq!(TimelineValue::from(frame.handle()), tv);
         assert_eq!(frame.timeline_value(), tv);
     }
 
@@ -3997,6 +4075,41 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    fn transaction_claim_consume_presents_once() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let transaction = scheme.grant_present(&lease).transaction();
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        let handle = submission.handle();
+        let claim = transaction.claim(&mut submission).expect("claim");
+        claim.consume().expect("consume");
+        assert_eq!(mock_present_count(&device), before + 1);
+        // Timeline handle remains usable after the claim is consumed.
+        let _ = handle.timeline_value();
+        let err = transaction.claim(&mut submission).expect_err("second claim must fail");
+        assert!(err.to_string().contains("already consumed"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn dropping_submission_discards_untaken_claim() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let _present = scheme.grant_present(&lease);
+        let before = mock_present_count(&device);
+        let submission = scheme.submit().expect("submit");
+        drop(submission);
+        assert_eq!(mock_present_count(&device), before, "discarded claim must not present");
+    }
+
+    #[test]
     fn grant_present_stamps_frame_with_present_partition_timeline() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4221,7 +4334,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn present_easement_promise_abandoned_when_submission_dropped() {
+    fn present_easement_promise_resolved_at_submit_before_claim_consume() {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
@@ -4236,11 +4349,26 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let key = ResourceKey::Texture(tex.gpu_handle());
         let submission = scheme.submit().expect("submit");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert_eq!(stamp.pending.lock().unwrap().len(), 1);
-        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Pending);
+        let resolved_tv = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            assert_eq!(stamp.pending.lock().unwrap().len(), 1);
+            // Source WAR resolves at submit from the known copy timeline. Dropping the
+            // submission discards the drawable claim without abandoning the WAR promise.
+            match stamp.pending.lock().unwrap()[0].poll() {
+                PromiseState::Resolved(tv) => tv,
+                other => panic!("expected Resolved after submit, got {other:?}"),
+            }
+        };
+        assert_eq!(resolved_tv, submission.timeline_value());
         drop(submission);
-        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Abandoned);
+        let after_drop = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        match after_drop {
+            PromiseState::Resolved(_) => {}
+            other => panic!("WAR must remain Resolved after claim discard, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4287,6 +4415,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn submit_gate_folds_resolved_present_promise_into_foreign_reads() {
         use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4315,18 +4444,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             1,
             "submit 2 claims a fresh present promise; frame 1's resolved promise must be pruned"
         );
-        assert_eq!(
-            stamp.pending.lock().unwrap()[0].poll(),
-            crate::timeline::PromiseState::Pending
+        // Frame 2's promise is resolved at submit from the known copy timeline.
+        assert!(
+            matches!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Resolved(_)),
+            "frame 2 present promise must be Resolved after submit"
         );
     }
 
     #[test]
-    fn submit_gate_blocks_until_present_promise_resolved() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        use std::time::Duration;
-
+    fn submit_gate_does_not_block_on_unconsumed_claim() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
@@ -4336,31 +4462,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
         let sub1 = scheme.submit().expect("submit 1");
-
-        let scheme = Arc::new(std::sync::Mutex::new(scheme));
-        let barrier = Arc::new(Barrier::new(2));
-        let scheme2 = Arc::clone(&scheme);
-        let barrier2 = Arc::clone(&barrier);
-
-        let gate_thread = thread::spawn(move || {
-            barrier2.wait();
-            scheme2
-                .lock()
-                .unwrap()
-                .submit()
-                .expect("submit 2 must succeed after promise resolves");
-        });
-
-        barrier.wait();
-        thread::sleep(Duration::from_millis(30));
-        present.consume(&sub1).expect("consume releases submit gate");
-        gate_thread.join().expect("gate thread");
+        // Source WAR already resolved at submit; the next submit must not wait for consume.
+        let _sub2 = scheme.submit().expect("submit 2 without consuming claim 1");
+        present.consume(&sub1).expect("consume may still happen later");
     }
 
     #[test]
-    fn texture_stamp_not_settled_while_present_promise_unresolved() {
+    fn texture_stamp_war_resolved_at_submit_survives_claim_discard() {
         use crate::task_graph::cross_submit::ResourceKey;
-        use crate::timeline::Settle;
+        use crate::timeline::PromiseState;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4373,10 +4483,23 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let key = ResourceKey::Texture(tex.gpu_handle());
 
         let submission = scheme.submit().expect("submit");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert_eq!(stamp.settle_on_context(&ctx), Settle::Pending);
+        let poll = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        assert!(
+            matches!(poll, PromiseState::Resolved(_)),
+            "WAR must resolve at submit, got {poll:?}"
+        );
         drop(submission);
-        assert_eq!(stamp.settle_on_context(&ctx), Settle::Ready);
+        let after = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        assert!(
+            matches!(after, PromiseState::Resolved(_)),
+            "discarding the claim must not abandon the resolved WAR, got {after:?}"
+        );
     }
 
     /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
@@ -4530,8 +4653,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let sub1 = scheme.submit().expect("submit frame 1");
         let compute_tv = sub1.timeline_value();
-        present.consume(&sub1).expect("present frame 1");
-
+        // Source WAR resolves at submit from the known copy timeline — before claim consume.
         let copy_tv = {
             let stamp = scheme
                 .submit_state
@@ -4540,13 +4662,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 .expect("out_image stamp");
             match stamp.pending.lock().unwrap()[0].poll() {
                 PromiseState::Resolved(tv) => tv,
-                other => panic!("present promise must be resolved after consume, got {other:?}"),
+                other => panic!("present promise must be resolved after submit, got {other:?}"),
             }
         };
         assert_eq!(
             copy_tv, compute_tv,
             "easement epoch must be the present-partition/copy timeline (copy={copy_tv}, compute={compute_tv})"
         );
+        present.consume(&sub1).expect("present frame 1");
 
         let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
         let _sub2 = scheme.submit().expect("submit frame 2");

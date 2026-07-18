@@ -49,6 +49,7 @@ pub mod tracy;
 pub use tracy_client as _tracy_client;
 pub mod allocation_policy;
 mod buffer_alloc_tests;
+pub mod exchange;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
@@ -63,13 +64,15 @@ pub mod transient_pool;
 pub mod vram_allocator;
 pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
 pub use error::GoldyError;
+pub use exchange::{Claim, SurfaceExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField, Texture};
 pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
 pub use scheme::{
-    Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture, Loan,
-    PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, UploadBuffer,
+    ClaimKey, Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture,
+    Loan, PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, SubmissionHandle,
+    Transaction, UploadBuffer,
 };
 pub use swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};

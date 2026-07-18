@@ -663,7 +663,7 @@ fn grant_read_double_read_same_frame_errors() {
 
 /// Cloned frames share one staging cell; only one read succeeds.
 #[test]
-fn grant_read_cloned_frame_double_read_errors() {
+fn grant_read_second_consume_errors() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
@@ -676,12 +676,9 @@ fn grant_read_cloned_frame_double_read_errors() {
     let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
     let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    let frame_clone = frame.clone();
 
     let _loan = grant.consume(&frame).expect("first read");
-    let err = grant
-        .consume(&frame_clone)
-        .expect_err("cloned frame second consume must fail");
+    let err = grant.consume(&frame).expect_err("second consume must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
