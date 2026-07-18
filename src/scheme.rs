@@ -213,12 +213,28 @@ pub struct ClaimKey {
 /// Stable erased relationship recorded in one [`Scheme`].
 ///
 /// Reusable across submissions. Extract each submission's product with [`Self::claim`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Transaction {
     pub(crate) scheme_id: u64,
     pub(crate) key: ClaimKey,
     /// Scheme-unique present binding ([`ResourceId::PresentLease`]).
     pub(crate) binding_id: u32,
+    /// Live exchange backing generation (shared with the owning pool).
+    pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transaction")
+            .field("scheme_id", &self.scheme_id)
+            .field("key", &self.key)
+            .field("binding_id", &self.binding_id)
+            .field(
+                "generation",
+                &self.generation.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 /// Unique receipt returned by [`Scheme::submit`].
@@ -234,6 +250,8 @@ pub struct Submission {
     staging_pools: Vec<Arc<GrantStagingPool>>,
     /// Scheme-unique present binding id for each claim slot (parallel to [`Self::claims`]).
     claim_bindings: Vec<u32>,
+    /// Pool generation snapshotted when each claim's drawable was acquired.
+    claim_generations: Vec<u64>,
     /// Erased exchange claims; taken by [`Transaction::claim`] or [`PresentGrant::consume`].
     claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
 }
@@ -289,6 +307,7 @@ impl Submission {
         scheme_id: u64,
         key: ClaimKey,
         binding_id: u32,
+        generation: u64,
     ) -> Result<crate::exchange::Claim, GoldyError> {
         if self.handle.scheme_id() != scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -308,6 +327,17 @@ impl Submission {
                 "transaction binding {} does not match claim slot binding {}",
                 binding_id,
                 expected_binding
+            )));
+        }
+        let expected_generation = self.claim_generations.get(idx).copied().ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "claim generation index {} out of range for submission",
+                idx
+            ))
+        })?;
+        if expected_generation != generation {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "transaction generation {generation} is stale for claim published at generation {expected_generation}"
             )));
         }
         let claim_mutex = self.claims.get(idx).ok_or_else(|| {
@@ -354,11 +384,26 @@ pub trait Grant {
 }
 
 /// Marker returned by [`Scheme::grant_present`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PresentGrant {
     pub(crate) grant_id: u32,
     pub(crate) scheme_id: u64,
     pub(crate) binding_id: u32,
+    pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl fmt::Debug for PresentGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PresentGrant")
+            .field("grant_id", &self.grant_id)
+            .field("scheme_id", &self.scheme_id)
+            .field("binding_id", &self.binding_id)
+            .field(
+                "generation",
+                &self.generation.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 impl PresentGrant {
@@ -375,6 +420,7 @@ impl PresentGrant {
                 present_idx: self.grant_id,
             },
             binding_id: self.binding_id,
+            generation: Arc::clone(&self.generation),
         }
     }
 }
@@ -394,6 +440,18 @@ impl Grant for PresentGrant {
                 )));
             }
             let idx = self.grant_id as usize;
+            let expected_generation = submission.claim_generations.get(idx).copied().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present grant index {} out of range for claim generations",
+                    idx
+                ))
+            })?;
+            let live = self.generation.load(std::sync::atomic::Ordering::Acquire);
+            if expected_generation != live {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "present grant generation {live} is stale for claim published at generation {expected_generation}"
+                )));
+            }
             let claim_mutex = submission.claims.get(idx).ok_or_else(|| {
                 GoldyError::Backend(anyhow::anyhow!(
                     "present grant index {} out of range for submission ({} claims)",
@@ -1515,6 +1573,9 @@ impl Scheme {
             // rather than shifting later bindings.
             let surface_frames: Vec<Mutex<Option<crate::surface::Frame>>> =
                 (0..grant_count).map(|_| Mutex::new(None)).collect();
+            // Parallel to surface_frames: generation snapshotted at acquire.
+            let surface_generations: Vec<std::sync::Mutex<u64>> =
+                (0..grant_count).map(|_| std::sync::Mutex::new(0)).collect();
             // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
             // across the mutable `submit_state` call below.
             let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>, u32)> = self
@@ -1552,14 +1613,16 @@ impl Scheme {
                 }
                 for ((binding_id, _, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
                     let idx = binding_to_idx[binding_id];
-                    let (_lease_id, _pool, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
+                    let (_lease_id, _pool, slot_id, generation, handle, uav_index, surface_frame) = claim.into_parts();
                     present_slots.push(ResolvedPresentSlot {
                         binding_id: *binding_id,
+                        generation,
                         slot_id,
                         handle,
                         uav_index,
                     });
                     *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
+                    *surface_generations[idx].lock().unwrap_or_else(|e| e.into_inner()) = generation;
                 }
             }
 
@@ -1586,25 +1649,28 @@ impl Scheme {
             let result = {
                 // Deferred acquire: run Surface::begin (DXGI wait) only for bindings
                 // needed by the upcoming present partition that are not yet resolved.
-                let mut deferred_acquire =
-                    |needed: &[u32], slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
-                        for &binding_id in needed {
-                            let idx = *binding_to_idx.get(&binding_id).ok_or_else(|| {
-                                anyhow::anyhow!("deferred present acquire: unknown binding id {binding_id}")
-                            })?;
-                            let (_, pool, _) = &present_grant_pools[idx];
-                            let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
-                                .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
-                            slots.push(ResolvedPresentSlot {
-                                binding_id,
-                                slot_id,
-                                handle,
-                                uav_index,
-                            });
-                            *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
-                        }
-                        Ok(())
-                    };
+                let mut deferred_acquire = |needed: &[u32],
+                                            slots: &mut Vec<ResolvedPresentSlot>|
+                 -> anyhow::Result<()> {
+                    for &binding_id in needed {
+                        let idx = *binding_to_idx.get(&binding_id).ok_or_else(|| {
+                            anyhow::anyhow!("deferred present acquire: unknown binding id {binding_id}")
+                        })?;
+                        let (_, pool, _) = &present_grant_pools[idx];
+                        let (slot_id, generation, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
+                            .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
+                        slots.push(ResolvedPresentSlot {
+                            binding_id,
+                            generation,
+                            slot_id,
+                            handle,
+                            uav_index,
+                        });
+                        *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
+                        *surface_generations[idx].lock().unwrap_or_else(|e| e.into_inner()) = generation;
+                    }
+                    Ok(())
+                };
                 let deferred: Option<&mut DeferredPresentAcquire<'_>> =
                     if present_grant_pools.is_empty() || !present_slots.is_empty() {
                         None
@@ -1631,12 +1697,12 @@ impl Scheme {
                 self.topology_dirty.store(false, Ordering::Release);
             }
             match result {
-                Ok(ok) => Ok((ok, surface_frames, partial)),
+                Ok(ok) => Ok((ok, surface_frames, surface_generations, partial)),
                 Err(e) => Err((e, surface_frames, partial, partial_tv)),
             }
         };
 
-        let ((tv, part_result), surface_frames, _partial) = match submit_result {
+        let ((tv, part_result), surface_frames, surface_generations, _partial) = match submit_result {
             Ok(ok) => ok,
             Err((e, surface_frames, partial, partial_tv)) => {
                 return Err(self.cleanup_failed_present_submit(e, surface_frames, &partial, partial_tv));
@@ -1732,7 +1798,11 @@ impl Scheme {
 
         let present_resolvers =
             claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
-        let submission = self.finish_submit_frame(tv, surface_frames, present_resolvers)?;
+        let claim_generations: Vec<u64> = surface_generations
+            .into_iter()
+            .map(|m| *m.lock().unwrap_or_else(|e| e.into_inner()))
+            .collect();
+        let submission = self.finish_submit_frame(tv, surface_frames, claim_generations, present_resolvers)?;
         Ok(submission)
     }
 
@@ -1785,6 +1855,7 @@ impl Scheme {
         &mut self,
         tv_dispatch: TimelineValue,
         present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+        claim_generations: Vec<u64>,
         present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
     ) -> Result<Submission, GoldyError> {
         // Resolve source WAR from the known copy/present-partition timeline immediately.
@@ -1795,6 +1866,11 @@ impl Scheme {
             claim_bindings.len(),
             present_frames.len(),
             "present grant count must match acquired frames"
+        );
+        debug_assert_eq!(
+            claim_bindings.len(),
+            claim_generations.len(),
+            "present grant count must match claim generations"
         );
         for (frame_mutex, resolver_mutex) in present_frames.into_iter().zip(present_resolvers) {
             let frame = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -1822,6 +1898,7 @@ impl Scheme {
                 cells: Vec::new(),
                 staging_pools: Vec::new(),
                 claim_bindings,
+                claim_generations,
                 claims,
             });
         }
@@ -1896,6 +1973,7 @@ impl Scheme {
             cells,
             staging_pools,
             claim_bindings,
+            claim_generations,
             claims,
         })
     }
@@ -1933,6 +2011,7 @@ impl Scheme {
     /// creating a second claim slot for one binding.
     pub fn grant_present(&mut self, lease: &PresentLease) -> PresentGrant {
         let binding_id = self.intern_present_binding(lease);
+        let generation = lease.generation_handle();
         if let Some((idx, _)) = self
             .present_grants
             .iter()
@@ -1943,6 +2022,7 @@ impl Scheme {
                 grant_id: idx as u32,
                 scheme_id: self.scheme_id,
                 binding_id,
+                generation,
             };
         }
 
@@ -1971,6 +2051,7 @@ impl Scheme {
             grant_id: present_idx,
             scheme_id: self.scheme_id,
             binding_id,
+            generation,
         }
     }
 
@@ -4464,6 +4545,169 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             before + 1,
             "discard must not present the other surface"
         );
+    }
+
+    #[test]
+    fn surface_claim_impl_drop_cancels_without_presenting() {
+        // Raw SurfaceClaimImpl may be dropped on finish_submit_frame failure before
+        // wrapping in Claim/Submission. Drop must cancel, not present via Frame::drop.
+        let device = mock_device();
+        let (_ctx, spool) = mock_swapchain_pool(&device);
+        let acquired = spool.acquire_present(&spool.lease()).expect("acquire");
+        let (_lease, _pool, _slot, _gen, _handle, _uav, frame) = acquired.into_parts();
+        let before = mock_present_count(&device);
+        drop(crate::exchange::SurfaceClaimImpl::new(frame));
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "SurfaceClaimImpl Drop must cancel, not present"
+        );
+    }
+
+    #[test]
+    fn partial_acquire_failure_discards_submitted_binding_without_present() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("left");
+        let right = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("right");
+        let left_tex = mock_direct_texture(&device);
+        let right_tex = mock_direct_texture(&device);
+        let buf = retained_buffer(&mut pool);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        // Force distinct present partitions: left copy must precede a buf write that
+        // the right path reads, so binding 1 is introduced in a later wave.
+        scheme
+            .node("write_left", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let _left_tx = left.bind(&mut scheme, &left_tex).expect("bind left");
+        scheme
+            .node("bridge", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Read)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("write_right", &pipeline)
+            .with_parcel(&right_tex, NodeAccess::Write)
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+        let _right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
+
+        right.pool().fail_next_acquire();
+        let before = mock_present_count(&device);
+        let err = scheme
+            .submit()
+            .expect_err("right acquire must fail after left submitted");
+        assert!(
+            err.to_string().contains("test-injected acquire failure") || err.to_string().contains("acquire"),
+            "unexpected: {err}"
+        );
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "partial failure must not present the submitted left frame"
+        );
+
+        let key = ResourceKey::Texture(left_tex.gpu_handle());
+        let war = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("left tex stamp");
+            let pending = stamp.pending.lock().unwrap();
+            assert!(
+                !pending.is_empty(),
+                "left present partition must have submitted and registered WAR before right acquire failed"
+            );
+            pending[0].poll()
+        };
+        match war {
+            PromiseState::Resolved(_) => {}
+            other => panic!("left source WAR must settle on partial failure cleanup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resize_advances_generation_and_stales_prior_claim() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("surface");
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let tx = surface.bind(&mut scheme, &tex).expect("bind");
+        assert_eq!(tx.generation(), 0);
+        let mut submission = scheme.submit().expect("submit");
+
+        surface.resize(64, 64).expect("resize");
+        assert_eq!(tx.generation(), 1);
+        let err = tx.claim(&mut submission).expect_err("claim must be stale after resize");
+        assert!(err.to_string().contains("stale"), "unexpected: {err}");
+
+        let before = mock_present_count(&device);
+        drop(submission);
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "dropping stale submission must discard, not present"
+        );
+
+        // Next submit under the new generation still works.
+        let mut submission2 = scheme.submit().expect("submit after resize");
+        tx.claim(&mut submission2)
+            .expect("fresh claim at new generation")
+            .consume()
+            .expect("present");
+        assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[test]
+    fn resize_one_surface_does_not_stale_other_transaction() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("left");
+        let right = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("right");
+        let left_tex = mock_direct_texture(&device);
+        let right_tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_left", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("write_right", &pipeline)
+            .with_parcel(&right_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let left_tx = left.bind(&mut scheme, &left_tex).expect("bind left");
+        let right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
+        let mut submission = scheme.submit().expect("submit");
+
+        left.resize(80, 80).expect("resize left only");
+        assert_eq!(left_tx.generation(), 1);
+        assert_eq!(right_tx.generation(), 0);
+
+        let err = left_tx.claim(&mut submission).expect_err("left claim stale");
+        assert!(err.to_string().contains("stale"), "unexpected: {err}");
+        right_tx
+            .claim(&mut submission)
+            .expect("right claim still current")
+            .consume()
+            .expect("right present");
     }
 
     #[test]

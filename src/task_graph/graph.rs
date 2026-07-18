@@ -740,6 +740,8 @@ impl PartitionSubmitResult {
 pub(crate) struct ResolvedPresentSlot {
     /// Scheme-unique present binding id ([`super::ResourceId::PresentLease`]).
     pub binding_id: u32,
+    /// Pool generation at acquire time (included in retained variant keys).
+    pub generation: u64,
     pub slot_id: u32,
     pub handle: crate::backend::TextureHandle,
     pub uav_index: u32,
@@ -879,6 +881,7 @@ fn dynamic_partition_slot_key(
     for slot in present_slots {
         if needed.binary_search(&slot.binding_id).is_ok() {
             slot.binding_id.hash(&mut h);
+            slot.generation.hash(&mut h);
             slot.slot_id.hash(&mut h);
         }
     }
@@ -2177,6 +2180,7 @@ mod slice_retention_tests {
             acquire_after_cb.store(n, std::sync::atomic::Ordering::SeqCst);
             slots.push(ResolvedPresentSlot {
                 binding_id: 0,
+                generation: 0,
                 slot_id: 0,
                 handle: 42,
                 uav_index: 7,
@@ -2236,6 +2240,7 @@ mod slice_retention_tests {
         let mut deferred2 = |_needed: &[u32], slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
             slots.push(ResolvedPresentSlot {
                 binding_id: 0,
+                generation: 0,
                 slot_id: 1,
                 handle: 43,
                 uav_index: 8,
@@ -2368,6 +2373,7 @@ mod slice_retention_tests {
             for &binding_id in needed {
                 slots.push(ResolvedPresentSlot {
                     binding_id,
+                    generation: 0,
                     slot_id: binding_id,
                     handle: 40 + binding_id as u64,
                     uav_index: 7 + binding_id,
@@ -2411,6 +2417,60 @@ mod slice_retention_tests {
         );
         assert_eq!(partial.present_binding_tvs[0].0, 0);
         assert!(partial_tv > 0, "partial high-water must reflect submitted work");
+    }
+
+    #[test]
+    fn dynamic_partition_slot_key_includes_generation() {
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "copy",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(5),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(0),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: 5,
+                dst: ResourceId::PresentLease(0),
+            },
+        });
+        let waves = vec![Wave {
+            node_indices: vec![0],
+            barriers_before: Default::default(),
+        }];
+        let resolver = crate::task_graph::SlotResolver::default();
+        let key_a = dynamic_partition_slot_key(
+            0xABCDu64,
+            &[ResolvedPresentSlot {
+                binding_id: 0,
+                generation: 0,
+                slot_id: 1,
+                handle: 10,
+                uav_index: 2,
+            }],
+            &ir,
+            &waves,
+            &resolver,
+        );
+        let key_b = dynamic_partition_slot_key(
+            0xABCDu64,
+            &[ResolvedPresentSlot {
+                binding_id: 0,
+                generation: 1,
+                slot_id: 1,
+                handle: 10,
+                uav_index: 2,
+            }],
+            &ir,
+            &waves,
+            &resolver,
+        );
+        assert_ne!(key_a, key_b, "generation must participate in retained variant key");
     }
 
     /// Fresh path: offscreen render uses `submit_graph`, not standalone.

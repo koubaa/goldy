@@ -8,7 +8,7 @@
 
 use crate::context::Context;
 use crate::error::GoldyError;
-use crate::scheme::{ClaimKey, Scheme, Submission, Transaction};
+use crate::scheme::{Scheme, Submission, Transaction};
 use crate::surface::Frame as SurfaceFrame;
 use crate::swapchain_pool::{PresentLease, SwapchainPool};
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
@@ -68,6 +68,16 @@ impl ClaimImpl for SurfaceClaimImpl {
     #[cfg(test)]
     fn debug_submit_timeline(&self) -> Option<crate::timeline::TimelineValue> {
         self.submit_timeline()
+    }
+}
+
+impl Drop for SurfaceClaimImpl {
+    fn drop(&mut self) {
+        // Raw claim values may be dropped on submit failure after publish construction
+        // (before wrapping in Claim / Submission). Cancel so Frame::drop cannot present.
+        if let Some(frame) = self.frame.take() {
+            frame.cancel();
+        }
     }
 }
 
@@ -154,15 +164,13 @@ impl SurfaceExchange {
         }
         scheme.copy_texture_to_present(source, &lease);
         let grant = scheme.grant_present(&lease);
-        Ok(Transaction {
-            scheme_id: grant.scheme_id,
-            key: ClaimKey {
-                present_idx: grant.grant_id(),
-            },
-            binding_id: grant.binding_id,
-        })
+        Ok(grant.transaction())
     }
 
+    /// Resize the underlying swapchain.
+    ///
+    /// Advances this exchange's backing generation so claims and retained variants
+    /// published under the previous generation become stale.
     pub fn resize(&self, width: u32, height: u32) -> Result<(), GoldyError> {
         self.pool.resize(width, height).map_err(GoldyError::Backend)
     }
@@ -199,10 +207,19 @@ impl Transaction {
         self.binding_id
     }
 
+    /// Current backing generation for this transaction's exchange.
+    ///
+    /// Resize and backing recreation advance this without changing binding identity.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Remove this transaction's claim from a successful submission.
     ///
     /// Acquisition already happened inside [`Scheme::submit`].
+    /// Fails when the exchange generation no longer matches the published claim
+    /// (for example after resize between submit and claim).
     pub fn claim(&self, submission: &mut Submission) -> Result<Claim, GoldyError> {
-        submission.take_claim(self.scheme_id, self.key, self.binding_id)
+        submission.take_claim(self.scheme_id, self.key, self.binding_id, self.generation())
     }
 }
