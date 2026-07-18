@@ -1204,6 +1204,7 @@ impl GpuBackend for VulkanBackend {
         &mut self,
         device_handle: DeviceHandle,
         compute_shader: ShaderHandle,
+        debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle> {
         // Compile shader on-demand
         let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
@@ -1218,7 +1219,9 @@ impl GpuBackend for VulkanBackend {
                 .unwrap_or_default()
         };
 
-        let shader_debug_name = format!("compute_shader#{compute_shader}");
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("compute_shader#{compute_shader}"));
 
         let handle = compute::create(
             &self.state.devices,

@@ -17,6 +17,7 @@ mod compute;
 mod context;
 mod device;
 mod frame_table;
+pub(super) mod metal_capture;
 mod pending_submit;
 mod pipeline;
 mod render_commands;
@@ -151,13 +152,20 @@ impl MetalBackend {
         // even device-creation calls can be captured if desired.
         api_log::init();
 
-        // `MTL_SHADER_VALIDATION` must be set before the first MTLDevice is created.
-        // Use a process-wide Once so parallel test threads do not race on `setenv`.
+        // `MTL_SHADER_VALIDATION` / `METAL_CAPTURE_ENABLED` must be set before the
+        // first MTLDevice is created. Use a process-wide Once so parallel test
+        // threads do not race on `setenv`.
         METAL_VALIDATION_INIT.call_once(|| {
             if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
                 // SAFETY: called exactly once per process, before `Device::all()` below.
                 unsafe { std::env::set_var("MTL_SHADER_VALIDATION", "1") };
                 tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION api)");
+            }
+            // Programmatic MTLCaptureManager requires METAL_CAPTURE_ENABLED=1 outside Xcode.
+            if metal_capture::enabled() && std::env::var_os("METAL_CAPTURE_ENABLED").is_none() {
+                // SAFETY: same Once as above; before first device creation.
+                unsafe { std::env::set_var("METAL_CAPTURE_ENABLED", "1") };
+                tracing::info!("Set METAL_CAPTURE_ENABLED=1 (GOLDY_METAL_CAPTURE)");
             }
         });
 
@@ -802,8 +810,9 @@ impl GpuBackend for MetalBackend {
         &mut self,
         device: DeviceHandle,
         compute_shader: ShaderHandle,
+        debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle> {
-        compute::create(&mut self.state, device, compute_shader)
+        compute::create(&mut self.state, device, compute_shader, debug_name)
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
