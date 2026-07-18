@@ -530,32 +530,6 @@ pub unsafe fn goldy_scheme_copy_to_texture(
     (lib().goldy_scheme_copy_to_texture)(scheme, src_lease, dst_texture)
 }
 
-pub unsafe fn goldy_scheme_copy_to_present(
-    scheme: *mut GoldyScheme,
-    src_lease: *const GoldySchemeRenderTargetLease,
-    dst_lease: *const GoldyPresentLease,
-) -> GoldyResult {
-    (lib().goldy_scheme_copy_to_present)(scheme, src_lease, dst_lease)
-}
-
-pub unsafe fn goldy_scheme_grant_present(
-    scheme: *mut GoldyScheme,
-    lease: *const GoldyPresentLease,
-) -> *mut GoldyPresentGrant {
-    (lib().goldy_scheme_grant_present)(scheme, lease)
-}
-
-pub unsafe fn goldy_present_grant_destroy(grant: *mut GoldyPresentGrant) {
-    (lib().goldy_present_grant_destroy)(grant)
-}
-
-pub unsafe fn goldy_present_grant_consume(
-    grant: *const GoldyPresentGrant,
-    submission: *const GoldySchemeSubmission,
-) -> GoldyResult {
-    (lib().goldy_present_grant_consume)(grant, submission)
-}
-
 pub unsafe fn goldy_scheme_grant_read_texture(
     scheme: *mut GoldyScheme,
     texture: *const GoldyTexture,
@@ -576,58 +550,121 @@ pub unsafe fn goldy_retained_pool_acquire_texture(
     (lib().goldy_retained_pool_acquire_texture)(pool, width, height, format, access, flags, data, data_size)
 }
 
-pub unsafe fn goldy_swapchain_pool_destroy(pool: *mut GoldySwapchainPool) {
-    (lib().goldy_swapchain_pool_destroy)(pool)
-}
-
-pub unsafe fn goldy_swapchain_pool_lease(pool: *const GoldySwapchainPool) -> *mut GoldyPresentLease {
-    (lib().goldy_swapchain_pool_lease)(pool)
-}
-
-pub unsafe fn goldy_swapchain_pool_width(pool: *const GoldySwapchainPool) -> u32 {
-    (lib().goldy_swapchain_pool_width)(pool)
-}
-
-pub unsafe fn goldy_swapchain_pool_height(pool: *const GoldySwapchainPool) -> u32 {
-    (lib().goldy_swapchain_pool_height)(pool)
-}
-
-pub unsafe fn goldy_swapchain_pool_format(pool: *const GoldySwapchainPool) -> GoldyTextureFormat {
-    (lib().goldy_swapchain_pool_format)(pool)
-}
-
-pub unsafe fn goldy_swapchain_pool_resize(pool: *mut GoldySwapchainPool, width: u32, height: u32) -> GoldyResult {
-    (lib().goldy_swapchain_pool_resize)(pool, width, height)
-}
-
 pub unsafe fn goldy_present_lease_destroy(lease: *mut GoldyPresentLease) {
     (lib().goldy_present_lease_destroy)(lease)
 }
 
+pub unsafe fn goldy_surface_exchange_destroy(exchange: *mut GoldySurfaceExchange) {
+    (lib().goldy_surface_exchange_destroy)(exchange)
+}
+
+pub unsafe fn goldy_surface_exchange_width(exchange: *const GoldySurfaceExchange) -> u32 {
+    (lib().goldy_surface_exchange_width)(exchange)
+}
+
+pub unsafe fn goldy_surface_exchange_height(exchange: *const GoldySurfaceExchange) -> u32 {
+    (lib().goldy_surface_exchange_height)(exchange)
+}
+
+pub unsafe fn goldy_surface_exchange_format(exchange: *const GoldySurfaceExchange) -> GoldyTextureFormat {
+    (lib().goldy_surface_exchange_format)(exchange)
+}
+
+pub unsafe fn goldy_surface_exchange_generation(exchange: *const GoldySurfaceExchange) -> u64 {
+    (lib().goldy_surface_exchange_generation)(exchange)
+}
+
+pub unsafe fn goldy_surface_exchange_resize(
+    exchange: *mut GoldySurfaceExchange,
+    width: u32,
+    height: u32,
+) -> GoldyResult {
+    (lib().goldy_surface_exchange_resize)(exchange, width, height)
+}
+
+pub unsafe fn goldy_surface_exchange_lease(exchange: *const GoldySurfaceExchange) -> *mut GoldyPresentLease {
+    (lib().goldy_surface_exchange_lease)(exchange)
+}
+
+pub unsafe fn goldy_surface_exchange_bind_render_target(
+    exchange: *const GoldySurfaceExchange,
+    scheme: *mut GoldyScheme,
+    src_lease: *const GoldySchemeRenderTargetLease,
+) -> *mut GoldyTransaction {
+    (lib().goldy_surface_exchange_bind_render_target)(exchange, scheme, src_lease)
+}
+
+pub unsafe fn goldy_surface_exchange_bind(
+    exchange: *const GoldySurfaceExchange,
+    scheme: *mut GoldyScheme,
+    source: *const GoldyTexture,
+) -> *mut GoldyTransaction {
+    (lib().goldy_surface_exchange_bind)(exchange, scheme, source)
+}
+
+pub unsafe fn goldy_surface_exchange_bind_destination(
+    exchange: *const GoldySurfaceExchange,
+    scheme: *mut GoldyScheme,
+    out: *mut GoldySurfaceExchangeBindDestinationOut,
+) -> GoldyResult {
+    (lib().goldy_surface_exchange_bind_destination)(exchange, scheme, out)
+}
+
+pub unsafe fn goldy_transaction_destroy(transaction: *mut GoldyTransaction) {
+    (lib().goldy_transaction_destroy)(transaction)
+}
+
+pub unsafe fn goldy_transaction_binding_id(transaction: *const GoldyTransaction) -> u32 {
+    (lib().goldy_transaction_binding_id)(transaction)
+}
+
+pub unsafe fn goldy_transaction_generation(transaction: *const GoldyTransaction) -> u64 {
+    (lib().goldy_transaction_generation)(transaction)
+}
+
+pub unsafe fn goldy_transaction_claim(
+    transaction: *const GoldyTransaction,
+    submission: *mut GoldySchemeSubmission,
+) -> *mut GoldyClaim {
+    (lib().goldy_transaction_claim)(transaction, submission)
+}
+
+pub unsafe fn goldy_claim_destroy(claim: *mut GoldyClaim) {
+    (lib().goldy_claim_destroy)(claim)
+}
+
+pub unsafe fn goldy_claim_consume(claim: *mut GoldyClaim) -> GoldyResult {
+    (lib().goldy_claim_consume)(claim)
+}
+
+pub unsafe fn goldy_claim_discard(claim: *mut GoldyClaim) -> GoldyResult {
+    (lib().goldy_claim_discard)(claim)
+}
+
 #[cfg(windows)]
-pub unsafe fn goldy_swapchain_pool_create_win32(
+pub unsafe fn goldy_surface_exchange_create_win32(
     ctx: *const GoldyContext,
     hwnd: *mut std::ffi::c_void,
     depth: u32,
-) -> *mut GoldySwapchainPool {
-    (lib().goldy_swapchain_pool_create_win32)(ctx, hwnd, depth)
+) -> *mut GoldySurfaceExchange {
+    (lib().goldy_surface_exchange_create_win32)(ctx, hwnd, depth)
 }
 
 #[cfg(target_os = "macos")]
-pub unsafe fn goldy_swapchain_pool_create_appkit(
+pub unsafe fn goldy_surface_exchange_create_appkit(
     ctx: *const GoldyContext,
     ns_view: *mut std::ffi::c_void,
     depth: u32,
-) -> *mut GoldySwapchainPool {
-    (lib().goldy_swapchain_pool_create_appkit)(ctx, ns_view, depth)
+) -> *mut GoldySurfaceExchange {
+    (lib().goldy_surface_exchange_create_appkit)(ctx, ns_view, depth)
 }
 
 #[cfg(target_os = "linux")]
-pub unsafe fn goldy_swapchain_pool_create_wayland(
+pub unsafe fn goldy_surface_exchange_create_wayland(
     ctx: *const GoldyContext,
     display: *mut std::ffi::c_void,
     surface: *mut std::ffi::c_void,
     depth: u32,
-) -> *mut GoldySwapchainPool {
-    (lib().goldy_swapchain_pool_create_wayland)(ctx, display, surface, depth)
+) -> *mut GoldySurfaceExchange {
+    (lib().goldy_surface_exchange_create_wayland)(ctx, display, surface, depth)
 }

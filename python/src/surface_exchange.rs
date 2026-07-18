@@ -1,37 +1,40 @@
-//! Python wrapper for [`goldy::SwapchainPool`] (present-on-scheme).
+//! Python wrapper for [`goldy::SurfaceExchange`].
 
 use crate::error::IntoPyResult;
-use crate::scheme::{PyContext, PyPresentLease};
+use crate::exchange::PyTransaction;
+use crate::scheme::{PyContext, PyPresentLease, PyScheme, PySchemeRenderTargetLease};
+use crate::texture::PyTexture;
 use crate::types::PyTextureFormat;
-use goldy::swapchain_pool::SwapchainPool;
+use goldy::{SurfaceConfig, SurfaceExchange};
 use pyo3::prelude::*;
 
-/// Pool of OS swapchain drawables for retained scheme present.
-#[pyclass(name = "SwapchainPool", module = "goldy", unsendable)]
-pub struct PySwapchainPool {
-    inner: SwapchainPool,
+/// Window-surface exchange for present-on-scheme.
+#[pyclass(name = "SurfaceExchange", module = "goldy", unsendable)]
+pub struct PySurfaceExchange {
+    pub(crate) inner: SurfaceExchange,
 }
 
 #[pymethods]
-impl PySwapchainPool {
-    /// Create a swapchain pool from a GLFW window and submission context.
+impl PySurfaceExchange {
+    /// Create a surface exchange from a GLFW window and submission context.
     #[staticmethod]
     fn from_glfw(ctx: &PyContext, glfw_window: &Bound<'_, PyAny>) -> PyResult<Self> {
         let py = glfw_window.py();
         let glfw = py.import("glfw")?;
 
         #[cfg(target_os = "windows")]
-        let pool = {
+        let exchange = {
             let get_win32_window = glfw.getattr("get_win32_window")?;
             let hwnd: isize = get_win32_window.call1((glfw_window,))?.extract()?;
             let window_wrapper = Win32WindowWrapper {
                 hwnd: hwnd as *mut std::ffi::c_void,
             };
-            SwapchainPool::new(&ctx.inner, &window_wrapper, 3).into_py_result()?
+            SurfaceExchange::new_with_depth(&ctx.inner, &window_wrapper, 3, SurfaceConfig::default())
+                .into_py_result()?
         };
 
         #[cfg(target_os = "linux")]
-        let pool = {
+        let exchange = {
             let get_wayland_window = glfw.getattr("get_wayland_window")?;
             let get_wayland_display = glfw.getattr("get_wayland_display")?;
             let wl_surface: isize = get_wayland_window.call1((glfw_window,))?.extract()?;
@@ -45,11 +48,12 @@ impl PySwapchainPool {
                 display: wl_display as *mut std::ffi::c_void,
                 surface: wl_surface as *mut std::ffi::c_void,
             };
-            SwapchainPool::new(&ctx.inner, &window_wrapper, 3).into_py_result()?
+            SurfaceExchange::new_with_depth(&ctx.inner, &window_wrapper, 3, SurfaceConfig::default())
+                .into_py_result()?
         };
 
         #[cfg(target_os = "macos")]
-        let pool = {
+        let exchange = {
             let get_cocoa_window = glfw.getattr("get_cocoa_window")?;
             let ns_window: isize = get_cocoa_window.call1((glfw_window,))?.extract()?;
             let ns_view = unsafe {
@@ -59,10 +63,11 @@ impl PySwapchainPool {
                 content_view as *mut std::ffi::c_void
             };
             let window_wrapper = CocoaWindowWrapper { ns_view };
-            SwapchainPool::new(&ctx.inner, &window_wrapper, 3).into_py_result()?
+            SurfaceExchange::new_with_depth(&ctx.inner, &window_wrapper, 3, SurfaceConfig::default())
+                .into_py_result()?
         };
 
-        Ok(PySwapchainPool { inner: pool })
+        Ok(PySurfaceExchange { inner: exchange })
     }
 
     #[getter]
@@ -80,6 +85,10 @@ impl PySwapchainPool {
         self.inner.format().into()
     }
 
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> PyResult<()> {
         self.inner.resize(width, height).into_py_result()
     }
@@ -90,9 +99,36 @@ impl PySwapchainPool {
         })
     }
 
+    fn bind_render_target(&self, scheme: &PyScheme, source: &PySchemeRenderTargetLease) -> PyResult<PyTransaction> {
+        scheme.ensure_no_active_recorder()?;
+        let transaction = self
+            .inner
+            .bind_render_target(&mut scheme.inner.borrow_mut(), &source.inner)
+            .into_py_result()?;
+        Ok(PyTransaction { inner: transaction })
+    }
+
+    fn bind(&self, scheme: &PyScheme, source: &PyTexture) -> PyResult<PyTransaction> {
+        scheme.ensure_no_active_recorder()?;
+        let transaction = self
+            .inner
+            .bind(&mut scheme.inner.borrow_mut(), &source.inner)
+            .into_py_result()?;
+        Ok(PyTransaction { inner: transaction })
+    }
+
+    fn bind_destination(&self, scheme: &PyScheme) -> PyResult<(PyPresentLease, PyTransaction)> {
+        scheme.ensure_no_active_recorder()?;
+        let (lease, transaction) = self
+            .inner
+            .bind_destination(&mut scheme.inner.borrow_mut())
+            .into_py_result()?;
+        Ok((PyPresentLease { inner: lease }, PyTransaction { inner: transaction }))
+    }
+
     fn __repr__(&self) -> String {
         let (w, h) = self.inner.size();
-        format!("SwapchainPool({w}x{h}, {:?})", self.inner.format())
+        format!("SurfaceExchange({w}x{h}, {:?})", self.inner.format())
     }
 }
 

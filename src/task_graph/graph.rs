@@ -703,12 +703,17 @@ fn cross_sync_for_stamps<'a>(
 ///
 /// When CB replay is disabled, both counters stay at zero — fresh encodes are
 /// neither retention "records" nor resubmits.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PartitionSubmitResult {
     /// Partitions that were re-recorded **and retained** this call.
     pub records: usize,
     /// Partitions that were resubmitted from a retained command list without re-recording.
     pub resubmit_hits: usize,
+    /// Last timeline value per present binding that reached a submitted present partition.
+    ///
+    /// Used for source-WAR settlement and for failure cleanup of referenced drawables.
+    /// Bindings acquired but not yet submitted are absent.
+    pub present_binding_tvs: Vec<(u32, TimelineValue)>,
 }
 
 impl PartitionSubmitResult {
@@ -719,31 +724,51 @@ impl PartitionSubmitResult {
     pub fn all_from_cache(&self) -> bool {
         self.records == 0
     }
+
+    fn note_present_bindings(&mut self, bindings: &[u32], tv: TimelineValue) {
+        for &id in bindings {
+            if let Some((_, existing)) = self.present_binding_tvs.iter_mut().find(|(b, _)| *b == id) {
+                *existing = tv;
+            } else {
+                self.present_binding_tvs.push((id, tv));
+            }
+        }
+    }
 }
 
-/// Resolved swapchain drawable for one present lease at submit time.
+/// Resolved swapchain drawable for one present binding at submit time.
 pub(crate) struct ResolvedPresentSlot {
-    pub lease_id: u32,
+    /// Scheme-unique present binding id ([`super::ResourceId::PresentLease`]).
+    pub binding_id: u32,
+    /// Pool generation at acquire time (included in retained variant keys).
+    pub generation: u64,
     pub slot_id: u32,
     pub handle: crate::backend::TextureHandle,
     pub uav_index: u32,
 }
 
-/// Deferred swapchain acquire callback for the first present-touching partition.
-pub(crate) type DeferredPresentAcquire<'a> = dyn FnMut(&mut Vec<ResolvedPresentSlot>) -> Result<()> + 'a;
+/// Deferred swapchain acquire for specific unresolved present binding ids.
+///
+/// Called with the binding ids that the upcoming partition needs and that are not
+/// yet in `present_slots`. Appends only those new resolutions.
+pub(crate) type DeferredPresentAcquire<'a> = dyn FnMut(&[u32], &mut Vec<ResolvedPresentSlot>) -> Result<()> + 'a;
 
 /// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir`].
 ///
 /// Present slots may be empty at entry. When a present-touching partition is about
-/// to run, [`Self::deferred_acquire`] (if set) fills `present_slots` — that is the
-/// DXGI / drawable wait. Non-present partitions are submitted first so GPU coarse/fine
-/// work can overlap the acquire wait (Exchange option/exercise split).
+/// to run, [`Self::deferred_acquire`] (if set) fills any still-unresolved bindings
+/// that partition needs — that is the DXGI / drawable wait. Earlier partitions
+/// (including earlier present partitions for other bindings) are submitted first so
+/// GPU work can overlap later acquires (Exchange option/exercise split).
 ///
 /// [`Self::upload_buffers`] maps logical [`super::ResourceId::UploadBuffer`] ids to
 /// the physical staging parcels selected for this submission.
+///
+/// [`Self::partial`] is updated after each successful partition so callers can
+/// settle high-water and referenced present frames if a later acquire/submit fails.
 pub(crate) struct PresentSubmitOptions<'a> {
     pub present_slots: &'a mut Vec<ResolvedPresentSlot>,
-    /// Called once, on the first present partition, when `present_slots` is still empty.
+    /// Called per present partition for binding ids not yet resolved in `present_slots`.
     pub deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
     /// Scheme upload-buffer resolutions for this submission (may be empty).
     pub upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
@@ -751,35 +776,75 @@ pub(crate) struct PresentSubmitOptions<'a> {
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
     pub sidecar: SubmitSidecarState,
+    /// Best-effort progress mirror; readable after `Err` for cleanup.
+    pub partial: &'a mut PartitionSubmitResult,
+    pub partial_tv: &'a mut TimelineValue,
 }
 
-/// Exercise deferred present acquire and populate the slot resolver (once).
+/// Ensure present bindings needed by the upcoming partition are in the resolver.
 fn ensure_present_ready(
+    needed_bindings: &[u32],
     present_slots: &mut Vec<ResolvedPresentSlot>,
     deferred_acquire: &mut Option<&mut DeferredPresentAcquire<'_>>,
     resolver: &mut super::SlotResolver,
-    present_resolver_ready: &mut bool,
 ) -> Result<()> {
     use super::ResolvedSwapchain;
-    if *present_resolver_ready {
+
+    // Seed resolver from any already-acquired slots (eager path or earlier partitions).
+    for slot in present_slots.iter() {
+        resolver
+            .present_leases
+            .entry(slot.binding_id)
+            .or_insert(ResolvedSwapchain {
+                handle: slot.handle,
+                uav_index: slot.uav_index,
+            });
+    }
+
+    let missing: Vec<u32> = needed_bindings
+        .iter()
+        .copied()
+        .filter(|id| !resolver.present_leases.contains_key(id))
+        .collect();
+    if missing.is_empty() {
+        if needed_bindings.is_empty() {
+            // Legacy SwapchainOutput partitions may have empty PresentLease ids;
+            // they still need at least one resolved slot when present_slots was
+            // pre-filled, or a deferred acquire that fills something.
+            if present_slots.is_empty() {
+                if let Some(acquire) = deferred_acquire.as_mut() {
+                    let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
+                    acquire(&[], present_slots)?;
+                }
+                if present_slots.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "present partition requires at least one resolved present slot"
+                    ));
+                }
+                for slot in present_slots.iter() {
+                    resolver
+                        .present_leases
+                        .entry(slot.binding_id)
+                        .or_insert(ResolvedSwapchain {
+                            handle: slot.handle,
+                            uav_index: slot.uav_index,
+                        });
+                }
+            }
+        }
         return Ok(());
     }
-    if present_slots.is_empty() {
-        if let Some(acquire) = deferred_acquire.as_mut() {
-            let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
-            acquire(present_slots)?;
-        }
-    }
-    if present_slots.is_empty() {
-        return Err(anyhow::anyhow!(
-            "present partition requires at least one resolved present slot"
-        ));
+
+    let start = present_slots.len();
+    if let Some(acquire) = deferred_acquire.as_mut() {
+        let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
+        acquire(&missing, present_slots)?;
     }
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.present_resolver");
-        for slot in present_slots.iter() {
+        for slot in &present_slots[start..] {
             resolver.present_leases.insert(
-                slot.lease_id,
+                slot.binding_id,
                 ResolvedSwapchain {
                     handle: slot.handle,
                     uav_index: slot.uav_index,
@@ -787,14 +852,20 @@ fn ensure_present_ready(
             );
         }
     }
-    *present_resolver_ready = true;
+    for &id in &missing {
+        if !resolver.present_leases.contains_key(&id) {
+            return Err(anyhow::anyhow!(
+                "present partition missing resolved slot for binding {id}"
+            ));
+        }
+    }
     Ok(())
 }
 
 /// Fingerprint for retained CB variants that bake late-bound slot handles.
 ///
-/// Combines the stable partition fingerprint with every present-lease slot and
-/// every resolved upload-buffer physical handle referenced by `waves`.
+/// Combines the stable partition fingerprint with present-lease slots referenced
+/// by `waves` and every resolved upload-buffer physical handle those waves use.
 fn dynamic_partition_slot_key(
     part_fp: u64,
     present_slots: &[ResolvedPresentSlot],
@@ -806,9 +877,13 @@ fn dynamic_partition_slot_key(
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     part_fp.hash(&mut h);
+    let needed = analysis::partition_present_binding_ids(ir, waves);
     for slot in present_slots {
-        slot.lease_id.hash(&mut h);
-        slot.slot_id.hash(&mut h);
+        if needed.binary_search(&slot.binding_id).is_ok() {
+            slot.binding_id.hash(&mut h);
+            slot.generation.hash(&mut h);
+            slot.slot_id.hash(&mut h);
+        }
     }
     let mut upload_ids: Vec<u32> = waves
         .iter()
@@ -857,6 +932,8 @@ pub(crate) struct FreshSegment {
     wave_range: std::ops::Range<usize>,
     has_render: bool,
     has_present: bool,
+    /// Scheme-unique present binding ids referenced by this segment.
+    present_bindings: Vec<u32>,
     /// Upload / unstable-copy partitions must use standalone submission.
     needs_standalone: bool,
     /// True when any node in the segment references a scheme upload-buffer slot.
@@ -908,6 +985,7 @@ fn coalesce_fresh_plan_for_fused_upload(plan: Vec<FreshSegment>, fuse_upload: bo
                 wave_range: a.wave_range.start..b.wave_range.end,
                 has_render: false,
                 has_present: false,
+                present_bindings: Vec::new(),
                 needs_standalone: true,
                 has_upload_slots: true,
             });
@@ -967,6 +1045,8 @@ fn submit_resolved_ir_partitions_fresh(
         stamp_targets,
         ir_clean,
         mut sidecar,
+        partial,
+        partial_tv,
     } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_partitions.fresh");
@@ -994,13 +1074,13 @@ fn submit_resolved_ir_partitions_fresh(
 
     let mut resolver = SlotResolver::new();
     seed_upload_resolver(&mut resolver, upload_buffers);
-    let mut present_resolver_ready = false;
 
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
     let device_owner = session.device_queue_owner(ctx);
     let mut last_tv = context.gpu_progress();
-    let result = PartitionSubmitResult::default();
+    *partial_tv = last_tv;
+    let mut result = PartitionSubmitResult::default();
 
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.fresh_loop");
@@ -1014,15 +1094,21 @@ fn submit_resolved_ir_partitions_fresh(
                 try_merge_fresh_segments(plan, seg_idx, separate)
             };
 
-            let (wave_range, has_render, has_present, advance) = {
+            let (wave_range, has_render, has_present, present_bindings, advance) = {
                 let plan = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap();
                 if merge {
                     let a = &plan[seg_idx];
                     let b = &plan[seg_idx + 1];
-                    (a.wave_range.start..b.wave_range.end, true, false, 2usize)
+                    (a.wave_range.start..b.wave_range.end, true, false, Vec::new(), 2usize)
                 } else {
                     let s = &plan[seg_idx];
-                    (s.wave_range.clone(), s.has_render, s.has_present, 1usize)
+                    (
+                        s.wave_range.clone(),
+                        s.has_render,
+                        s.has_present,
+                        s.present_bindings.clone(),
+                        1usize,
+                    )
                 }
             };
 
@@ -1044,12 +1130,7 @@ fn submit_resolved_ir_partitions_fresh(
             let merged = sidecar.merge_sync(sync.as_ref());
 
             if has_present {
-                ensure_present_ready(
-                    present_slots,
-                    &mut deferred_acquire,
-                    &mut resolver,
-                    &mut present_resolver_ready,
-                )?;
+                ensure_present_ready(&present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
             }
 
             if has_render {
@@ -1083,6 +1164,11 @@ fn submit_resolved_ir_partitions_fresh(
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, waves, last_tv);
             }
+            if has_present {
+                result.note_present_bindings(&present_bindings, last_tv);
+            }
+            *partial_tv = last_tv;
+            *partial = result.clone();
             seg_idx += advance;
         }
     }
@@ -1109,6 +1195,8 @@ fn submit_resolved_ir_partitions_replay(
         stamp_targets,
         ir_clean,
         mut sidecar,
+        partial,
+        partial_tv,
     } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_partitions.replay");
@@ -1163,13 +1251,13 @@ fn submit_resolved_ir_partitions_replay(
 
     let mut resolver = SlotResolver::new();
     seed_upload_resolver(&mut resolver, upload_buffers);
-    let mut present_resolver_ready = false;
 
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
     let device_owner = session.device_queue_owner(ctx);
     let fuse_upload = context.device().capabilities().fuse_upload_with_compute_partitions;
     let mut last_tv = context.gpu_progress();
+    *partial_tv = last_tv;
     let mut result = PartitionSubmitResult::default();
 
     {
@@ -1264,6 +1352,8 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_merged_last_tvs(part_idx, last_tv);
                 result.records += 1;
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                *partial_tv = last_tv;
+                *partial = result.clone();
                 part_idx += 2;
                 continue;
             }
@@ -1274,6 +1364,7 @@ fn submit_resolved_ir_partitions_replay(
             let can_retain = partition_waves_can_retain(ir, &waves);
             let has_render = partition_waves_have_render(ir, &waves);
             let has_present = analysis::partition_waves_have_present(ir, &waves);
+            let present_bindings = analysis::partition_present_binding_ids(ir, &waves);
             let has_upload_slots = analysis::partition_waves_have_upload_slots(ir, &waves);
             let needs_resolver = partition_needs_slot_resolver(ir, &waves, has_present);
             let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
@@ -1294,12 +1385,7 @@ fn submit_resolved_ir_partitions_replay(
 
             if !can_retain {
                 if has_present {
-                    ensure_present_ready(
-                        present_slots,
-                        &mut deferred_acquire,
-                        &mut resolver,
-                        &mut present_resolver_ready,
-                    )?;
+                    ensure_present_ready(&present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
                 }
                 let cache_entry = cache.as_ref().unwrap();
                 let cmds = {
@@ -1319,6 +1405,11 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_last_tv(part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                if has_present {
+                    result.note_present_bindings(&present_bindings, last_tv);
+                }
+                *partial_tv = last_tv;
+                *partial = result.clone();
                 part_idx += 1;
                 continue;
             }
@@ -1327,12 +1418,7 @@ fn submit_resolved_ir_partitions_replay(
             // so retention keys include the concrete slot combination.
             if has_present || has_upload_slots {
                 if has_present {
-                    ensure_present_ready(
-                        present_slots,
-                        &mut deferred_acquire,
-                        &mut resolver,
-                        &mut present_resolver_ready,
-                    )?;
+                    ensure_present_ready(&present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
                 }
 
                 // Metal (and any backend that cannot retain present partitions): always fresh
@@ -1356,6 +1442,9 @@ fn submit_resolved_ir_partitions_replay(
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                    result.note_present_bindings(&present_bindings, last_tv);
+                    *partial_tv = last_tv;
+                    *partial = result.clone();
                     part_idx += 1;
                     continue;
                 }
@@ -1378,6 +1467,11 @@ fn submit_resolved_ir_partitions_replay(
                         replay.record_last_tv(part_idx, last_tv);
                         boundary.record(separate, has_render, last_tv);
                         apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                        if has_present {
+                            result.note_present_bindings(&present_bindings, last_tv);
+                        }
+                        *partial_tv = last_tv;
+                        *partial = result.clone();
                         part_idx += 1;
                         continue;
                     }
@@ -1405,6 +1499,11 @@ fn submit_resolved_ir_partitions_replay(
                 result.records += 1;
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                if has_present {
+                    result.note_present_bindings(&present_bindings, last_tv);
+                }
+                *partial_tv = last_tv;
+                *partial = result.clone();
                 part_idx += 1;
                 continue;
             }
@@ -1419,6 +1518,8 @@ fn submit_resolved_ir_partitions_replay(
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                    *partial_tv = last_tv;
+                    *partial = result.clone();
                     part_idx += 1;
                     continue;
                 }
@@ -1436,6 +1537,8 @@ fn submit_resolved_ir_partitions_replay(
             result.records += 1;
             boundary.record(separate, has_render, last_tv);
             apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+            *partial_tv = last_tv;
+            *partial = result.clone();
             part_idx += 1;
         }
     }
@@ -1600,12 +1703,16 @@ impl IrSubmitState {
 
     /// Submit `ir`, retaining command lists when CB replay is enabled.
     ///
-    /// `deferred_acquire` runs on the first present-touching partition (after
-    /// non-present partitions have already been submitted), filling `present_slots`.
-    /// Pass `None` and a pre-filled `present_slots` for tests / eager acquire.
+    /// `deferred_acquire` runs for each present-touching partition, receiving the
+    /// binding ids that partition still needs. Pass `None` and a pre-filled
+    /// `present_slots` for tests / eager acquire.
     ///
     /// `upload_buffers` maps logical upload-buffer ids to the physical parcels
     /// selected for this submission (may be empty).
+    ///
+    /// On failure after some partitions succeeded, `partial` / `partial_tv` hold
+    /// progress for high-water and referenced-present cleanup.
+    #[allow(clippy::too_many_arguments)] // present/upload/partial progress are all required at call sites
     pub fn submit_pipelined_and_retain_with_presents<'a>(
         &'a mut self,
         ctx: &crate::Context,
@@ -1614,6 +1721,8 @@ impl IrSubmitState {
         deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
         upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
         ir_clean: bool,
+        partial: &'a mut PartitionSubmitResult,
+        partial_tv: &'a mut TimelineValue,
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
         self.sync_replay_mode(ctx);
         let (queue_epochs, host_epochs, host_writes) = self.take_submit_sidecars();
@@ -1632,6 +1741,8 @@ impl IrSubmitState {
                 stamp_targets: &self.stamp_targets,
                 ir_clean,
                 sidecar,
+                partial,
+                partial_tv,
             },
         )
     }
@@ -1719,6 +1830,7 @@ fn get_or_build_fresh_plan(
             wave_range: range,
             has_render: partition_waves_have_render(ir, waves),
             has_present: analysis::partition_waves_have_present(ir, waves),
+            present_bindings: analysis::partition_present_binding_ids(ir, waves),
             needs_standalone: !partition_waves_can_retain(ir, waves),
             has_upload_slots: analysis::partition_waves_have_upload_slots(ir, waves),
         });
@@ -1889,8 +2001,19 @@ mod slice_retention_tests {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let mut present_slots = Vec::new();
         let empty_uploads = std::collections::HashMap::new();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
         state
-            .submit_pipelined_and_retain_with_presents(ctx, ir, &mut present_slots, None, &empty_uploads, ir_clean)
+            .submit_pipelined_and_retain_with_presents(
+                ctx,
+                ir,
+                &mut present_slots,
+                None,
+                &empty_uploads,
+                ir_clean,
+                &mut partial,
+                &mut partial_tv,
+            )
             .unwrap();
     }
 
@@ -1965,6 +2088,8 @@ mod slice_retention_tests {
         let empty_uploads = std::collections::HashMap::new();
         let mut present_slots = Vec::new();
         for ir_clean in [false, true, true] {
+            let mut partial = PartitionSubmitResult::default();
+            let mut partial_tv = 0u64;
             let (tv, result) = submit_resolved_ir_partitions(
                 &mut cache,
                 None,
@@ -1979,6 +2104,8 @@ mod slice_retention_tests {
                     stamp_targets: &[],
                     ir_clean,
                     sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                    partial: &mut partial,
+                    partial_tv: &mut partial_tv,
                 },
             )
             .unwrap();
@@ -2049,11 +2176,12 @@ mod slice_retention_tests {
         let acquire_after = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
         let acquire_after_cb = acquire_after.clone();
         let device_cb = device.clone();
-        let mut deferred = |slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
+        let mut deferred = |_needed: &[u32], slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
             let n = device_cb.with_mock(|m| m.compute_dispatch_count);
             acquire_after_cb.store(n, std::sync::atomic::Ordering::SeqCst);
             slots.push(ResolvedPresentSlot {
-                lease_id: 0,
+                binding_id: 0,
+                generation: 0,
                 slot_id: 0,
                 handle: 42,
                 uav_index: 7,
@@ -2061,6 +2189,8 @@ mod slice_retention_tests {
             Ok(())
         };
 
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
         let (tv, result) = submit_resolved_ir_partitions(
             &mut cache,
             None,
@@ -2075,6 +2205,8 @@ mod slice_retention_tests {
                 stamp_targets: &[],
                 ir_clean: false,
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
             },
         )
         .unwrap();
@@ -2083,6 +2215,11 @@ mod slice_retention_tests {
         assert_eq!(result.records, 0);
         assert_eq!(result.resubmit_hits, 0);
         assert_eq!(present_slots.len(), 1);
+        assert_eq!(
+            result.present_binding_tvs,
+            vec![(0, tv)],
+            "present binding stamped with its partition timeline"
+        );
         assert_eq!(
             acquire_after.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -2101,15 +2238,18 @@ mod slice_retention_tests {
         // Plan is cached across clean submits.
         let plan_ptr = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap().as_ptr();
         let mut present_slots = Vec::new();
-        let mut deferred2 = |slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
+        let mut deferred2 = |_needed: &[u32], slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
             slots.push(ResolvedPresentSlot {
-                lease_id: 0,
+                binding_id: 0,
+                generation: 0,
                 slot_id: 1,
                 handle: 43,
                 uav_index: 8,
             });
             Ok(())
         };
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
         submit_resolved_ir_partitions(
             &mut cache,
             None,
@@ -2124,6 +2264,8 @@ mod slice_retention_tests {
                 stamp_targets: &[],
                 ir_clean: true,
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
             },
         )
         .unwrap();
@@ -2136,6 +2278,200 @@ mod slice_retention_tests {
             cache.as_ref().unwrap().partitioned_commands.is_none(),
             "fresh path must not populate the replay command cache"
         );
+    }
+
+    /// Fresh path: two present bindings in sequence acquire only the unresolved ids
+    /// at each partition; the second acquire can fail after the first was submitted.
+    #[test]
+    fn fresh_two_presents_acquire_per_binding_and_partial_failure() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "early_a",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "copy_a",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(5),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(0),
+                    access: NodeAccess::Write,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf.handle),
+                    access: NodeAccess::Read,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: 5,
+                dst: ResourceId::PresentLease(0),
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "early_b",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "copy_b",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(6),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(1),
+                    access: NodeAccess::Write,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf.handle),
+                    access: NodeAccess::Read,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: 6,
+                dst: ResourceId::PresentLease(1),
+            },
+        });
+
+        let mut cache = None;
+        let empty_stamps = ResourceKeyMap::default();
+        let empty_uploads = std::collections::HashMap::new();
+        let mut present_slots = Vec::new();
+        let acquire_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u32>>::new()));
+        let acquire_calls_cb = acquire_calls.clone();
+        let mut deferred = |needed: &[u32], slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
+            acquire_calls_cb.lock().unwrap().push(needed.to_vec());
+            if needed == [1] {
+                anyhow::bail!("simulated acquire failure for binding 1");
+            }
+            for &binding_id in needed {
+                slots.push(ResolvedPresentSlot {
+                    binding_id,
+                    generation: 0,
+                    slot_id: binding_id,
+                    handle: 40 + binding_id as u64,
+                    uav_index: 7 + binding_id,
+                });
+            }
+            Ok(())
+        };
+
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
+        let err = submit_resolved_ir_partitions(
+            &mut cache,
+            None,
+            &ctx,
+            ctx.submit_session(),
+            &ir,
+            PresentSubmitOptions {
+                present_slots: &mut present_slots,
+                deferred_acquire: Some(&mut deferred),
+                upload_buffers: &empty_uploads,
+                resource_stamps: &empty_stamps,
+                stamp_targets: &[],
+                ir_clean: false,
+                sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
+            },
+        )
+        .expect_err("second present acquire must fail");
+        assert!(err.to_string().contains("binding 1"), "unexpected error: {err}");
+        assert_eq!(
+            *acquire_calls.lock().unwrap(),
+            vec![vec![0], vec![1]],
+            "each present partition acquires only its unresolved binding"
+        );
+        assert_eq!(present_slots.len(), 1, "only binding 0 was acquired");
+        assert_eq!(
+            partial.present_binding_tvs.len(),
+            1,
+            "binding 0 present partition was submitted before failure"
+        );
+        assert_eq!(partial.present_binding_tvs[0].0, 0);
+        assert!(partial_tv > 0, "partial high-water must reflect submitted work");
+    }
+
+    #[test]
+    fn dynamic_partition_slot_key_includes_generation() {
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "copy",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(5),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(0),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: 5,
+                dst: ResourceId::PresentLease(0),
+            },
+        });
+        let waves = vec![Wave {
+            node_indices: vec![0],
+            barriers_before: Default::default(),
+        }];
+        let resolver = crate::task_graph::SlotResolver::default();
+        let key_a = dynamic_partition_slot_key(
+            0xABCDu64,
+            &[ResolvedPresentSlot {
+                binding_id: 0,
+                generation: 0,
+                slot_id: 1,
+                handle: 10,
+                uav_index: 2,
+            }],
+            &ir,
+            &waves,
+            &resolver,
+        );
+        let key_b = dynamic_partition_slot_key(
+            0xABCDu64,
+            &[ResolvedPresentSlot {
+                binding_id: 0,
+                generation: 1,
+                slot_id: 1,
+                handle: 10,
+                uav_index: 2,
+            }],
+            &ir,
+            &waves,
+            &resolver,
+        );
+        assert_ne!(key_a, key_b, "generation must participate in retained variant key");
     }
 
     /// Fresh path: offscreen render uses `submit_graph`, not standalone.
@@ -2162,6 +2498,8 @@ mod slice_retention_tests {
         let empty_stamps = ResourceKeyMap::default();
         let empty_uploads = std::collections::HashMap::new();
         let mut present_slots = Vec::new();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
         let (tv, result) = submit_resolved_ir_partitions(
             &mut cache,
             None,
@@ -2176,6 +2514,8 @@ mod slice_retention_tests {
                 stamp_targets: &[],
                 ir_clean: false,
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
             },
         )
         .unwrap();
@@ -2241,6 +2581,7 @@ mod slice_retention_tests {
                 wave_range: 0..1,
                 has_render: false,
                 has_present: false,
+                present_bindings: Vec::new(),
                 needs_standalone: true,
                 has_upload_slots: true,
             },
@@ -2248,6 +2589,7 @@ mod slice_retention_tests {
                 wave_range: 1..2,
                 has_render: false,
                 has_present: false,
+                present_bindings: Vec::new(),
                 needs_standalone: false,
                 has_upload_slots: false,
             },
@@ -2284,6 +2626,8 @@ mod slice_retention_tests {
             },
         );
         let mut present_slots = Vec::new();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
         submit_resolved_ir_partitions(
             &mut cache,
             None,
@@ -2298,6 +2642,8 @@ mod slice_retention_tests {
                 stamp_targets: &[],
                 ir_clean: false,
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
             },
         )
         .unwrap();
@@ -2346,8 +2692,19 @@ mod slice_retention_tests {
         );
         let mut present_slots = Vec::new();
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
         state
-            .submit_pipelined_and_retain_with_presents(&ctx, &ir, &mut present_slots, None, &uploads, false)
+            .submit_pipelined_and_retain_with_presents(
+                &ctx,
+                &ir,
+                &mut present_slots,
+                None,
+                &uploads,
+                false,
+                &mut partial,
+                &mut partial_tv,
+            )
             .unwrap();
 
         device.with_mock(|m| {
@@ -2631,8 +2988,9 @@ mod slice_retention_tests {
 // `analysis::describe_logical_partitions`.  They assert invariants that must
 // hold regardless of the actualized split count or heuristic tuning:
 //
-//  • Present-boundary invariant: all pre-present logical partitions have
-//    has_present == false; the present partition (if any) comes last.
+//  • Present-boundary invariant: each PresentLease binding is introduced in
+//    exactly one logical partition; present partitions do not precede their
+//    first use of that binding.
 //  • Render-kind invariant: every render-pass logical partition has
 //    has_render == true; pure-compute ones have has_render == false.
 //  • Cache-kind invariant: render partitions use the graph-command cache slot;
@@ -2749,26 +3107,30 @@ mod partitioning_tests {
     // ------------------------------------------------------------------
 
     /// Assert the present-boundary invariant:
-    ///   - At most one logical partition has has_present == true.
-    ///   - The present partition (if any) must be the last one.
+    ///   - Every present partition carries the PresentLease ids it introduces.
+    ///   - Each binding id is introduced in exactly one partition.
+    ///   - Non-present partitions have an empty present_bindings set.
     fn assert_present_boundary_invariant(parts: &[LogicalPartition]) {
-        let present_indices: Vec<usize> = parts
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.has_present)
-            .map(|(i, _)| i)
-            .collect();
-        assert!(
-            present_indices.len() <= 1,
-            "at most one present partition expected, got indices {:?}",
-            present_indices
-        );
-        if let Some(&pi) = present_indices.first() {
-            assert_eq!(
-                pi,
-                parts.len() - 1,
-                "present partition must be the last logical partition"
-            );
+        let mut seen = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            if p.has_present {
+                assert!(
+                    !p.present_bindings.is_empty() || p.wave_range.len() > 0, // SwapchainOutput-only may have empty lease ids
+                    "present partition {i} must be well-formed"
+                );
+                for &id in &p.present_bindings {
+                    assert!(
+                        !seen.contains(&id),
+                        "binding {id} introduced twice (second at partition {i})"
+                    );
+                    seen.push(id);
+                }
+            } else {
+                assert!(
+                    p.present_bindings.is_empty(),
+                    "non-present partition {i} must not list present bindings"
+                );
+            }
         }
     }
 
@@ -2994,6 +3356,46 @@ mod partitioning_tests {
         let present_count = parts.iter().filter(|p| p.has_present).count();
         assert_eq!(present_count, 1, "must have exactly one present logical partition");
         assert!(!parts.iter().any(|p| p.has_render), "no render partitions expected");
+        assert_present_boundary_invariant(&parts);
+    }
+
+    #[test]
+    fn two_present_leases_in_sequence_two_present_partitions() {
+        // Force distinct waves via render-target WAR so lease 1 cannot join lease 0's wave.
+        let ir = GraphIR {
+            nodes: vec![
+                render_pass_node("draw_a", 10),
+                copy_to_dst_node("copy_a", 10, ResourceId::PresentLease(0)),
+                render_pass_node("draw_b", 10),
+                copy_to_dst_node("copy_b", 10, ResourceId::PresentLease(1)),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        let present: Vec<_> = parts.iter().filter(|p| p.has_present).collect();
+        assert!(
+            present.len() >= 2,
+            "distinct present bindings in later waves must produce ≥ 2 present partitions, got {:?}",
+            parts
+        );
+        assert_eq!(present[0].present_bindings, vec![0]);
+        assert_eq!(present[1].present_bindings, vec![1]);
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn same_wave_two_present_leases_one_present_partition() {
+        // Two independent copies share a wave and acquire together.
+        let ir = GraphIR {
+            nodes: vec![
+                copy_to_dst_node("copy_a", 5, ResourceId::PresentLease(0)),
+                copy_to_dst_node("copy_b", 6, ResourceId::PresentLease(1)),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        let present: Vec<_> = parts.iter().filter(|p| p.has_present).collect();
+        assert_eq!(present.len(), 1, "same-wave bindings share one present partition");
+        assert_eq!(present[0].present_bindings, vec![0, 1]);
         assert_present_boundary_invariant(&parts);
     }
 

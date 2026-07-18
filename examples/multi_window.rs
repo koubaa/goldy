@@ -1,13 +1,13 @@
 //! Multi-window example - three simultaneous effects in separate windows.
 //!
-//! Each window runs its own demo with an independent SwapchainPool + Scheme.
+//! Each window runs its own demo with an independent SurfaceExchange + Scheme.
 //!
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    SurfaceExchange, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
 
@@ -225,9 +225,8 @@ impl EffectType {
 struct WindowState {
     window: Arc<Window>,
     ctx: goldy::Context,
-    swapchain: SwapchainPool,
-    screen: goldy::PresentLease,
-    present: PresentGrant,
+    surface: SurfaceExchange,
+    present: Transaction,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     pipeline: RenderPipeline,
@@ -246,12 +245,12 @@ impl WindowState {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        swapchain: &SwapchainPool,
+        surface: &SurfaceExchange,
     ) -> anyhow::Result<RenderPipeline> {
-        common::render_pipeline_for_swapchain(
+        common::render_pipeline_for_surface(
             device,
             shader,
-            swapchain,
+            surface,
             RenderPipelineDesc {
                 vertex_layout: QuadVertex::layout(),
                 ..Default::default()
@@ -261,12 +260,12 @@ impl WindowState {
 
     fn record_scheme(
         scheme: &mut Scheme,
+        surface: &SurfaceExchange,
         pipeline: &RenderPipeline,
         vertex_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
-        screen: &goldy::PresentLease,
         label: &'static str,
-    ) -> PresentGrant {
+    ) -> anyhow::Result<Transaction> {
         let mut pass = scheme.render_pass(label, scene_rt);
         pass.with_parcel(vertex_parcel, NodeAccess::Read);
         pass.clear(Color::BLACK);
@@ -274,23 +273,24 @@ impl WindowState {
         pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..6, 0..1);
         pass.finish();
-        scheme.copy_to_present(scene_rt, screen);
-        scheme.grant_present(screen)
+        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
     }
 
     fn rerecord_scheme(&mut self) {
         let mut scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.swapchain.size();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
+        let (width, height) = self.surface.size();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.surface.format(), None) {
             self.scene_rt = rt;
-            self.present = Self::record_scheme(
+            if let Ok(present) = Self::record_scheme(
                 &mut scheme,
+                &self.surface,
                 &self.pipeline,
                 &self.vertex_parcel,
                 &self.scene_rt,
-                &self.screen,
                 self.effect_type.title(),
-            );
+            ) {
+                self.present = present;
+            }
             self.scheme = scheme;
         }
     }
@@ -301,32 +301,30 @@ impl WindowState {
         device: &Arc<goldy::Device>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
-        let swapchain = SwapchainPool::new(ctx, window.as_ref(), 3)?;
-        let screen = swapchain.lease();
+        let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
-        let pipeline = Self::create_pipeline(device, &shader, &swapchain)?;
+        let pipeline = Self::create_pipeline(device, &shader, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let vertex_parcel =
             retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
-        let (width, height) = swapchain.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let (width, height) = surface.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
         let present = Self::record_scheme(
             &mut scheme,
+            &surface,
             &pipeline,
             &vertex_parcel,
             &scene_rt,
-            &screen,
             effect_type.title(),
-        );
+        )?;
 
         Ok(Self {
             window,
             ctx: ctx.clone(),
-            swapchain,
-            screen,
+            surface,
             present,
             scheme,
             scene_rt,
@@ -395,15 +393,15 @@ impl WindowState {
         upload.commit_write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
         upload.submit()?;
 
-        let submission = self.scheme.submit()?;
-        self.present.consume(&submission)?;
+        let mut submission = self.scheme.submit()?;
+        self.present.claim(&mut submission)?.consume()?;
         Ok(())
     }
 
     fn handle_resize(&mut self, device: &goldy::Device, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            let _ = self.swapchain.resize(width, height);
-            match Self::create_pipeline(device, &self.shader, &self.swapchain) {
+            let _ = self.surface.resize(width, height);
+            match Self::create_pipeline(device, &self.shader, &self.surface) {
                 Ok(pipeline) => {
                     self.pipeline = pipeline;
                     self.rerecord_scheme();

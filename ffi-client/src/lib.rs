@@ -11,6 +11,7 @@ mod compute;
 mod context;
 mod device;
 mod error;
+mod exchange;
 mod instance;
 mod parcel;
 mod pipeline;
@@ -19,7 +20,7 @@ mod retained_pool;
 mod scheme;
 mod shader_module;
 mod surface;
-mod swapchain_pool;
+mod surface_exchange;
 mod sys;
 mod texture;
 mod types;
@@ -30,18 +31,19 @@ pub use compute::ComputePipeline;
 pub use context::Context;
 pub use device::Device;
 pub use error::{GoldyError, Result};
+pub use exchange::{Claim, Transaction};
 pub use instance::{AdapterInfo, Instance};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use render_target::RenderTarget;
 pub use retained_pool::{RecordBuilder, RecordField, RetainedPool};
 pub use scheme::{
-    ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentGrant, PresentLease, ReadGrant, ReplayStats, Scheme,
+    ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentLease, ReadGrant, ReplayStats, Scheme,
     SchemeRenderPassBuilder, SchemeRenderTargetLease, SchemeSubmission,
 };
 pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
-pub use swapchain_pool::SwapchainPool;
+pub use surface_exchange::SurfaceExchange;
 pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,

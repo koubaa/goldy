@@ -37,13 +37,13 @@ static class GameOfLifeWindow
         using var _ = scheme.Submit();
     }
 
-    static PresentGrant RecordDisplayScheme(
+    static Transaction RecordDisplayScheme(
         Scheme scheme,
+        SurfaceExchange surface,
         Buffer cells,
         string currentField,
         RenderPipeline renderPipeline,
-        SchemeRenderTargetLease sceneRt,
-        PresentLease screen)
+        SchemeRenderTargetLease sceneRt)
     {
         using var current = cells.Field(FieldUnit(currentField));
         using (var pass = scheme.RenderPass("game_of_life_render", sceneRt))
@@ -54,31 +54,29 @@ static class GameOfLifeWindow
                 .SetPipeline(renderPipeline)
                 .DrawFullscreen();
         }
-        scheme.CopyToPresent(sceneRt, screen);
-        return scheme.GrantPresent(screen);
+        return surface.BindRenderTarget(scheme, sceneRt);
     }
 
-    static (Scheme scheme, SchemeRenderTargetLease rt, PresentGrant present) RebuildDisplayScheme(
+    static (Scheme scheme, SchemeRenderTargetLease rt, Transaction transaction) RebuildDisplayScheme(
         Context ctx,
-        SwapchainPool swapchain,
+        SurfaceExchange surface,
         Buffer cells,
         string currentField,
-        RenderPipeline renderPipeline,
-        PresentLease screen)
+        RenderPipeline renderPipeline)
     {
         var displayScheme = new Scheme(ctx);
         var rt = displayScheme.LeaseRenderTarget(
-            Math.Max(swapchain.Width, 1u),
-            Math.Max(swapchain.Height, 1u),
-            swapchain.Format);
-        var present = RecordDisplayScheme(
-            displayScheme, cells, currentField, renderPipeline, rt, screen);
-        return (displayScheme, rt, present);
+            Math.Max(surface.Width, 1u),
+            Math.Max(surface.Height, 1u),
+            surface.Format);
+        var transaction = RecordDisplayScheme(
+            displayScheme, surface, cells, currentField, renderPipeline, rt);
+        return (displayScheme, rt, transaction);
     }
 
     public static unsafe void Run()
     {
-        Console.WriteLine("Goldy .NET Game of Life (Scheme + Present)");
+        Console.WriteLine("Goldy .NET Game of Life (Scheme + SurfaceExchange)");
         Console.WriteLine(new string('=', 40));
         Console.WriteLine("Press Escape or close the window to exit\n");
 
@@ -105,8 +103,7 @@ static class GameOfLifeWindow
             using var instance = new Instance();
             using var device = instance.RequestAdapter().RequestDevice();
             using var ctx = device.CreateContext();
-            using var swapchain = GlfwSwapchainPool.Create(ctx, window);
-            using var screen = swapchain.Lease();
+            using var surface = GlfwSurfaceExchange.Create(ctx, window);
 
             var computeSrc = ShaderPaths.Load("game_of_life.slang");
             var renderSrc = ShaderPaths.Load("game_of_life_render.slang");
@@ -127,18 +124,18 @@ static class GameOfLifeWindow
                 renderShader,
                 new RenderPipelineDesc
                 {
-                    TargetFormat = swapchain.Format,
+                    TargetFormat = surface.Format,
                     Topology = PrimitiveTopology.TriangleList,
                 });
 
             var useBufferA = true;
             var displayScheme = new Scheme(ctx);
             var sceneRt = displayScheme.LeaseRenderTarget(
-                Math.Max(swapchain.Width, 1u),
-                Math.Max(swapchain.Height, 1u),
-                swapchain.Format);
-            var present = RecordDisplayScheme(
-                displayScheme, cells, "a", renderPipeline, sceneRt, screen);
+                Math.Max(surface.Width, 1u),
+                Math.Max(surface.Height, 1u),
+                surface.Format);
+            var transaction = RecordDisplayScheme(
+                displayScheme, surface, cells, "a", renderPipeline, sceneRt);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -147,15 +144,15 @@ static class GameOfLifeWindow
                 {
                     var w = (uint)fbWidth;
                     var h = (uint)fbHeight;
-                    if (w != swapchain.Width || h != swapchain.Height)
+                    if (w != surface.Width || h != surface.Height)
                     {
-                        swapchain.Resize(w, h);
+                        surface.Resize(w, h);
                         sceneRt.Dispose();
-                        present.Dispose();
+                        transaction.Dispose();
                         displayScheme.Dispose();
                         var currentField = useBufferA ? "a" : "b";
-                        (displayScheme, sceneRt, present) = RebuildDisplayScheme(
-                            ctx, swapchain, cells, currentField, renderPipeline, screen);
+                        (displayScheme, sceneRt, transaction) = RebuildDisplayScheme(
+                            ctx, surface, cells, currentField, renderPipeline);
                     }
                 }
 
@@ -169,14 +166,15 @@ static class GameOfLifeWindow
                     useBufferA = !useBufferA;
                     var currentField = useBufferA ? "a" : "b";
                     sceneRt.Dispose();
-                    present.Dispose();
+                    transaction.Dispose();
                     displayScheme.Dispose();
-                    (displayScheme, sceneRt, present) = RebuildDisplayScheme(
-                        ctx, swapchain, cells, currentField, renderPipeline, screen);
+                    (displayScheme, sceneRt, transaction) = RebuildDisplayScheme(
+                        ctx, surface, cells, currentField, renderPipeline);
                 }
 
                 using var submission = displayScheme.Submit();
-                present.Consume(submission);
+                using var claim = transaction.Claim(submission);
+                claim.Consume();
 
                 frameCount++;
                 glfw.PollEvents();
@@ -189,7 +187,7 @@ static class GameOfLifeWindow
             }
 
             sceneRt.Dispose();
-            present.Dispose();
+            transaction.Dispose();
             displayScheme.Dispose();
         }
         finally

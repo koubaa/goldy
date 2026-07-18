@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 
 /// A GPU surface for zero-copy presentation to a window.
 ///
-/// Windowed rendering uses [`SwapchainPool`] + present-on-scheme (`copy_to_present`,
-/// `grant_present`) rather than task-graph swapchain tokens.
+/// Windowed rendering uses [`SurfaceExchange`] + present-on-scheme (`bind_render_target`,
+/// `bind`, `bind_destination`) rather than task-graph swapchain tokens.
 #[pyclass(name = "Surface", module = "goldy")]
 pub struct PySurface {
     inner: goldy::Surface,

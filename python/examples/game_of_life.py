@@ -114,12 +114,12 @@ def run_compute_step(
 
 def record_display_scheme(
     scheme: goldy.Scheme,
+    surface: goldy.SurfaceExchange,
     cells: goldy.Buffer,
     current_field: str,
     render_pipeline: goldy.RenderPipeline,
     scene_rt: goldy.SchemeRenderTargetLease,
-    screen: goldy.PresentLease,
-) -> goldy.PresentGrant:
+) -> goldy.Transaction:
     with scheme.render_pass("game_of_life_render", scene_rt) as rp:
         (
             rp.with_field(cells, current_field, goldy.NodeAccess.READ)
@@ -127,32 +127,30 @@ def record_display_scheme(
             .set_pipeline(render_pipeline)
             .draw_fullscreen()
         )
-    scheme.copy_to_present(scene_rt, screen)
-    return scheme.grant_present(screen)
+    return surface.bind_render_target(scheme, scene_rt)
 
 
 def rebuild_display_scheme(
     ctx: goldy.Context,
-    swapchain: goldy.SwapchainPool,
+    surface: goldy.SurfaceExchange,
     cells: goldy.Buffer,
     current_field: str,
     render_pipeline: goldy.RenderPipeline,
-    screen: goldy.PresentLease,
-) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.PresentGrant]:
+) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.Transaction]:
     display_scheme = goldy.Scheme(ctx)
     scene_rt = display_scheme.lease_render_target(
-        max(swapchain.width, 1),
-        max(swapchain.height, 1),
-        swapchain.format,
+        max(surface.width, 1),
+        max(surface.height, 1),
+        surface.format,
     )
     present = record_display_scheme(
-        display_scheme, cells, current_field, render_pipeline, scene_rt, screen
+        display_scheme, surface, cells, current_field, render_pipeline, scene_rt
     )
     return display_scheme, scene_rt, present
 
 
 def main() -> int:
-    print("Goldy Python Game of Life (Scheme + Present)")
+    print("Goldy Python Game of Life (Scheme + SurfaceExchange)")
     print("=" * 40)
     print("Press Escape or close the window to exit\n")
 
@@ -173,8 +171,7 @@ def main() -> int:
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
     ctx = device.create_context()
-    swapchain = goldy.SwapchainPool.from_glfw(ctx, window)
-    screen = swapchain.lease()
+    surface = goldy.SurfaceExchange.from_glfw(ctx, window)
 
     initial = create_initial_state()
     retained_pool = goldy.RetainedPool(device)
@@ -191,19 +188,19 @@ def main() -> int:
         render_shader,
         render_shader,
         goldy.RenderPipelineDesc(
-            target_format=swapchain.format,
+            target_format=surface.format,
             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
         ),
     )
 
     display_scheme = goldy.Scheme(ctx)
     scene_rt = display_scheme.lease_render_target(
-        max(swapchain.width, 1),
-        max(swapchain.height, 1),
-        swapchain.format,
+        max(surface.width, 1),
+        max(surface.height, 1),
+        surface.format,
     )
     present = record_display_scheme(
-        display_scheme, cells, "a", render_pipeline, scene_rt, screen
+        display_scheme, surface, cells, "a", render_pipeline, scene_rt
     )
 
     use_buffer_a = True
@@ -216,25 +213,24 @@ def main() -> int:
         while not glfw.window_should_close(window):
             fb_width, fb_height = glfw.get_framebuffer_size(window)
             if fb_width > 0 and fb_height > 0:
-                if fb_width != swapchain.width or fb_height != swapchain.height:
-                    swapchain.resize(fb_width, fb_height)
+                if fb_width != surface.width or fb_height != surface.height:
+                    surface.resize(fb_width, fb_height)
                     render_pipeline = goldy.RenderPipeline(
                         device,
                         render_shader,
                         render_shader,
                         goldy.RenderPipelineDesc(
-                            target_format=swapchain.format,
+                            target_format=surface.format,
                             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
                         ),
                     )
                     current_field = "a" if use_buffer_a else "b"
                     display_scheme, scene_rt, present = rebuild_display_scheme(
                         ctx,
-                        swapchain,
+                        surface,
                         cells,
                         current_field,
                         render_pipeline,
-                        screen,
                     )
 
             now = time.monotonic()
@@ -247,15 +243,14 @@ def main() -> int:
                 current_field = "a" if use_buffer_a else "b"
                 display_scheme, scene_rt, present = rebuild_display_scheme(
                     ctx,
-                    swapchain,
+                    surface,
                     cells,
                     current_field,
                     render_pipeline,
-                    screen,
                 )
 
             submission = display_scheme.submit()
-            present.consume(submission)
+            present.claim(submission).consume()
 
             frame_count += 1
             glfw.poll_events()

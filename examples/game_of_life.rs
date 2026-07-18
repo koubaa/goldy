@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, Color, ComputePipeline, Context, DeviceDescriptor, Grant, Init, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, ShaderResourceSlot, SwapchainPool, VertexBufferLayout,
+    field, Buffer, Color, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -45,12 +45,12 @@ fn run_compute_step(
 
 fn record_display_scheme(
     scheme: &mut Scheme,
+    surface: &SurfaceExchange,
     cells: &Buffer,
     current_field: &str,
     render_pipeline: &RenderPipeline,
     scene_rt: &Lease<LeaseRenderTarget>,
-    screen: &goldy::PresentLease,
-) -> PresentGrant {
+) -> anyhow::Result<Transaction> {
     let current = &cells[current_field];
     let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
     // Bind before set_pipeline: Scattered<uint> needs a UAV slot, not the SRV from with_parcel(Read).
@@ -62,8 +62,7 @@ fn record_display_scheme(
     pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();
-    scheme.copy_to_present(scene_rt, screen);
-    scheme.grant_present(screen)
+    surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
 }
 
 fn create_initial_state() -> Vec<u32> {
@@ -156,11 +155,10 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     ctx: Context,
-    swapchain: SwapchainPool,
-    screen: goldy::PresentLease,
+    surface: SurfaceExchange,
     scene_rt: Lease<LeaseRenderTarget>,
     display_scheme: Scheme,
-    present: PresentGrant,
+    present: Transaction,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
@@ -180,8 +178,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
-        let screen = swapchain.lease();
+        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
@@ -201,15 +198,15 @@ impl RenderState {
             &RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::default(),
                 topology: PrimitiveTopology::TriangleList,
-                target_format: swapchain.format(),
+                target_format: surface.format(),
                 ..Default::default()
             },
         )?;
 
         let mut display_scheme = Scheme::new(&ctx);
-        let (width, height) = swapchain.size();
-        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
-        let present = record_display_scheme(&mut display_scheme, &cells, "a", &render_pipeline, &scene_rt, &screen);
+        let (width, height) = surface.size();
+        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
+        let present = record_display_scheme(&mut display_scheme, &surface, &cells, "a", &render_pipeline, &scene_rt)?;
 
         println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
         println!("Features Gosper Glider Gun + random cells");
@@ -218,8 +215,7 @@ impl RenderState {
         Ok(Self {
             window,
             ctx,
-            swapchain,
-            screen,
+            surface,
             scene_rt,
             display_scheme,
             present,
@@ -237,17 +233,16 @@ impl RenderState {
     fn rebuild_display_scheme(&mut self) -> Result<()> {
         let current_field = if self.use_buffer_a { "a" } else { "b" };
         let mut display_scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.swapchain.size();
-        self.scene_rt =
-            display_scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)?;
+        let (width, height) = self.surface.size();
+        self.scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), self.surface.format(), None)?;
         self.present = record_display_scheme(
             &mut display_scheme,
+            &self.surface,
             &self.cells,
             current_field,
             &self.render_pipeline,
             &self.scene_rt,
-            &self.screen,
-        );
+        )?;
         self.display_scheme = display_scheme;
         Ok(())
     }
@@ -267,8 +262,8 @@ impl RenderState {
             self.rebuild_display_scheme()?;
         }
 
-        let submission = self.display_scheme.submit()?;
-        self.present.consume(&submission)?;
+        let mut submission = self.display_scheme.submit()?;
+        self.present.claim(&mut submission)?.consume()?;
 
         self.window.request_redraw();
         Ok(())
@@ -335,8 +330,8 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        if let Err(e) = state.swapchain.resize(size.width, size.height) {
-                            tracing::error!("Failed to resize swapchain: {e}");
+                        if let Err(e) = state.surface.resize(size.width, size.height) {
+                            tracing::error!("Failed to resize surface: {e}");
                             return;
                         }
                         if let Err(e) = state.rebuild_display_scheme() {

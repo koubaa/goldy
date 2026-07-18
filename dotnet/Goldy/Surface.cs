@@ -7,7 +7,7 @@ namespace Goldy;
 /// 
 /// Unlike RenderTarget, a Surface presents directly to the display
 /// without any CPU-side copies. Windowed rendering uses
-/// <see cref="SwapchainPool"/> + present-on-scheme.
+/// <see cref="SurfaceExchange"/> + present-on-scheme.
 /// </summary>
 public sealed class Surface : IDisposable
 {

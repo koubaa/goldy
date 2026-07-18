@@ -116,25 +116,32 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_render_pass_draw_fullscreen: FnGoldySchemeRenderPassDrawFullscreen,
     pub goldy_scheme_render_pass_finish: FnGoldySchemeRenderPassFinish,
     pub goldy_scheme_copy_to_texture: FnGoldySchemeCopyToTexture,
-    pub goldy_scheme_copy_to_present: FnGoldySchemeCopyToPresent,
-    pub goldy_scheme_grant_present: FnGoldySchemeGrantPresent,
-    pub goldy_present_grant_destroy: FnGoldyPresentGrantDestroy,
-    pub goldy_present_grant_consume: FnGoldyPresentGrantConsume,
     pub goldy_scheme_grant_read_texture: FnGoldySchemeGrantReadTexture,
     pub goldy_retained_pool_acquire_texture: FnGoldyRetainedPoolAcquireTexture,
-    pub goldy_swapchain_pool_destroy: FnGoldySwapchainPoolDestroy,
-    pub goldy_swapchain_pool_lease: FnGoldySwapchainPoolLease,
-    pub goldy_swapchain_pool_width: FnGoldySwapchainPoolWidth,
-    pub goldy_swapchain_pool_height: FnGoldySwapchainPoolHeight,
-    pub goldy_swapchain_pool_format: FnGoldySwapchainPoolFormat,
-    pub goldy_swapchain_pool_resize: FnGoldySwapchainPoolResize,
     pub goldy_present_lease_destroy: FnGoldyPresentLeaseDestroy,
+    pub goldy_surface_exchange_destroy: FnGoldySurfaceExchangeDestroy,
+    pub goldy_surface_exchange_width: FnGoldySurfaceExchangeWidth,
+    pub goldy_surface_exchange_height: FnGoldySurfaceExchangeHeight,
+    pub goldy_surface_exchange_format: FnGoldySurfaceExchangeFormat,
+    pub goldy_surface_exchange_generation: FnGoldySurfaceExchangeGeneration,
+    pub goldy_surface_exchange_resize: FnGoldySurfaceExchangeResize,
+    pub goldy_surface_exchange_lease: FnGoldySurfaceExchangeLease,
+    pub goldy_surface_exchange_bind_render_target: FnGoldySurfaceExchangeBindRenderTarget,
+    pub goldy_surface_exchange_bind: FnGoldySurfaceExchangeBind,
+    pub goldy_surface_exchange_bind_destination: FnGoldySurfaceExchangeBindDestination,
+    pub goldy_transaction_destroy: FnGoldyTransactionDestroy,
+    pub goldy_transaction_binding_id: FnGoldyTransactionBindingId,
+    pub goldy_transaction_generation: FnGoldyTransactionGeneration,
+    pub goldy_transaction_claim: FnGoldyTransactionClaim,
+    pub goldy_claim_destroy: FnGoldyClaimDestroy,
+    pub goldy_claim_consume: FnGoldyClaimConsume,
+    pub goldy_claim_discard: FnGoldyClaimDiscard,
     #[cfg(windows)]
-    pub goldy_swapchain_pool_create_win32: FnGoldySwapchainPoolCreateWin32,
+    pub goldy_surface_exchange_create_win32: FnGoldySurfaceExchangeCreateWin32,
     #[cfg(target_os = "macos")]
-    pub goldy_swapchain_pool_create_appkit: FnGoldySwapchainPoolCreateAppkit,
+    pub goldy_surface_exchange_create_appkit: FnGoldySurfaceExchangeCreateAppkit,
     #[cfg(target_os = "linux")]
-    pub goldy_swapchain_pool_create_wayland: FnGoldySwapchainPoolCreateWayland,
+    pub goldy_surface_exchange_create_wayland: FnGoldySurfaceExchangeCreateWayland,
 }
 
 impl GoldyFfi {
@@ -311,36 +318,52 @@ impl GoldyFfi {
             ),
             goldy_scheme_render_pass_finish: sym!("goldy_scheme_render_pass_finish", FnGoldySchemeRenderPassFinish),
             goldy_scheme_copy_to_texture: sym!("goldy_scheme_copy_to_texture", FnGoldySchemeCopyToTexture),
-            goldy_scheme_copy_to_present: sym!("goldy_scheme_copy_to_present", FnGoldySchemeCopyToPresent),
-            goldy_scheme_grant_present: sym!("goldy_scheme_grant_present", FnGoldySchemeGrantPresent),
-            goldy_present_grant_destroy: sym!("goldy_present_grant_destroy", FnGoldyPresentGrantDestroy),
-            goldy_present_grant_consume: sym!("goldy_present_grant_consume", FnGoldyPresentGrantConsume),
             goldy_scheme_grant_read_texture: sym!("goldy_scheme_grant_read_texture", FnGoldySchemeGrantReadTexture),
             goldy_retained_pool_acquire_texture: sym!(
                 "goldy_retained_pool_acquire_texture",
                 FnGoldyRetainedPoolAcquireTexture
             ),
-            goldy_swapchain_pool_destroy: sym!("goldy_swapchain_pool_destroy", FnGoldySwapchainPoolDestroy),
-            goldy_swapchain_pool_lease: sym!("goldy_swapchain_pool_lease", FnGoldySwapchainPoolLease),
-            goldy_swapchain_pool_width: sym!("goldy_swapchain_pool_width", FnGoldySwapchainPoolWidth),
-            goldy_swapchain_pool_height: sym!("goldy_swapchain_pool_height", FnGoldySwapchainPoolHeight),
-            goldy_swapchain_pool_format: sym!("goldy_swapchain_pool_format", FnGoldySwapchainPoolFormat),
-            goldy_swapchain_pool_resize: sym!("goldy_swapchain_pool_resize", FnGoldySwapchainPoolResize),
             goldy_present_lease_destroy: sym!("goldy_present_lease_destroy", FnGoldyPresentLeaseDestroy),
+            goldy_surface_exchange_destroy: sym!("goldy_surface_exchange_destroy", FnGoldySurfaceExchangeDestroy),
+            goldy_surface_exchange_width: sym!("goldy_surface_exchange_width", FnGoldySurfaceExchangeWidth),
+            goldy_surface_exchange_height: sym!("goldy_surface_exchange_height", FnGoldySurfaceExchangeHeight),
+            goldy_surface_exchange_format: sym!("goldy_surface_exchange_format", FnGoldySurfaceExchangeFormat),
+            goldy_surface_exchange_generation: sym!(
+                "goldy_surface_exchange_generation",
+                FnGoldySurfaceExchangeGeneration
+            ),
+            goldy_surface_exchange_resize: sym!("goldy_surface_exchange_resize", FnGoldySurfaceExchangeResize),
+            goldy_surface_exchange_lease: sym!("goldy_surface_exchange_lease", FnGoldySurfaceExchangeLease),
+            goldy_surface_exchange_bind_render_target: sym!(
+                "goldy_surface_exchange_bind_render_target",
+                FnGoldySurfaceExchangeBindRenderTarget
+            ),
+            goldy_surface_exchange_bind: sym!("goldy_surface_exchange_bind", FnGoldySurfaceExchangeBind),
+            goldy_surface_exchange_bind_destination: sym!(
+                "goldy_surface_exchange_bind_destination",
+                FnGoldySurfaceExchangeBindDestination
+            ),
+            goldy_transaction_destroy: sym!("goldy_transaction_destroy", FnGoldyTransactionDestroy),
+            goldy_transaction_binding_id: sym!("goldy_transaction_binding_id", FnGoldyTransactionBindingId),
+            goldy_transaction_generation: sym!("goldy_transaction_generation", FnGoldyTransactionGeneration),
+            goldy_transaction_claim: sym!("goldy_transaction_claim", FnGoldyTransactionClaim),
+            goldy_claim_destroy: sym!("goldy_claim_destroy", FnGoldyClaimDestroy),
+            goldy_claim_consume: sym!("goldy_claim_consume", FnGoldyClaimConsume),
+            goldy_claim_discard: sym!("goldy_claim_discard", FnGoldyClaimDiscard),
             #[cfg(windows)]
-            goldy_swapchain_pool_create_win32: sym!(
-                "goldy_swapchain_pool_create_win32",
-                FnGoldySwapchainPoolCreateWin32
+            goldy_surface_exchange_create_win32: sym!(
+                "goldy_surface_exchange_create_win32",
+                FnGoldySurfaceExchangeCreateWin32
             ),
             #[cfg(target_os = "macos")]
-            goldy_swapchain_pool_create_appkit: sym!(
-                "goldy_swapchain_pool_create_appkit",
-                FnGoldySwapchainPoolCreateAppkit
+            goldy_surface_exchange_create_appkit: sym!(
+                "goldy_surface_exchange_create_appkit",
+                FnGoldySurfaceExchangeCreateAppkit
             ),
             #[cfg(target_os = "linux")]
-            goldy_swapchain_pool_create_wayland: sym!(
-                "goldy_swapchain_pool_create_wayland",
-                FnGoldySwapchainPoolCreateWayland
+            goldy_surface_exchange_create_wayland: sym!(
+                "goldy_surface_exchange_create_wayland",
+                FnGoldySurfaceExchangeCreateWayland
             ),
             _library: library,
         })

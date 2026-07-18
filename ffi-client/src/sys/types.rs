@@ -16,9 +16,10 @@ pub enum GoldyRenderTarget {}
 pub enum GoldySampler {}
 pub enum GoldyScheme {}
 pub enum GoldySchemeRenderTargetLease {}
-pub enum GoldyPresentGrant {}
 pub enum GoldyPresentLease {}
-pub enum GoldySwapchainPool {}
+pub enum GoldySurfaceExchange {}
+pub enum GoldyTransaction {}
+pub enum GoldyClaim {}
 pub enum GoldyShaderModule {}
 pub enum GoldySurface {}
 pub enum GoldySurfaceFrame {}
@@ -239,4 +240,10 @@ pub struct GoldyReadGrant {
 pub struct GoldyReplayStats {
     pub records: u64,
     pub resubmit_hits: u64,
+}
+
+#[repr(C)]
+pub struct GoldySurfaceExchangeBindDestinationOut {
+    pub lease: *mut GoldyPresentLease,
+    pub transaction: *mut GoldyTransaction,
 }

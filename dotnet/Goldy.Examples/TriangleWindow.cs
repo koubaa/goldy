@@ -5,7 +5,7 @@ using Silk.NET.GLFW;
 namespace Goldy.Examples;
 
 /// <summary>
-/// Windowed triangle via GLFW + retained Scheme (offscreen RT → copy_to_present → grant_present).
+/// Windowed triangle via GLFW + retained Scheme (offscreen RT → bind_render_target).
 /// </summary>
 static class TriangleWindow
 {
@@ -16,18 +16,17 @@ static class TriangleWindow
         public float R, G, B, A;
     }
 
-    static (SchemeRenderTargetLease rt, PresentGrant present) RecordScheme(
+    static (SchemeRenderTargetLease rt, Transaction transaction) RecordScheme(
         Scheme scheme,
-        SwapchainPool swapchain,
+        SurfaceExchange surface,
         RenderPipeline pipeline,
         Parcel vertexParcel,
-        PresentLease screen,
         Color bg)
     {
         var rt = scheme.LeaseRenderTarget(
-            Math.Max(swapchain.Width, 1u),
-            Math.Max(swapchain.Height, 1u),
-            swapchain.Format);
+            Math.Max(surface.Width, 1u),
+            Math.Max(surface.Height, 1u),
+            surface.Format);
         using (var pass = scheme.RenderPass("triangle", rt))
         {
             pass
@@ -37,14 +36,13 @@ static class TriangleWindow
                 .SetVertexBuffer(0, vertexParcel)
                 .Draw(3);
         }
-        scheme.CopyToPresent(rt, screen);
-        var present = scheme.GrantPresent(screen);
-        return (rt, present);
+        var transaction = surface.BindRenderTarget(scheme, rt);
+        return (rt, transaction);
     }
 
     public static unsafe void Run()
     {
-        Console.WriteLine("Goldy .NET Triangle Window (Scheme + Present)");
+        Console.WriteLine("Goldy .NET Triangle Window (Scheme + SurfaceExchange)");
         Console.WriteLine(new string('=', 40));
         Console.WriteLine("Press Escape or close the window to exit\n");
 
@@ -65,8 +63,7 @@ static class TriangleWindow
             using var instance = new Instance();
             using var device = instance.RequestAdapter().RequestDevice();
             using var ctx = device.CreateContext();
-            using var swapchain = GlfwSwapchainPool.Create(ctx, window);
-            using var screen = swapchain.Lease();
+            using var surface = GlfwSurfaceExchange.Create(ctx, window);
 
             using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
             using var pipeline = new RenderPipeline(
@@ -77,7 +74,7 @@ static class TriangleWindow
                 {
                     VertexAttributes = VertexLayouts.Vertex2D,
                     VertexStride = 24,
-                    TargetFormat = swapchain.Format,
+                    TargetFormat = surface.Format,
                 });
 
             ReadOnlySpan<Vertex2D> vertices =
@@ -92,7 +89,7 @@ static class TriangleWindow
 
             var bg = new Color(0.1f, 0.1f, 0.2f, 1.0f);
             var scheme = new Scheme(ctx);
-            var (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
+            var (sceneRt, transaction) = RecordScheme(scheme, surface, pipeline, vertexParcel, bg);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -101,19 +98,20 @@ static class TriangleWindow
                 {
                     var w = (uint)fbWidth;
                     var h = (uint)fbHeight;
-                    if (w != swapchain.Width || h != swapchain.Height)
+                    if (w != surface.Width || h != surface.Height)
                     {
-                        swapchain.Resize(w, h);
+                        surface.Resize(w, h);
                         sceneRt.Dispose();
-                        present.Dispose();
+                        transaction.Dispose();
                         scheme.Dispose();
                         scheme = new Scheme(ctx);
-                        (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
+                        (sceneRt, transaction) = RecordScheme(scheme, surface, pipeline, vertexParcel, bg);
                     }
                 }
 
                 using var submission = scheme.Submit();
-                present.Consume(submission);
+                using var claim = transaction.Claim(submission);
+                claim.Consume();
 
                 glfw.PollEvents();
 
@@ -122,7 +120,7 @@ static class TriangleWindow
             }
 
             sceneRt.Dispose();
-            present.Dispose();
+            transaction.Dispose();
             scheme.Dispose();
             Console.WriteLine("Done!");
         }

@@ -5,9 +5,9 @@
 //! Run with: `cargo run --example waveform`
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SwapchainPool, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    SurfaceConfig, SurfaceExchange, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -69,9 +69,8 @@ struct App {
     _retained_pool: Option<RetainedPool>,
     channel_parcels: Option<[Buffer; NUM_CHANNELS]>,
     window: Option<Arc<Window>>,
-    swapchain: Option<SwapchainPool>,
-    screen: Option<goldy::PresentLease>,
-    present: Option<PresentGrant>,
+    surface: Option<SurfaceExchange>,
+    present: Option<Transaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     start_time: Instant,
@@ -87,8 +86,7 @@ impl App {
             pipeline: None,
             shader: None,
             window: None,
-            swapchain: None,
-            screen: None,
+            surface: None,
             present: None,
             scene_rt: None,
             scheme: None,
@@ -102,12 +100,12 @@ impl App {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        swapchain: &SwapchainPool,
+        surface: &SurfaceExchange,
     ) -> anyhow::Result<RenderPipeline> {
-        common::render_pipeline_for_swapchain(
+        common::render_pipeline_for_surface(
             device,
             shader,
-            swapchain,
+            surface,
             RenderPipelineDesc {
                 vertex_layout: Vertex2D::layout(),
                 topology: PrimitiveTopology::LineStrip,
@@ -118,11 +116,11 @@ impl App {
 
     fn record_scheme(
         scheme: &mut Scheme,
+        surface: &SurfaceExchange,
         pipeline: &RenderPipeline,
         channel_parcels: &[Buffer; NUM_CHANNELS],
         scene_rt: &Lease<LeaseRenderTarget>,
-        screen: &goldy::PresentLease,
-    ) -> PresentGrant {
+    ) -> anyhow::Result<Transaction> {
         let mut pass = scheme.render_pass("waveform", scene_rt);
         for parcel in channel_parcels {
             pass.with_parcel(parcel, NodeAccess::Read);
@@ -139,8 +137,7 @@ impl App {
             pass.draw(0..NUM_SAMPLES as u32, 0..1);
         }
         pass.finish();
-        scheme.copy_to_present(scene_rt, screen);
-        scheme.grant_present(screen)
+        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -150,11 +147,10 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
-        let screen = swapchain.lease();
+        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
 
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
+        let pipeline = Self::create_pipeline(&device, &shader, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let channel_parcels = std::array::from_fn(|_| {
@@ -164,9 +160,9 @@ impl App {
         });
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = swapchain.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
-        let present = Self::record_scheme(&mut scheme, &pipeline, &channel_parcels, &scene_rt, &screen);
+        let (width, height) = surface.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
+        let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &channel_parcels, &scene_rt)?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);
@@ -174,8 +170,7 @@ impl App {
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.channel_parcels = Some(channel_parcels);
-        self.swapchain = Some(swapchain);
-        self.screen = Some(screen);
+        self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
@@ -233,38 +228,38 @@ impl App {
         upload.submit()?;
 
         let present = self.present.as_ref().unwrap();
-        let submission = scheme.submit()?;
-        present.consume(&submission)?;
+        let mut submission = scheme.submit()?;
+        present.claim(&mut submission)?.consume()?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(swapchain) = &self.swapchain {
-                let _ = swapchain.resize(new_size.width, new_size.height);
+            if let Some(surface) = &self.surface {
+                let _ = surface.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
-                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+            if let (Some(device), Some(surface), Some(shader)) = (&self.device, &self.surface, &self.shader) {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, surface) {
                     self.pipeline = Some(pipeline);
-                    if let (Some(ctx), Some(pipeline), Some(channel_parcels), Some(screen)) = (
+                    if let (Some(ctx), Some(pipeline), Some(channel_parcels), Some(surface)) = (
                         self.ctx.as_ref(),
                         self.pipeline.as_ref(),
                         self.channel_parcels.as_ref(),
-                        self.screen.as_ref(),
+                        self.surface.as_ref(),
                     ) {
                         let mut scheme = Scheme::new(ctx);
 
-                        let (width, height) = swapchain.size();
+                        let (width, height) = surface.size();
 
-                        if let Ok(rt) =
-                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)
                         {
-                            let present = Self::record_scheme(&mut scheme, pipeline, channel_parcels, &rt, screen);
-
-                            self.scheme = Some(scheme);
-                            self.present = Some(present);
-
-                            self.scene_rt = Some(rt);
+                            if let Ok(present) =
+                                Self::record_scheme(&mut scheme, surface, pipeline, channel_parcels, &rt)
+                            {
+                                self.scheme = Some(scheme);
+                                self.present = Some(present);
+                                self.scene_rt = Some(rt);
+                            }
                         }
                     }
                 }

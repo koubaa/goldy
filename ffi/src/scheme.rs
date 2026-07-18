@@ -65,11 +65,6 @@ pub struct GoldyReplayStats {
     pub resubmit_hits: u64,
 }
 
-/// Opaque present easement grant handle returned by [`goldy_scheme_grant_present`].
-pub struct GoldyPresentGrant {
-    pub(crate) inner: goldy::PresentGrant,
-}
-
 /// Opaque handle to a retained Goldy scheme.
 pub struct GoldyScheme {
     pub(crate) inner: Scheme,

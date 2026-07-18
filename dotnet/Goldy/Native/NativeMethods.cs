@@ -241,12 +241,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_copy_to_texture")]
     internal static partial GoldyResult SchemeCopyToTexture(nint scheme, nint srcLease, nint dstTexture);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_copy_to_present")]
-    internal static partial GoldyResult SchemeCopyToPresent(nint scheme, nint srcLease, nint dstLease);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_grant_present")]
-    internal static partial nint SchemeGrantPresent(nint scheme, nint presentLease);
-
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_begin", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial GoldyResult SchemeRenderPassBegin(nint scheme, string label, nint lease);
 
@@ -288,12 +282,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_buffer_unit")]
     internal static partial GoldyResult SchemeComputeNodeWithBufferUnit(
         nint scheme, nint buffer, uint unit, NodeAccess nodeAccess);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_present_grant_consume")]
-    internal static partial GoldyResult PresentGrantConsume(nint grant, nint submission);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_present_grant_destroy")]
-    internal static partial void PresentGrantDestroy(nint grant);
 
     [LibraryImport(LibName, EntryPoint = "goldy_present_lease_destroy")]
     internal static partial void PresentLeaseDestroy(nint lease);
@@ -403,35 +391,69 @@ internal static partial class NativeMethods
     internal static partial nint SurfaceCreateWayland(nint device, nint display, nint surface);
 
     // ========================================================================
-    // SwapchainPool (present-on-scheme)
+    // SurfaceExchange / Transaction / Claim
     // ========================================================================
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_create_win32")]
-    internal static partial nint SwapchainPoolCreateWin32(nint ctx, nint hwnd, uint depth);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_create_win32")]
+    internal static partial nint SurfaceExchangeCreateWin32(nint ctx, nint hwnd, uint depth);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_create_appkit")]
-    internal static partial nint SwapchainPoolCreateAppKit(nint ctx, nint nsView, uint depth);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_create_appkit")]
+    internal static partial nint SurfaceExchangeCreateAppKit(nint ctx, nint nsView, uint depth);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_create_wayland")]
-    internal static partial nint SwapchainPoolCreateWayland(nint ctx, nint display, nint surface, uint depth);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_create_wayland")]
+    internal static partial nint SurfaceExchangeCreateWayland(nint ctx, nint display, nint surface, uint depth);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_destroy")]
-    internal static partial void SwapchainPoolDestroy(nint pool);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_destroy")]
+    internal static partial void SurfaceExchangeDestroy(nint exchange);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_width")]
-    internal static partial uint SwapchainPoolWidth(nint pool);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_width")]
+    internal static partial uint SurfaceExchangeWidth(nint exchange);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_height")]
-    internal static partial uint SwapchainPoolHeight(nint pool);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_height")]
+    internal static partial uint SurfaceExchangeHeight(nint exchange);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_format")]
-    internal static partial TextureFormat SwapchainPoolFormat(nint pool);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_format")]
+    internal static partial TextureFormat SurfaceExchangeFormat(nint exchange);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_resize")]
-    internal static partial GoldyResult SwapchainPoolResize(nint pool, uint width, uint height);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_generation")]
+    internal static partial ulong SurfaceExchangeGeneration(nint exchange);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_swapchain_pool_lease")]
-    internal static partial nint SwapchainPoolLease(nint pool);
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_resize")]
+    internal static partial GoldyResult SurfaceExchangeResize(nint exchange, uint width, uint height);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_lease")]
+    internal static partial nint SurfaceExchangeLease(nint exchange);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_bind")]
+    internal static partial nint SurfaceExchangeBind(nint exchange, nint scheme, nint source);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_bind_render_target")]
+    internal static partial nint SurfaceExchangeBindRenderTarget(nint exchange, nint scheme, nint srcLease);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_exchange_bind_destination")]
+    internal static partial GoldyResult SurfaceExchangeBindDestination(
+        nint exchange, nint scheme, out nint lease, out nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_transaction_binding_id")]
+    internal static partial uint TransactionBindingId(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_transaction_generation")]
+    internal static partial ulong TransactionGeneration(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_transaction_claim")]
+    internal static partial nint TransactionClaim(nint transaction, nint submission);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_transaction_destroy")]
+    internal static partial void TransactionDestroy(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_claim_consume")]
+    internal static partial GoldyResult ClaimConsume(nint claim);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_claim_discard")]
+    internal static partial GoldyResult ClaimDiscard(nint claim);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_claim_destroy")]
+    internal static partial void ClaimDestroy(nint claim);
 }
 
 /// <summary>

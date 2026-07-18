@@ -6,6 +6,7 @@
 
 use crate::backend::{GpuBackend, RenderTargetHandle};
 use crate::device::Device;
+use crate::parcel::ParcelStamp;
 use crate::types::*;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,8 @@ pub struct RenderTarget {
     height: u32,
     format: TextureFormat,
     depth_format: Option<DepthFormat>,
+    /// Scheme submit / present-easement stamp (WAR against copy-to-present readers).
+    stamp: Arc<ParcelStamp>,
 }
 
 impl RenderTarget {
@@ -65,6 +68,7 @@ impl RenderTarget {
             height,
             format: color_format,
             depth_format,
+            stamp: Arc::new(ParcelStamp::new(Arc::downgrade(&device.inner))),
         })
     }
 
@@ -72,6 +76,12 @@ impl RenderTarget {
     #[inline]
     pub(crate) fn backend_handle(&self) -> RenderTargetHandle {
         self.handle
+    }
+
+    /// Stamp cell for present-easement / cross-submit WAR tracking.
+    #[inline]
+    pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
+        Arc::clone(&self.stamp)
     }
 
     pub fn width(&self) -> u32 {
@@ -114,6 +124,12 @@ impl RenderTarget {
         }
         let mut backend = self.backend.lock().unwrap();
         backend.read_target_to_cpu(self.handle, output)
+    }
+}
+
+impl Drop for RenderTarget {
+    fn drop(&mut self) {
+        self.stamp.mark_dead();
     }
 }
 

@@ -75,32 +75,6 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
-    /// Copy a scheme-held render target into a present lease drawable.
-    /// </summary>
-    public void CopyToPresent(SchemeRenderTargetLease src, PresentLease dst)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(src);
-        ArgumentNullException.ThrowIfNull(dst);
-        var result = NativeMethods.SchemeCopyToPresent(Handle, src.Handle, dst.Handle);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme copy_to_present");
-    }
-
-    /// <summary>
-    /// Record a present easement grant over a swapchain lease (once per scheme).
-    /// </summary>
-    public PresentGrant GrantPresent(PresentLease lease)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(lease);
-        var grant = NativeMethods.SchemeGrantPresent(Handle, lease.Handle);
-        if (grant == nint.Zero)
-            throw GoldyException.FromLastError("Scheme grant_present");
-        return new PresentGrant(grant);
-    }
-
-    /// <summary>
     /// Record a read easement over a buffer parcel (once per scheme).
     /// </summary>
     public ReadGrant GrantRead(Parcel parcel)

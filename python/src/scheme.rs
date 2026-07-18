@@ -140,7 +140,7 @@ impl PySchemeRenderTargetLease {
 /// Retained scheme bound to one [`PyContext`].
 #[pyclass(name = "Scheme", module = "goldy", unsendable)]
 pub struct PyScheme {
-    inner: RefCell<Scheme>,
+    pub(crate) inner: RefCell<Scheme>,
     active_compute: RefCell<Option<ComputeNodeRecord>>,
     active_render_pass: RefCell<Option<RenderPassRecord>>,
     labels: RefCell<Vec<String>>,
@@ -288,7 +288,7 @@ impl PyScheme {
         Ok(unsafe { std::mem::transmute::<&str, &'static str>(s.as_str()) })
     }
 
-    fn ensure_no_active_recorder(&self) -> PyResult<()> {
+    pub(crate) fn ensure_no_active_recorder(&self) -> PyResult<()> {
         if self.active_compute.borrow().is_some() || self.active_render_pass.borrow().is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot mutate scheme while recording a node or render pass",

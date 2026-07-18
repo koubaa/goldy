@@ -169,80 +169,197 @@ impl fmt::Debug for GrantStagingPool {
     }
 }
 
-struct SubmissionData {
+/// Cloneable GPU submission identity and timeline (no exchange claims).
+#[derive(Debug, Clone)]
+pub struct SubmissionHandle {
+    core: Arc<SubmissionCore>,
+}
+
+#[derive(Debug)]
+struct SubmissionCore {
     scheme_id: u64,
     timeline: TimelineValue,
+}
+
+impl SubmissionHandle {
+    /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
+    pub fn timeline_value(&self) -> TimelineValue {
+        self.core.timeline
+    }
+
+    /// Block until this submission's GPU work has completed.
+    pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
+        ctx.wait_until(self.core.timeline)?;
+        Ok(())
+    }
+
+    pub(crate) fn scheme_id(&self) -> u64 {
+        self.core.scheme_id
+    }
+}
+
+impl From<SubmissionHandle> for TimelineValue {
+    fn from(handle: SubmissionHandle) -> Self {
+        handle.timeline_value()
+    }
+}
+
+/// Dense index of a present/exchange claim slot on a [`Submission`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClaimKey {
+    pub(crate) present_idx: u32,
+}
+
+/// Stable erased relationship recorded in one [`Scheme`].
+///
+/// Reusable across submissions. Extract each submission's product with [`Self::claim`].
+#[derive(Clone)]
+pub struct Transaction {
+    pub(crate) scheme_id: u64,
+    pub(crate) key: ClaimKey,
+    /// Scheme-unique present binding ([`ResourceId::PresentLease`]).
+    pub(crate) binding_id: u32,
+    /// Live exchange backing generation (shared with the owning pool).
+    pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transaction")
+            .field("scheme_id", &self.scheme_id)
+            .field("key", &self.key)
+            .field("binding_id", &self.binding_id)
+            .field(
+                "generation",
+                &self.generation.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+/// Unique receipt returned by [`Scheme::submit`].
+///
+/// Owns untaken exchange claims and read-grant staging cells. Clone the
+/// [`SubmissionHandle`] for timeline identity that must outlive claim extraction.
+/// Dropping this receipt discards every claim that has not been taken.
+pub struct Submission {
+    handle: SubmissionHandle,
     /// Per-grant staging buffer for this submission; taken by [`ReadGrant::consume`].
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
     staging_pools: Vec<Arc<GrantStagingPool>>,
-    /// Acquired swapchain frames for present grants; consumed by [`PresentGrant::consume`].
-    present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
-    /// Resolvers for present easement timeline promises; resolved by [`PresentGrant::consume`].
-    present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
+    /// Scheme-unique present binding id for each claim slot (parallel to [`Self::claims`]).
+    claim_bindings: Vec<u32>,
+    /// Pool generation snapshotted when each claim's drawable was acquired.
+    claim_generations: Vec<u64>,
+    /// Erased exchange claims; taken by [`Transaction::claim`] or [`PresentGrant::consume`].
+    claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
 }
 
-impl Drop for SubmissionData {
+impl Drop for Submission {
     fn drop(&mut self) {
-        let ready_after = self.timeline;
+        let ready_after = self.handle.timeline_value();
         for (cell, pool) in self.cells.iter().zip(self.staging_pools.iter()) {
             if let Some(handle) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 pool.return_handle(handle, ready_after);
             }
         }
-        for frame_mutex in &self.present_frames {
-            if let Ok(mut slot) = frame_mutex.lock() {
-                if let Some(frame) = slot.take() {
-                    frame.cancel();
+        for claim_mutex in &self.claims {
+            if let Ok(mut slot) = claim_mutex.lock() {
+                if let Some(claim) = slot.take() {
+                    claim.discard_best_effort();
                 }
             }
         }
     }
 }
 
-impl fmt::Debug for SubmissionData {
+impl fmt::Debug for Submission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SubmissionData")
-            .field("scheme_id", &self.scheme_id)
-            .field("timeline", &self.timeline)
+        f.debug_struct("Submission")
+            .field("scheme_id", &self.handle.scheme_id())
+            .field("timeline", &self.handle.timeline_value())
             .field("cells", &self.cells.len())
             .field("staging_pools", &self.staging_pools.len())
-            .field("present_frames", &self.present_frames.len())
-            .field("present_resolvers", &self.present_resolvers.len())
+            .field("claims", &self.claims.len())
             .finish()
     }
 }
 
-/// Per-submission identity returned by [`Scheme::submit`].
-///
-/// Not [`crate::surface::Frame`] (the swapchain acquire/present token).
-///
-/// A lightweight token. The timeline value identifies which submission this represents;
-/// use [`Self::wait`] to block until that submission's GPU work completes (including
-/// grant-read staging copies when grants are recorded).
-#[derive(Debug, Clone)]
-pub struct Submission {
-    data: Arc<SubmissionData>,
-}
-
 impl Submission {
+    /// Cloneable timeline / scheme identity (does not share claim ownership).
+    pub fn handle(&self) -> SubmissionHandle {
+        self.handle.clone()
+    }
+
     /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
     pub fn timeline_value(&self) -> TimelineValue {
-        self.data.timeline
+        self.handle.timeline_value()
     }
 
     /// Block until this submission's GPU work has completed.
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
-        ctx.wait_until(self.data.timeline)?;
-        Ok(())
+        self.handle.wait(ctx)
+    }
+
+    pub(crate) fn take_claim(
+        &mut self,
+        scheme_id: u64,
+        key: ClaimKey,
+        binding_id: u32,
+        generation: u64,
+    ) -> Result<crate::exchange::Claim, GoldyError> {
+        if self.handle.scheme_id() != scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "Transaction belongs to a different scheme than this submission"
+            )));
+        }
+        let idx = key.present_idx as usize;
+        let expected_binding = self.claim_bindings.get(idx).copied().ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "claim index {} out of range for submission ({} claims)",
+                idx,
+                self.claims.len()
+            ))
+        })?;
+        if expected_binding != binding_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "transaction binding {} does not match claim slot binding {}",
+                binding_id,
+                expected_binding
+            )));
+        }
+        let expected_generation = self.claim_generations.get(idx).copied().ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "claim generation index {} out of range for submission",
+                idx
+            ))
+        })?;
+        if expected_generation != generation {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "transaction generation {generation} is stale for claim published at generation {expected_generation}"
+            )));
+        }
+        let claim_mutex = self.claims.get(idx).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "claim index {} out of range for submission ({} claims)",
+                idx,
+                self.claims.len()
+            ))
+        })?;
+        let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let implementation = slot
+            .take()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
+        Ok(crate::exchange::Claim::from_impl(implementation))
     }
 
     /// Submit timeline stamped on the acquired present frame, if still held.
     #[cfg(test)]
     pub(crate) fn present_frame_submit_timeline(&self, idx: usize) -> Option<TimelineValue> {
-        let frame_mutex = self.data.present_frames.get(idx)?;
-        let slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        slot.as_ref().and_then(|f| f.submit_timeline())
+        let claim_mutex = self.claims.get(idx)?;
+        let slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref()?.debug_submit_timeline()
     }
 }
 
@@ -267,16 +384,44 @@ pub trait Grant {
 }
 
 /// Marker returned by [`Scheme::grant_present`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PresentGrant {
     pub(crate) grant_id: u32,
     pub(crate) scheme_id: u64,
+    pub(crate) binding_id: u32,
+    pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl fmt::Debug for PresentGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PresentGrant")
+            .field("grant_id", &self.grant_id)
+            .field("scheme_id", &self.scheme_id)
+            .field("binding_id", &self.binding_id)
+            .field(
+                "generation",
+                &self.generation.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 impl PresentGrant {
     /// Stable grant index recorded in the scheme IR.
     pub fn grant_id(&self) -> u32 {
         self.grant_id
+    }
+
+    /// Erased transaction handle for [`Transaction::claim`].
+    pub fn transaction(&self) -> Transaction {
+        Transaction {
+            scheme_id: self.scheme_id,
+            key: ClaimKey {
+                present_idx: self.grant_id,
+            },
+            binding_id: self.binding_id,
+            generation: Arc::clone(&self.generation),
+        }
     }
 }
 
@@ -285,92 +430,88 @@ impl Grant for PresentGrant {
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
         let _tz = crate::tracy_zone!("scheme.grant_present.consume");
-        if submission.data.scheme_id != self.scheme_id {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "PresentGrant belongs to a different scheme than this submission"
-            )));
-        }
-        let idx = self.grant_id as usize;
-        let frame_mutex = submission.data.present_frames.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "present grant index {} out of range for submission ({} present grants)",
-                idx,
-                submission.data.present_frames.len()
-            ))
-        })?;
-        let mut slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        let surface_frame = slot
-            .take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
-        // Copy sources (e.g. ekrano `out_image`) finish at the present-partition
-        // submit timeline, not at display present. Resolving the easement with
-        // present_tv would force the next writer to GPU-wait on present completion
-        // and serialize behind drawable recycle.
-        //
-        // Fall back to present_tv when the partition stamped 0 / no submit_tv
-        // (e.g. grant_present-only schemes with no copy work) — timeline 0 is
-        // reserved as PromiseState::Pending and cannot be resolved.
-        let copy_tv = surface_frame.submit_timeline().filter(|&tv| tv != 0);
-        let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
-        let easement_tv = copy_tv.unwrap_or(present_tv);
-        let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "present resolver index {} out of range for submission ({} present grants)",
-                idx,
-                submission.data.present_resolvers.len()
-            ))
-        })?;
-        if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            resolver.resolve(easement_tv);
-        }
-        Ok(())
+        // Compatibility path: extract and consume the erased surface claim.
+        // Source WAR was already resolved at submit from the known copy timeline.
+        let claim = {
+            // Take without requiring &mut Submission so Grant stays &Submission.
+            if submission.handle.scheme_id() != self.scheme_id {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "PresentGrant belongs to a different scheme than this submission"
+                )));
+            }
+            let idx = self.grant_id as usize;
+            let expected_generation = submission.claim_generations.get(idx).copied().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present grant index {} out of range for claim generations",
+                    idx
+                ))
+            })?;
+            let live = self.generation.load(std::sync::atomic::Ordering::Acquire);
+            if expected_generation != live {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "present grant generation {live} is stale for claim published at generation {expected_generation}"
+                )));
+            }
+            let claim_mutex = submission.claims.get(idx).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present grant index {} out of range for submission ({} claims)",
+                    idx,
+                    submission.claims.len()
+                ))
+            })?;
+            let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let implementation = slot.take().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission"))
+            })?;
+            crate::exchange::Claim::from_impl(implementation)
+        };
+        claim.consume()
     }
 }
 
-struct PresentGrantInfo {
-    lease_id: u32,
-    pool: std::sync::Arc<crate::swapchain_pool::SwapchainPoolInner>,
+struct PresentBinding {
+    pool: Arc<crate::swapchain_pool::SwapchainPoolInner>,
+    pool_lease_id: u32,
 }
 
-/// Parcel stamps read by a present easement for `lease_id` (copy-to-present sources).
-///
-/// Only [`NodeKind::CopyTexture`] sources can be stamp-tracked — `CopyRenderTarget`
-/// sources are scheme-owned leases that do not participate in the [`ResourceKey`] /
-/// [`crate::parcel::ParcelStamp`] system, so they cannot carry a promise.
-/// A warning is emitted when such a node is encountered so the gap is visible.
+struct PresentGrantInfo {
+    /// Scheme-unique binding id used in IR as [`ResourceId::PresentLease`].
+    binding_id: u32,
+    pool: Arc<crate::swapchain_pool::SwapchainPoolInner>,
+    /// Pool-local lease id for eager-acquire provenance checks.
+    pool_lease_id: u32,
+}
+
+/// Parcel stamps read by a present easement for `binding_id` (copy-to-present sources).
 fn present_easement_source_stamps(
     ir: &GraphIR,
-    lease_id: u32,
+    binding_id: u32,
     resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Arc<crate::parcel::ParcelStamp>> {
-    let dst = ResourceId::PresentLease(lease_id);
+    let dst = ResourceId::PresentLease(binding_id);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in &ir.nodes {
-        match &node.kind {
-            NodeKind::CopyTexture { src, dst: d, .. } if *d == dst => {
-                let key = ResourceKey::Texture(*src);
-                let hit = resource_stamps.get(&key);
-                if let Some(stamp) = hit {
-                    let ptr = Arc::as_ptr(stamp);
-                    if seen.insert(ptr) {
-                        out.push(Arc::clone(stamp));
-                    }
-                }
+        let key = match &node.kind {
+            NodeKind::CopyTexture { src, dst: d, .. } if *d == dst => Some(ResourceKey::Texture(*src)),
+            NodeKind::CopyRenderTarget { src, dst: d, .. } if *d == dst => Some(ResourceKey::RenderTarget(*src)),
+            _ => None,
+        };
+        let Some(key) = key else {
+            continue;
+        };
+        if let Some(stamp) = resource_stamps.get(&key) {
+            let ptr = Arc::as_ptr(stamp);
+            if seen.insert(ptr) {
+                out.push(Arc::clone(stamp));
             }
-            NodeKind::CopyRenderTarget { dst: d, .. } if *d == dst => {
-                // RenderTarget sources are scheme-owned leases with no ResourceKey and
-                // no ParcelStamp, so we cannot attach a promise to gate the next writer.
-                // The WAR hazard for this path is not covered by the easement promise
-                // mechanism. Log so the gap is visible; do not silently drop.
-                tracing::warn!(
-                    target: "goldy::scheme",
-                    lease_id,
-                    "present easement: CopyRenderTarget source has no stamp; \
-                     WAR hazard not tracked by promise (TODO: extend RT stamp system)"
-                );
-            }
-            _ => {}
+        } else {
+            tracing::warn!(
+                target: "goldy::scheme",
+                binding_id,
+                ?key,
+                "present easement: copy source has no registered stamp; WAR hazard not tracked"
+            );
         }
     }
     out
@@ -384,7 +525,7 @@ fn claim_present_easement_promises(
     let mut resolvers = Vec::with_capacity(present_grants.len());
     for grant in present_grants {
         let (promise, resolver) = TimelinePromise::new();
-        for stamp in present_easement_source_stamps(ir, grant.lease_id, resource_stamps) {
+        for stamp in present_easement_source_stamps(ir, grant.binding_id, resource_stamps) {
             stamp.push_pending(promise.clone());
         }
         resolvers.push(Mutex::new(Some(resolver)));
@@ -489,29 +630,28 @@ impl<T> Grant for ReadGrant<T> {
     type Output = Loan<T>;
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
-        if submission.data.scheme_id != self.scheme_id {
+        if submission.handle.scheme_id() != self.scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "ReadGrant belongs to a different scheme than this submission"
             )));
         }
         submission.wait(&self.ctx)?;
         let idx = self.grant_id.0 as usize;
-        if validation_env::scheme_validation_enabled() && idx >= submission.data.cells.len() {
+        if validation_env::scheme_validation_enabled() && idx >= submission.cells.len() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "grant index {} out of range for submission ({} grants)",
                 idx,
-                submission.data.cells.len()
+                submission.cells.len()
             )));
         }
         let handle = submission
-            .data
             .cells
             .get(idx)
             .ok_or_else(|| {
                 GoldyError::Backend(anyhow::anyhow!(
                     "grant index {} out of range for submission ({} grants)",
                     idx,
-                    submission.data.cells.len()
+                    submission.cells.len()
                 ))
             })?
             .lock()
@@ -712,7 +852,9 @@ pub struct Scheme {
     scheme_id: u64,
     /// Read-easement grants: N-backed staging per submission.
     grants: Vec<GrantInfo>,
-    /// Present easement grants: swapchain pool backing per submission.
+    /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
+    present_bindings: Vec<PresentBinding>,
+    /// Present easement grants: one claim slot per grant, keyed by dense present_idx.
     present_grants: Vec<PresentGrantInfo>,
 }
 
@@ -733,6 +875,7 @@ impl Scheme {
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             grants: Vec::new(),
+            present_bindings: Vec::new(),
             present_grants: Vec::new(),
         }
     }
@@ -1308,6 +1451,10 @@ impl Scheme {
         self.dirty = true;
         let rt = RenderTarget::new_with_depth(self.ctx.device(), width, height, format, depth_format)
             .map_err(|e| self.ctx.classify(e))?;
+        let handle = rt.backend_handle();
+        let stamp = rt.stamp_handle();
+        self.submit_state
+            .register_stamp_parts(ResourceId::RenderTarget(handle), stamp);
         let id = LeaseId(u32::try_from(self.rt_leases.len()).expect("render target lease id overflow"));
         self.rt_leases.push(rt);
         Ok(Lease {
@@ -1415,14 +1562,26 @@ impl Scheme {
         }
 
         let submit_result = {
-            let mut present_slots = Vec::with_capacity(self.present_grants.len());
-            let mut surface_frames = Vec::with_capacity(self.present_grants.len());
+            let grant_count = self.present_grants.len();
+            let mut present_slots = Vec::with_capacity(grant_count);
+            // Fixed-size slots indexed by grant order so partial acquires leave holes
+            // rather than shifting later bindings.
+            let surface_frames: Vec<Mutex<Option<crate::surface::Frame>>> =
+                (0..grant_count).map(|_| Mutex::new(None)).collect();
+            // Parallel to surface_frames: generation snapshotted at acquire.
+            let surface_generations: Vec<std::sync::Mutex<u64>> =
+                (0..grant_count).map(|_| std::sync::Mutex::new(0)).collect();
             // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
             // across the mutable `submit_state` call below.
-            let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>)> = self
+            let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>, u32)> = self
                 .present_grants
                 .iter()
-                .map(|g| (g.lease_id, Arc::clone(&g.pool)))
+                .map(|g| (g.binding_id, Arc::clone(&g.pool), g.pool_lease_id))
+                .collect();
+            let binding_to_idx: std::collections::HashMap<u32, usize> = present_grant_pools
+                .iter()
+                .enumerate()
+                .map(|(i, (id, _, _))| (*id, i))
                 .collect();
             let acquire_ctx = self.ctx.clone();
 
@@ -1434,22 +1593,31 @@ impl Scheme {
                         present_grant_pools.len()
                     )));
                 }
-                for ((lease_id, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
-                    if claim.lease_id() != *lease_id {
+                // Validate every claim before converting any to Frame. A mid-loop
+                // Err after into_parts() would drop Frame and implicitly present.
+                for ((binding_id, pool, pool_lease_id), claim) in present_grant_pools.iter().zip(acquired.iter()) {
+                    if !std::sync::Arc::ptr_eq(claim.pool(), pool) || claim.lease_id() != *pool_lease_id {
                         return Err(GoldyError::Backend(anyhow::anyhow!(
-                            "submit_with_acquired_presents: lease id mismatch (grant {}, claim {})",
-                            lease_id,
+                            "submit_with_acquired_presents: lease provenance mismatch \
+                             (binding {}, expected pool-local {}, claim pool-local {})",
+                            binding_id,
+                            pool_lease_id,
                             claim.lease_id()
                         )));
                     }
-                    let (lease_id, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
+                }
+                for ((binding_id, _, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
+                    let idx = binding_to_idx[binding_id];
+                    let (_lease_id, _pool, slot_id, generation, handle, uav_index, surface_frame) = claim.into_parts();
                     present_slots.push(ResolvedPresentSlot {
-                        lease_id,
+                        binding_id: *binding_id,
+                        generation,
                         slot_id,
                         handle,
                         uav_index,
                     });
-                    surface_frames.push(Mutex::new(Some(surface_frame)));
+                    *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
+                    *surface_generations[idx].lock().unwrap_or_else(|e| e.into_inner()) = generation;
                 }
             }
 
@@ -1471,21 +1639,30 @@ impl Scheme {
             let ir_clean = !structurally_dirty && !topo_dirty;
             let had_replay = self.submit_state.has_cb_replay();
             let upload_resolutions = self.resolve_upload_buffers_for_submit()?;
+            let mut partial = crate::task_graph::PartitionSubmitResult::default();
+            let mut partial_tv = self.ctx.gpu_progress();
             let result = {
-                // Deferred acquire: run Surface::begin (DXGI wait) only when the first
-                // present-touching partition is about to submit — after coarse/fine have
-                // already been enqueued so GPU work can overlap the drawable wait.
-                let mut deferred_acquire = |slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
-                    for (lease_id, pool) in &present_grant_pools {
-                        let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
+                // Deferred acquire: run Surface::begin (DXGI wait) only for bindings
+                // needed by the upcoming present partition that are not yet resolved.
+                let mut deferred_acquire = |needed: &[u32],
+                                            slots: &mut Vec<ResolvedPresentSlot>|
+                 -> anyhow::Result<()> {
+                    for &binding_id in needed {
+                        let idx = *binding_to_idx.get(&binding_id).ok_or_else(|| {
+                            anyhow::anyhow!("deferred present acquire: unknown binding id {binding_id}")
+                        })?;
+                        let (_, pool, _) = &present_grant_pools[idx];
+                        let (slot_id, generation, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
                             .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
                         slots.push(ResolvedPresentSlot {
-                            lease_id: *lease_id,
+                            binding_id,
+                            generation,
                             slot_id,
                             handle,
                             uav_index,
                         });
-                        surface_frames.push(Mutex::new(Some(surface_frame)));
+                        *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
+                        *surface_generations[idx].lock().unwrap_or_else(|e| e.into_inner()) = generation;
                     }
                     Ok(())
                 };
@@ -1502,6 +1679,8 @@ impl Scheme {
                     deferred,
                     &upload_resolutions,
                     ir_clean,
+                    &mut partial,
+                    &mut partial_tv,
                 )
             };
             // When CB replay was torn down (env / profiler), drop topology edges that only
@@ -1513,26 +1692,16 @@ impl Scheme {
                 self.topology_dirty.store(false, Ordering::Release);
             }
             match result {
-                Ok(ok) => Ok((ok, surface_frames)),
-                Err(e) => {
-                    // Cancel any drawables acquired before the failure (present partition
-                    // or mid-acquire). Early non-present partitions may already have run —
-                    // that throwaway GPU work is intentional under deferred exercise.
-                    for frame_mutex in surface_frames {
-                        if let Ok(mut slot) = frame_mutex.lock() {
-                            if let Some(frame) = slot.take() {
-                                frame.cancel();
-                            }
-                        }
-                    }
-                    Err(e)
-                }
+                Ok(ok) => Ok((ok, surface_frames, surface_generations, partial)),
+                Err(e) => Err((e, surface_frames, partial, partial_tv)),
             }
         };
 
-        let ((tv, part_result), surface_frames) = match submit_result {
+        let ((tv, part_result), surface_frames, surface_generations, _partial) = match submit_result {
             Ok(ok) => ok,
-            Err(e) => return Err(self.ctx.classify(e)),
+            Err((e, surface_frames, partial, partial_tv)) => {
+                return Err(self.cleanup_failed_present_submit(e, surface_frames, &partial, partial_tv));
+            }
         };
 
         // Stamp selected upload parcels with the submit timeline so they cannot be
@@ -1544,13 +1713,13 @@ impl Scheme {
             }
         }
 
-        // Present partition is last; stamp acquired frames with that epoch so
-        // Present's scratch→backbuffer copy Wait()s on it instead of inferring
-        // timeline_next-1 from an empty submit_frame().
-        for frame_mutex in &surface_frames {
-            if let Ok(mut slot) = frame_mutex.lock() {
-                if let Some(frame) = slot.as_mut() {
-                    frame.note_submit_timeline(tv);
+        // Stamp each acquired frame with the timeline of the partition that wrote it.
+        for (binding_id, binding_tv) in &part_result.present_binding_tvs {
+            if let Some(idx) = self.present_grants.iter().position(|g| g.binding_id == *binding_id) {
+                if let Ok(mut slot) = surface_frames[idx].lock() {
+                    if let Some(frame) = slot.as_mut() {
+                        frame.note_submit_timeline(*binding_tv);
+                    }
                 }
             }
         }
@@ -1624,26 +1793,108 @@ impl Scheme {
 
         let present_resolvers =
             claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
-        let submission = self.finish_submit_frame(tv, surface_frames, present_resolvers)?;
+        let claim_generations: Vec<u64> = surface_generations
+            .into_iter()
+            .map(|m| *m.lock().unwrap_or_else(|e| e.into_inner()))
+            .collect();
+        let submission = self.finish_submit_frame(tv, surface_frames, claim_generations, present_resolvers)?;
         Ok(submission)
+    }
+
+    /// Settle high-water, source WAR, and present frames after a mid-submit failure.
+    ///
+    /// Bindings whose present partition already ran get an unpublished claim discarded
+    /// at their copy timeline. Acquired but unsubmitted frames are cancelled. Never-
+    /// acquired slots are left alone.
+    fn cleanup_failed_present_submit(
+        &self,
+        e: anyhow::Error,
+        surface_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+        partial: &crate::task_graph::PartitionSubmitResult,
+        partial_tv: TimelineValue,
+    ) -> GoldyError {
+        self.ctx.advance_high_water_timeline(partial_tv);
+
+        for (grant, frame_mutex) in self.present_grants.iter().zip(surface_frames) {
+            let submitted_tv = partial
+                .present_binding_tvs
+                .iter()
+                .find(|(id, _)| *id == grant.binding_id)
+                .map(|(_, tv)| *tv);
+            let mut slot = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+            let Some(mut frame) = slot.take() else {
+                continue;
+            };
+            if let Some(tv) = submitted_tv {
+                frame.note_submit_timeline(tv);
+                let (promise, resolver) = TimelinePromise::new();
+                for stamp in
+                    present_easement_source_stamps(&self.ir, grant.binding_id, self.submit_state.resource_stamps())
+                {
+                    stamp.push_pending(promise.clone());
+                }
+                resolver.resolve(tv);
+                // Referenced drawable: discard without present (same as claim.discard).
+                let claim = crate::exchange::SurfaceClaimImpl::new(frame);
+                let _ = crate::exchange::ClaimImpl::discard(Box::new(claim));
+            } else {
+                // Acquired for a partition that never submitted — unsubmitted cancel.
+                frame.cancel();
+            }
+        }
+
+        self.ctx.classify(e)
     }
 
     fn finish_submit_frame(
         &mut self,
         tv_dispatch: TimelineValue,
         present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+        claim_generations: Vec<u64>,
         present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
     ) -> Result<Submission, GoldyError> {
+        // Resolve source WAR from the known copy/present-partition timeline immediately.
+        // Claim consumption waits for presentation independently; it must not gate source reuse.
+        let mut claims = Vec::with_capacity(present_frames.len());
+        let claim_bindings: Vec<u32> = self.present_grants.iter().map(|g| g.binding_id).collect();
+        debug_assert_eq!(
+            claim_bindings.len(),
+            present_frames.len(),
+            "present grant count must match acquired frames"
+        );
+        debug_assert_eq!(
+            claim_bindings.len(),
+            claim_generations.len(),
+            "present grant count must match claim generations"
+        );
+        for (frame_mutex, resolver_mutex) in present_frames.into_iter().zip(present_resolvers) {
+            let frame = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+            let resolver = resolver_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+            if let Some(resolver) = resolver {
+                match frame.as_ref().and_then(|f| f.submit_timeline()).filter(|&tv| tv != 0) {
+                    Some(tv) => resolver.resolve(tv),
+                    // No usable copy timeline: abandon so the next writer is not blocked forever.
+                    None => drop(resolver),
+                }
+            }
+            let claim = frame
+                .map(|f| Box::new(crate::exchange::SurfaceClaimImpl::new(f)) as Box<dyn crate::exchange::ClaimImpl>);
+            claims.push(Mutex::new(claim));
+        }
+
         if self.grants.is_empty() {
             return Ok(Submission {
-                data: Arc::new(SubmissionData {
-                    scheme_id: self.scheme_id,
-                    timeline: tv_dispatch,
-                    cells: Vec::new(),
-                    staging_pools: Vec::new(),
-                    present_frames,
-                    present_resolvers,
-                }),
+                handle: SubmissionHandle {
+                    core: Arc::new(SubmissionCore {
+                        scheme_id: self.scheme_id,
+                        timeline: tv_dispatch,
+                    }),
+                },
+                cells: Vec::new(),
+                staging_pools: Vec::new(),
+                claim_bindings,
+                claim_generations,
+                claims,
             });
         }
 
@@ -1708,35 +1959,85 @@ impl Scheme {
         self.ctx.advance_high_water_timeline(tv_copy);
 
         Ok(Submission {
-            data: Arc::new(SubmissionData {
-                scheme_id: self.scheme_id,
-                timeline: tv_copy,
-                cells,
-                staging_pools,
-                present_frames,
-                present_resolvers,
-            }),
+            handle: SubmissionHandle {
+                core: Arc::new(SubmissionCore {
+                    scheme_id: self.scheme_id,
+                    timeline: tv_copy,
+                }),
+            },
+            cells,
+            staging_pools,
+            claim_bindings,
+            claim_generations,
+            claims,
+        })
+    }
+
+    /// Map a pool-local [`PresentLease`] to a scheme-unique present binding id.
+    ///
+    /// Two leases from different pools that both use local id `0` receive distinct
+    /// binding ids. Reusing the same lease returns the same binding.
+    fn intern_present_binding(&mut self, lease: &PresentLease) -> u32 {
+        for (i, binding) in self.present_bindings.iter().enumerate() {
+            if Arc::ptr_eq(&binding.pool, &lease.pool) && binding.pool_lease_id == lease.id {
+                return i as u32;
+            }
+        }
+        let id = self.present_bindings.len() as u32;
+        self.present_bindings.push(PresentBinding {
+            pool: Arc::clone(&lease.pool),
+            pool_lease_id: lease.id,
+        });
+        id
+    }
+
+    /// True when this scheme already has a present grant for `lease`.
+    pub(crate) fn has_present_grant_for(&self, lease: &PresentLease) -> bool {
+        self.present_bindings.iter().enumerate().any(|(i, binding)| {
+            Arc::ptr_eq(&binding.pool, &lease.pool)
+                && binding.pool_lease_id == lease.id
+                && self.present_grants.iter().any(|g| g.binding_id == i as u32)
         })
     }
 
     /// Record a present easement grant over a swapchain lease.
+    ///
+    /// Calling this twice for the same lease reuses the existing grant rather than
+    /// creating a second claim slot for one binding.
     pub fn grant_present(&mut self, lease: &PresentLease) -> PresentGrant {
+        let binding_id = self.intern_present_binding(lease);
+        let generation = lease.generation_handle();
+        if let Some((idx, _)) = self
+            .present_grants
+            .iter()
+            .enumerate()
+            .find(|(_, g)| g.binding_id == binding_id)
+        {
+            return PresentGrant {
+                grant_id: idx as u32,
+                scheme_id: self.scheme_id,
+                binding_id,
+                generation,
+            };
+        }
+
         self.dirty = true;
         // `ir_grant_id` is the globally-unique ID used only for IR fingerprinting.
-        // `present_idx` is the dense index into `present_frames`/`present_resolvers`
-        // built by iterating `present_grants` at submit time; the two must be kept
-        // independent so interleaved read grants do not corrupt the present vec index.
+        // `present_idx` is the dense index into claim slots built by iterating
+        // `present_grants` at submit time; the two must be kept independent so
+        // interleaved read grants do not corrupt the present vec index.
         let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
         let present_idx = self.present_grants.len() as u32;
         self.present_grants.push(PresentGrantInfo {
-            lease_id: lease.id,
+            binding_id,
             pool: Arc::clone(&lease.pool),
+            pool_lease_id: lease.id,
         });
         self.ir.nodes.push(TaskNode {
             label: "grant_present",
             bindings: vec![ResourceBinding {
-                resource: ResourceId::PresentLease(lease.id),
+                resource: ResourceId::PresentLease(binding_id),
                 access: NodeAccess::Read,
             }],
             kind: NodeKind::GrantPresent { grant_id: ir_grant_id },
@@ -1744,12 +2045,15 @@ impl Scheme {
         PresentGrant {
             grant_id: present_idx,
             scheme_id: self.scheme_id,
+            binding_id,
+            generation,
         }
     }
 
     /// Copy an offscreen render target into a present lease drawable.
     pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
         self.dirty = true;
+        let binding_id = self.intern_present_binding(dst);
         let handle = self.rt_leases[src.id.0 as usize].backend_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_present",
@@ -1759,13 +2063,13 @@ impl Scheme {
                     access: NodeAccess::Read,
                 },
                 ResourceBinding {
-                    resource: ResourceId::PresentLease(dst.id),
+                    resource: ResourceId::PresentLease(binding_id),
                     access: NodeAccess::Write,
                 },
             ],
             kind: NodeKind::CopyRenderTarget {
                 src: handle,
-                dst: ResourceId::PresentLease(dst.id),
+                dst: ResourceId::PresentLease(binding_id),
             },
         });
     }
@@ -1780,6 +2084,7 @@ impl Scheme {
     /// mechanism used by [`Self::copy_to_present`].
     pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
         self.dirty = true;
+        let binding_id = self.intern_present_binding(dst);
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
         self.submit_state
@@ -1792,13 +2097,13 @@ impl Scheme {
                     access: NodeAccess::Read,
                 },
                 ResourceBinding {
-                    resource: ResourceId::PresentLease(dst.id),
+                    resource: ResourceId::PresentLease(binding_id),
                     access: NodeAccess::Write,
                 },
             ],
             kind: NodeKind::CopyTexture {
                 src: src_h,
-                dst: ResourceId::PresentLease(dst.id),
+                dst: ResourceId::PresentLease(binding_id),
                 dst_buffer_layout: None,
             },
         });
@@ -2509,8 +2814,9 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// so the resolver can patch it to the correct UAV index at submit time.
     /// May be called before or after other slot-binding calls on the same node.
     pub fn with_present(mut self, lease: &PresentLease) -> Self {
+        let binding_id = self.scheme.intern_present_binding(lease);
         self.bindings.push(ResourceBinding {
-            resource: ResourceId::PresentLease(lease.id),
+            resource: ResourceId::PresentLease(binding_id),
             access: NodeAccess::Write,
         });
         self.resource_slots.push(PRESENT_LEASE_SLOT_PLACEHOLDER);
@@ -3017,7 +3323,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
-        assert_eq!(TimelineValue::from(frame.clone()), tv);
+        assert_eq!(TimelineValue::from(frame.handle()), tv);
         assert_eq!(frame.timeline_value(), tv);
     }
 
@@ -3997,6 +4303,409 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    fn transaction_claim_consume_presents_once() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let transaction = scheme.grant_present(&lease).transaction();
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        let handle = submission.handle();
+        let claim = transaction.claim(&mut submission).expect("claim");
+        claim.consume().expect("consume");
+        assert_eq!(mock_present_count(&device), before + 1);
+        // Timeline handle remains usable after the claim is consumed.
+        let _ = handle.timeline_value();
+        let err = transaction.claim(&mut submission).expect_err("second claim must fail");
+        assert!(err.to_string().contains("already consumed"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn dropping_submission_discards_untaken_claim() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let _present = scheme.grant_present(&lease);
+        let before = mock_present_count(&device);
+        let submission = scheme.submit().expect("submit");
+        drop(submission);
+        assert_eq!(mock_present_count(&device), before, "discarded claim must not present");
+    }
+
+    #[test]
+    fn two_pools_receive_distinct_present_bindings() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+        let left = left_pool.lease();
+        let right = right_pool.lease();
+        assert_eq!(left.id, 0);
+        assert_eq!(right.id, 0);
+
+        let mut scheme = Scheme::new(&ctx);
+        let left_grant = scheme.grant_present(&left);
+        let right_grant = scheme.grant_present(&right);
+
+        assert_ne!(
+            left_grant.binding_id, right_grant.binding_id,
+            "distinct pools must intern distinct scheme bindings"
+        );
+        assert_eq!(left_grant.grant_id(), 0);
+        assert_eq!(right_grant.grant_id(), 1);
+
+        let left_res = scheme.ir.nodes[0].bindings[0].resource;
+        let right_res = scheme.ir.nodes[1].bindings[0].resource;
+        assert_eq!(left_res, ResourceId::PresentLease(left_grant.binding_id));
+        assert_eq!(right_res, ResourceId::PresentLease(right_grant.binding_id));
+        assert_ne!(left_res, right_res);
+    }
+
+    #[test]
+    fn same_lease_reuses_present_binding_and_grant() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let first = scheme.grant_present(&lease);
+        let second = scheme.grant_present(&lease);
+        assert_eq!(first.grant_id(), second.grant_id());
+        assert_eq!(first.binding_id, second.binding_id);
+        assert_eq!(scheme.ir_node_count(), 1, "reuse must not append a second grant node");
+    }
+
+    #[test]
+    fn two_present_claims_consume_independently() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+
+        let mut scheme = Scheme::new(&ctx);
+        let left_tx = scheme.grant_present(&left_pool.lease()).transaction();
+        let right_tx = scheme.grant_present(&right_pool.lease()).transaction();
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        let left_claim = left_tx.claim(&mut submission).expect("left claim");
+        let right_claim = right_tx.claim(&mut submission).expect("right claim");
+
+        left_claim.consume().expect("left present");
+        assert_eq!(mock_present_count(&device), before + 1);
+        drop(right_claim); // discard must not present
+        assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[test]
+    fn eager_acquire_rejects_wrong_pool_with_matching_local_id() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+        let left = left_pool.lease();
+        let right = right_pool.lease();
+        assert_eq!(left.id, right.id);
+
+        let mut scheme = Scheme::new(&ctx);
+        let _grant = scheme.grant_present(&left);
+
+        let wrong = right_pool.acquire_present(&right).expect("acquire right");
+        let err = scheme
+            .submit_with_acquired_presents(vec![wrong])
+            .expect_err("wrong pool must be rejected");
+        assert!(err.to_string().contains("provenance"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn eager_acquire_mixed_provenance_cancels_without_presenting() {
+        // First claim is valid; second is from the wrong pool. Validation must reject
+        // before converting either AcquiredPresent into Frame, otherwise Drop would
+        // implicitly present the already-converted frame.
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+
+        let mut scheme = Scheme::new(&ctx);
+        let _left = scheme.grant_present(&left_pool.lease());
+        let _right = scheme.grant_present(&right_pool.lease());
+
+        let good = left_pool.acquire_present(&left_pool.lease()).expect("acquire left");
+        let wrong = left_pool
+            .acquire_present(&left_pool.lease())
+            .expect("acquire left again for wrong slot");
+        // Swap: grant order is left then right, but second claim is from left pool.
+        let before = mock_present_count(&device);
+        let err = scheme
+            .submit_with_acquired_presents(vec![good, wrong])
+            .expect_err("second claim must fail provenance for right grant");
+        assert!(err.to_string().contains("provenance"), "unexpected: {err}");
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "rejected eager submit must not present any converted frame"
+        );
+    }
+
+    #[test]
+    fn surface_exchange_bind_rejects_duplicate_for_same_lease() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("surface exchange");
+        let tex_a = mock_direct_texture(&device);
+        let tex_b = mock_direct_texture(&device);
+
+        let mut scheme = Scheme::new(&ctx);
+        let first = surface.bind(&mut scheme, &tex_a).expect("first bind");
+        let err = surface
+            .bind(&mut scheme, &tex_b)
+            .expect_err("second bind for same lease must fail");
+        assert!(err.to_string().contains("already bound"), "unexpected: {err}");
+        // First transaction still works; only one copy+grant recorded beyond the bind path.
+        let copy_count = scheme
+            .ir
+            .nodes
+            .iter()
+            .filter(|n| n.label == "copy_texture_to_present")
+            .count();
+        assert_eq!(copy_count, 1, "rejected bind must not append a second copy");
+        let mut submission = scheme.submit().expect("submit");
+        first.claim(&mut submission).expect("claim").consume().expect("present");
+    }
+
+    #[test]
+    fn two_surfaces_bind_copy_resolve_and_claim_independently() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("left surface");
+        let right = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("right surface");
+        let left_tex = mock_direct_texture(&device);
+        let right_tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_left", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("write_right", &pipeline)
+            .with_parcel(&right_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let left_tx = left.bind(&mut scheme, &left_tex).expect("bind left");
+        let right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
+
+        assert_ne!(left_tx.binding_id(), right_tx.binding_id());
+        let copy_bindings: Vec<_> = scheme
+            .ir
+            .nodes
+            .iter()
+            .filter(|n| n.label == "copy_texture_to_present")
+            .map(|n| match &n.kind {
+                NodeKind::CopyTexture { dst, .. } => *dst,
+                other => panic!("expected CopyTexture, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(copy_bindings.len(), 2);
+        assert_eq!(copy_bindings[0], ResourceId::PresentLease(left_tx.binding_id()));
+        assert_eq!(copy_bindings[1], ResourceId::PresentLease(right_tx.binding_id()));
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        let left_stamp = submission
+            .present_frame_submit_timeline(0)
+            .expect("left claim must hold a stamped frame");
+        let right_stamp = submission
+            .present_frame_submit_timeline(1)
+            .expect("right claim must hold a stamped frame");
+        assert_eq!(left_stamp, submission.timeline_value());
+        assert_eq!(right_stamp, submission.timeline_value());
+
+        let left_claim = left_tx.claim(&mut submission).expect("left claim");
+        let right_claim = right_tx.claim(&mut submission).expect("right claim");
+        left_claim.consume().expect("left present");
+        assert_eq!(mock_present_count(&device), before + 1);
+        right_claim.discard().expect("right discard");
+        assert_eq!(
+            mock_present_count(&device),
+            before + 1,
+            "discard must not present the other surface"
+        );
+    }
+
+    #[test]
+    fn surface_claim_impl_drop_cancels_without_presenting() {
+        // Raw SurfaceClaimImpl may be dropped on finish_submit_frame failure before
+        // wrapping in Claim/Submission. Drop must cancel, not present via Frame::drop.
+        let device = mock_device();
+        let (_ctx, spool) = mock_swapchain_pool(&device);
+        let acquired = spool.acquire_present(&spool.lease()).expect("acquire");
+        let (_lease, _pool, _slot, _gen, _handle, _uav, frame) = acquired.into_parts();
+        let before = mock_present_count(&device);
+        drop(crate::exchange::SurfaceClaimImpl::new(frame));
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "SurfaceClaimImpl Drop must cancel, not present"
+        );
+    }
+
+    #[test]
+    fn partial_acquire_failure_discards_submitted_binding_without_present() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("left");
+        let right = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("right");
+        let left_tex = mock_direct_texture(&device);
+        let right_tex = mock_direct_texture(&device);
+        let buf = retained_buffer(&mut pool);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        // Force distinct present partitions: left copy must precede a buf write that
+        // the right path reads, so binding 1 is introduced in a later wave.
+        scheme
+            .node("write_left", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let _left_tx = left.bind(&mut scheme, &left_tex).expect("bind left");
+        scheme
+            .node("bridge", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Read)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("write_right", &pipeline)
+            .with_parcel(&right_tex, NodeAccess::Write)
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+        let _right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
+
+        right.fail_next_acquire();
+        let before = mock_present_count(&device);
+        let err = scheme
+            .submit()
+            .expect_err("right acquire must fail after left submitted");
+        assert!(
+            err.to_string().contains("test-injected acquire failure") || err.to_string().contains("acquire"),
+            "unexpected: {err}"
+        );
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "partial failure must not present the submitted left frame"
+        );
+
+        let key = ResourceKey::Texture(left_tex.gpu_handle());
+        let war = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("left tex stamp");
+            let pending = stamp.pending.lock().unwrap();
+            assert!(
+                !pending.is_empty(),
+                "left present partition must have submitted and registered WAR before right acquire failed"
+            );
+            pending[0].poll()
+        };
+        match war {
+            PromiseState::Resolved(_) => {}
+            other => panic!("left source WAR must settle on partial failure cleanup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resize_advances_generation_and_stales_prior_claim() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("surface");
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let tx = surface.bind(&mut scheme, &tex).expect("bind");
+        assert_eq!(tx.generation(), 0);
+        let mut submission = scheme.submit().expect("submit");
+
+        surface.resize(64, 64).expect("resize");
+        assert_eq!(tx.generation(), 1);
+        let err = tx.claim(&mut submission).expect_err("claim must be stale after resize");
+        assert!(err.to_string().contains("stale"), "unexpected: {err}");
+
+        let before = mock_present_count(&device);
+        drop(submission);
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "dropping stale submission must discard, not present"
+        );
+
+        // Next submit under the new generation still works.
+        let mut submission2 = scheme.submit().expect("submit after resize");
+        tx.claim(&mut submission2)
+            .expect("fresh claim at new generation")
+            .consume()
+            .expect("present");
+        assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[test]
+    fn resize_one_surface_does_not_stale_other_transaction() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("left");
+        let right = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("right");
+        let left_tex = mock_direct_texture(&device);
+        let right_tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_left", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("write_right", &pipeline)
+            .with_parcel(&right_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let left_tx = left.bind(&mut scheme, &left_tex).expect("bind left");
+        let right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
+        let mut submission = scheme.submit().expect("submit");
+
+        left.resize(80, 80).expect("resize left only");
+        assert_eq!(left_tx.generation(), 1);
+        assert_eq!(right_tx.generation(), 0);
+
+        let err = left_tx.claim(&mut submission).expect_err("left claim stale");
+        assert!(err.to_string().contains("stale"), "unexpected: {err}");
+        right_tx
+            .claim(&mut submission)
+            .expect("right claim still current")
+            .consume()
+            .expect("right present");
+    }
+
+    #[test]
     fn grant_present_stamps_frame_with_present_partition_timeline() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4221,7 +4930,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn present_easement_promise_abandoned_when_submission_dropped() {
+    fn present_easement_promise_resolved_at_submit_before_claim_consume() {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
@@ -4236,11 +4945,72 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let key = ResourceKey::Texture(tex.gpu_handle());
         let submission = scheme.submit().expect("submit");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert_eq!(stamp.pending.lock().unwrap().len(), 1);
-        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Pending);
+        let resolved_tv = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            assert_eq!(stamp.pending.lock().unwrap().len(), 1);
+            // Source WAR resolves at submit from the known copy timeline. Dropping the
+            // submission discards the drawable claim without abandoning the WAR promise.
+            match stamp.pending.lock().unwrap()[0].poll() {
+                PromiseState::Resolved(tv) => tv,
+                other => panic!("expected Resolved after submit, got {other:?}"),
+            }
+        };
+        assert_eq!(resolved_tv, submission.timeline_value());
         drop(submission);
-        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Abandoned);
+        let after_drop = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        match after_drop {
+            PromiseState::Resolved(_) => {}
+            other => panic!("WAR must remain Resolved after claim discard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn present_easement_tracks_render_target_copy_source_stamp() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_render_shader(&device);
+        let pipeline = mock_render_pipeline(&device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        let rt_handle = scheme.rt(&rt).backend_handle();
+        let mut pass = scheme.render_pass("render", &rt);
+        pass.set_pipeline(&pipeline);
+        pass.draw_fullscreen();
+        pass.finish();
+        scheme.copy_to_present(&rt, &lease);
+        let _present = scheme.grant_present(&lease);
+
+        let key = ResourceKey::RenderTarget(rt_handle);
+        assert!(
+            scheme.submit_state.resource_stamps().contains_key(&key),
+            "lease_render_target must register an RT stamp for present WAR"
+        );
+
+        let submission = scheme.submit().expect("submit");
+        let resolved_tv = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("rt stamp");
+            assert_eq!(
+                stamp.pending.lock().unwrap().len(),
+                1,
+                "copy_to_present must attach a present-easement promise to the RT stamp"
+            );
+            match stamp.pending.lock().unwrap()[0].poll() {
+                PromiseState::Resolved(tv) => tv,
+                other => panic!("expected Resolved after submit, got {other:?}"),
+            }
+        };
+        assert_eq!(resolved_tv, submission.timeline_value());
+        drop(submission);
     }
 
     #[test]
@@ -4287,6 +5057,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn submit_gate_folds_resolved_present_promise_into_foreign_reads() {
         use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4315,18 +5086,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             1,
             "submit 2 claims a fresh present promise; frame 1's resolved promise must be pruned"
         );
-        assert_eq!(
-            stamp.pending.lock().unwrap()[0].poll(),
-            crate::timeline::PromiseState::Pending
+        // Frame 2's promise is resolved at submit from the known copy timeline.
+        assert!(
+            matches!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Resolved(_)),
+            "frame 2 present promise must be Resolved after submit"
         );
     }
 
     #[test]
-    fn submit_gate_blocks_until_present_promise_resolved() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        use std::time::Duration;
-
+    fn submit_gate_does_not_block_on_unconsumed_claim() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
@@ -4336,31 +5104,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
         let sub1 = scheme.submit().expect("submit 1");
-
-        let scheme = Arc::new(std::sync::Mutex::new(scheme));
-        let barrier = Arc::new(Barrier::new(2));
-        let scheme2 = Arc::clone(&scheme);
-        let barrier2 = Arc::clone(&barrier);
-
-        let gate_thread = thread::spawn(move || {
-            barrier2.wait();
-            scheme2
-                .lock()
-                .unwrap()
-                .submit()
-                .expect("submit 2 must succeed after promise resolves");
-        });
-
-        barrier.wait();
-        thread::sleep(Duration::from_millis(30));
-        present.consume(&sub1).expect("consume releases submit gate");
-        gate_thread.join().expect("gate thread");
+        // Source WAR already resolved at submit; the next submit must not wait for consume.
+        let _sub2 = scheme.submit().expect("submit 2 without consuming claim 1");
+        present.consume(&sub1).expect("consume may still happen later");
     }
 
     #[test]
-    fn texture_stamp_not_settled_while_present_promise_unresolved() {
+    fn texture_stamp_war_resolved_at_submit_survives_claim_discard() {
         use crate::task_graph::cross_submit::ResourceKey;
-        use crate::timeline::Settle;
+        use crate::timeline::PromiseState;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4373,10 +5125,23 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let key = ResourceKey::Texture(tex.gpu_handle());
 
         let submission = scheme.submit().expect("submit");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert_eq!(stamp.settle_on_context(&ctx), Settle::Pending);
+        let poll = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        assert!(
+            matches!(poll, PromiseState::Resolved(_)),
+            "WAR must resolve at submit, got {poll:?}"
+        );
         drop(submission);
-        assert_eq!(stamp.settle_on_context(&ctx), Settle::Ready);
+        let after = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        assert!(
+            matches!(after, PromiseState::Resolved(_)),
+            "discarding the claim must not abandon the resolved WAR, got {after:?}"
+        );
     }
 
     /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
@@ -4530,8 +5295,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let sub1 = scheme.submit().expect("submit frame 1");
         let compute_tv = sub1.timeline_value();
-        present.consume(&sub1).expect("present frame 1");
-
+        // Source WAR resolves at submit from the known copy timeline — before claim consume.
         let copy_tv = {
             let stamp = scheme
                 .submit_state
@@ -4540,13 +5304,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 .expect("out_image stamp");
             match stamp.pending.lock().unwrap()[0].poll() {
                 PromiseState::Resolved(tv) => tv,
-                other => panic!("present promise must be resolved after consume, got {other:?}"),
+                other => panic!("present promise must be resolved after submit, got {other:?}"),
             }
         };
         assert_eq!(
             copy_tv, compute_tv,
             "easement epoch must be the present-partition/copy timeline (copy={copy_tv}, compute={compute_tv})"
         );
+        present.consume(&sub1).expect("present frame 1");
 
         let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
         let _sub2 = scheme.submit().expect("submit frame 2");

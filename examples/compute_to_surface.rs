@@ -1,14 +1,15 @@
 //! Compute-to-Surface example — pure compute rendering without a graphics pipeline.
 //!
 //! Demonstrates present-on-scheme: a retained [`Scheme`] writes directly to a
-//! [`PresentLease`] from [`SwapchainPool`], then presents via [`PresentGrant::consume`].
+//! drawable from [`SurfaceExchange::bind_destination`], then presents via
+//! [`Transaction::claim`] and [`Claim::consume`].
 //!
 //! Run with: cargo run --example compute_to_surface
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance, PresentMode,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
+    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance, PresentMode,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -97,9 +98,8 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     ctx: goldy::Context,
-    swapchain: SwapchainPool,
-    screen: goldy::PresentLease,
-    present: goldy::PresentGrant,
+    surface: SurfaceExchange,
+    present: Transaction,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
@@ -111,32 +111,34 @@ struct RenderState {
 
 fn record_scheme(
     scheme: &mut Scheme,
+    surface: &SurfaceExchange,
     pipeline: &ComputePipeline,
     uniform: &Buffer,
-    screen: &goldy::PresentLease,
     width: u32,
     height: u32,
-) -> goldy::PresentGrant {
+) -> Result<Transaction> {
+    let (lease, present_tx) = surface.bind_destination(scheme)?;
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
     scheme
         .node("compute", pipeline)
         .with_parcel(uniform, NodeAccess::Read)
-        .with_present(screen)
+        .with_present(&lease)
         .dispatch(wg_x, wg_y, 1);
-    scheme.grant_present(screen)
+    Ok(present_tx)
 }
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     let mut scheme = Scheme::new(&state.ctx);
     state.present = record_scheme(
         &mut scheme,
+        &state.surface,
         &state.compute_pipeline,
         &state.uniform_buffer,
-        &state.screen,
         width,
         height,
-    );
+    )
+    .expect("failed to record scheme");
     state.scheme = scheme;
 }
 
@@ -150,7 +152,7 @@ impl App {
         );
         let ctx = device.create_context()?;
 
-        let swapchain = SwapchainPool::new_with_config(
+        let surface = SurfaceExchange::new_with_depth(
             &ctx,
             window.as_ref(),
             3,
@@ -159,7 +161,6 @@ impl App {
                 depth_format: None,
             },
         )?;
-        let screen = swapchain.lease();
 
         let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let compute_pipeline = ComputePipeline::new(&device, &shader)?;
@@ -167,8 +168,8 @@ impl App {
         let mut retained_pool = RetainedPool::new(device);
         let uniform_buffer = retained_pool.acquire_buffer_with_data(
             &[Uniforms {
-                width: swapchain.width(),
-                height: swapchain.height(),
+                width: surface.width(),
+                height: surface.height(),
                 time: 0.0,
                 _padding: 0.0,
             }],
@@ -178,18 +179,17 @@ impl App {
         let mut scheme = Scheme::new(&ctx);
         let present = record_scheme(
             &mut scheme,
+            &surface,
             &compute_pipeline,
             &uniform_buffer,
-            &screen,
-            swapchain.width(),
-            swapchain.height(),
-        );
+            surface.width(),
+            surface.height(),
+        )?;
 
         self.state = Some(RenderState {
             window,
             ctx,
-            swapchain,
-            screen,
+            surface,
             present,
             scheme,
             compute_pipeline,
@@ -261,7 +261,7 @@ impl ApplicationHandler for App {
                     } else {
                         PresentMode::Immediate
                     };
-                    if let Err(e) = state.swapchain.set_present_mode(mode) {
+                    if let Err(e) = state.surface.set_present_mode(mode) {
                         eprintln!("Failed to set present mode: {e}");
                     } else {
                         println!(
@@ -274,7 +274,7 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
-                let _ = state.swapchain.resize(new_size.width, new_size.height);
+                let _ = state.surface.resize(new_size.width, new_size.height);
                 rebuild_scheme(state, new_size.width, new_size.height);
                 state.window.request_redraw();
             }
@@ -292,7 +292,7 @@ impl ApplicationHandler for App {
 fn render_frame(state: &mut RenderState) -> Result<()> {
     state.frame_count += 1;
 
-    let (width, height) = state.swapchain.size();
+    let (width, height) = state.surface.size();
     if width == 0 || height == 0 {
         return Ok(());
     }
@@ -309,8 +309,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     upload.commit_write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
     upload.submit()?;
 
-    let submission = state.scheme.submit()?;
-    state.present.consume(&submission)?;
+    let mut submission = state.scheme.submit()?;
+    state.present.claim(&mut submission)?.consume()?;
 
     Ok(())
 }
