@@ -152,6 +152,7 @@ impl SurfaceExchange {
             key: ClaimKey {
                 present_idx: grant.grant_id(),
             },
+            binding_id: grant.binding_id,
         })
     }
 
@@ -186,10 +187,15 @@ impl SurfaceExchange {
 }
 
 impl Transaction {
+    /// Scheme-unique present binding id for this transaction.
+    pub fn binding_id(&self) -> u32 {
+        self.binding_id
+    }
+
     /// Remove this transaction's claim from a successful submission.
     ///
     /// Acquisition already happened inside [`Scheme::submit`].
     pub fn claim(&self, submission: &mut Submission) -> Result<Claim, GoldyError> {
-        submission.take_claim(self.scheme_id, self.key)
+        submission.take_claim(self.scheme_id, self.key, self.binding_id)
     }
 }

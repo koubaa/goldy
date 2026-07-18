@@ -28,10 +28,11 @@ pub struct SwapchainPool {
     inner: Arc<SwapchainPoolInner>,
 }
 
-/// Stable scheme-scoped name for a swapchain drawable lease.
+/// Pool-local present lease handle.
 ///
-/// The physical backing rotates per submission; the lease id is recorded once
-/// in the scheme IR as `ResourceId::PresentLease`.
+/// The physical backing rotates per submission. Schemes map `(pool, id)` to a
+/// scheme-unique [`crate::task_graph::ResourceId::PresentLease`] binding so two
+/// pools that both use local id `0` remain distinct.
 pub struct PresentLease {
     pub(crate) id: u32,
     pub(crate) pool: Arc<SwapchainPoolInner>,
@@ -42,7 +43,9 @@ pub struct PresentLease {
 /// Dropping an unconsumed claim cancels the underlying [`Surface`] frame so the
 /// image is not presented.
 pub struct AcquiredPresent {
+    /// Pool-local lease id ([`PresentLease::id`]), not the scheme binding id.
     lease_id: u32,
+    pool: Arc<SwapchainPoolInner>,
     slot_id: u32,
     handle: TextureHandle,
     uav_index: u32,
@@ -50,18 +53,23 @@ pub struct AcquiredPresent {
 }
 
 impl AcquiredPresent {
-    /// Lease id this drawable fulfills ([`PresentLease`] identity).
+    /// Pool-local lease id this drawable fulfills ([`PresentLease`] identity).
     pub fn lease_id(&self) -> u32 {
         self.lease_id
     }
 
-    pub(crate) fn into_parts(mut self) -> (u32, u32, TextureHandle, u32, SurfaceFrame) {
+    pub(crate) fn pool(&self) -> &Arc<SwapchainPoolInner> {
+        &self.pool
+    }
+
+    pub(crate) fn into_parts(mut self) -> (u32, Arc<SwapchainPoolInner>, u32, TextureHandle, u32, SurfaceFrame) {
         let frame = self.frame.take().expect("AcquiredPresent frame already taken");
         let lease_id = self.lease_id;
+        let pool = Arc::clone(&self.pool);
         let slot_id = self.slot_id;
         let handle = self.handle;
         let uav_index = self.uav_index;
-        (lease_id, slot_id, handle, uav_index, frame)
+        (lease_id, pool, slot_id, handle, uav_index, frame)
     }
 }
 
@@ -119,6 +127,7 @@ impl SwapchainPool {
         let (slot_id, frame, uav_index, handle) = Self::acquire_slot(&lease.pool)?;
         Ok(AcquiredPresent {
             lease_id: lease.id,
+            pool: Arc::clone(&lease.pool),
             slot_id,
             handle,
             uav_index,

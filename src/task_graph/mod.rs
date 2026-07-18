@@ -114,7 +114,11 @@ pub(crate) enum ResourceId {
     /// swapchain image.  Lowered to [`ResourceId::Texture`] after acquire.
     #[allow(dead_code)]
     SwapchainOutput,
-    /// Present lease: scheme-scoped name for a swapchain-pool drawable.
+    /// Present binding: scheme-unique id for a swapchain-pool drawable.
+    ///
+    /// The `u32` is allocated by [`crate::Scheme`] when a [`crate::PresentLease`]
+    /// is first recorded; it is **not** the pool-local lease id. Two pools that
+    /// both expose local id `0` receive distinct binding ids in one scheme.
     ///
     /// Lowered to [`ResourceId::Texture`] when the pool acquires a backing slot
     /// at [`crate::Scheme::submit`] time.

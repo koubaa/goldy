@@ -721,9 +721,10 @@ impl PartitionSubmitResult {
     }
 }
 
-/// Resolved swapchain drawable for one present lease at submit time.
+/// Resolved swapchain drawable for one present binding at submit time.
 pub(crate) struct ResolvedPresentSlot {
-    pub lease_id: u32,
+    /// Scheme-unique present binding id ([`super::ResourceId::PresentLease`]).
+    pub binding_id: u32,
     pub slot_id: u32,
     pub handle: crate::backend::TextureHandle,
     pub uav_index: u32,
@@ -779,7 +780,7 @@ fn ensure_present_ready(
         let _tz = crate::tracy_zone!("goldy.submit_resolved.present_resolver");
         for slot in present_slots.iter() {
             resolver.present_leases.insert(
-                slot.lease_id,
+                slot.binding_id,
                 ResolvedSwapchain {
                     handle: slot.handle,
                     uav_index: slot.uav_index,
@@ -807,7 +808,7 @@ fn dynamic_partition_slot_key(
     let mut h = DefaultHasher::new();
     part_fp.hash(&mut h);
     for slot in present_slots {
-        slot.lease_id.hash(&mut h);
+        slot.binding_id.hash(&mut h);
         slot.slot_id.hash(&mut h);
     }
     let mut upload_ids: Vec<u32> = waves
@@ -2053,7 +2054,7 @@ mod slice_retention_tests {
             let n = device_cb.with_mock(|m| m.compute_dispatch_count);
             acquire_after_cb.store(n, std::sync::atomic::Ordering::SeqCst);
             slots.push(ResolvedPresentSlot {
-                lease_id: 0,
+                binding_id: 0,
                 slot_id: 0,
                 handle: 42,
                 uav_index: 7,
@@ -2103,7 +2104,7 @@ mod slice_retention_tests {
         let mut present_slots = Vec::new();
         let mut deferred2 = |slots: &mut Vec<ResolvedPresentSlot>| -> Result<()> {
             slots.push(ResolvedPresentSlot {
-                lease_id: 0,
+                binding_id: 0,
                 slot_id: 1,
                 handle: 43,
                 uav_index: 8,

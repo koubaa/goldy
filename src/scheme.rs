@@ -217,6 +217,8 @@ pub struct ClaimKey {
 pub struct Transaction {
     pub(crate) scheme_id: u64,
     pub(crate) key: ClaimKey,
+    /// Scheme-unique present binding ([`ResourceId::PresentLease`]).
+    pub(crate) binding_id: u32,
 }
 
 /// Unique receipt returned by [`Scheme::submit`].
@@ -230,6 +232,8 @@ pub struct Submission {
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
     staging_pools: Vec<Arc<GrantStagingPool>>,
+    /// Scheme-unique present binding id for each claim slot (parallel to [`Self::claims`]).
+    claim_bindings: Vec<u32>,
     /// Erased exchange claims; taken by [`Transaction::claim`] or [`PresentGrant::consume`].
     claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
 }
@@ -280,13 +284,32 @@ impl Submission {
         self.handle.wait(ctx)
     }
 
-    pub(crate) fn take_claim(&mut self, scheme_id: u64, key: ClaimKey) -> Result<crate::exchange::Claim, GoldyError> {
+    pub(crate) fn take_claim(
+        &mut self,
+        scheme_id: u64,
+        key: ClaimKey,
+        binding_id: u32,
+    ) -> Result<crate::exchange::Claim, GoldyError> {
         if self.handle.scheme_id() != scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "Transaction belongs to a different scheme than this submission"
             )));
         }
         let idx = key.present_idx as usize;
+        let expected_binding = self.claim_bindings.get(idx).copied().ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "claim index {} out of range for submission ({} claims)",
+                idx,
+                self.claims.len()
+            ))
+        })?;
+        if expected_binding != binding_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "transaction binding {} does not match claim slot binding {}",
+                binding_id,
+                expected_binding
+            )));
+        }
         let claim_mutex = self.claims.get(idx).ok_or_else(|| {
             GoldyError::Backend(anyhow::anyhow!(
                 "claim index {} out of range for submission ({} claims)",
@@ -335,6 +358,7 @@ pub trait Grant {
 pub struct PresentGrant {
     pub(crate) grant_id: u32,
     pub(crate) scheme_id: u64,
+    pub(crate) binding_id: u32,
 }
 
 impl PresentGrant {
@@ -350,6 +374,7 @@ impl PresentGrant {
             key: ClaimKey {
                 present_idx: self.grant_id,
             },
+            binding_id: self.binding_id,
         }
     }
 }
@@ -386,12 +411,20 @@ impl Grant for PresentGrant {
     }
 }
 
-struct PresentGrantInfo {
-    lease_id: u32,
-    pool: std::sync::Arc<crate::swapchain_pool::SwapchainPoolInner>,
+struct PresentBinding {
+    pool: Arc<crate::swapchain_pool::SwapchainPoolInner>,
+    pool_lease_id: u32,
 }
 
-/// Parcel stamps read by a present easement for `lease_id` (copy-to-present sources).
+struct PresentGrantInfo {
+    /// Scheme-unique binding id used in IR as [`ResourceId::PresentLease`].
+    binding_id: u32,
+    pool: Arc<crate::swapchain_pool::SwapchainPoolInner>,
+    /// Pool-local lease id for eager-acquire provenance checks.
+    pool_lease_id: u32,
+}
+
+/// Parcel stamps read by a present easement for `binding_id` (copy-to-present sources).
 ///
 /// Only [`NodeKind::CopyTexture`] sources can be stamp-tracked — `CopyRenderTarget`
 /// sources are scheme-owned leases that do not participate in the [`ResourceKey`] /
@@ -399,10 +432,10 @@ struct PresentGrantInfo {
 /// A warning is emitted when such a node is encountered so the gap is visible.
 fn present_easement_source_stamps(
     ir: &GraphIR,
-    lease_id: u32,
+    binding_id: u32,
     resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Arc<crate::parcel::ParcelStamp>> {
-    let dst = ResourceId::PresentLease(lease_id);
+    let dst = ResourceId::PresentLease(binding_id);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in &ir.nodes {
@@ -424,7 +457,7 @@ fn present_easement_source_stamps(
                 // mechanism. Log so the gap is visible; do not silently drop.
                 tracing::warn!(
                     target: "goldy::scheme",
-                    lease_id,
+                    binding_id,
                     "present easement: CopyRenderTarget source has no stamp; \
                      WAR hazard not tracked by promise (TODO: extend RT stamp system)"
                 );
@@ -443,7 +476,7 @@ fn claim_present_easement_promises(
     let mut resolvers = Vec::with_capacity(present_grants.len());
     for grant in present_grants {
         let (promise, resolver) = TimelinePromise::new();
-        for stamp in present_easement_source_stamps(ir, grant.lease_id, resource_stamps) {
+        for stamp in present_easement_source_stamps(ir, grant.binding_id, resource_stamps) {
             stamp.push_pending(promise.clone());
         }
         resolvers.push(Mutex::new(Some(resolver)));
@@ -770,7 +803,9 @@ pub struct Scheme {
     scheme_id: u64,
     /// Read-easement grants: N-backed staging per submission.
     grants: Vec<GrantInfo>,
-    /// Present easement grants: swapchain pool backing per submission.
+    /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
+    present_bindings: Vec<PresentBinding>,
+    /// Present easement grants: one claim slot per grant, keyed by dense present_idx.
     present_grants: Vec<PresentGrantInfo>,
 }
 
@@ -791,6 +826,7 @@ impl Scheme {
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             grants: Vec::new(),
+            present_bindings: Vec::new(),
             present_grants: Vec::new(),
         }
     }
@@ -1477,10 +1513,10 @@ impl Scheme {
             let mut surface_frames = Vec::with_capacity(self.present_grants.len());
             // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
             // across the mutable `submit_state` call below.
-            let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>)> = self
+            let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>, u32)> = self
                 .present_grants
                 .iter()
-                .map(|g| (g.lease_id, Arc::clone(&g.pool)))
+                .map(|g| (g.binding_id, Arc::clone(&g.pool), g.pool_lease_id))
                 .collect();
             let acquire_ctx = self.ctx.clone();
 
@@ -1492,17 +1528,19 @@ impl Scheme {
                         present_grant_pools.len()
                     )));
                 }
-                for ((lease_id, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
-                    if claim.lease_id() != *lease_id {
+                for ((binding_id, pool, pool_lease_id), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
+                    if !std::sync::Arc::ptr_eq(claim.pool(), pool) || claim.lease_id() != *pool_lease_id {
                         return Err(GoldyError::Backend(anyhow::anyhow!(
-                            "submit_with_acquired_presents: lease id mismatch (grant {}, claim {})",
-                            lease_id,
+                            "submit_with_acquired_presents: lease provenance mismatch \
+                             (binding {}, expected pool-local {}, claim pool-local {})",
+                            binding_id,
+                            pool_lease_id,
                             claim.lease_id()
                         )));
                     }
-                    let (lease_id, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
+                    let (_lease_id, _pool, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
                     present_slots.push(ResolvedPresentSlot {
-                        lease_id,
+                        binding_id: *binding_id,
                         slot_id,
                         handle,
                         uav_index,
@@ -1534,11 +1572,11 @@ impl Scheme {
                 // present-touching partition is about to submit — after coarse/fine have
                 // already been enqueued so GPU work can overlap the drawable wait.
                 let mut deferred_acquire = |slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
-                    for (lease_id, pool) in &present_grant_pools {
+                    for (binding_id, pool, _) in &present_grant_pools {
                         let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
                             .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
                         slots.push(ResolvedPresentSlot {
-                            lease_id: *lease_id,
+                            binding_id: *binding_id,
                             slot_id,
                             handle,
                             uav_index,
@@ -1695,6 +1733,12 @@ impl Scheme {
         // Resolve source WAR from the known copy/present-partition timeline immediately.
         // Claim consumption waits for presentation independently; it must not gate source reuse.
         let mut claims = Vec::with_capacity(present_frames.len());
+        let claim_bindings: Vec<u32> = self.present_grants.iter().map(|g| g.binding_id).collect();
+        debug_assert_eq!(
+            claim_bindings.len(),
+            present_frames.len(),
+            "present grant count must match acquired frames"
+        );
         for (frame_mutex, resolver_mutex) in present_frames.into_iter().zip(present_resolvers) {
             let frame = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
             let resolver = resolver_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -1720,6 +1764,7 @@ impl Scheme {
                 },
                 cells: Vec::new(),
                 staging_pools: Vec::new(),
+                claim_bindings,
                 claims,
             });
         }
@@ -1793,28 +1838,65 @@ impl Scheme {
             },
             cells,
             staging_pools,
+            claim_bindings,
             claims,
         })
     }
 
+    /// Map a pool-local [`PresentLease`] to a scheme-unique present binding id.
+    ///
+    /// Two leases from different pools that both use local id `0` receive distinct
+    /// binding ids. Reusing the same lease returns the same binding.
+    fn intern_present_binding(&mut self, lease: &PresentLease) -> u32 {
+        for (i, binding) in self.present_bindings.iter().enumerate() {
+            if Arc::ptr_eq(&binding.pool, &lease.pool) && binding.pool_lease_id == lease.id {
+                return i as u32;
+            }
+        }
+        let id = self.present_bindings.len() as u32;
+        self.present_bindings.push(PresentBinding {
+            pool: Arc::clone(&lease.pool),
+            pool_lease_id: lease.id,
+        });
+        id
+    }
+
     /// Record a present easement grant over a swapchain lease.
+    ///
+    /// Calling this twice for the same lease reuses the existing grant rather than
+    /// creating a second claim slot for one binding.
     pub fn grant_present(&mut self, lease: &PresentLease) -> PresentGrant {
+        let binding_id = self.intern_present_binding(lease);
+        if let Some((idx, _)) = self
+            .present_grants
+            .iter()
+            .enumerate()
+            .find(|(_, g)| g.binding_id == binding_id)
+        {
+            return PresentGrant {
+                grant_id: idx as u32,
+                scheme_id: self.scheme_id,
+                binding_id,
+            };
+        }
+
         self.dirty = true;
         // `ir_grant_id` is the globally-unique ID used only for IR fingerprinting.
-        // `present_idx` is the dense index into `present_frames`/`present_resolvers`
-        // built by iterating `present_grants` at submit time; the two must be kept
-        // independent so interleaved read grants do not corrupt the present vec index.
+        // `present_idx` is the dense index into claim slots built by iterating
+        // `present_grants` at submit time; the two must be kept independent so
+        // interleaved read grants do not corrupt the present vec index.
         let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
         let present_idx = self.present_grants.len() as u32;
         self.present_grants.push(PresentGrantInfo {
-            lease_id: lease.id,
+            binding_id,
             pool: Arc::clone(&lease.pool),
+            pool_lease_id: lease.id,
         });
         self.ir.nodes.push(TaskNode {
             label: "grant_present",
             bindings: vec![ResourceBinding {
-                resource: ResourceId::PresentLease(lease.id),
+                resource: ResourceId::PresentLease(binding_id),
                 access: NodeAccess::Read,
             }],
             kind: NodeKind::GrantPresent { grant_id: ir_grant_id },
@@ -1822,12 +1904,14 @@ impl Scheme {
         PresentGrant {
             grant_id: present_idx,
             scheme_id: self.scheme_id,
+            binding_id,
         }
     }
 
     /// Copy an offscreen render target into a present lease drawable.
     pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
         self.dirty = true;
+        let binding_id = self.intern_present_binding(dst);
         let handle = self.rt_leases[src.id.0 as usize].backend_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_present",
@@ -1837,13 +1921,13 @@ impl Scheme {
                     access: NodeAccess::Read,
                 },
                 ResourceBinding {
-                    resource: ResourceId::PresentLease(dst.id),
+                    resource: ResourceId::PresentLease(binding_id),
                     access: NodeAccess::Write,
                 },
             ],
             kind: NodeKind::CopyRenderTarget {
                 src: handle,
-                dst: ResourceId::PresentLease(dst.id),
+                dst: ResourceId::PresentLease(binding_id),
             },
         });
     }
@@ -1858,6 +1942,7 @@ impl Scheme {
     /// mechanism used by [`Self::copy_to_present`].
     pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
         self.dirty = true;
+        let binding_id = self.intern_present_binding(dst);
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
         self.submit_state
@@ -1870,13 +1955,13 @@ impl Scheme {
                     access: NodeAccess::Read,
                 },
                 ResourceBinding {
-                    resource: ResourceId::PresentLease(dst.id),
+                    resource: ResourceId::PresentLease(binding_id),
                     access: NodeAccess::Write,
                 },
             ],
             kind: NodeKind::CopyTexture {
                 src: src_h,
-                dst: ResourceId::PresentLease(dst.id),
+                dst: ResourceId::PresentLease(binding_id),
                 dst_buffer_layout: None,
             },
         });
@@ -2587,8 +2672,9 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// so the resolver can patch it to the correct UAV index at submit time.
     /// May be called before or after other slot-binding calls on the same node.
     pub fn with_present(mut self, lease: &PresentLease) -> Self {
+        let binding_id = self.scheme.intern_present_binding(lease);
         self.bindings.push(ResourceBinding {
-            resource: ResourceId::PresentLease(lease.id),
+            resource: ResourceId::PresentLease(binding_id),
             access: NodeAccess::Write,
         });
         self.resource_slots.push(PRESENT_LEASE_SLOT_PLACEHOLDER);
@@ -4107,6 +4193,91 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let submission = scheme.submit().expect("submit");
         drop(submission);
         assert_eq!(mock_present_count(&device), before, "discarded claim must not present");
+    }
+
+    #[test]
+    fn two_pools_receive_distinct_present_bindings() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+        let left = left_pool.lease();
+        let right = right_pool.lease();
+        assert_eq!(left.id, 0);
+        assert_eq!(right.id, 0);
+
+        let mut scheme = Scheme::new(&ctx);
+        let left_grant = scheme.grant_present(&left);
+        let right_grant = scheme.grant_present(&right);
+
+        assert_ne!(
+            left_grant.binding_id, right_grant.binding_id,
+            "distinct pools must intern distinct scheme bindings"
+        );
+        assert_eq!(left_grant.grant_id(), 0);
+        assert_eq!(right_grant.grant_id(), 1);
+
+        let left_res = scheme.ir.nodes[0].bindings[0].resource;
+        let right_res = scheme.ir.nodes[1].bindings[0].resource;
+        assert_eq!(left_res, ResourceId::PresentLease(left_grant.binding_id));
+        assert_eq!(right_res, ResourceId::PresentLease(right_grant.binding_id));
+        assert_ne!(left_res, right_res);
+    }
+
+    #[test]
+    fn same_lease_reuses_present_binding_and_grant() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        let first = scheme.grant_present(&lease);
+        let second = scheme.grant_present(&lease);
+        assert_eq!(first.grant_id(), second.grant_id());
+        assert_eq!(first.binding_id, second.binding_id);
+        assert_eq!(scheme.ir_node_count(), 1, "reuse must not append a second grant node");
+    }
+
+    #[test]
+    fn two_present_claims_consume_independently() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+
+        let mut scheme = Scheme::new(&ctx);
+        let left_tx = scheme.grant_present(&left_pool.lease()).transaction();
+        let right_tx = scheme.grant_present(&right_pool.lease()).transaction();
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        let left_claim = left_tx.claim(&mut submission).expect("left claim");
+        let right_claim = right_tx.claim(&mut submission).expect("right claim");
+
+        left_claim.consume().expect("left present");
+        assert_eq!(mock_present_count(&device), before + 1);
+        drop(right_claim); // discard must not present
+        assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[test]
+    fn eager_acquire_rejects_wrong_pool_with_matching_local_id() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+        let left = left_pool.lease();
+        let right = right_pool.lease();
+        assert_eq!(left.id, right.id);
+
+        let mut scheme = Scheme::new(&ctx);
+        let _grant = scheme.grant_present(&left);
+
+        let wrong = right_pool.acquire_present(&right).expect("acquire right");
+        let err = scheme
+            .submit_with_acquired_presents(vec![wrong])
+            .expect_err("wrong pool must be rejected");
+        assert!(err.to_string().contains("provenance"), "unexpected error: {err}");
     }
 
     #[test]
