@@ -3,7 +3,7 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// Stable present lease from a <see cref="SwapchainPool"/>.
+/// Stable present lease from a <see cref="SurfaceExchange"/>.
 /// </summary>
 public sealed class PresentLease : IDisposable
 {

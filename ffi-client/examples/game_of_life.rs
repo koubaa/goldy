@@ -7,9 +7,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PresentGrant,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    SchemeRenderTargetLease, ShaderModule, SwapchainPool,
+    Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease,
+    ShaderModule, SurfaceExchange, Transaction,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -36,19 +36,19 @@ fn field_unit(name: &str) -> u32 {
     }
 }
 
-fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Result<SwapchainPool> {
+fn surface_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Result<SurfaceExchange> {
     let handle = window
         .window_handle()
         .map_err(|e| goldy_ffi_client::GoldyError::from_message(format!("window handle: {e}")))?;
     match handle.as_raw() {
         #[cfg(windows)]
-        RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
+        RawWindowHandle::Win32(h) => SurfaceExchange::from_win32(ctx, h.hwnd.get() as *mut _, 3),
         #[cfg(target_os = "macos")]
-        RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
+        RawWindowHandle::AppKit(h) => SurfaceExchange::from_appkit(ctx, h.ns_view.as_ptr(), 3),
         #[cfg(target_os = "linux")]
-        RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(ctx, h.display.as_ptr(), h.surface.as_ptr(), 3),
+        RawWindowHandle::Wayland(h) => SurfaceExchange::from_wayland(ctx, h.display.as_ptr(), h.surface.as_ptr(), 3),
         other => Err(goldy_ffi_client::GoldyError::from_message(format!(
-            "unsupported window handle for swapchain pool: {other:?}"
+            "unsupported window handle for surface exchange: {other:?}"
         ))),
     }
 }
@@ -147,12 +147,12 @@ fn run_compute_step(
 
 fn record_display_scheme(
     scheme: &mut Scheme,
+    surface: &SurfaceExchange,
     cells: &Buffer,
     current_field: &str,
     render_pipeline: &RenderPipeline,
     scene_rt: &SchemeRenderTargetLease,
-    screen: &goldy_ffi_client::PresentLease,
-) -> goldy_ffi_client::Result<PresentGrant> {
+) -> goldy_ffi_client::Result<Transaction> {
     let unit = field_unit(current_field);
     let current = cells.field(unit)?;
     {
@@ -163,18 +163,16 @@ fn record_display_scheme(
         pass.draw_fullscreen();
         pass.finish_recorded();
     }
-    scheme.copy_to_present(scene_rt, screen)?;
-    scheme.grant_present(screen)
+    surface.bind_render_target(scheme, scene_rt)
 }
 
 struct RenderState {
     window: Arc<Window>,
     ctx: Context,
-    swapchain: SwapchainPool,
-    screen: goldy_ffi_client::PresentLease,
+    surface: SurfaceExchange,
     scene_rt: SchemeRenderTargetLease,
     display_scheme: Scheme,
-    present: PresentGrant,
+    present: Transaction,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
@@ -192,8 +190,7 @@ impl RenderState {
             .request_adapter(&RequestAdapterOptions::default())?
             .request_device(&DeviceDescriptor::default())?;
         let ctx = Context::new(&device)?;
-        let swapchain = swapchain_from_window(&ctx, window.as_ref())?;
-        let screen = swapchain.lease()?;
+        let surface = surface_from_window(&ctx, window.as_ref())?;
 
         let initial = create_initial_state();
         let mut retained_pool = RetainedPool::new(&device)?;
@@ -208,16 +205,16 @@ impl RenderState {
             &render_shader,
             &RenderPipelineDesc {
                 topology: PrimitiveTopology::TriangleList,
-                target_format: swapchain.format(),
+                target_format: surface.format(),
                 ..Default::default()
             },
         )?;
 
         let mut display_scheme = Scheme::new(&ctx)?;
-        let (width, height) = swapchain.size();
+        let (width, height) = surface.size();
         let scene_rt =
-            display_scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)?;
-        let present = record_display_scheme(&mut display_scheme, &cells, "a", &render_pipeline, &scene_rt, &screen)?;
+            display_scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
+        let present = record_display_scheme(&mut display_scheme, &surface, &cells, "a", &render_pipeline, &scene_rt)?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
         println!("Features Gosper Glider Gun + random cells");
@@ -226,8 +223,7 @@ impl RenderState {
         Ok(Self {
             window,
             ctx,
-            swapchain,
-            screen,
+            surface,
             scene_rt,
             display_scheme,
             present,
@@ -245,20 +241,20 @@ impl RenderState {
     fn rebuild_display_scheme(&mut self) -> goldy_ffi_client::Result<()> {
         let current_field = if self.use_buffer_a { "a" } else { "b" };
         let mut display_scheme = Scheme::new(&self.ctx)?;
-        let (width, height) = self.swapchain.size();
+        let (width, height) = self.surface.size();
         self.scene_rt = display_scheme.lease_render_target(
             width.max(1),
             height.max(1),
-            self.swapchain.format(),
+            self.surface.format(),
             None::<DepthFormat>,
         )?;
         self.present = record_display_scheme(
             &mut display_scheme,
+            &self.surface,
             &self.cells,
             current_field,
             &self.render_pipeline,
             &self.scene_rt,
-            &self.screen,
         )?;
         self.display_scheme = display_scheme;
         Ok(())
@@ -279,8 +275,8 @@ impl RenderState {
             self.rebuild_display_scheme()?;
         }
 
-        let submission = self.display_scheme.submit()?;
-        self.present.consume(&submission)?;
+        let mut submission = self.display_scheme.submit()?;
+        self.present.claim(&mut submission)?.consume()?;
         self.window.request_redraw();
         Ok(())
     }
@@ -343,8 +339,8 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        if let Err(e) = state.swapchain.resize(size.width, size.height) {
-                            tracing::error!("Failed to resize swapchain: {e}");
+                        if let Err(e) = state.surface.resize(size.width, size.height) {
+                            tracing::error!("Failed to resize surface exchange: {e}");
                             return;
                         }
                         if let Err(e) = state.rebuild_display_scheme() {
@@ -377,7 +373,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Game of Life (ffi-client / Scheme)");
+    println!("Goldy Game of Life (ffi-client / Scheme + SurfaceExchange)");
     println!("========================================\n");
 
     let event_loop = EventLoop::new()?;

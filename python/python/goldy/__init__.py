@@ -79,7 +79,9 @@ from goldy._goldy import (
     ReadGrant,
     PresentLease,
     PresentGrant,
-    SwapchainPool,
+    SurfaceExchange,
+    Transaction,
+    Claim,
     NodeAccess,
     # Shader builtins
     Builtins,
@@ -130,7 +132,9 @@ __all__ = [
     "ReadGrant",
     "PresentLease",
     "PresentGrant",
-    "SwapchainPool",
+    "SurfaceExchange",
+    "Transaction",
+    "Claim",
     "NodeAccess",
     # Shader builtins
     "Builtins",

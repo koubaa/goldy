@@ -5,8 +5,8 @@ use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::pipeline::RenderPipeline;
 use crate::sys::{
-    self, GoldyPresentGrant, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme,
-    GoldySchemeRenderTargetLease, GoldySchemeSubmission,
+    self, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme, GoldySchemeRenderTargetLease,
+    GoldySchemeSubmission,
 };
 use crate::texture::Texture;
 use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, TextureFormat};
@@ -25,6 +25,10 @@ impl SchemeSubmission {
 
     pub fn wait(&self, ctx: &Context) -> Result<()> {
         check(unsafe { sys::goldy_scheme_submission_wait(ctx.as_ptr(), self.ptr) })
+    }
+
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldySchemeSubmission {
+        self.ptr
     }
 }
 
@@ -64,26 +68,6 @@ impl Drop for ReadGrant {
     }
 }
 
-/// Present easement grant recorded once via [`Scheme::grant_present`].
-pub struct PresentGrant {
-    ptr: *mut GoldyPresentGrant,
-}
-
-impl PresentGrant {
-    pub fn consume(&self, submission: &SchemeSubmission) -> Result<()> {
-        check(unsafe { sys::goldy_present_grant_consume(self.ptr, submission.ptr) })
-    }
-}
-
-impl Drop for PresentGrant {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { sys::goldy_present_grant_destroy(self.ptr) };
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
 /// Stable render-target lease declared on a [`Scheme`].
 pub struct SchemeRenderTargetLease {
     ptr: *mut GoldySchemeRenderTargetLease,
@@ -104,7 +88,7 @@ impl Drop for SchemeRenderTargetLease {
     }
 }
 
-/// Stable present lease from a swapchain pool.
+/// Stable present lease from a surface exchange.
 pub struct PresentLease {
     ptr: *mut GoldyPresentLease,
 }
@@ -137,6 +121,10 @@ impl Scheme {
     pub fn new(ctx: &Context) -> Result<Self> {
         let ptr = non_null_expect(unsafe { sys::goldy_scheme_create(ctx.as_ptr()) });
         Ok(Self { ptr })
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut GoldyScheme {
+        self.ptr
     }
 
     pub fn len(&self) -> u32 {
@@ -191,15 +179,6 @@ impl Scheme {
 
     pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Texture) -> Result<()> {
         check(unsafe { sys::goldy_scheme_copy_to_texture(self.ptr, src.as_ptr(), dst.as_ptr()) })
-    }
-
-    pub fn copy_to_present(&mut self, src: &SchemeRenderTargetLease, dst: &PresentLease) -> Result<()> {
-        check(unsafe { sys::goldy_scheme_copy_to_present(self.ptr, src.as_ptr(), dst.as_ptr()) })
-    }
-
-    pub fn grant_present(&mut self, lease: &PresentLease) -> Result<PresentGrant> {
-        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_present(self.ptr, lease.as_ptr()) });
-        Ok(PresentGrant { ptr })
     }
 
     pub fn submit(&mut self) -> Result<SchemeSubmission> {

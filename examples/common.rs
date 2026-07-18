@@ -1,15 +1,15 @@
 //! Shared helpers for interactive examples (run limits, perf reporting).
 
-use goldy::{Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SwapchainPool};
+use goldy::{Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SurfaceExchange};
 use std::time::{Duration, Instant};
 use winit::event_loop::ActiveEventLoop;
 
-/// Build or rebuild a render pipeline using the swapchain's current format.
+/// Build or rebuild a render pipeline using the surface's current format.
 #[allow(dead_code)]
-pub fn render_pipeline_for_swapchain(
+pub fn render_pipeline_for_surface(
     device: &Device,
     shader: &ShaderModule,
-    swapchain: &SwapchainPool,
+    surface: &SurfaceExchange,
     desc: RenderPipelineDesc,
 ) -> anyhow::Result<RenderPipeline> {
     Ok(RenderPipeline::new(
@@ -17,7 +17,7 @@ pub fn render_pipeline_for_swapchain(
         shader,
         shader,
         &RenderPipelineDesc {
-            target_format: swapchain.format(),
+            target_format: surface.format(),
             ..desc
         },
     )?)

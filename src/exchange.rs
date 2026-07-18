@@ -8,7 +8,7 @@
 
 use crate::context::Context;
 use crate::error::GoldyError;
-use crate::scheme::{Scheme, Submission, Transaction};
+use crate::scheme::{Lease, LeaseRenderTarget, Scheme, Submission, Transaction};
 use crate::surface::Frame as SurfaceFrame;
 use crate::swapchain_pool::{PresentLease, SwapchainPool};
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
@@ -137,34 +137,77 @@ pub struct SurfaceExchange {
 
 impl SurfaceExchange {
     /// Create a surface exchange bound to `window` on `context`.
+    ///
+    /// Uses an in-flight depth of 3. Prefer [`Self::new_with_depth`] to choose pacing depth.
     pub fn new<W>(context: &Context, window: &W, config: SurfaceConfig) -> Result<Self, GoldyError>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
-        let pool = SwapchainPool::new_with_config(context, window, 1, config).map_err(GoldyError::Backend)?;
+        Self::new_with_depth(context, window, 3, config)
+    }
+
+    /// Create with an explicit client in-flight frame depth.
+    pub fn new_with_depth<W>(
+        context: &Context,
+        window: &W,
+        depth: u32,
+        config: SurfaceConfig,
+    ) -> Result<Self, GoldyError>
+    where
+        W: HasWindowHandle + HasDisplayHandle,
+    {
+        let pool = SwapchainPool::new_with_config(context, window, depth, config).map_err(GoldyError::Backend)?;
         Ok(Self { pool })
     }
 
     /// Stable lease for scheme recording (one lease per exchange in v1).
+    ///
+    /// Prefer [`Self::bind`], [`Self::bind_render_target`], or [`Self::bind_destination`]
+    /// for new code; this remains for callers that need the lease handle explicitly.
     pub fn lease(&self) -> PresentLease {
         self.pool.lease()
     }
 
-    /// Record a stable texture → surface relationship and return an erased transaction.
-    ///
-    /// Does not acquire a drawable. Each surface lease may be bound at most once per
-    /// scheme; a second `bind` for the same lease returns an error rather than
-    /// appending another copy that would share one claim slot.
-    pub fn bind(&self, scheme: &mut Scheme, source: &Texture) -> Result<Transaction, GoldyError> {
+    fn ensure_unbound(&self, scheme: &Scheme) -> Result<PresentLease, GoldyError> {
         let lease = self.pool.lease();
         if scheme.has_present_grant_for(&lease) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "SurfaceExchange::bind: lease already bound in this scheme"
+                "SurfaceExchange: lease already bound in this scheme"
             )));
         }
+        Ok(lease)
+    }
+
+    /// Record a stable texture → surface copy and return an erased transaction.
+    ///
+    /// Does not acquire a drawable. Each surface lease may be bound at most once per
+    /// scheme; a second bind for the same lease returns an error rather than
+    /// appending another copy that would share one claim slot.
+    pub fn bind(&self, scheme: &mut Scheme, source: &Texture) -> Result<Transaction, GoldyError> {
+        let lease = self.ensure_unbound(scheme)?;
         scheme.copy_texture_to_present(source, &lease);
-        let grant = scheme.grant_present(&lease);
-        Ok(grant.transaction())
+        Ok(scheme.grant_present(&lease).transaction())
+    }
+
+    /// Record a stable offscreen render-target → surface copy and return a transaction.
+    pub fn bind_render_target(
+        &self,
+        scheme: &mut Scheme,
+        source: &Lease<LeaseRenderTarget>,
+    ) -> Result<Transaction, GoldyError> {
+        let lease = self.ensure_unbound(scheme)?;
+        scheme.copy_to_present(source, &lease);
+        Ok(scheme.grant_present(&lease).transaction())
+    }
+
+    /// Register present without a copy: the scheme writes the drawable directly.
+    ///
+    /// Returns the lease for [`Scheme`] node binding (for example `with_present`) and
+    /// the erased transaction for claim extraction after submit.
+    pub fn bind_destination(&self, scheme: &mut Scheme) -> Result<(PresentLease, Transaction), GoldyError> {
+        let lease = self.ensure_unbound(scheme)?;
+        let transaction = scheme.grant_present(&lease).transaction();
+        Ok((lease, transaction))
     }
 
     /// Resize the underlying swapchain.
@@ -195,9 +238,25 @@ impl SurfaceExchange {
         self.pool.format()
     }
 
-    /// Access the underlying swapchain pool (compatibility / migration).
-    pub fn pool(&self) -> &SwapchainPool {
-        &self.pool
+    /// Current backing generation (advances on resize / present-mode change).
+    pub fn generation(&self) -> u64 {
+        self.pool.generation()
+    }
+
+    /// Acquire the next drawable now (classic early-acquire timing).
+    ///
+    /// Pass the result to [`Scheme::submit_with_acquired_presents`] so submit does
+    /// not wait again at the present partition. Prefer deferred acquire via plain
+    /// [`Scheme::submit`] unless matching classic frame-start acquire timing.
+    pub fn acquire_present(&self) -> Result<crate::swapchain_pool::AcquiredPresent, GoldyError> {
+        let lease = self.pool.lease();
+        self.pool.acquire_present(&lease).map_err(GoldyError::Backend)
+    }
+
+    /// Test-only: force the next deferred acquire on this exchange to fail once.
+    #[cfg(test)]
+    pub(crate) fn fail_next_acquire(&self) {
+        self.pool.fail_next_acquire();
     }
 }
 

@@ -164,6 +164,9 @@ typedef enum GoldyIndexFormat {
 // Opaque handle to an acquired [`goldy::Buffer`].
 typedef struct GoldyBuffer GoldyBuffer;
 
+// One submission's claim extracted from a transaction.
+typedef struct GoldyClaim GoldyClaim;
+
 // Opaque handle to a Goldy ComputePipeline.
 typedef struct GoldyComputePipeline GoldyComputePipeline;
 
@@ -179,10 +182,7 @@ typedef struct GoldyInstance GoldyInstance;
 // Opaque handle to a bindable [`goldy::Parcel`] (buffer units; textures use [`GoldyTexture`]).
 typedef struct GoldyParcel GoldyParcel;
 
-// Opaque present easement grant handle returned by [`goldy_scheme_grant_present`].
-typedef struct GoldyPresentGrant GoldyPresentGrant;
-
-// Opaque handle to a stable present lease from a swapchain pool.
+// Opaque handle to a stable present lease from a surface exchange.
 typedef struct GoldyPresentLease GoldyPresentLease;
 
 // Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
@@ -225,14 +225,17 @@ typedef struct GoldyShaderModule GoldyShaderModule;
 // higher-level bindings that can pass window handles.
 typedef struct GoldySurface GoldySurface;
 
+// Opaque handle to a window-surface exchange.
+typedef struct GoldySurfaceExchange GoldySurfaceExchange;
+
 // Opaque handle to a Goldy SurfaceFrame.
 typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
-// Opaque handle to a swapchain pool.
-typedef struct GoldySwapchainPool GoldySwapchainPool;
-
 // Opaque handle to an acquired [`goldy::Texture`].
 typedef struct GoldyTexture GoldyTexture;
+
+// Erased exchange transaction recorded in a scheme.
+typedef struct GoldyTransaction GoldyTransaction;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -307,6 +310,12 @@ typedef struct GoldyReplayStats {
     uint64_t resubmit_hits;
 } GoldyReplayStats;
 
+// Out-parameters for [`goldy_surface_exchange_bind_destination`].
+typedef struct GoldySurfaceExchangeBindDestinationOut {
+    struct GoldyPresentLease *lease;
+    struct GoldyTransaction *transaction;
+} GoldySurfaceExchangeBindDestinationOut;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -331,6 +340,24 @@ enum GoldyResult goldy_buffer_unit_read_to_cpu(const struct GoldyBuffer *buffer,
                                                const struct GoldyDevice *device,
                                                uint8_t *output,
                                                size_t output_size);
+
+// Perform the claim's external handoff (for example present).
+//
+// # Safety
+// `claim` must be valid.
+enum GoldyResult goldy_claim_consume(struct GoldyClaim *claim);
+
+// Destroy a claim without consuming or discarding intentionally.
+//
+// # Safety
+// `claim` must be valid and not used after this call.
+void goldy_claim_destroy(struct GoldyClaim *claim);
+
+// Settle the claim without intentionally performing the external operation.
+//
+// # Safety
+// `claim` must be valid.
+enum GoldyResult goldy_claim_discard(struct GoldyClaim *claim);
 
 // Clear the last error message.
 void goldy_clear_error(void);
@@ -449,24 +476,7 @@ uint64_t goldy_parcel_byte_size(const struct GoldyParcel *parcel);
 
 void goldy_parcel_destroy(struct GoldyParcel *parcel);
 
-// Present the swapchain for `(grant × submission)`.
-//
-// Blocks until this submission's GPU work completes, then presents.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_present_grant_consume(const struct GoldyPresentGrant *grant,
-                                             const struct GoldySchemeSubmission *submission);
-
-// Destroy a present grant from [`goldy_scheme_grant_present`].
-//
-// # Safety
-// `grant` must be valid and not used after this call.
-void goldy_present_grant_destroy(struct GoldyPresentGrant *grant);
-
 // Destroy a present lease handle.
-//
-// Does not remove the lease from the pool; the backing remains until the pool is dropped.
 //
 // # Safety
 // `lease` must be valid and not used after this call.
@@ -701,14 +711,6 @@ enum GoldyResult goldy_scheme_compute_node_with_texture(struct GoldyScheme *sche
                                                         const struct GoldyTexture *texture,
                                                         enum GoldyNodeAccess node_access);
 
-// Copy a scheme-held render target into a present lease drawable.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_copy_to_present(struct GoldyScheme *scheme,
-                                              const struct GoldySchemeRenderTargetLease *src_lease,
-                                              const struct GoldyPresentLease *dst_lease);
-
 // Copy a scheme-held render target into a texture parcel (for grant readback).
 //
 // # Safety
@@ -729,15 +731,6 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
 
-// Record a present easement grant over a swapchain lease (once per scheme).
-//
-// Returns a heap-allocated [`GoldyPresentGrant`]; destroy with [`goldy_present_grant_destroy`].
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyPresentGrant *goldy_scheme_grant_present(struct GoldyScheme *scheme,
-                                                     const struct GoldyPresentLease *lease);
-
 // Record a read-easement grant over a buffer parcel (once per scheme).
 //
 // Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
@@ -748,7 +741,6 @@ struct GoldyPresentGrant *goldy_scheme_grant_present(struct GoldyScheme *scheme,
 struct GoldyReadGrant *goldy_scheme_grant_read(struct GoldyScheme *scheme,
                                                const struct GoldyParcel *parcel);
 
-// Record a read easement over a texture parcel (once per scheme).
 //
 // Like [`goldy_scheme_grant_read`] but requires a texture parcel with [`TextureFlags::COPY_SRC`].
 //
@@ -995,6 +987,103 @@ struct GoldySurface *goldy_surface_create_win32(const struct GoldyDevice *device
 // The pointer must be valid and not used after this call.
 void goldy_surface_destroy(struct GoldySurface *surface);
 
+// Record texture → surface copy and return a transaction.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyTransaction *goldy_surface_exchange_bind(const struct GoldySurfaceExchange *exchange,
+                                                     struct GoldyScheme *scheme,
+                                                     const struct GoldyTexture *source);
+
+// Register present without a copy; scheme writes the drawable directly.
+//
+// Writes lease and transaction into `out`.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_surface_exchange_bind_destination(const struct GoldySurfaceExchange *exchange,
+                                                         struct GoldyScheme *scheme,
+                                                         struct GoldySurfaceExchangeBindDestinationOut *out);
+
+// Record offscreen render-target → surface copy and return a transaction.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyTransaction *goldy_surface_exchange_bind_render_target(const struct GoldySurfaceExchange *exchange,
+                                                                   struct GoldyScheme *scheme,
+                                                                   const struct GoldySchemeRenderTargetLease *src_lease);
+
+// Create a surface exchange from an AppKit `NSView` pointer.
+//
+// # Safety
+// `ctx` must be valid. `ns_view` must be a valid `NSView*` for the window's content view.
+struct GoldySurfaceExchange *goldy_surface_exchange_create_appkit(const struct GoldyContext *ctx,
+                                                                  void *ns_view,
+                                                                  uint32_t depth);
+
+// Create a surface exchange from Wayland `wl_display` and `wl_surface` pointers.
+//
+// # Safety
+// `ctx` must be valid. `display` and `surface` must be valid Wayland handles.
+struct GoldySurfaceExchange *goldy_surface_exchange_create_wayland(const struct GoldyContext *ctx,
+                                                                   void *display,
+                                                                   void *surface,
+                                                                   uint32_t depth);
+
+// Create a surface exchange from a Win32 HWND.
+//
+// # Safety
+// `ctx` must be valid. `hwnd` must be a valid Win32 window handle.
+struct GoldySurfaceExchange *goldy_surface_exchange_create_win32(const struct GoldyContext *ctx,
+                                                                 void *hwnd,
+                                                                 uint32_t depth);
+
+// Destroy a surface exchange.
+//
+// # Safety
+// `exchange` must be valid and not used after this call.
+void goldy_surface_exchange_destroy(struct GoldySurfaceExchange *exchange);
+
+// Surface format.
+//
+// # Safety
+// `exchange` must be valid.
+enum GoldyTextureFormat goldy_surface_exchange_format(const struct GoldySurfaceExchange *exchange);
+
+// Current backing generation (advances on resize / present-mode change).
+//
+// # Safety
+// `exchange` must be valid.
+uint64_t goldy_surface_exchange_generation(const struct GoldySurfaceExchange *exchange);
+
+// Current drawable height.
+//
+// # Safety
+// `exchange` must be valid.
+uint32_t goldy_surface_exchange_height(const struct GoldySurfaceExchange *exchange);
+
+// Acquire a stable present lease (prefer exchange bind helpers for new code).
+//
+// Returns a heap-allocated lease handle; destroy with [`goldy_present_lease_destroy`].
+//
+// # Safety
+// `exchange` must be valid.
+struct GoldyPresentLease *goldy_surface_exchange_lease(const struct GoldySurfaceExchange *exchange);
+
+// Resize the underlying swapchain.
+//
+// # Safety
+// `exchange` must be valid.
+enum GoldyResult goldy_surface_exchange_resize(struct GoldySurfaceExchange *exchange,
+                                               uint32_t width,
+                                               uint32_t height);
+
+// Current drawable width.
+//
+// # Safety
+// `exchange` must be valid.
+uint32_t goldy_surface_exchange_width(const struct GoldySurfaceExchange *exchange);
+
 // Get the surface format.
 //
 // # Safety
@@ -1043,75 +1132,36 @@ enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
 // The surface pointer must be valid.
 uint32_t goldy_surface_width(const struct GoldySurface *surface);
 
-// Create a swapchain pool from an AppKit `NSView` pointer.
-//
-// # Safety
-// `ctx` must be valid. `ns_view` must be a valid `NSView*` for the window's content view.
-struct GoldySwapchainPool *goldy_swapchain_pool_create_appkit(const struct GoldyContext *ctx,
-                                                              void *ns_view,
-                                                              uint32_t depth);
-
-// Create a swapchain pool from Wayland `wl_display` and `wl_surface` pointers.
-//
-// # Safety
-// `ctx` must be valid. `display` and `surface` must be valid Wayland handles.
-struct GoldySwapchainPool *goldy_swapchain_pool_create_wayland(const struct GoldyContext *ctx,
-                                                               void *display,
-                                                               void *surface,
-                                                               uint32_t depth);
-
-// Create a swapchain pool from a Win32 HWND.
-//
-// # Safety
-// `ctx` must be valid. `hwnd` must be a valid Win32 window handle.
-struct GoldySwapchainPool *goldy_swapchain_pool_create_win32(const struct GoldyContext *ctx,
-                                                             void *hwnd,
-                                                             uint32_t depth);
-
-// Destroy a swapchain pool.
-//
-// # Safety
-// `pool` must be valid and not used after this call.
-void goldy_swapchain_pool_destroy(struct GoldySwapchainPool *pool);
-
-// Swapchain surface format.
-//
-// # Safety
-// `pool` must be valid.
-enum GoldyTextureFormat goldy_swapchain_pool_format(const struct GoldySwapchainPool *pool);
-
-// Current swapchain drawable height.
-//
-// # Safety
-// `pool` must be valid.
-uint32_t goldy_swapchain_pool_height(const struct GoldySwapchainPool *pool);
-
-// Acquire a stable present lease from `pool`.
-//
-// Returns a heap-allocated lease handle; destroy with [`goldy_present_lease_destroy`].
-// The lease identity remains valid until the pool is destroyed.
-//
-// # Safety
-// `pool` must be valid.
-struct GoldyPresentLease *goldy_swapchain_pool_lease(const struct GoldySwapchainPool *pool);
-
-// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
-//
-// # Safety
-// `pool` must be valid.
-enum GoldyResult goldy_swapchain_pool_resize(struct GoldySwapchainPool *pool,
-                                             uint32_t width,
-                                             uint32_t height);
-
-// Current swapchain drawable width.
-//
-// # Safety
-// `pool` must be valid.
-uint32_t goldy_swapchain_pool_width(const struct GoldySwapchainPool *pool);
-
 uint64_t goldy_texture_byte_size(const struct GoldyTexture *texture);
 
 void goldy_texture_destroy(struct GoldyTexture *texture);
+
+// Binding id for this transaction within its scheme.
+//
+// # Safety
+// `transaction` must be valid.
+uint32_t goldy_transaction_binding_id(const struct GoldyTransaction *transaction);
+
+// Extract this transaction's claim from a successful submission.
+//
+// Returns a heap-allocated claim; destroy with [`goldy_claim_destroy`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyClaim *goldy_transaction_claim(const struct GoldyTransaction *transaction,
+                                           struct GoldySchemeSubmission *submission);
+
+// Destroy a transaction handle.
+//
+// # Safety
+// `transaction` must be valid and not used after this call.
+void goldy_transaction_destroy(struct GoldyTransaction *transaction);
+
+// Backing generation snapshotted at claim time.
+//
+// # Safety
+// `transaction` must be valid.
+uint64_t goldy_transaction_generation(const struct GoldyTransaction *transaction);
 
 #ifdef __cplusplus
 }  // extern "C"

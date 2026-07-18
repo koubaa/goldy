@@ -70,11 +70,10 @@ struct GpuState {
     goldy::ShaderModule render_shader;
     goldy::ComputePipeline compute_pipeline;
     goldy::RenderPipeline render_pipeline;
-    goldy::SwapchainPool swapchain;
-    goldy::PresentLease screen;
+    goldy::SurfaceExchange exchange;
     goldy::Scheme display_scheme;
     goldy::SchemeRenderTargetLease scene_rt;
-    goldy::PresentGrant present;
+    goldy::Transaction present;
     bool use_buffer_a = true;
     uint64_t frame_count = 0;
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
@@ -152,13 +151,13 @@ std::vector<uint32_t> create_initial_state() {
     return cells;
 }
 
-goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow* window) {
+goldy::SurfaceExchange create_surface_exchange(const goldy::Context& ctx, GLFWwindow* window) {
 #if defined(_WIN32)
     void* hwnd = glfwGetWin32Window(window);
     if (!hwnd) {
         throw std::runtime_error("glfwGetWin32Window failed");
     }
-    return goldy::SwapchainPool(ctx, hwnd);
+    return goldy::SurfaceExchange(ctx, hwnd);
 #elif defined(__APPLE__)
     void* ns_window = glfwGetCocoaWindow(window);
     if (!ns_window) {
@@ -170,7 +169,7 @@ goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow
     if (!ns_view) {
         throw std::runtime_error("NSWindow contentView is null");
     }
-    return goldy::SwapchainPool(ctx, ns_view);
+    return goldy::SurfaceExchange(ctx, ns_view);
 #else
     void* display = glfwGetWaylandDisplay();
     void* surface = glfwGetWaylandWindow(window);
@@ -178,7 +177,7 @@ goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow
         throw std::runtime_error(
             "Wayland handles unavailable — run under a Wayland session (Vulkan backend requires Wayland on Linux)");
     }
-    return goldy::SwapchainPool(ctx, display, surface);
+    return goldy::SurfaceExchange(ctx, display, surface);
 #endif
 }
 
@@ -200,13 +199,13 @@ void run_compute_step(
     scheme.submit();
 }
 
-goldy::PresentGrant record_display_scheme(
+goldy::Transaction record_display_scheme(
     goldy::Scheme& scheme,
     const goldy::Buffer& cells,
     const char* current_field,
     const goldy::RenderPipeline& render_pipeline,
-    goldy::SchemeRenderTargetLease& scene_rt,
-    const goldy::PresentLease& screen) {
+    const goldy::SchemeRenderTargetLease& scene_rt,
+    goldy::SurfaceExchange& exchange) {
     const uint32_t unit = field_unit(current_field);
     goldy::Parcel current = cells.field(unit);
     {
@@ -216,24 +215,23 @@ goldy::PresentGrant record_display_scheme(
             .set_pipeline(render_pipeline)
             .draw_fullscreen();
     }
-    scheme.copy_to_present(scene_rt, screen);
-    return scheme.grant_present(screen);
+    return exchange.bind_render_target(scheme, scene_rt);
 }
 
 void rebuild_display_scheme(GpuState& gpu) {
     const char* current_field = gpu.use_buffer_a ? "a" : "b";
     gpu.display_scheme = goldy::Scheme(gpu.ctx);
-    auto [width, height] = gpu.swapchain.size();
+    auto [width, height] = gpu.exchange.size();
     width = std::max(width, 1u);
     height = std::max(height, 1u);
-    gpu.scene_rt = gpu.display_scheme.lease_render_target(width, height, gpu.swapchain.format());
+    gpu.scene_rt = gpu.display_scheme.lease_render_target(width, height, gpu.exchange.format());
     gpu.present = record_display_scheme(
         gpu.display_scheme,
         gpu.cells,
         current_field,
         gpu.render_pipeline,
         gpu.scene_rt,
-        gpu.screen);
+        gpu.exchange);
 }
 
 GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
@@ -250,23 +248,22 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     goldy::ShaderModule render_shader(device, find_shader("game_of_life_render.slang"));
     goldy::ComputePipeline compute_pipeline(device, compute_shader);
 
-    goldy::SwapchainPool swapchain = create_swapchain_pool(ctx, window);
-    goldy::PresentLease screen = swapchain.lease();
+    goldy::SurfaceExchange exchange = create_surface_exchange(ctx, window);
 
     GoldyRenderPipelineDesc render_desc{};
     render_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    render_desc.target_format = swapchain.format();
+    render_desc.target_format = exchange.format();
     render_desc.depth_enabled = false;
     goldy::RenderPipeline render_pipeline(device, render_shader, render_shader, render_desc);
 
     goldy::Scheme display_scheme(ctx);
-    auto [width, height] = swapchain.size();
+    auto [width, height] = exchange.size();
     width = std::max(width, 1u);
     height = std::max(height, 1u);
     goldy::SchemeRenderTargetLease scene_rt =
-        display_scheme.lease_render_target(width, height, swapchain.format());
-    goldy::PresentGrant present =
-        record_display_scheme(display_scheme, cells, "a", render_pipeline, scene_rt, screen);
+        display_scheme.lease_render_target(width, height, exchange.format());
+    goldy::Transaction present =
+        record_display_scheme(display_scheme, cells, "a", render_pipeline, scene_rt, exchange);
 
     return GpuState{
         std::move(ctx),
@@ -277,8 +274,7 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
         std::move(render_shader),
         std::move(compute_pipeline),
         std::move(render_pipeline),
-        std::move(swapchain),
-        std::move(screen),
+        std::move(exchange),
         std::move(display_scheme),
         std::move(scene_rt),
         std::move(present),
@@ -308,7 +304,7 @@ void render_frame(GpuState& gpu) {
     }
 
     auto submission = gpu.display_scheme.submit();
-    gpu.present.consume(submission);
+    gpu.present.claim(submission).consume();
 }
 
 void handle_resize(GpuState& gpu, GLFWwindow* window) {
@@ -320,14 +316,14 @@ void handle_resize(GpuState& gpu, GLFWwindow* window) {
     }
     const auto w = static_cast<uint32_t>(width);
     const auto h = static_cast<uint32_t>(height);
-    if (w == gpu.swapchain.width() && h == gpu.swapchain.height()) {
+    if (w == gpu.exchange.width() && h == gpu.exchange.height()) {
         return;
     }
-    gpu.swapchain.resize(w, h);
+    gpu.exchange.resize(w, h);
 
     GoldyRenderPipelineDesc render_desc{};
     render_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    render_desc.target_format = gpu.swapchain.format();
+    render_desc.target_format = gpu.exchange.format();
     render_desc.depth_enabled = false;
     gpu.render_pipeline =
         goldy::RenderPipeline(gpu.device, gpu.render_shader, gpu.render_shader, render_desc);

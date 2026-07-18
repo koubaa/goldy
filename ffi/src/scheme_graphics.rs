@@ -1,13 +1,12 @@
-//! Scheme render-pass and easement FFI (`copy_to_texture`, `grant_present`).
+//! Scheme render-pass and easement FFI (`copy_to_texture`, `grant_read_texture`).
 
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
-use crate::scheme::{GoldyPresentGrant, GoldyReadGrant, GoldyScheme, GoldySchemeSubmission, ReadGrantInner};
+use crate::scheme::{GoldyReadGrant, GoldyScheme, ReadGrantInner};
 use crate::types::{GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget};
 use goldy::task_graph::{NodeAccess, RenderPassRecord};
-use goldy::Grant;
 use std::ffi::CStr;
 
 /// Opaque handle to a scheme-held render-target lease.
@@ -388,87 +387,6 @@ pub unsafe extern "C" fn goldy_scheme_copy_to_texture(
     }
 }
 
-/// Copy a scheme-held render target into a present lease drawable.
-///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_copy_to_present(
-    scheme: *mut GoldyScheme,
-    src_lease: *const GoldySchemeRenderTargetLease,
-    dst_lease: *const crate::swapchain_pool::GoldyPresentLease,
-) -> GoldyResult {
-    if scheme.is_null() || src_lease.is_null() || dst_lease.is_null() {
-        return GoldyResult::NullPointer;
-    }
-    if (*scheme).has_active_recorder() {
-        set_last_error("Cannot copy_to_present while recording a node");
-        return GoldyResult::InvalidArgument;
-    }
-    (*scheme)
-        .inner
-        .copy_to_present(&(*src_lease).lease, &(*dst_lease).inner);
-    GoldyResult::Ok
-}
-
-/// Record a present easement grant over a swapchain lease (once per scheme).
-///
-/// Returns a heap-allocated [`GoldyPresentGrant`]; destroy with [`goldy_present_grant_destroy`].
-///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_grant_present(
-    scheme: *mut GoldyScheme,
-    lease: *const crate::swapchain_pool::GoldyPresentLease,
-) -> *mut GoldyPresentGrant {
-    if scheme.is_null() || lease.is_null() {
-        set_last_error("Scheme or present lease pointer is null");
-        return std::ptr::null_mut();
-    }
-    if (*scheme).has_active_recorder() {
-        set_last_error("Cannot grant_present while recording a node");
-        return std::ptr::null_mut();
-    }
-    let grant = (*scheme).inner.grant_present(&(*lease).inner);
-    Box::into_raw(Box::new(GoldyPresentGrant { inner: grant }))
-}
-
-/// Destroy a present grant from [`goldy_scheme_grant_present`].
-///
-/// # Safety
-/// `grant` must be valid and not used after this call.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_present_grant_destroy(grant: *mut GoldyPresentGrant) {
-    if !grant.is_null() {
-        drop(Box::from_raw(grant));
-    }
-}
-
-/// Present the swapchain for `(grant × submission)`.
-///
-/// Blocks until this submission's GPU work completes, then presents.
-///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_present_grant_consume(
-    grant: *const GoldyPresentGrant,
-    submission: *const GoldySchemeSubmission,
-) -> GoldyResult {
-    if grant.is_null() || submission.is_null() {
-        return GoldyResult::NullPointer;
-    }
-    match (*grant).inner.consume(&(*submission).inner) {
-        Ok(()) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error(format!("{e}"));
-            GoldyResult::GpuError
-        }
-    }
-}
-
-/// Record a read easement over a texture parcel (once per scheme).
 ///
 /// Like [`goldy_scheme_grant_read`] but requires a texture parcel with [`TextureFlags::COPY_SRC`].
 ///

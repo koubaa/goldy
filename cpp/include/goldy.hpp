@@ -75,9 +75,11 @@ class RenderTarget;
 class Surface;
 class Scheme;
 class SchemeRenderTargetLease;
-class PresentGrant;
+class SchemeSubmission;
 class PresentLease;
-class SwapchainPool;
+class SurfaceExchange;
+class Transaction;
+class Claim;
 class ComputePipeline;
 class Sampler;
 
@@ -267,10 +269,6 @@ struct ReadGrantDeleter {
     void operator()(GoldyReadGrant* p) const { if (p) goldy_read_grant_destroy(p); }
 };
 
-struct PresentGrantDeleter {
-    void operator()(GoldyPresentGrant* p) const { if (p) goldy_present_grant_destroy(p); }
-};
-
 struct SchemeRenderTargetLeaseDeleter {
     void operator()(GoldySchemeRenderTargetLease* p) const {
         if (p) goldy_scheme_render_target_lease_destroy(p);
@@ -281,8 +279,16 @@ struct PresentLeaseDeleter {
     void operator()(GoldyPresentLease* p) const { if (p) goldy_present_lease_destroy(p); }
 };
 
-struct SwapchainPoolDeleter {
-    void operator()(GoldySwapchainPool* p) const { if (p) goldy_swapchain_pool_destroy(p); }
+struct SurfaceExchangeDeleter {
+    void operator()(GoldySurfaceExchange* p) const { if (p) goldy_surface_exchange_destroy(p); }
+};
+
+struct TransactionDeleter {
+    void operator()(GoldyTransaction* p) const { if (p) goldy_transaction_destroy(p); }
+};
+
+struct ClaimDeleter {
+    void operator()(GoldyClaim* p) const { if (p) goldy_claim_destroy(p); }
 };
 
 struct ComputePipelineDeleter {
@@ -1266,30 +1272,6 @@ private:
 };
 
 /**
- * @brief Present easement grant recorded once via Scheme::grant_present().
- */
-class PresentGrant {
-public:
-    PresentGrant() = default;
-
-    explicit PresentGrant(GoldyPresentGrant* grant) : ptr_(grant) {}
-
-    PresentGrant(const PresentGrant&) = delete;
-    PresentGrant& operator=(const PresentGrant&) = delete;
-    PresentGrant(PresentGrant&&) = default;
-    PresentGrant& operator=(PresentGrant&&) = default;
-
-    void consume(const SchemeSubmission& submission) const {
-        detail::throw_on_result(goldy_present_grant_consume(ptr_.get(), submission.get()));
-    }
-
-    GoldyPresentGrant* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyPresentGrant, detail::PresentGrantDeleter> ptr_;
-};
-
-/**
  * @brief Stable render-target lease declared on a Scheme.
  */
 class SchemeRenderTargetLease {
@@ -1311,7 +1293,7 @@ private:
 };
 
 /**
- * @brief Stable present lease from a SwapchainPool.
+ * @brief Stable present lease from a SurfaceExchange.
  */
 class PresentLease {
 public:
@@ -1331,29 +1313,95 @@ private:
 };
 
 /**
- * @brief Swapchain pool for present-on-scheme.
+ * @brief One submission's claim extracted from a transaction.
  */
-class SwapchainPool {
+class Claim {
+public:
+    Claim() = default;
+
+    explicit Claim(GoldyClaim* claim) : ptr_(claim) {}
+
+    Claim(const Claim&) = delete;
+    Claim& operator=(const Claim&) = delete;
+    Claim(Claim&&) = default;
+    Claim& operator=(Claim&&) = default;
+
+    void consume() {
+        detail::throw_on_result(goldy_claim_consume(ptr_.get()));
+        ptr_.reset();
+    }
+
+    void discard() {
+        detail::throw_on_result(goldy_claim_discard(ptr_.get()));
+        ptr_.reset();
+    }
+
+    GoldyClaim* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyClaim, detail::ClaimDeleter> ptr_;
+};
+
+/**
+ * @brief Exchange transaction recorded in a scheme.
+ */
+class Transaction {
+public:
+    Transaction() = default;
+
+    explicit Transaction(GoldyTransaction* transaction) : ptr_(transaction) {}
+
+    Transaction(const Transaction&) = delete;
+    Transaction& operator=(const Transaction&) = delete;
+    Transaction(Transaction&&) = default;
+    Transaction& operator=(Transaction&&) = default;
+
+    [[nodiscard]] uint32_t binding_id() const {
+        return goldy_transaction_binding_id(ptr_.get());
+    }
+
+    [[nodiscard]] uint64_t generation() const {
+        return goldy_transaction_generation(ptr_.get());
+    }
+
+    [[nodiscard]] Claim claim(const SchemeSubmission& submission) const {
+        GoldyClaim* claim = goldy_transaction_claim(ptr_.get(), submission.get());
+        if (!claim) {
+            throw Exception::from_last_error();
+        }
+        return Claim{claim};
+    }
+
+    GoldyTransaction* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyTransaction, detail::TransactionDeleter> ptr_;
+};
+
+/**
+ * @brief Window-surface exchange for present-on-scheme.
+ */
+class SurfaceExchange {
 public:
 #if defined(_WIN32)
-    SwapchainPool(const Context& ctx, void* hwnd, uint32_t depth = 3) {
-        GoldySwapchainPool* ptr = goldy_swapchain_pool_create_win32(ctx.get(), hwnd, depth);
+    SurfaceExchange(const Context& ctx, void* hwnd, uint32_t depth = 3) {
+        GoldySurfaceExchange* ptr = goldy_surface_exchange_create_win32(ctx.get(), hwnd, depth);
         if (!ptr) {
             throw Exception::from_last_error();
         }
         ptr_.reset(ptr);
     }
 #elif defined(__APPLE__)
-    SwapchainPool(const Context& ctx, void* ns_view, uint32_t depth = 3) {
-        GoldySwapchainPool* ptr = goldy_swapchain_pool_create_appkit(ctx.get(), ns_view, depth);
+    SurfaceExchange(const Context& ctx, void* ns_view, uint32_t depth = 3) {
+        GoldySurfaceExchange* ptr = goldy_surface_exchange_create_appkit(ctx.get(), ns_view, depth);
         if (!ptr) {
             throw Exception::from_last_error();
         }
         ptr_.reset(ptr);
     }
 #else
-    SwapchainPool(const Context& ctx, void* wayland_display, void* wayland_surface, uint32_t depth = 3) {
-        GoldySwapchainPool* ptr = goldy_swapchain_pool_create_wayland(
+    SurfaceExchange(const Context& ctx, void* wayland_display, void* wayland_surface, uint32_t depth = 3) {
+        GoldySurfaceExchange* ptr = goldy_surface_exchange_create_wayland(
             ctx.get(), wayland_display, wayland_surface, depth);
         if (!ptr) {
             throw Exception::from_last_error();
@@ -1362,13 +1410,13 @@ public:
     }
 #endif
 
-    SwapchainPool(const SwapchainPool&) = delete;
-    SwapchainPool& operator=(const SwapchainPool&) = delete;
-    SwapchainPool(SwapchainPool&&) = default;
-    SwapchainPool& operator=(SwapchainPool&&) = default;
+    SurfaceExchange(const SurfaceExchange&) = delete;
+    SurfaceExchange& operator=(const SurfaceExchange&) = delete;
+    SurfaceExchange(SurfaceExchange&&) = default;
+    SurfaceExchange& operator=(SurfaceExchange&&) = default;
 
     [[nodiscard]] PresentLease lease() {
-        GoldyPresentLease* lease = goldy_swapchain_pool_lease(ptr_.get());
+        GoldyPresentLease* lease = goldy_surface_exchange_lease(ptr_.get());
         if (!lease) {
             throw Exception::from_last_error();
         }
@@ -1376,22 +1424,55 @@ public:
     }
 
     std::pair<uint32_t, uint32_t> size() const {
-        return {goldy_swapchain_pool_width(ptr_.get()), goldy_swapchain_pool_height(ptr_.get())};
+        return {goldy_surface_exchange_width(ptr_.get()), goldy_surface_exchange_height(ptr_.get())};
     }
 
-    uint32_t width() const { return goldy_swapchain_pool_width(ptr_.get()); }
-    uint32_t height() const { return goldy_swapchain_pool_height(ptr_.get()); }
+    uint32_t width() const { return goldy_surface_exchange_width(ptr_.get()); }
+    uint32_t height() const { return goldy_surface_exchange_height(ptr_.get()); }
 
-    GoldyTextureFormat format() const { return goldy_swapchain_pool_format(ptr_.get()); }
+    GoldyTextureFormat format() const { return goldy_surface_exchange_format(ptr_.get()); }
+
+    uint64_t generation() const { return goldy_surface_exchange_generation(ptr_.get()); }
 
     void resize(uint32_t width, uint32_t height) {
-        detail::throw_on_result(goldy_swapchain_pool_resize(ptr_.get(), width, height));
+        detail::throw_on_result(goldy_surface_exchange_resize(ptr_.get(), width, height));
     }
 
-    GoldySwapchainPool* get() const { return ptr_.get(); }
+    [[nodiscard]] Transaction bind(Scheme& scheme, const Texture& source) {
+        GoldyTransaction* transaction = goldy_surface_exchange_bind(ptr_.get(), scheme.get(), source.get());
+        if (!transaction) {
+            throw Exception::from_last_error();
+        }
+        return Transaction{transaction};
+    }
+
+    [[nodiscard]] Transaction bind_render_target(Scheme& scheme, const SchemeRenderTargetLease& src) {
+        GoldyTransaction* transaction = goldy_surface_exchange_bind_render_target(
+            ptr_.get(), scheme.get(), src.get());
+        if (!transaction) {
+            throw Exception::from_last_error();
+        }
+        return Transaction{transaction};
+    }
+
+    struct BindDestinationResult {
+        PresentLease lease;
+        Transaction transaction;
+    };
+
+    [[nodiscard]] BindDestinationResult bind_destination(Scheme& scheme) {
+        GoldySurfaceExchangeBindDestinationOut out{};
+        detail::throw_on_result(goldy_surface_exchange_bind_destination(ptr_.get(), scheme.get(), &out));
+        if (!out.lease || !out.transaction) {
+            throw Exception::from_last_error();
+        }
+        return BindDestinationResult{PresentLease{out.lease}, Transaction{out.transaction}};
+    }
+
+    GoldySurfaceExchange* get() const { return ptr_.get(); }
 
 private:
-    std::unique_ptr<GoldySwapchainPool, detail::SwapchainPoolDeleter> ptr_;
+    std::unique_ptr<GoldySurfaceExchange, detail::SurfaceExchangeDeleter> ptr_;
 };
 
 /**
@@ -1452,18 +1533,6 @@ public:
 
     void copy_to_texture(const SchemeRenderTargetLease& src, const Texture& dst) {
         detail::throw_on_result(goldy_scheme_copy_to_texture(ptr_.get(), src.get(), dst.get()));
-    }
-
-    void copy_to_present(const SchemeRenderTargetLease& src, const PresentLease& dst) {
-        detail::throw_on_result(goldy_scheme_copy_to_present(ptr_.get(), src.get(), dst.get()));
-    }
-
-    [[nodiscard]] PresentGrant grant_present(const PresentLease& lease) {
-        GoldyPresentGrant* grant = goldy_scheme_grant_present(ptr_.get(), lease.get());
-        if (!grant) {
-            throw Exception::from_last_error();
-        }
-        return PresentGrant{grant};
     }
 
     [[nodiscard]] SchemeSubmission submit() {

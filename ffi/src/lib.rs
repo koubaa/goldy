@@ -15,7 +15,7 @@ mod sampler;
 mod scheme;
 mod shader;
 mod surface;
-mod swapchain_pool;
+mod surface_exchange;
 mod types;
 
 pub use compute::*;
@@ -30,5 +30,5 @@ pub use sampler::*;
 pub use scheme::*;
 pub use shader::*;
 pub use surface::*;
-pub use swapchain_pool::*;
+pub use surface_exchange::*;
 pub use types::*;

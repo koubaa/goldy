@@ -5,9 +5,9 @@
 //! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SwapchainPool, Vertex2D,
+    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    SurfaceExchange, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -28,9 +28,8 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
-    swapchain: Option<SwapchainPool>,
-    screen: Option<goldy::PresentLease>,
-    present: Option<PresentGrant>,
+    surface: Option<SurfaceExchange>,
+    present: Option<Transaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     frame_count: u64,
@@ -48,8 +47,7 @@ impl App {
             pipeline: None,
             shader: None,
             window: None,
-            swapchain: None,
-            screen: None,
+            surface: None,
             present: None,
             scene_rt: None,
             scheme: None,
@@ -61,12 +59,12 @@ impl App {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        swapchain: &SwapchainPool,
+        surface: &SurfaceExchange,
     ) -> anyhow::Result<RenderPipeline> {
-        common::render_pipeline_for_swapchain(
+        common::render_pipeline_for_surface(
             device,
             shader,
-            swapchain,
+            surface,
             RenderPipelineDesc {
                 vertex_layout: Vertex2D::layout(),
                 ..Default::default()
@@ -76,12 +74,12 @@ impl App {
 
     fn record_scheme(
         scheme: &mut Scheme,
+        surface: &SurfaceExchange,
         pipeline: &RenderPipeline,
         vertex_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
-        screen: &goldy::PresentLease,
         bg_color: Color,
-    ) -> PresentGrant {
+    ) -> anyhow::Result<Transaction> {
         let mut pass = scheme.render_pass("triangle", scene_rt);
         pass.with_parcel(vertex_buffer, NodeAccess::Read);
         pass.clear(bg_color);
@@ -89,8 +87,7 @@ impl App {
         pass.set_vertex_buffer(0, vertex_buffer);
         pass.draw(0..3, 0..1);
         pass.finish();
-        scheme.copy_to_present(scene_rt, screen);
-        scheme.grant_present(screen)
+        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -100,8 +97,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
-        let screen = swapchain.lease();
+        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
 
         let vertices = [
             Vertex2D::new(0.0, -0.5, Color::RED),
@@ -112,18 +108,18 @@ impl App {
         let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
-        let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
+        let pipeline = Self::create_pipeline(&device, &shader, &surface)?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = swapchain.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let (width, height) = surface.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
             b: 0.2,
             a: 1.0,
         };
-        let present = Self::record_scheme(&mut scheme, &pipeline, &vertex_buffer, &scene_rt, &screen, bg_color);
+        let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &vertex_buffer, &scene_rt, bg_color)?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);
@@ -131,8 +127,7 @@ impl App {
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self.swapchain = Some(swapchain);
-        self.screen = Some(screen);
+        self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
@@ -147,8 +142,8 @@ impl App {
         }
 
         let scheme = self.scheme.as_mut().unwrap();
-        let submission = scheme.submit()?;
-        self.present.as_ref().unwrap().consume(&submission)?;
+        let mut submission = scheme.submit()?;
+        self.present.as_ref().unwrap().claim(&mut submission)?.consume()?;
 
         self.frame_count += 1;
         Ok(())
@@ -156,24 +151,22 @@ impl App {
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(swapchain) = &self.swapchain {
-                let _ = swapchain.resize(new_size.width, new_size.height);
+            if let Some(surface) = &self.surface {
+                let _ = surface.resize(new_size.width, new_size.height);
             }
-            if let (Some(ctx), Some(device), Some(swapchain), Some(shader), Some(vertex_buffer), Some(screen)) = (
+            if let (Some(ctx), Some(device), Some(surface), Some(shader), Some(vertex_buffer)) = (
                 self.ctx.as_ref(),
                 self.device.as_ref(),
-                self.swapchain.as_ref(),
+                self.surface.as_ref(),
                 self.shader.as_ref(),
                 self.vertex_buffer.as_ref(),
-                self.screen.as_ref(),
             ) {
-                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, surface) {
                     self.pipeline = Some(pipeline);
                     if let Some(pipeline) = self.pipeline.as_ref() {
                         let mut scheme = Scheme::new(ctx);
-                        let (width, height) = swapchain.size();
-                        if let Ok(rt) =
-                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        let (width, height) = surface.size();
+                        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)
                         {
                             let bg_color = Color {
                                 r: 0.1,
@@ -182,10 +175,12 @@ impl App {
                                 a: 1.0,
                             };
                             let present =
-                                Self::record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color);
-                            self.scheme = Some(scheme);
-                            self.present = Some(present);
-                            self.scene_rt = Some(rt);
+                                Self::record_scheme(&mut scheme, surface, pipeline, vertex_buffer, &rt, bg_color).ok();
+                            if let Some(present) = present {
+                                self.scheme = Some(scheme);
+                                self.present = Some(present);
+                                self.scene_rt = Some(rt);
+                            }
                         }
                     }
                 }

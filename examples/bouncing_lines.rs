@@ -6,9 +6,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -65,9 +65,8 @@ struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
     ctx: goldy::Context,
-    swapchain: SwapchainPool,
-    screen: goldy::PresentLease,
-    present: PresentGrant,
+    surface: SurfaceExchange,
+    present: Transaction,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
@@ -83,12 +82,12 @@ impl RenderState {
     fn create_render_pipeline(
         device: &goldy::Device,
         render_shader: &ShaderModule,
-        swapchain: &SwapchainPool,
+        surface: &SurfaceExchange,
     ) -> Result<RenderPipeline> {
-        common::render_pipeline_for_swapchain(
+        common::render_pipeline_for_surface(
             device,
             render_shader,
-            swapchain,
+            surface,
             RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::LineList,
@@ -100,12 +99,12 @@ impl RenderState {
 
     fn record_scheme(
         scheme: &mut Scheme,
+        surface: &SurfaceExchange,
         compute_pipeline: &ComputePipeline,
         render_pipeline: &RenderPipeline,
         line_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
-        screen: &goldy::PresentLease,
-    ) -> PresentGrant {
+    ) -> anyhow::Result<Transaction> {
         scheme
             .node("update_lines", compute_pipeline)
             .with_parcel(line_buffer, NodeAccess::ReadWrite)
@@ -125,24 +124,25 @@ impl RenderState {
         pass.draw(0..2, 0..NUM_LINES);
         pass.finish();
 
-        scheme.copy_to_present(scene_rt, screen);
-        scheme.grant_present(screen)
+        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
     }
 
     fn rerecord_scheme(&mut self) {
         let mut scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.swapchain.size();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
+        let (width, height) = self.surface.size();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.surface.format(), None) {
             self.scene_rt = rt;
-            self.present = Self::record_scheme(
+            if let Ok(present) = Self::record_scheme(
                 &mut scheme,
+                &self.surface,
                 &self.compute_pipeline,
                 &self.render_pipeline,
                 &self.line_buffer,
                 &self.scene_rt,
-                &self.screen,
-            );
-            self.scheme = scheme;
+            ) {
+                self.present = present;
+                self.scheme = scheme;
+            }
         }
     }
 
@@ -154,8 +154,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
-        let screen = swapchain.lease();
+        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
@@ -179,19 +178,19 @@ impl RenderState {
         let line_buffer = retained_pool.acquire_buffer_with_data(&lines, BufferKind::Scattered)?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
-        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &swapchain)?;
+        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &surface)?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = swapchain.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let (width, height) = surface.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
         let present = Self::record_scheme(
             &mut scheme,
+            &surface,
             &compute_pipeline,
             &render_pipeline,
             &line_buffer,
             &scene_rt,
-            &screen,
-        );
+        )?;
 
         println!("Created bouncing lines with {} lines", NUM_LINES);
 
@@ -199,8 +198,7 @@ impl RenderState {
             window,
             device,
             ctx,
-            swapchain,
-            screen,
+            surface,
             present,
             scheme,
             scene_rt,
@@ -217,8 +215,8 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        let submission = self.scheme.submit()?;
-        self.present.consume(&submission)?;
+        let mut submission = self.scheme.submit()?;
+        self.present.claim(&mut submission)?.consume()?;
 
         self.window.request_redraw();
         Ok(())
@@ -285,9 +283,9 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        state.swapchain.resize(size.width, size.height).ok();
+                        state.surface.resize(size.width, size.height).ok();
                         if let Ok(pipeline) =
-                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.swapchain)
+                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.surface)
                         {
                             state.render_pipeline = pipeline;
                         }

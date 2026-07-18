@@ -483,11 +483,6 @@ struct PresentGrantInfo {
 }
 
 /// Parcel stamps read by a present easement for `binding_id` (copy-to-present sources).
-///
-/// Only [`NodeKind::CopyTexture`] sources can be stamp-tracked — `CopyRenderTarget`
-/// sources are scheme-owned leases that do not participate in the [`ResourceKey`] /
-/// [`crate::parcel::ParcelStamp`] system, so they cannot carry a promise.
-/// A warning is emitted when such a node is encountered so the gap is visible.
 fn present_easement_source_stamps(
     ir: &GraphIR,
     binding_id: u32,
@@ -497,30 +492,26 @@ fn present_easement_source_stamps(
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in &ir.nodes {
-        match &node.kind {
-            NodeKind::CopyTexture { src, dst: d, .. } if *d == dst => {
-                let key = ResourceKey::Texture(*src);
-                let hit = resource_stamps.get(&key);
-                if let Some(stamp) = hit {
-                    let ptr = Arc::as_ptr(stamp);
-                    if seen.insert(ptr) {
-                        out.push(Arc::clone(stamp));
-                    }
-                }
+        let key = match &node.kind {
+            NodeKind::CopyTexture { src, dst: d, .. } if *d == dst => Some(ResourceKey::Texture(*src)),
+            NodeKind::CopyRenderTarget { src, dst: d, .. } if *d == dst => Some(ResourceKey::RenderTarget(*src)),
+            _ => None,
+        };
+        let Some(key) = key else {
+            continue;
+        };
+        if let Some(stamp) = resource_stamps.get(&key) {
+            let ptr = Arc::as_ptr(stamp);
+            if seen.insert(ptr) {
+                out.push(Arc::clone(stamp));
             }
-            NodeKind::CopyRenderTarget { dst: d, .. } if *d == dst => {
-                // RenderTarget sources are scheme-owned leases with no ResourceKey and
-                // no ParcelStamp, so we cannot attach a promise to gate the next writer.
-                // The WAR hazard for this path is not covered by the easement promise
-                // mechanism. Log so the gap is visible; do not silently drop.
-                tracing::warn!(
-                    target: "goldy::scheme",
-                    binding_id,
-                    "present easement: CopyRenderTarget source has no stamp; \
-                     WAR hazard not tracked by promise (TODO: extend RT stamp system)"
-                );
-            }
-            _ => {}
+        } else {
+            tracing::warn!(
+                target: "goldy::scheme",
+                binding_id,
+                ?key,
+                "present easement: copy source has no registered stamp; WAR hazard not tracked"
+            );
         }
     }
     out
@@ -1460,6 +1451,10 @@ impl Scheme {
         self.dirty = true;
         let rt = RenderTarget::new_with_depth(self.ctx.device(), width, height, format, depth_format)
             .map_err(|e| self.ctx.classify(e))?;
+        let handle = rt.backend_handle();
+        let stamp = rt.stamp_handle();
+        self.submit_state
+            .register_stamp_parts(ResourceId::RenderTarget(handle), stamp);
         let id = LeaseId(u32::try_from(self.rt_leases.len()).expect("render target lease id overflow"));
         self.rt_leases.push(rt);
         Ok(Lease {
@@ -4601,7 +4596,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
         let _right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
 
-        right.pool().fail_next_acquire();
+        right.fail_next_acquire();
         let before = mock_present_count(&device);
         let err = scheme
             .submit()
@@ -4970,6 +4965,52 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             PromiseState::Resolved(_) => {}
             other => panic!("WAR must remain Resolved after claim discard, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn present_easement_tracks_render_target_copy_source_stamp() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_render_shader(&device);
+        let pipeline = mock_render_pipeline(&device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        let rt_handle = scheme.rt(&rt).backend_handle();
+        let mut pass = scheme.render_pass("render", &rt);
+        pass.set_pipeline(&pipeline);
+        pass.draw_fullscreen();
+        pass.finish();
+        scheme.copy_to_present(&rt, &lease);
+        let _present = scheme.grant_present(&lease);
+
+        let key = ResourceKey::RenderTarget(rt_handle);
+        assert!(
+            scheme.submit_state.resource_stamps().contains_key(&key),
+            "lease_render_target must register an RT stamp for present WAR"
+        );
+
+        let submission = scheme.submit().expect("submit");
+        let resolved_tv = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("rt stamp");
+            assert_eq!(
+                stamp.pending.lock().unwrap().len(),
+                1,
+                "copy_to_present must attach a present-easement promise to the RT stamp"
+            );
+            match stamp.pending.lock().unwrap()[0].poll() {
+                PromiseState::Resolved(tv) => tv,
+                other => panic!("expected Resolved after submit, got {other:?}"),
+            }
+        };
+        assert_eq!(resolved_tv, submission.timeline_value());
+        drop(submission);
     }
 
     #[test]

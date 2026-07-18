@@ -14,6 +14,7 @@ mod bytes_util;
 mod compute;
 mod device;
 mod error;
+mod exchange;
 mod instance;
 mod parcel;
 mod pipeline;
@@ -23,7 +24,7 @@ mod retained_pool;
 mod scheme;
 mod shader;
 mod surface;
-mod swapchain_pool;
+mod surface_exchange;
 mod texture;
 mod types;
 
@@ -67,7 +68,9 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheme::PySchemeRenderTargetLease>()?;
     m.add_class::<scheme::PyPresentLease>()?;
     m.add_class::<scheme::PyPresentGrant>()?;
-    m.add_class::<swapchain_pool::PySwapchainPool>()?;
+    m.add_class::<exchange::PyTransaction>()?;
+    m.add_class::<exchange::PyClaim>()?;
+    m.add_class::<surface_exchange::PySurfaceExchange>()?;
     m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<texture::PyTexture>()?;

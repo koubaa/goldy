@@ -42,7 +42,7 @@ byte[] pixels = grant.Consume(submission);
 - Retained scheme recording API
 - SafeHandle-based resource management
 - Compute shader support
-- Windowed rendering via SwapchainPool + present grants
+- Windowed rendering via SurfaceExchange + transaction claims
 
 ## Requirements
 

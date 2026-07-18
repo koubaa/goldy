@@ -12,8 +12,11 @@ use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 pub(crate) struct SwapchainPoolInner {
     surface: RwLock<Surface>,
@@ -39,9 +42,9 @@ impl SwapchainPoolInner {
 
 /// Pool of OS swapchain drawables for present-on-scheme.
 ///
-/// Construct once per window; call [`Self::lease`] to obtain a stable
-/// [`PresentLease`] identity for scheme recording.
-pub struct SwapchainPool {
+/// Constructed by [`crate::SurfaceExchange`]. Call [`Self::lease`] to obtain a
+/// stable [`PresentLease`] identity for scheme recording.
+pub(crate) struct SwapchainPool {
     inner: Arc<SwapchainPoolInner>,
 }
 
@@ -113,6 +116,7 @@ impl SwapchainPool {
     ///
     /// `depth` is the client's stated in-flight frame count (used for pool
     /// policy; the OS may provide fewer or more swapchain images).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new<W>(ctx: &Context, window: &W, depth: u32) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,

@@ -74,7 +74,7 @@ pub use scheme::{
     Loan, PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, SubmissionHandle,
     Transaction, UploadBuffer,
 };
-pub use swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
+pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
 pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
