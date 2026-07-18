@@ -1438,36 +1438,16 @@ public:
         detail::throw_on_result(goldy_surface_exchange_resize(ptr_.get(), width, height));
     }
 
-    [[nodiscard]] Transaction bind(Scheme& scheme, const Texture& source) {
-        GoldyTransaction* transaction = goldy_surface_exchange_bind(ptr_.get(), scheme.get(), source.get());
-        if (!transaction) {
-            throw Exception::from_last_error();
-        }
-        return Transaction{transaction};
-    }
-
-    [[nodiscard]] Transaction bind_render_target(Scheme& scheme, const SchemeRenderTargetLease& src) {
-        GoldyTransaction* transaction = goldy_surface_exchange_bind_render_target(
-            ptr_.get(), scheme.get(), src.get());
-        if (!transaction) {
-            throw Exception::from_last_error();
-        }
-        return Transaction{transaction};
-    }
+    // Defined after Scheme (needs a complete type for scheme.get()).
+    [[nodiscard]] Transaction bind(Scheme& scheme, const Texture& source);
+    [[nodiscard]] Transaction bind_render_target(Scheme& scheme, const SchemeRenderTargetLease& src);
 
     struct BindDestinationResult {
         PresentLease lease;
         Transaction transaction;
     };
 
-    [[nodiscard]] BindDestinationResult bind_destination(Scheme& scheme) {
-        GoldySurfaceExchangeBindDestinationOut out{};
-        detail::throw_on_result(goldy_surface_exchange_bind_destination(ptr_.get(), scheme.get(), &out));
-        if (!out.lease || !out.transaction) {
-            throw Exception::from_last_error();
-        }
-        return BindDestinationResult{PresentLease{out.lease}, Transaction{out.transaction}};
-    }
+    [[nodiscard]] BindDestinationResult bind_destination(Scheme& scheme);
 
     GoldySurfaceExchange* get() const { return ptr_.get(); }
 
@@ -1778,6 +1758,32 @@ public:
 private:
     std::unique_ptr<GoldySampler, detail::SamplerDeleter> ptr_;
 };
+
+inline Transaction SurfaceExchange::bind(Scheme& scheme, const Texture& source) {
+    GoldyTransaction* transaction = goldy_surface_exchange_bind(ptr_.get(), scheme.get(), source.get());
+    if (!transaction) {
+        throw Exception::from_last_error();
+    }
+    return Transaction{transaction};
+}
+
+inline Transaction SurfaceExchange::bind_render_target(Scheme& scheme, const SchemeRenderTargetLease& src) {
+    GoldyTransaction* transaction = goldy_surface_exchange_bind_render_target(
+        ptr_.get(), scheme.get(), src.get());
+    if (!transaction) {
+        throw Exception::from_last_error();
+    }
+    return Transaction{transaction};
+}
+
+inline SurfaceExchange::BindDestinationResult SurfaceExchange::bind_destination(Scheme& scheme) {
+    GoldySurfaceExchangeBindDestinationOut out{};
+    detail::throw_on_result(goldy_surface_exchange_bind_destination(ptr_.get(), scheme.get(), &out));
+    if (!out.lease || !out.transaction) {
+        throw Exception::from_last_error();
+    }
+    return BindDestinationResult{PresentLease{out.lease}, Transaction{out.transaction}};
+}
 
 // =============================================================================
 // Utility functions

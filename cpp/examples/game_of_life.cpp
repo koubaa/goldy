@@ -196,7 +196,7 @@ void run_compute_step(
         node.with_parcel(write, goldy::NodeAccess::Write);
         node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
     }
-    scheme.submit();
+    (void)scheme.submit();
 }
 
 goldy::Transaction record_display_scheme(
