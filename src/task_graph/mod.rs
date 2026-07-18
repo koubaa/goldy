@@ -12,7 +12,7 @@ mod ir;
 pub mod record;
 
 pub use graph::ShaderResourceSlot;
-pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, ResolvedPresentSlot};
+pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, PartitionSubmitResult, ResolvedPresentSlot};
 pub use ir::{BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 pub use record::{ComputeNodeRecord, RenderPassRecord};

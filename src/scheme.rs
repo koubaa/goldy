@@ -1509,14 +1509,23 @@ impl Scheme {
         }
 
         let submit_result = {
-            let mut present_slots = Vec::with_capacity(self.present_grants.len());
-            let mut surface_frames = Vec::with_capacity(self.present_grants.len());
+            let grant_count = self.present_grants.len();
+            let mut present_slots = Vec::with_capacity(grant_count);
+            // Fixed-size slots indexed by grant order so partial acquires leave holes
+            // rather than shifting later bindings.
+            let surface_frames: Vec<Mutex<Option<crate::surface::Frame>>> =
+                (0..grant_count).map(|_| Mutex::new(None)).collect();
             // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
             // across the mutable `submit_state` call below.
             let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>, u32)> = self
                 .present_grants
                 .iter()
                 .map(|g| (g.binding_id, Arc::clone(&g.pool), g.pool_lease_id))
+                .collect();
+            let binding_to_idx: std::collections::HashMap<u32, usize> = present_grant_pools
+                .iter()
+                .enumerate()
+                .map(|(i, (id, _, _))| (*id, i))
                 .collect();
             let acquire_ctx = self.ctx.clone();
 
@@ -1530,11 +1539,8 @@ impl Scheme {
                 }
                 // Validate every claim before converting any to Frame. A mid-loop
                 // Err after into_parts() would drop Frame and implicitly present.
-                for ((binding_id, pool, pool_lease_id), claim) in
-                    present_grant_pools.iter().zip(acquired.iter())
-                {
-                    if !std::sync::Arc::ptr_eq(claim.pool(), pool) || claim.lease_id() != *pool_lease_id
-                    {
+                for ((binding_id, pool, pool_lease_id), claim) in present_grant_pools.iter().zip(acquired.iter()) {
+                    if !std::sync::Arc::ptr_eq(claim.pool(), pool) || claim.lease_id() != *pool_lease_id {
                         return Err(GoldyError::Backend(anyhow::anyhow!(
                             "submit_with_acquired_presents: lease provenance mismatch \
                              (binding {}, expected pool-local {}, claim pool-local {})",
@@ -1545,15 +1551,15 @@ impl Scheme {
                     }
                 }
                 for ((binding_id, _, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
-                    let (_lease_id, _pool, slot_id, handle, uav_index, surface_frame) =
-                        claim.into_parts();
+                    let idx = binding_to_idx[binding_id];
+                    let (_lease_id, _pool, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
                     present_slots.push(ResolvedPresentSlot {
                         binding_id: *binding_id,
                         slot_id,
                         handle,
                         uav_index,
                     });
-                    surface_frames.push(Mutex::new(Some(surface_frame)));
+                    *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
                 }
             }
 
@@ -1575,24 +1581,30 @@ impl Scheme {
             let ir_clean = !structurally_dirty && !topo_dirty;
             let had_replay = self.submit_state.has_cb_replay();
             let upload_resolutions = self.resolve_upload_buffers_for_submit()?;
+            let mut partial = crate::task_graph::PartitionSubmitResult::default();
+            let mut partial_tv = self.ctx.gpu_progress();
             let result = {
-                // Deferred acquire: run Surface::begin (DXGI wait) only when the first
-                // present-touching partition is about to submit — after coarse/fine have
-                // already been enqueued so GPU work can overlap the drawable wait.
-                let mut deferred_acquire = |slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
-                    for (binding_id, pool, _) in &present_grant_pools {
-                        let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
-                            .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
-                        slots.push(ResolvedPresentSlot {
-                            binding_id: *binding_id,
-                            slot_id,
-                            handle,
-                            uav_index,
-                        });
-                        surface_frames.push(Mutex::new(Some(surface_frame)));
-                    }
-                    Ok(())
-                };
+                // Deferred acquire: run Surface::begin (DXGI wait) only for bindings
+                // needed by the upcoming present partition that are not yet resolved.
+                let mut deferred_acquire =
+                    |needed: &[u32], slots: &mut Vec<ResolvedPresentSlot>| -> anyhow::Result<()> {
+                        for &binding_id in needed {
+                            let idx = *binding_to_idx.get(&binding_id).ok_or_else(|| {
+                                anyhow::anyhow!("deferred present acquire: unknown binding id {binding_id}")
+                            })?;
+                            let (_, pool, _) = &present_grant_pools[idx];
+                            let (slot_id, surface_frame, uav_index, handle) = SwapchainPool::acquire_slot(pool)
+                                .map_err(|e| anyhow::anyhow!("{}", acquire_ctx.classify(e)))?;
+                            slots.push(ResolvedPresentSlot {
+                                binding_id,
+                                slot_id,
+                                handle,
+                                uav_index,
+                            });
+                            *surface_frames[idx].lock().unwrap_or_else(|e| e.into_inner()) = Some(surface_frame);
+                        }
+                        Ok(())
+                    };
                 let deferred: Option<&mut DeferredPresentAcquire<'_>> =
                     if present_grant_pools.is_empty() || !present_slots.is_empty() {
                         None
@@ -1606,6 +1618,8 @@ impl Scheme {
                     deferred,
                     &upload_resolutions,
                     ir_clean,
+                    &mut partial,
+                    &mut partial_tv,
                 )
             };
             // When CB replay was torn down (env / profiler), drop topology edges that only
@@ -1617,26 +1631,16 @@ impl Scheme {
                 self.topology_dirty.store(false, Ordering::Release);
             }
             match result {
-                Ok(ok) => Ok((ok, surface_frames)),
-                Err(e) => {
-                    // Cancel any drawables acquired before the failure (present partition
-                    // or mid-acquire). Early non-present partitions may already have run —
-                    // that throwaway GPU work is intentional under deferred exercise.
-                    for frame_mutex in surface_frames {
-                        if let Ok(mut slot) = frame_mutex.lock() {
-                            if let Some(frame) = slot.take() {
-                                frame.cancel();
-                            }
-                        }
-                    }
-                    Err(e)
-                }
+                Ok(ok) => Ok((ok, surface_frames, partial)),
+                Err(e) => Err((e, surface_frames, partial, partial_tv)),
             }
         };
 
-        let ((tv, part_result), surface_frames) = match submit_result {
+        let ((tv, part_result), surface_frames, _partial) = match submit_result {
             Ok(ok) => ok,
-            Err(e) => return Err(self.ctx.classify(e)),
+            Err((e, surface_frames, partial, partial_tv)) => {
+                return Err(self.cleanup_failed_present_submit(e, surface_frames, &partial, partial_tv));
+            }
         };
 
         // Stamp selected upload parcels with the submit timeline so they cannot be
@@ -1648,13 +1652,13 @@ impl Scheme {
             }
         }
 
-        // Present partition is last; stamp acquired frames with that epoch so
-        // Present's scratch→backbuffer copy Wait()s on it instead of inferring
-        // timeline_next-1 from an empty submit_frame().
-        for frame_mutex in &surface_frames {
-            if let Ok(mut slot) = frame_mutex.lock() {
-                if let Some(frame) = slot.as_mut() {
-                    frame.note_submit_timeline(tv);
+        // Stamp each acquired frame with the timeline of the partition that wrote it.
+        for (binding_id, binding_tv) in &part_result.present_binding_tvs {
+            if let Some(idx) = self.present_grants.iter().position(|g| g.binding_id == *binding_id) {
+                if let Ok(mut slot) = surface_frames[idx].lock() {
+                    if let Some(frame) = slot.as_mut() {
+                        frame.note_submit_timeline(*binding_tv);
+                    }
                 }
             }
         }
@@ -1730,6 +1734,51 @@ impl Scheme {
             claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
         let submission = self.finish_submit_frame(tv, surface_frames, present_resolvers)?;
         Ok(submission)
+    }
+
+    /// Settle high-water, source WAR, and present frames after a mid-submit failure.
+    ///
+    /// Bindings whose present partition already ran get an unpublished claim discarded
+    /// at their copy timeline. Acquired but unsubmitted frames are cancelled. Never-
+    /// acquired slots are left alone.
+    fn cleanup_failed_present_submit(
+        &self,
+        e: anyhow::Error,
+        surface_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+        partial: &crate::task_graph::PartitionSubmitResult,
+        partial_tv: TimelineValue,
+    ) -> GoldyError {
+        self.ctx.advance_high_water_timeline(partial_tv);
+
+        for (grant, frame_mutex) in self.present_grants.iter().zip(surface_frames) {
+            let submitted_tv = partial
+                .present_binding_tvs
+                .iter()
+                .find(|(id, _)| *id == grant.binding_id)
+                .map(|(_, tv)| *tv);
+            let mut slot = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+            let Some(mut frame) = slot.take() else {
+                continue;
+            };
+            if let Some(tv) = submitted_tv {
+                frame.note_submit_timeline(tv);
+                let (promise, resolver) = TimelinePromise::new();
+                for stamp in
+                    present_easement_source_stamps(&self.ir, grant.binding_id, self.submit_state.resource_stamps())
+                {
+                    stamp.push_pending(promise.clone());
+                }
+                resolver.resolve(tv);
+                // Referenced drawable: discard without present (same as claim.discard).
+                let claim = crate::exchange::SurfaceClaimImpl::new(frame);
+                let _ = crate::exchange::ClaimImpl::discard(Box::new(claim));
+            } else {
+                // Acquired for a partition that never submitted — unsubmitted cancel.
+                frame.cancel();
+            }
+        }
+
+        self.ctx.classify(e)
     }
 
     fn finish_submit_frame(
@@ -1871,14 +1920,11 @@ impl Scheme {
 
     /// True when this scheme already has a present grant for `lease`.
     pub(crate) fn has_present_grant_for(&self, lease: &PresentLease) -> bool {
-        self.present_bindings
-            .iter()
-            .enumerate()
-            .any(|(i, binding)| {
-                Arc::ptr_eq(&binding.pool, &lease.pool)
-                    && binding.pool_lease_id == lease.id
-                    && self.present_grants.iter().any(|g| g.binding_id == i as u32)
-            })
+        self.present_bindings.iter().enumerate().any(|(i, binding)| {
+            Arc::ptr_eq(&binding.pool, &lease.pool)
+                && binding.pool_lease_id == lease.id
+                && self.present_grants.iter().any(|g| g.binding_id == i as u32)
+        })
     }
 
     /// Record a present easement grant over a swapchain lease.
@@ -4314,9 +4360,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _left = scheme.grant_present(&left_pool.lease());
         let _right = scheme.grant_present(&right_pool.lease());
 
-        let good = left_pool
-            .acquire_present(&left_pool.lease())
-            .expect("acquire left");
+        let good = left_pool.acquire_present(&left_pool.lease()).expect("acquire left");
         let wrong = left_pool
             .acquire_present(&left_pool.lease())
             .expect("acquire left again for wrong slot");
@@ -4337,12 +4381,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn surface_exchange_bind_rejects_duplicate_for_same_lease() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
-        let surface = crate::exchange::SurfaceExchange::new(
-            &ctx,
-            &MockWindow,
-            crate::types::SurfaceConfig::default(),
-        )
-        .expect("surface exchange");
+        let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("surface exchange");
         let tex_a = mock_direct_texture(&device);
         let tex_b = mock_direct_texture(&device);
 
@@ -4351,10 +4391,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let err = surface
             .bind(&mut scheme, &tex_b)
             .expect_err("second bind for same lease must fail");
-        assert!(
-            err.to_string().contains("already bound"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().contains("already bound"), "unexpected: {err}");
         // First transaction still works; only one copy+grant recorded beyond the bind path.
         let copy_count = scheme
             .ir
@@ -4371,18 +4408,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn two_surfaces_bind_copy_resolve_and_claim_independently() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
-        let left = crate::exchange::SurfaceExchange::new(
-            &ctx,
-            &MockWindow,
-            crate::types::SurfaceConfig::default(),
-        )
-        .expect("left surface");
-        let right = crate::exchange::SurfaceExchange::new(
-            &ctx,
-            &MockWindow,
-            crate::types::SurfaceConfig::default(),
-        )
-        .expect("right surface");
+        let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("left surface");
+        let right = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("right surface");
         let left_tex = mock_direct_texture(&device);
         let right_tex = mock_direct_texture(&device);
         let pipeline = mock_pipeline(&device, &mock_shader(&device));
@@ -4411,14 +4440,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             })
             .collect();
         assert_eq!(copy_bindings.len(), 2);
-        assert_eq!(
-            copy_bindings[0],
-            ResourceId::PresentLease(left_tx.binding_id())
-        );
-        assert_eq!(
-            copy_bindings[1],
-            ResourceId::PresentLease(right_tx.binding_id())
-        );
+        assert_eq!(copy_bindings[0], ResourceId::PresentLease(left_tx.binding_id()));
+        assert_eq!(copy_bindings[1], ResourceId::PresentLease(right_tx.binding_id()));
 
         let before = mock_present_count(&device);
         let mut submission = scheme.submit().expect("submit");

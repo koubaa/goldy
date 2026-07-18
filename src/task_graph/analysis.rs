@@ -1010,10 +1010,12 @@ pub fn emit_partitioned_commands(
 ///
 /// Logical partitions are defined by two hard split rules:
 ///
-/// 1. **Present boundary**: any wave that references a [`ResourceId::PresentLease`] or
-///    [`ResourceId::SwapchainOutput`] begins a new logical partition.  Work that touches
-///    the swapchain drawable must not be submitted until the OS grants that image, so it
-///    must be a distinct unit from all earlier, drawable-independent work.
+/// 1. **Present-binding boundary**: any wave that introduces a
+///    [`ResourceId::PresentLease`] binding id (or the legacy
+///    [`ResourceId::SwapchainOutput`]) not seen in earlier waves begins a new
+///    logical partition. Independent GPU work must not wait behind a drawable
+///    acquire, and distinct surfaces acquire at their own first dependent
+///    partition.
 ///
 /// 2. **Render-kind boundary**: any wave that is the first wave containing a
 ///    [`NodeKind::RenderPass`] when the preceding waves contained none — or vice versa —
@@ -1024,12 +1026,12 @@ pub fn emit_partitioned_commands(
 /// Both rules are checked per-wave; split points from either rule are collected and
 /// merged into a monotone list before forming ranges.
 ///
-/// The two Boolean flags tag each partition so callers can choose the right
-/// emitter without re-scanning the wave slice:
+/// Flags and binding sets tag each partition so callers can choose the right
+/// emitter and acquire only the bindings that partition requires:
 ///
 /// - `has_render`   — the slice contains at least one [`NodeKind::RenderPass`] node.
-/// - `has_present`  — the slice binds at least one [`ResourceId::PresentLease`] or
-///   [`ResourceId::SwapchainOutput`].
+/// - `has_present`  — the slice binds at least one present lease or swapchain output.
+/// - `present_bindings` — scheme-unique [`ResourceId::PresentLease`] ids in the slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalPartition {
     /// Wave-index range `start..end` into [`CompiledSchedule::waves`].
@@ -1038,6 +1040,9 @@ pub struct LogicalPartition {
     pub has_render: bool,
     /// True when the slice references a present-lease or swapchain-output resource.
     pub has_present: bool,
+    /// Scheme-unique present binding ids ([`ResourceId::PresentLease`]) referenced
+    /// by this partition, sorted and deduplicated.
+    pub present_bindings: Vec<u32>,
 }
 
 impl LogicalPartition {
@@ -1051,8 +1056,8 @@ impl LogicalPartition {
 ///
 /// Rules applied, in priority order:
 ///
-/// 1. If a wave is the first to contain a present binding, it opens a new partition
-///    (unless it is wave 0, in which case there can be no pre-present partition).
+/// 1. If a wave introduces a present binding id (or first `SwapchainOutput`) not
+///    seen earlier, it opens a new partition (unless it is wave 0).
 /// 2. If a wave changes the render-kind of its predecessor (compute→render or
 ///    render→compute), it opens a new partition.
 ///
@@ -1065,22 +1070,33 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
             wave_range: 0..0,
             has_render: false,
             has_present: false,
+            present_bindings: Vec::new(),
         }];
     }
 
     // Collect split points: indices of waves that begin a new logical partition.
     let mut splits: Vec<usize> = vec![0]; // always start with wave 0
-    let mut seen_present = false;
+    let mut seen_bindings: Vec<u32> = Vec::new();
+    let mut seen_swapchain_output = false;
 
     for (i, wave) in waves.iter().enumerate() {
-        let is_present = wave_has_present_binding(ir, wave);
+        let wave_bindings = wave_present_binding_ids(ir, wave);
+        let has_swapchain = wave_has_swapchain_output(ir, wave);
         let is_render = wave
             .node_indices
             .iter()
             .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }));
 
+        let introduces_new_binding =
+            wave_bindings.iter().any(|id| !seen_bindings.contains(id)) || (has_swapchain && !seen_swapchain_output);
+
         if i == 0 {
-            seen_present = is_present;
+            for &id in &wave_bindings {
+                if !seen_bindings.contains(&id) {
+                    seen_bindings.push(id);
+                }
+            }
+            seen_swapchain_output |= has_swapchain;
             continue;
         }
 
@@ -1089,10 +1105,17 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
             .iter()
             .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }));
 
-        // Present boundary: first wave that touches the swapchain/lease.
-        if is_present && !seen_present {
+        // Present-binding boundary: wave introduces a previously unseen lease /
+        // swapchain output. Multiple surfaces in different waves become distinct
+        // partitions so each acquires at its own first dependent work.
+        if introduces_new_binding {
             splits.push(i);
-            seen_present = true;
+            for &id in &wave_bindings {
+                if !seen_bindings.contains(&id) {
+                    seen_bindings.push(id);
+                }
+            }
+            seen_swapchain_output |= has_swapchain;
             continue; // don't also split on render-kind here
         }
 
@@ -1110,7 +1133,8 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
     for (k, &start) in splits.iter().enumerate() {
         let end = if k + 1 < splits.len() { splits[k + 1] } else { n };
         let slice = &waves[start..end];
-        let has_present = slice.iter().any(|w| wave_has_present_binding(ir, w));
+        let present_bindings = partition_present_binding_ids(ir, slice);
+        let has_present = !present_bindings.is_empty() || slice.iter().any(|w| wave_has_swapchain_output(ir, w));
         let has_render = slice.iter().any(|w| {
             w.node_indices
                 .iter()
@@ -1120,6 +1144,7 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
             wave_range: start..end,
             has_render,
             has_present,
+            present_bindings,
         });
     }
     result
@@ -1280,6 +1305,20 @@ pub(crate) fn partition_waves_have_present(ir: &GraphIR, waves: &[Wave]) -> bool
     waves.iter().any(|w| wave_has_present_binding(ir, w))
 }
 
+/// Scheme-unique [`ResourceId::PresentLease`] ids referenced by `waves`, sorted and deduplicated.
+pub(crate) fn partition_present_binding_ids(ir: &GraphIR, waves: &[Wave]) -> Vec<u32> {
+    let mut ids = Vec::new();
+    for wave in waves {
+        for id in wave_present_binding_ids(ir, wave) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids
+}
+
 /// Returns true if any node in `waves` references a scheme upload-buffer slot.
 pub(crate) fn partition_waves_have_upload_slots(ir: &GraphIR, waves: &[Wave]) -> bool {
     waves.iter().any(|w| {
@@ -1292,13 +1331,31 @@ pub(crate) fn partition_waves_have_upload_slots(ir: &GraphIR, waves: &[Wave]) ->
     })
 }
 
-fn wave_has_present_binding(ir: &GraphIR, wave: &Wave) -> bool {
+fn wave_present_binding_ids(ir: &GraphIR, wave: &Wave) -> Vec<u32> {
+    let mut ids = Vec::new();
+    for &ni in &wave.node_indices {
+        for b in &ir.nodes[ni].bindings {
+            if let ResourceId::PresentLease(id) = b.resource {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn wave_has_swapchain_output(ir: &GraphIR, wave: &Wave) -> bool {
     wave.node_indices.iter().any(|&ni| {
         ir.nodes[ni]
             .bindings
             .iter()
-            .any(|b| matches!(b.resource, ResourceId::SwapchainOutput | ResourceId::PresentLease(_)))
+            .any(|b| matches!(b.resource, ResourceId::SwapchainOutput))
     })
+}
+
+fn wave_has_present_binding(ir: &GraphIR, wave: &Wave) -> bool {
+    !wave_present_binding_ids(ir, wave).is_empty() || wave_has_swapchain_output(ir, wave)
 }
 
 /// Emit [`GraphCommand`]s for a slice of compiled waves (compute + optional render).
