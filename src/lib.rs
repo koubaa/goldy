@@ -138,6 +138,40 @@ pub mod test_support {
         device.with_mock_backend(f)
     }
 
+    /// Headless surface exchange backed by mock window handles (mock backend only).
+    pub fn mock_surface_exchange(device: &Arc<Device>) -> (crate::Context, crate::SurfaceExchange) {
+        struct MockWindow;
+
+        impl raw_window_handle::HasWindowHandle for MockWindow {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe {
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
+                })
+            }
+        }
+
+        impl raw_window_handle::HasDisplayHandle for MockWindow {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+                Ok(unsafe {
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
+                })
+            }
+        }
+
+        let ctx = device.create_context().expect("mock context");
+        let surface = crate::SurfaceExchange::new_with_depth(&ctx, &MockWindow, 2, crate::types::SurfaceConfig::default())
+            .expect("mock surface exchange");
+        (ctx, surface)
+    }
+
     /// Advance `ctx`'s timeline with a minimal scheme submit (one clear-parcel node).
     ///
     /// Drops the temporary [`crate::Scheme`] before returning, which waits the

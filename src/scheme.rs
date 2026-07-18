@@ -2115,6 +2115,36 @@ impl Scheme {
         self.ir.nodes.len()
     }
 
+    /// Recorded task-graph nodes (tests / diagnostics only).
+    #[doc(hidden)]
+    pub fn ir_nodes(&self) -> &[crate::task_graph::TaskNode] {
+        &self.ir.nodes
+    }
+
+    /// True when the IR contains a copy-to-present blit node.
+    #[doc(hidden)]
+    pub fn test_has_copy_render_target_to_present(&self) -> bool {
+        use crate::task_graph::{NodeKind, ResourceId};
+        self.ir.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::CopyRenderTarget { dst, .. }
+                    if matches!(dst, ResourceId::PresentLease(_))
+            )
+        })
+    }
+
+    /// True when any dispatch node binds a present lease.
+    #[doc(hidden)]
+    pub fn test_has_present_lease_dispatch_binding(&self) -> bool {
+        use crate::task_graph::ResourceId;
+        self.ir.nodes.iter().any(|node| {
+            node.bindings
+                .iter()
+                .any(|b| matches!(b.resource, ResourceId::PresentLease(_)))
+        })
+    }
+
     /// Resolve pending upload-buffer stages into concrete handles for this submit.
     fn resolve_upload_buffers_for_submit(
         &self,
@@ -2718,19 +2748,25 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Declare a UAV write to a present lease (swapchain drawable).
+    /// Declare access to a present lease (swapchain drawable) at the current shader
+    /// resource slot index.
     ///
-    /// Appends a [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entry at the end of `resource_slots`
-    /// so the resolver can patch it to the correct UAV index at submit time.
-    /// May be called before or after other slot-binding calls on the same node.
-    pub fn with_present(mut self, lease: &PresentLease) -> Self {
+    /// Inserts [`PRESENT_LEASE_SLOT_PLACEHOLDER`] at the current position in
+    /// `resource_slots` so the resolver can patch it to the correct bindless index
+    /// at submit time. Call order must match the shader's resource parameter order.
+    pub fn with_present_access(mut self, lease: &PresentLease, access: NodeAccess) -> Self {
         let binding_id = self.scheme.intern_present_binding(lease);
         self.bindings.push(ResourceBinding {
             resource: ResourceId::PresentLease(binding_id),
-            access: NodeAccess::Write,
+            access,
         });
         self.resource_slots.push(PRESENT_LEASE_SLOT_PLACEHOLDER);
         self
+    }
+
+    /// Declare a UAV write to a present lease (swapchain drawable).
+    pub fn with_present(self, lease: &PresentLease) -> Self {
+        self.with_present_access(lease, NodeAccess::Write)
     }
 
     /// Finalize the node with fixed workgroup dimensions.
@@ -2750,6 +2786,25 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     fn push_dispatch_node(self, dispatch: DispatchDim) {
+        let present_bindings = self
+            .bindings
+            .iter()
+            .filter(|b| matches!(b.resource, ResourceId::PresentLease(_)))
+            .count();
+        let present_slots = self
+            .resource_slots
+            .iter()
+            .filter(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
+            .count();
+        debug_assert_eq!(
+            present_bindings,
+            present_slots,
+            "present lease bindings must align with PRESENT_LEASE_SLOT_PLACEHOLDER entries (label={})",
+            self.label
+        );
+        // Do not assert resource_slots.len() >= bindings.len(): samplers add slots
+        // without bindings, and with_buffer_dependency adds bindings without slots.
+        // Present placeholders are resolved by declaration order, not binding index.
         self.scheme.ir.nodes.push(TaskNode {
             label: self.label,
             bindings: self.bindings,
@@ -4180,6 +4235,193 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             }
             other => panic!("expected Dispatch node, got {other:?}"),
         }
+    }
+
+    fn mock_buf_then_present_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(
+            device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
+    buf[0] = 1u;
+    if (id.x == 0 && id.y == 0) {
+        dst[uint2(0, 0)] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#,
+        )
+        .expect("compile buf+present shader")
+    }
+
+    #[test]
+    fn with_present_placeholder_at_middle_shader_slot() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_buf_then_present_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let mut pool = RetainedPool::new(device.clone());
+        let buf = pool
+            .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n", &pipeline)
+            .with_parcel(&buf, NodeAccess::Read)
+            .with_present(&lease)
+            .dispatch(1, 1, 1);
+
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::Dispatch { resource_slots, .. } => {
+                assert_eq!(resource_slots.len(), 2);
+                assert_ne!(resource_slots[0], PRESENT_LEASE_SLOT_PLACEHOLDER);
+                assert_eq!(resource_slots[1], PRESENT_LEASE_SLOT_PLACEHOLDER);
+            }
+            other => panic!("expected Dispatch node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_present_access_records_readwrite_binding() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n", &pipeline)
+            .with_present_access(&lease, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let binding = scheme.ir.nodes[0]
+            .bindings
+            .iter()
+            .find(|b| b.resource == ResourceId::PresentLease(0))
+            .expect("present binding");
+        assert_eq!(binding.access, NodeAccess::ReadWrite);
+    }
+
+    fn mock_sampler_then_present_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(
+            device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
+    if (id.x == 0 && id.y == 0) {
+        dst[uint2(0, 0)] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#,
+        )
+        .expect("compile sampler+present shader")
+    }
+
+    #[test]
+    fn with_present_after_sampler_submits_and_presents() {
+        // Sampler contributes a resource slot without a hazard binding, so the
+        // PresentLease binding index is 0 while the placeholder is at slot 1.
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_sampler_then_present_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let sampler = crate::Sampler::linear(&device).expect("sampler");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n", &pipeline)
+            .with_parcel(&sampler, NodeAccess::Read)
+            .with_present(&lease)
+            .dispatch(1, 1, 1);
+        let transaction = scheme.grant_present(&lease).transaction();
+
+        let dispatch = scheme
+            .ir
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Dispatch { .. }))
+            .expect("dispatch node");
+        match &dispatch.kind {
+            NodeKind::Dispatch { resource_slots, .. } => {
+                assert_eq!(resource_slots.len(), 2);
+                assert_ne!(resource_slots[0], PRESENT_LEASE_SLOT_PLACEHOLDER);
+                assert_eq!(resource_slots[1], PRESENT_LEASE_SLOT_PLACEHOLDER);
+            }
+            other => panic!("expected Dispatch node, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch.bindings.len(),
+            1,
+            "sampler must not emit a hazard binding; only PresentLease remains"
+        );
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit with sampler-before-present");
+        let claim = transaction.claim(&mut submission).expect("claim");
+        claim.consume().expect("consume");
+        assert_eq!(
+            mock_present_count(&device),
+            before + 1,
+            "present placeholder after sampler must resolve through submit"
+        );
+    }
+
+    #[test]
+    fn with_present_after_buffer_dependency_submits_and_presents() {
+        // Dependency-only bindings omit shader slots, so PresentLease is binding
+        // index 1 while the placeholder is the only (index 0) resource slot.
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let mut pool = RetainedPool::new(device.clone());
+        let buf = pool
+            .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n", &pipeline)
+            .with_buffer_dependency(&buf, NodeAccess::Read)
+            .with_present(&lease)
+            .dispatch(1, 1, 1);
+        let transaction = scheme.grant_present(&lease).transaction();
+
+        let dispatch = scheme
+            .ir
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Dispatch { .. }))
+            .expect("dispatch node");
+        match &dispatch.kind {
+            NodeKind::Dispatch { resource_slots, .. } => {
+                assert_eq!(resource_slots, &[PRESENT_LEASE_SLOT_PLACEHOLDER]);
+            }
+            other => panic!("expected Dispatch node, got {other:?}"),
+        }
+        assert!(
+            dispatch.bindings.len() >= 2,
+            "dependency binding plus PresentLease expected; got {:?}",
+            dispatch.bindings
+        );
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit with dependency-before-present");
+        let claim = transaction.claim(&mut submission).expect("claim");
+        claim.consume().expect("consume");
+        assert_eq!(
+            mock_present_count(&device),
+            before + 1,
+            "present placeholder after dependency binding must resolve through submit"
+        );
     }
 
     fn scheme_lease_texture_for_test(device: &Arc<Device>, _ctx: &Context) -> crate::types::ResourceHandle {
