@@ -1,10 +1,9 @@
 //! Swapchain pool — N-backed present leases for retained schemes.
 //!
-//! A [`SwapchainPool`] wraps a [`Surface`] and supplies drawable backings for
-//! [`PresentLease`] handles acquired via [`SwapchainPool::lease`]. Callers may
-//! acquire a concrete drawable early via [`SwapchainPool::acquire_present`] (classic
-//! frame timing) or let [`crate::Scheme::submit`] defer acquire until the present
-//! partition is about to run.
+//! A swapchain pool wraps a [`Surface`] and supplies drawable backings for
+//! [`PresentLease`] handles. Callers may acquire a concrete drawable early
+//! (classic frame timing) or let [`crate::Scheme::submit`] defer acquire until
+//! the present partition is about to run.
 
 use crate::backend::TextureHandle;
 use crate::context::Context;
@@ -51,8 +50,8 @@ pub(crate) struct SwapchainPool {
 /// Pool-local present lease handle.
 ///
 /// The physical backing rotates per submission. Schemes map `(pool, id)` to a
-/// scheme-unique [`crate::task_graph::ResourceId::PresentLease`] binding so two
-/// pools that both use local id `0` remain distinct.
+/// scheme-unique present-lease binding so two pools that both use local id `0`
+/// remain distinct.
 pub struct PresentLease {
     pub(crate) id: u32,
     pub(crate) pool: Arc<SwapchainPoolInner>,
@@ -70,7 +69,7 @@ impl PresentLease {
 /// Dropping an unconsumed claim cancels the underlying [`Surface`] frame so the
 /// image is not presented.
 pub struct AcquiredPresent {
-    /// Pool-local lease id ([`PresentLease::id`]), not the scheme binding id.
+    /// Pool-local lease id (matches a [`PresentLease`], not the scheme binding id).
     lease_id: u32,
     pool: Arc<SwapchainPoolInner>,
     slot_id: u32,

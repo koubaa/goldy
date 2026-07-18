@@ -1712,6 +1712,7 @@ impl IrSubmitState {
     ///
     /// On failure after some partitions succeeded, `partial` / `partial_tv` hold
     /// progress for high-water and referenced-present cleanup.
+    #[allow(clippy::too_many_arguments)] // present/upload/partial progress are all required at call sites
     pub fn submit_pipelined_and_retain_with_presents<'a>(
         &'a mut self,
         ctx: &crate::Context,
