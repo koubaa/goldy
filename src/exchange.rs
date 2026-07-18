@@ -142,9 +142,16 @@ impl SurfaceExchange {
 
     /// Record a stable texture → surface relationship and return an erased transaction.
     ///
-    /// Does not acquire a drawable.
+    /// Does not acquire a drawable. Each surface lease may be bound at most once per
+    /// scheme; a second `bind` for the same lease returns an error rather than
+    /// appending another copy that would share one claim slot.
     pub fn bind(&self, scheme: &mut Scheme, source: &Texture) -> Result<Transaction, GoldyError> {
         let lease = self.pool.lease();
+        if scheme.has_present_grant_for(&lease) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "SurfaceExchange::bind: lease already bound in this scheme"
+            )));
+        }
         scheme.copy_texture_to_present(source, &lease);
         let grant = scheme.grant_present(&lease);
         Ok(Transaction {

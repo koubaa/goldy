@@ -1528,8 +1528,13 @@ impl Scheme {
                         present_grant_pools.len()
                     )));
                 }
-                for ((binding_id, pool, pool_lease_id), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
-                    if !std::sync::Arc::ptr_eq(claim.pool(), pool) || claim.lease_id() != *pool_lease_id {
+                // Validate every claim before converting any to Frame. A mid-loop
+                // Err after into_parts() would drop Frame and implicitly present.
+                for ((binding_id, pool, pool_lease_id), claim) in
+                    present_grant_pools.iter().zip(acquired.iter())
+                {
+                    if !std::sync::Arc::ptr_eq(claim.pool(), pool) || claim.lease_id() != *pool_lease_id
+                    {
                         return Err(GoldyError::Backend(anyhow::anyhow!(
                             "submit_with_acquired_presents: lease provenance mismatch \
                              (binding {}, expected pool-local {}, claim pool-local {})",
@@ -1538,7 +1543,10 @@ impl Scheme {
                             claim.lease_id()
                         )));
                     }
-                    let (_lease_id, _pool, slot_id, handle, uav_index, surface_frame) = claim.into_parts();
+                }
+                for ((binding_id, _, _), claim) in present_grant_pools.iter().zip(acquired.drain(..)) {
+                    let (_lease_id, _pool, slot_id, handle, uav_index, surface_frame) =
+                        claim.into_parts();
                     present_slots.push(ResolvedPresentSlot {
                         binding_id: *binding_id,
                         slot_id,
@@ -1859,6 +1867,18 @@ impl Scheme {
             pool_lease_id: lease.id,
         });
         id
+    }
+
+    /// True when this scheme already has a present grant for `lease`.
+    pub(crate) fn has_present_grant_for(&self, lease: &PresentLease) -> bool {
+        self.present_bindings
+            .iter()
+            .enumerate()
+            .any(|(i, binding)| {
+                Arc::ptr_eq(&binding.pool, &lease.pool)
+                    && binding.pool_lease_id == lease.id
+                    && self.present_grants.iter().any(|g| g.binding_id == i as u32)
+            })
     }
 
     /// Record a present easement grant over a swapchain lease.
@@ -4278,6 +4298,149 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .submit_with_acquired_presents(vec![wrong])
             .expect_err("wrong pool must be rejected");
         assert!(err.to_string().contains("provenance"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn eager_acquire_mixed_provenance_cancels_without_presenting() {
+        // First claim is valid; second is from the wrong pool. Validation must reject
+        // before converting either AcquiredPresent into Frame, otherwise Drop would
+        // implicitly present the already-converted frame.
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+
+        let mut scheme = Scheme::new(&ctx);
+        let _left = scheme.grant_present(&left_pool.lease());
+        let _right = scheme.grant_present(&right_pool.lease());
+
+        let good = left_pool
+            .acquire_present(&left_pool.lease())
+            .expect("acquire left");
+        let wrong = left_pool
+            .acquire_present(&left_pool.lease())
+            .expect("acquire left again for wrong slot");
+        // Swap: grant order is left then right, but second claim is from left pool.
+        let before = mock_present_count(&device);
+        let err = scheme
+            .submit_with_acquired_presents(vec![good, wrong])
+            .expect_err("second claim must fail provenance for right grant");
+        assert!(err.to_string().contains("provenance"), "unexpected: {err}");
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "rejected eager submit must not present any converted frame"
+        );
+    }
+
+    #[test]
+    fn surface_exchange_bind_rejects_duplicate_for_same_lease() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let surface = crate::exchange::SurfaceExchange::new(
+            &ctx,
+            &MockWindow,
+            crate::types::SurfaceConfig::default(),
+        )
+        .expect("surface exchange");
+        let tex_a = mock_direct_texture(&device);
+        let tex_b = mock_direct_texture(&device);
+
+        let mut scheme = Scheme::new(&ctx);
+        let first = surface.bind(&mut scheme, &tex_a).expect("first bind");
+        let err = surface
+            .bind(&mut scheme, &tex_b)
+            .expect_err("second bind for same lease must fail");
+        assert!(
+            err.to_string().contains("already bound"),
+            "unexpected: {err}"
+        );
+        // First transaction still works; only one copy+grant recorded beyond the bind path.
+        let copy_count = scheme
+            .ir
+            .nodes
+            .iter()
+            .filter(|n| n.label == "copy_texture_to_present")
+            .count();
+        assert_eq!(copy_count, 1, "rejected bind must not append a second copy");
+        let mut submission = scheme.submit().expect("submit");
+        first.claim(&mut submission).expect("claim").consume().expect("present");
+    }
+
+    #[test]
+    fn two_surfaces_bind_copy_resolve_and_claim_independently() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let left = crate::exchange::SurfaceExchange::new(
+            &ctx,
+            &MockWindow,
+            crate::types::SurfaceConfig::default(),
+        )
+        .expect("left surface");
+        let right = crate::exchange::SurfaceExchange::new(
+            &ctx,
+            &MockWindow,
+            crate::types::SurfaceConfig::default(),
+        )
+        .expect("right surface");
+        let left_tex = mock_direct_texture(&device);
+        let right_tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_left", &pipeline)
+            .with_parcel(&left_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("write_right", &pipeline)
+            .with_parcel(&right_tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let left_tx = left.bind(&mut scheme, &left_tex).expect("bind left");
+        let right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
+
+        assert_ne!(left_tx.binding_id(), right_tx.binding_id());
+        let copy_bindings: Vec<_> = scheme
+            .ir
+            .nodes
+            .iter()
+            .filter(|n| n.label == "copy_texture_to_present")
+            .map(|n| match &n.kind {
+                NodeKind::CopyTexture { dst, .. } => *dst,
+                other => panic!("expected CopyTexture, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(copy_bindings.len(), 2);
+        assert_eq!(
+            copy_bindings[0],
+            ResourceId::PresentLease(left_tx.binding_id())
+        );
+        assert_eq!(
+            copy_bindings[1],
+            ResourceId::PresentLease(right_tx.binding_id())
+        );
+
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        let left_stamp = submission
+            .present_frame_submit_timeline(0)
+            .expect("left claim must hold a stamped frame");
+        let right_stamp = submission
+            .present_frame_submit_timeline(1)
+            .expect("right claim must hold a stamped frame");
+        assert_eq!(left_stamp, submission.timeline_value());
+        assert_eq!(right_stamp, submission.timeline_value());
+
+        let left_claim = left_tx.claim(&mut submission).expect("left claim");
+        let right_claim = right_tx.claim(&mut submission).expect("right claim");
+        left_claim.consume().expect("left present");
+        assert_eq!(mock_present_count(&device), before + 1);
+        right_claim.discard().expect("right discard");
+        assert_eq!(
+            mock_present_count(&device),
+            before + 1,
+            "discard must not present the other surface"
+        );
     }
 
     #[test]
