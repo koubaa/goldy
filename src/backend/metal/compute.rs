@@ -422,6 +422,7 @@ pub(super) fn create(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     compute_shader: ShaderHandle,
+    debug_name: Option<&str>,
 ) -> Result<ComputePipelineHandle> {
     super::shader::ensure_stage_compiled(state, compute_shader, SlangStage::Compute)?;
 
@@ -444,13 +445,25 @@ pub(super) fn create(
         .as_ref()
         .expect("compute library must be compiled before pipeline creation");
 
+    let shader_debug_name = debug_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("compute_shader#{compute_shader}"));
+
+    library.set_label(&shader_debug_name);
+
     let function = library
         .get_function("cs_main", None)
         .map_err(|e| anyhow::anyhow!("Failed to get compute function: {}", e))?;
+    function.set_label(&shader_debug_name);
 
+    // Build via descriptor so the PSO itself carries the human-readable label
+    // (visible in Instruments / Xcode Metal Debugger).
+    let desc = mtl::ComputePipelineDescriptor::new();
+    desc.set_label(&shader_debug_name);
+    desc.set_compute_function(Some(&function));
     let pipeline = logical_device
         .device
-        .new_compute_pipeline_state_with_function(&function)
+        .new_compute_pipeline_state(&desc)
         .map_err(|e| anyhow::anyhow!("Failed to create compute pipeline: {}", e))?;
 
     let handle = state.next_compute_pipeline_handle;
@@ -462,8 +475,6 @@ pub(super) fn create(
         .and_then(|s| s.reflection.as_ref())
         .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
         .unwrap_or_default();
-
-    let shader_debug_name = format!("compute_shader#{compute_shader}");
 
     state.compute_pipelines.insert(
         handle,
@@ -1015,10 +1026,14 @@ pub(super) fn record_commands_to_buffer(
                     if super::api_log::enabled() {
                         super::api_log::log_dispatch(*label, *workgroups_x, *workgroups_y, *workgroups_z);
                     }
-                    guard
-                        .compute
-                        .expect("encoder must be set after ensure_compute!()")
-                        .dispatch_thread_groups(threadgroups, threads_per_group);
+                    let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
+                    if let Some(name) = *label {
+                        enc.push_debug_group(name);
+                    }
+                    enc.dispatch_thread_groups(threadgroups, threads_per_group);
+                    if label.is_some() {
+                        enc.pop_debug_group();
+                    }
                 }
             }
             GpuCommand::DispatchBatch { label, arg_data, count } => {
@@ -1047,6 +1062,9 @@ pub(super) fn record_commands_to_buffer(
                     };
                     let row_offset = prologue_row.map_or(0, |r| r * crate::frame_table::FRAME_TABLE_ROW_STRIDE);
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
+                    if let Some(name) = *label {
+                        enc.push_debug_group(name);
+                    }
                     for i in 0..entry_count {
                         let base = i * stride;
                         let layout_slice = &arg_data[base..base + push_size];
@@ -1083,6 +1101,9 @@ pub(super) fn record_commands_to_buffer(
                         };
                         enc.dispatch_thread_groups(threadgroups, threads_per_group);
                     }
+                    if label.is_some() {
+                        enc.pop_debug_group();
+                    }
                 }
             }
             GpuCommand::DispatchIndirect { label, buffer, offset } => {
@@ -1100,10 +1121,14 @@ pub(super) fn record_commands_to_buffer(
                 if super::api_log::enabled() {
                     super::api_log::log_dispatch_indirect(*label, *buffer, *offset);
                 }
-                guard
-                    .compute
-                    .expect("encoder must be set after ensure_compute!()")
-                    .dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
+                let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
+                if let Some(name) = *label {
+                    enc.push_debug_group(name);
+                }
+                enc.dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
+                if label.is_some() {
+                    enc.pop_debug_group();
+                }
             }
             GpuCommand::CopyTexture { src, dst } => {
                 ensure_blit_tex!(*src);
@@ -1503,9 +1528,14 @@ pub(super) fn submit(
         None
     };
 
-    let owned_command_buffer = {
+    let (_capture_session, owned_command_buffer) = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        ld.command_queue.new_command_buffer().to_owned()
+        let capture_session = super::metal_capture::CaptureSession::start(ld.command_queue.as_ref());
+        let cb = ld.command_queue.new_command_buffer().to_owned();
+        if capture_session.is_active() {
+            cb.set_label("goldy.capture.submit");
+        }
+        (capture_session, cb)
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
     encode_wait_for_epochs(state, command_buffer_ref, sync)?;
@@ -1561,6 +1591,7 @@ pub(super) fn submit(
         true,
         Some(compute_commit_instant),
     )?;
+    // CaptureSession drops here (after commit) and stops the capture.
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1655,9 +1686,14 @@ pub(super) fn submit_graph(
         None
     };
 
-    let owned_command_buffer = {
+    let (_capture_session, owned_command_buffer) = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        ld.command_queue.new_command_buffer().to_owned()
+        let capture_session = super::metal_capture::CaptureSession::start(ld.command_queue.as_ref());
+        let cb = ld.command_queue.new_command_buffer().to_owned();
+        if capture_session.is_active() {
+            cb.set_label("goldy.capture.submit_graph");
+        }
+        (capture_session, cb)
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
     encode_wait_for_epochs(state, command_buffer_ref, sync)?;

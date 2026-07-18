@@ -1639,10 +1639,16 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
 
     // Compute pipeline management
     /// Create a compute pipeline from a compute shader.
+    ///
+    /// `debug_name` is an optional human-readable label (e.g. `"fine_area"`) used for
+    /// GPU debugger / Instruments identification. Backends that support object labels
+    /// apply it to the underlying PSO (and Metal function). When `None`, backends use
+    /// a generic fallback such as `compute_shader#N`.
     fn create_compute_pipeline(
         &mut self,
         device: DeviceHandle,
         compute_shader: ShaderHandle,
+        debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle>;
 
     /// Destroy a compute pipeline.

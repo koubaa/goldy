@@ -47,6 +47,20 @@ GOLDY_VALIDATION=1 cargo run --example triangle
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `GOLDY_DUMP_SHADERS` | Directory path | *(not set)* | Dump compiled shader bytecode (SPIR-V, DXIL, MSL) to the specified directory. Files are written at shader compilation time. Useful for inspecting what Slang produces for each backend. |
+| `GOLDY_GPU_PROFILE` | Any non-empty value; optional `chrome[=path]` | *(not set)* | Enable GPU timestamp profiling logs. On Vulkan/DX12, records per-dispatch GPU durations. On Metal, records command-buffer GPU duration. `chrome` / `chrome=/path.json` also writes a Perfetto Chrome-trace JSON file. Disables retained CB reuse while active. |
+| `GOLDY_METAL_CAPTURE` | `1` / path / `path,skip=N,frames=M` | *(not set)* | **Metal only.** Opt-in programmatic `MTLCaptureManager` GPU capture for Xcode Metal Debugger. `1`/`true`/`yes` captures to Developer Tools; a path writes a `.gputrace`. Optional `skip=N` (default 60) skips warm-up submits; `frames=M` (default 1) captures M submits. Automatically sets `METAL_CAPTURE_ENABLED=1` if unset. Open the `.gputrace` in Xcode → Performance to inspect register pressure, occupancy, and per-line shader costs. |
+| `GOLDY_API_LOG` | File path | *(not set)* | **Metal only.** Append NDJSON Metal API call traces (dispatches, encoder open/close, commits) to the given file. |
+| `GOLDY_API_LOG_SYNC` | `1` | *(not set)* | Force synchronous `GOLDY_API_LOG` writes (for tests). |
+
+### Metal capture example
+
+```bash
+# Warm up 120 submits, then write one .gputrace for Xcode Metal Debugger
+GOLDY_METAL_CAPTURE=/tmp/ekrano-tiger.gputrace,skip=120,frames=1 \
+  target/release/with_winit_bin --timeout-secs 12 --no-vsync
+
+# Open /tmp/ekrano-tiger.gputrace in Xcode → click Performance → select fine_area
+```
 
 ## Interop with System Variables
 
@@ -57,3 +71,4 @@ Goldy also respects these non-Goldy environment variables:
 | `VK_INSTANCE_LAYERS` | Vulkan | If set to include `VK_LAYER_KHRONOS_validation`, Goldy enables Vulkan validation regardless of `GOLDY_VALIDATION`. |
 | `VK_LAYER_PATH` | Vulkan | Standard Vulkan loader variable for locating validation layer manifests. |
 | `MTL_SHADER_VALIDATION` | Metal | When `GOLDY_VALIDATION` enables API validation and this variable is unset, Goldy sets it to `1` before creating the first Metal device. If you set it yourself, Goldy does not override it. |
+| `METAL_CAPTURE_ENABLED` | Metal | Required for programmatic GPU capture outside Xcode. Goldy sets this to `1` automatically when `GOLDY_METAL_CAPTURE` is set (if unset). |

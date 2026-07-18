@@ -525,11 +525,14 @@ pub(super) fn create(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     compute_shader: ShaderHandle,
+    debug_name: Option<&str>,
 ) -> Result<ComputePipelineHandle> {
     // Compile shader on-demand
     let cs_bytecode = shader::ensure_stage_compiled(state, compute_shader, crate::slang::SlangStage::Compute)?;
 
-    let shader_debug_name = format!("compute_shader#{compute_shader}");
+    let shader_debug_name = debug_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("compute_shader#{compute_shader}"));
 
     let key = pso_cache::compute_pso_key(&cs_bytecode);
 

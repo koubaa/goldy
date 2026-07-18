@@ -52,12 +52,22 @@ pub struct ComputePipeline {
 impl ComputePipeline {
     /// Create a new compute pipeline.
     pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self> {
-        tracing::debug!("Creating compute pipeline");
+        Self::new_with_label(device, compute_shader, None)
+    }
+
+    /// Create a compute pipeline with an optional debug label for GPU tools.
+    ///
+    /// On Metal the label is applied to the `MTLFunction` and compute PSO so
+    /// Instruments / Xcode Metal Debugger can distinguish shaders (e.g. `"fine_area"`
+    /// instead of a generic `cs_main`). Other backends store it for CPU-side
+    /// diagnostics.
+    pub fn new_with_label(device: &Device, compute_shader: &ShaderModule, label: Option<&str>) -> Result<Self> {
+        tracing::debug!(?label, "Creating compute pipeline");
         let mut backend = device.inner.backend.lock().unwrap();
 
         let handle = {
             let _tz = crate::tracy_zone!("goldy.compute_pipeline.create_pso");
-            backend.create_compute_pipeline(device.inner.handle, compute_shader.handle)?
+            backend.create_compute_pipeline(device.inner.handle, compute_shader.handle, label)?
         };
 
         tracing::debug!("Compute pipeline created");

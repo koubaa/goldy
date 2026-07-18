@@ -1338,8 +1338,9 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         device_handle: DeviceHandle,
         compute_shader: ShaderHandle,
+        debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle> {
-        let handle = compute::create(&mut self.state, device_handle, compute_shader)?;
+        let handle = compute::create(&mut self.state, device_handle, compute_shader, debug_name)?;
 
         let (cats, slot_kinds, strides) = self
             .state

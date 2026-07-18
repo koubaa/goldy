@@ -1868,6 +1868,7 @@ impl GpuBackend for MockBackend {
         &mut self,
         device: DeviceHandle,
         _compute_shader: ShaderHandle,
+        _debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
