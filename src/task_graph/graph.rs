@@ -309,7 +309,7 @@ fn ensure_partition_retired_before_rerecord(context: &crate::Context, prev_tv: O
 fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
     waves.iter().flat_map(|w| &w.node_indices).any(|&ni| {
         let node = &ir.nodes[ni];
-        if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
+        if matches!(node.kind, NodeKind::GrantRead { .. }) {
             return false;
         }
         node.bindings
@@ -446,10 +446,6 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
             }
             NodeKind::GrantRead { grant_id } => {
                 3u8.hash(&mut h);
-                grant_id.hash(&mut h);
-            }
-            NodeKind::GrantPresent { grant_id } => {
-                4u8.hash(&mut h);
                 grant_id.hash(&mut h);
             }
             NodeKind::CopyBufferToTexture {
@@ -3077,14 +3073,6 @@ mod partitioning_tests {
         }
     }
 
-    fn grant_present_node(label: &'static str, grant_id: u32) -> TaskNode {
-        TaskNode {
-            label,
-            bindings: vec![],
-            kind: NodeKind::GrantPresent { grant_id },
-        }
-    }
-
     // ------------------------------------------------------------------
     // Analysis helpers — logical partitions and actualized cache
     // ------------------------------------------------------------------
@@ -3293,13 +3281,12 @@ mod partitioning_tests {
 
     #[test]
     fn render_then_copy_present_two_logical_partitions() {
-        // RenderPass → CopyRenderTarget(PresentLease) → GrantPresent
+        // RenderPass → CopyRenderTarget(PresentLease)
         // Logical split: render partition | present partition.
         let ir = GraphIR {
             nodes: vec![
                 render_pass_node("draw", 10),
                 copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
-                grant_present_node("grant", 0),
             ],
         };
         let parts = logical_partitions(&ir);
@@ -3406,7 +3393,6 @@ mod partitioning_tests {
                 dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 dispatch_node("post", 2, vec![(buf(0), NodeAccess::Read)], 1),
                 copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
-                grant_present_node("grant", 0),
             ],
         };
         let parts = logical_partitions(&ir);
@@ -3424,7 +3410,6 @@ mod partitioning_tests {
                 render_pass_node("draw", 10),
                 dispatch_node("post", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
-                grant_present_node("grant", 0),
             ],
         };
         let parts = logical_partitions(&ir);
@@ -3467,7 +3452,6 @@ mod partitioning_tests {
             nodes: vec![
                 dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
-                grant_present_node("grant", 0),
             ],
         };
         let entry = build_cache(&ir);
@@ -3481,7 +3465,6 @@ mod partitioning_tests {
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 render_pass_node("draw", 10),
                 copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
-                grant_present_node("grant", 0),
             ],
         };
         let entry = build_cache(&ir);
@@ -3670,7 +3653,6 @@ mod partitioning_tests {
         let nodes = vec![
             render_pass_node("rp", 10),
             copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
-            grant_present_node("grant", 0),
         ];
         assert!(
             can_retain_single_wave(nodes),

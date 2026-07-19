@@ -388,12 +388,76 @@ struct PresentBinding {
     pool_lease_id: u32,
 }
 
-struct PresentGrantInfo {
+struct PresentTransactionInfo {
     /// Scheme-unique binding id used in IR as [`ResourceId::PresentLease`].
     binding_id: u32,
     pool: Arc<crate::swapchain_pool::SwapchainPoolInner>,
     /// Pool-local lease id for eager-acquire provenance checks.
     pool_lease_id: u32,
+}
+
+/// Validate registered present exchanges against real drawable IR accesses.
+fn validate_present_exchange_bindings(
+    ir: &GraphIR,
+    present_transactions: &[PresentTransactionInfo],
+) -> Result<(), GoldyError> {
+    use std::collections::{HashMap, HashSet};
+
+    let registered: HashSet<u32> = present_transactions.iter().map(|t| t.binding_id).collect();
+
+    let mut first_access: HashMap<u32, NodeAccess> = HashMap::new();
+    let mut has_write: HashSet<u32> = HashSet::new();
+    let mut accessed: HashSet<u32> = HashSet::new();
+
+    for node in &ir.nodes {
+        for b in &node.bindings {
+            let ResourceId::PresentLease(id) = b.resource else {
+                continue;
+            };
+            accessed.insert(id);
+            if b.access.writes() {
+                has_write.insert(id);
+            }
+            first_access.entry(id).or_insert(b.access);
+        }
+    }
+
+    for tx in present_transactions {
+        if !accessed.contains(&tx.binding_id) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "present exchange binding {} registered but scheme never accesses its PresentLease",
+                tx.binding_id
+            )));
+        }
+        if !has_write.contains(&tx.binding_id) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "present exchange binding {} has no Write/ReadWrite access to its PresentLease",
+                tx.binding_id
+            )));
+        }
+        match first_access.get(&tx.binding_id) {
+            Some(NodeAccess::Write) => {}
+            Some(other) => {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "present exchange binding {}: first PresentLease access must be Write, got {:?}",
+                    tx.binding_id,
+                    other
+                )));
+            }
+            None => unreachable!("accessed set implies first_access entry"),
+        }
+    }
+
+    for id in accessed {
+        if !registered.contains(&id) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "PresentLease binding {} accessed in IR but no exchange transaction registered",
+                id
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Parcel stamps read by a present easement for `binding_id` (copy-to-present sources).
@@ -433,13 +497,13 @@ fn present_easement_source_stamps(
 
 fn claim_present_easement_promises(
     ir: &GraphIR,
-    present_grants: &[PresentGrantInfo],
+    present_transactions: &[PresentTransactionInfo],
     resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Mutex<Option<PromiseResolver>>> {
-    let mut resolvers = Vec::with_capacity(present_grants.len());
-    for grant in present_grants {
+    let mut resolvers = Vec::with_capacity(present_transactions.len());
+    for tx in present_transactions {
         let (promise, resolver) = TimelinePromise::new();
-        for stamp in present_easement_source_stamps(ir, grant.binding_id, resource_stamps) {
+        for stamp in present_easement_source_stamps(ir, tx.binding_id, resource_stamps) {
             stamp.push_pending(promise.clone());
         }
         resolvers.push(Mutex::new(Some(resolver)));
@@ -768,8 +832,8 @@ pub struct Scheme {
     grants: Vec<GrantInfo>,
     /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
     present_bindings: Vec<PresentBinding>,
-    /// Present easement grants: one claim slot per grant, keyed by dense present_idx.
-    present_grants: Vec<PresentGrantInfo>,
+    /// Registered present exchanges: one claim slot per transaction, keyed by dense present_idx.
+    present_transactions: Vec<PresentTransactionInfo>,
 }
 
 impl Scheme {
@@ -790,7 +854,7 @@ impl Scheme {
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             grants: Vec::new(),
             present_bindings: Vec::new(),
-            present_grants: Vec::new(),
+            present_transactions: Vec::new(),
         }
     }
 
@@ -1437,12 +1501,9 @@ impl Scheme {
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
     ///
-    /// When present grants are recorded and no early acquire was supplied, swapchain
-    /// drawables are acquired lazily — after non-present partitions have been submitted
-    /// — and stored on the returned [`Submission`] for [`Transaction::claim`]. This
-    /// lets GPU coarse/fine work overlap the DXGI frame-latency wait (Exchange
-    /// option/exercise split). Prefer [`Self::submit_with_acquired_presents`] to match
-    /// classic task-graph timing (acquire at frame start).
+    /// When present exchange transactions are recorded and no early acquire was supplied,
+    /// swapchain drawables are acquired lazily — after non-present partitions have been
+    /// submitted — and stored on the returned [`Submission`] for [`Transaction::claim`].
     ///
     /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
     /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
@@ -1475,8 +1536,10 @@ impl Scheme {
             }
         }
 
+        validate_present_exchange_bindings(&self.ir, &self.present_transactions)?;
+
         let submit_result = {
-            let grant_count = self.present_grants.len();
+            let grant_count = self.present_transactions.len();
             let mut present_slots = Vec::with_capacity(grant_count);
             // Fixed-size slots indexed by grant order so partial acquires leave holes
             // rather than shifting later bindings.
@@ -1488,7 +1551,7 @@ impl Scheme {
             // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
             // across the mutable `submit_state` call below.
             let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>, u32)> = self
-                .present_grants
+                .present_transactions
                 .iter()
                 .map(|g| (g.binding_id, Arc::clone(&g.pool), g.pool_lease_id))
                 .collect();
@@ -1629,7 +1692,11 @@ impl Scheme {
 
         // Stamp each acquired frame with the timeline of the partition that wrote it.
         for (binding_id, binding_tv) in &part_result.present_binding_tvs {
-            if let Some(idx) = self.present_grants.iter().position(|g| g.binding_id == *binding_id) {
+            if let Some(idx) = self
+                .present_transactions
+                .iter()
+                .position(|g| g.binding_id == *binding_id)
+            {
                 if let Ok(mut slot) = surface_frames[idx].lock() {
                     if let Some(frame) = slot.as_mut() {
                         frame.note_submit_timeline(*binding_tv);
@@ -1705,8 +1772,11 @@ impl Scheme {
             );
         }
 
-        let present_resolvers =
-            claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
+        let present_resolvers = claim_present_easement_promises(
+            &self.ir,
+            &self.present_transactions,
+            self.submit_state.resource_stamps(),
+        );
         let claim_generations: Vec<u64> = surface_generations
             .into_iter()
             .map(|m| *m.lock().unwrap_or_else(|e| e.into_inner()))
@@ -1729,7 +1799,7 @@ impl Scheme {
     ) -> GoldyError {
         self.ctx.advance_high_water_timeline(partial_tv);
 
-        for (grant, frame_mutex) in self.present_grants.iter().zip(surface_frames) {
+        for (grant, frame_mutex) in self.present_transactions.iter().zip(surface_frames) {
             let submitted_tv = partial
                 .present_binding_tvs
                 .iter()
@@ -1770,7 +1840,7 @@ impl Scheme {
         // Resolve source WAR from the known copy/present-partition timeline immediately.
         // Claim consumption waits for presentation independently; it must not gate source reuse.
         let mut claims = Vec::with_capacity(present_frames.len());
-        let claim_bindings: Vec<u32> = self.present_grants.iter().map(|g| g.binding_id).collect();
+        let claim_bindings: Vec<u32> = self.present_transactions.iter().map(|g| g.binding_id).collect();
         debug_assert_eq!(
             claim_bindings.len(),
             present_frames.len(),
@@ -1905,50 +1975,39 @@ impl Scheme {
         id
     }
 
-    /// True when this scheme already has a present grant for `lease`.
-    pub(crate) fn has_present_grant_for(&self, lease: &PresentLease) -> bool {
+    /// True when this scheme already has a present exchange transaction for `lease`.
+    pub(crate) fn has_present_transaction_for(&self, lease: &PresentLease) -> bool {
         self.present_bindings.iter().enumerate().any(|(i, binding)| {
             Arc::ptr_eq(&binding.pool, &lease.pool)
                 && binding.pool_lease_id == lease.id
-                && self.present_grants.iter().any(|g| g.binding_id == i as u32)
+                && self.present_transactions.iter().any(|t| t.binding_id == i as u32)
         })
     }
 
     /// Record a present exchange over a swapchain lease and return its transaction.
     ///
-    /// Called by [`crate::SurfaceExchange`] bind helpers. Calling twice for the same
-    /// lease reuses the existing grant rather than creating a second claim slot.
+    /// Metadata-only: does not append IR nodes or touch the drawable. Real
+    /// [`PresentLease`] bindings in dispatch/copy nodes determine deferred acquire,
+    /// ordering, and settlement. Called by [`crate::SurfaceExchange`] bind helpers.
+    /// Calling twice for the same lease reuses the existing transaction rather than
+    /// creating a second claim slot.
     pub(crate) fn register_present_exchange(&mut self, lease: &PresentLease) -> Transaction {
         let binding_id = self.intern_present_binding(lease);
         let generation = lease.generation_handle();
         let present_idx = if let Some((idx, _)) = self
-            .present_grants
+            .present_transactions
             .iter()
             .enumerate()
-            .find(|(_, g)| g.binding_id == binding_id)
+            .find(|(_, t)| t.binding_id == binding_id)
         {
             idx as u32
         } else {
             self.dirty = true;
-            // `ir_grant_id` is the globally-unique ID used only for IR fingerprinting.
-            // `present_idx` is the dense index into claim slots built by iterating
-            // `present_grants` at submit time; the two must be kept independent so
-            // interleaved read grants do not corrupt the present vec index.
-            let ir_grant_id = self.next_grant_id;
-            self.next_grant_id += 1;
-            let present_idx = self.present_grants.len() as u32;
-            self.present_grants.push(PresentGrantInfo {
+            let present_idx = self.present_transactions.len() as u32;
+            self.present_transactions.push(PresentTransactionInfo {
                 binding_id,
                 pool: Arc::clone(&lease.pool),
                 pool_lease_id: lease.id,
-            });
-            self.ir.nodes.push(TaskNode {
-                label: "grant_present",
-                bindings: vec![ResourceBinding {
-                    resource: ResourceId::PresentLease(binding_id),
-                    access: NodeAccess::Read,
-                }],
-                kind: NodeKind::GrantPresent { grant_id: ir_grant_id },
             });
             present_idx
         };
@@ -2797,8 +2856,7 @@ impl<'a> SchemeNodeBuilder<'a> {
             .filter(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
             .count();
         debug_assert_eq!(
-            present_bindings,
-            present_slots,
+            present_bindings, present_slots,
             "present lease bindings must align with PRESENT_LEASE_SLOT_PLACEHOLDER entries (label={})",
             self.label
         );
@@ -3909,8 +3967,16 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         tx.claim(submission).expect("claim").consume().expect("present");
     }
 
+    fn register_exchange_with_copy(scheme: &mut Scheme, lease: &crate::swapchain_pool::PresentLease) -> Transaction {
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
+        scheme.copy_to_present(&rt, lease);
+        scheme.register_present_exchange(lease)
+    }
+
     #[test]
-    fn grant_present_appends_ir_node() {
+    fn register_present_exchange_is_metadata_only() {
         let device = mock_device();
         let (ctx, pool) = mock_swapchain_pool(&device);
         let lease = pool.lease();
@@ -3918,18 +3984,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         assert_eq!(scheme.ir_node_count(), 0);
 
-        let grant = scheme.register_present_exchange(&lease);
-        assert_eq!(scheme.ir_node_count(), 1);
-
-        match &scheme.ir.nodes[0].kind {
-            NodeKind::GrantPresent { grant_id: 0 } => {}
-            other => panic!("expected GrantPresent{{grant_id:0}}, got {other:?}"),
-        }
-        assert_eq!(grant.key.present_idx, 0);
+        let tx = scheme.register_present_exchange(&lease);
+        assert_eq!(scheme.ir_node_count(), 0, "registration must not append IR nodes");
+        assert_eq!(tx.key.present_idx, 0);
     }
 
     #[test]
-    fn grant_present_marks_dirty() {
+    fn register_present_exchange_marks_dirty() {
         let device = mock_device();
         let (ctx, pool) = mock_swapchain_pool(&device);
         let lease = pool.lease();
@@ -3937,15 +3998,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
 
-        // Submit to clear dirty.
-        // A scheme with only a GrantPresent (no dispatch) should still submit.
         scheme.register_present_exchange(&lease);
-        // grant_present must keep the dirty flag set.
-        assert!(scheme.is_dirty(), "grant_present must mark the scheme dirty");
+        assert!(
+            scheme.is_dirty(),
+            "register_present_exchange must mark the scheme dirty"
+        );
     }
 
     #[test]
-    fn grant_present_orders_after_writer() {
+    fn bind_before_write_leaves_coarse_in_non_present_partition() {
         use crate::task_graph::analysis;
 
         let device = mock_device();
@@ -3957,18 +4018,87 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let parcel = retained_buffer(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
+        scheme.register_present_exchange(&lease);
+        scheme
+            .node("coarse", &pipeline)
+            .with_parcel(&parcel, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("fine", &pipeline)
+            .with_parcel(&parcel, NodeAccess::Read)
+            .with_present(&lease)
+            .dispatch(1, 1, 1);
+
+        let partitions = analysis::describe_logical_partitions(
+            &scheme.ir,
+            &analysis::schedule_waves(&scheme.ir, &analysis::build_edges(&scheme.ir)),
+        );
+        assert!(
+            partitions.iter().any(|p| p.is_pure_compute() && !p.has_present),
+            "coarse compute must remain outside the present partition; got {partitions:?}"
+        );
+        assert!(
+            partitions.last().is_some_and(|p| p.has_present),
+            "present partition must be last; got {partitions:?}"
+        );
+    }
+
+    #[test]
+    fn submit_rejects_unused_present_transaction() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.register_present_exchange(&lease);
+
+        let err = scheme.submit().expect_err("submit without drawable access");
+        assert!(err.to_string().contains("never accesses"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn submit_rejects_unregistered_present_lease_access() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let mut pool = RetainedPool::new(device.clone());
+        let parcel = retained_buffer(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
         scheme
             .node("write", &pipeline)
             .with_parcel(&parcel, NodeAccess::Write)
             .with_present(&lease)
             .dispatch(1, 1, 1);
-        scheme.register_present_exchange(&lease);
 
-        let edges = analysis::build_edges(&scheme.ir);
-        // The dispatch (node 0) must precede the GrantPresent (node 1).
+        let err = scheme.submit().expect_err("submit without registered transaction");
         assert!(
-            edges.contains(&(0, 1)),
-            "dispatch (0) must precede grant_present (1); edges: {edges:?}"
+            err.to_string().contains("no exchange transaction"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn submit_rejects_first_present_access_that_reads() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.register_present_exchange(&lease);
+        scheme
+            .node("filter", &pipeline)
+            .with_present_access(&lease, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let err = scheme.submit().expect_err("first present touch must be Write");
+        assert!(
+            err.to_string().contains("first PresentLease access must be Write"),
+            "unexpected error: {err}"
         );
     }
 
@@ -4340,7 +4470,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&sampler, NodeAccess::Read)
             .with_present(&lease)
             .dispatch(1, 1, 1);
-        let transaction = scheme.grant_present(&lease).transaction();
+        let transaction = scheme.register_present_exchange(&lease);
 
         let dispatch = scheme
             .ir
@@ -4393,7 +4523,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .with_buffer_dependency(&buf, NodeAccess::Read)
             .with_present(&lease)
             .dispatch(1, 1, 1);
-        let transaction = scheme.grant_present(&lease).transaction();
+        let transaction = scheme.register_present_exchange(&lease);
 
         let dispatch = scheme
             .ir
@@ -4443,13 +4573,13 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_present_submit_increments_present_count() {
+    fn present_exchange_submit_increments_present_count() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let present = scheme.register_present_exchange(&lease);
+        let present = register_exchange_with_copy(&mut scheme, &lease);
 
         let before = mock_present_count(&device);
         let mut submission = scheme.submit().expect("first submit");
@@ -4465,7 +4595,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let transaction = scheme.register_present_exchange(&lease);
+        let transaction = register_exchange_with_copy(&mut scheme, &lease);
 
         let before = mock_present_count(&device);
         let mut submission = scheme.submit().expect("submit");
@@ -4486,7 +4616,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let _present = scheme.register_present_exchange(&lease);
+        let _present = register_exchange_with_copy(&mut scheme, &lease);
         let before = mock_present_count(&device);
         let submission = scheme.submit().expect("submit");
         drop(submission);
@@ -4505,7 +4635,15 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(right.id, 0);
 
         let mut scheme = Scheme::new(&ctx);
+        let rt_a = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        let rt_b = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        scheme.copy_to_present(&rt_a, &left);
         let left_grant = scheme.register_present_exchange(&left);
+        scheme.copy_to_present(&rt_b, &right);
         let right_grant = scheme.register_present_exchange(&right);
 
         assert_ne!(
@@ -4515,8 +4653,8 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(left_grant.key.present_idx, 0);
         assert_eq!(right_grant.key.present_idx, 1);
 
-        let left_res = scheme.ir.nodes[0].bindings[0].resource;
-        let right_res = scheme.ir.nodes[1].bindings[0].resource;
+        let left_res = scheme.ir.nodes[0].bindings[1].resource;
+        let right_res = scheme.ir.nodes[1].bindings[1].resource;
         assert_eq!(left_res, ResourceId::PresentLease(left_grant.binding_id));
         assert_eq!(right_res, ResourceId::PresentLease(right_grant.binding_id));
         assert_ne!(left_res, right_res);
@@ -4533,7 +4671,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let second = scheme.register_present_exchange(&lease);
         assert_eq!(first.key.present_idx, second.key.present_idx);
         assert_eq!(first.binding_id, second.binding_id);
-        assert_eq!(scheme.ir_node_count(), 1, "reuse must not append a second grant node");
+        assert_eq!(scheme.ir_node_count(), 0, "reuse must not append IR nodes");
     }
 
     #[test]
@@ -4544,8 +4682,18 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
 
         let mut scheme = Scheme::new(&ctx);
-        let left_tx = scheme.register_present_exchange(&left_pool.lease());
-        let right_tx = scheme.register_present_exchange(&right_pool.lease());
+        let left_lease = left_pool.lease();
+        let right_lease = right_pool.lease();
+        let rt_a = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        let rt_b = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        scheme.copy_to_present(&rt_a, &left_lease);
+        let left_tx = scheme.register_present_exchange(&left_lease);
+        scheme.copy_to_present(&rt_b, &right_lease);
+        let right_tx = scheme.register_present_exchange(&right_lease);
 
         let before = mock_present_count(&device);
         let mut submission = scheme.submit().expect("submit");
@@ -4569,6 +4717,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(left.id, right.id);
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        scheme.copy_to_present(&rt, &left);
         let _grant = scheme.register_present_exchange(&left);
 
         let wrong = right_pool.acquire_present(&right).expect("acquire right");
@@ -4589,8 +4741,18 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
 
         let mut scheme = Scheme::new(&ctx);
-        let _left = scheme.register_present_exchange(&left_pool.lease());
-        let _right = scheme.register_present_exchange(&right_pool.lease());
+        let left = left_pool.lease();
+        let right = right_pool.lease();
+        let rt_a = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        let rt_b = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        scheme.copy_to_present(&rt_a, &left);
+        let _left = scheme.register_present_exchange(&left);
+        scheme.copy_to_present(&rt_b, &right);
+        let _right = scheme.register_present_exchange(&right);
 
         let good = left_pool.acquire_present(&left_pool.lease()).expect("acquire left");
         let wrong = left_pool
@@ -4862,13 +5024,13 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_present_stamps_frame_with_present_partition_timeline() {
+    fn present_exchange_stamps_frame_with_present_partition_timeline() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let present = scheme.register_present_exchange(&lease);
+        let present = register_exchange_with_copy(&mut scheme, &lease);
 
         let submission = scheme.submit().expect("submit");
         // No read grants → finish_submit_frame keeps the present-partition tv as
@@ -4887,13 +5049,13 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_present_second_present_errors() {
+    fn present_exchange_second_present_errors() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let present = scheme.register_present_exchange(&lease);
+        let present = register_exchange_with_copy(&mut scheme, &lease);
 
         let mut submission = scheme.submit().expect("submit");
         consume_present(&present, &mut submission);
@@ -4911,7 +5073,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let present_a = scheme_a.register_present_exchange(&lease);
 
         let mut scheme_b = Scheme::new(&ctx);
-        scheme_b.register_present_exchange(&lease);
+        register_exchange_with_copy(&mut scheme_b, &lease);
         let mut submission_b = scheme_b.submit().expect("submit b");
 
         let err = present_a
@@ -4921,14 +5083,14 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_present_submit_twice_presents_independently() {
+    fn present_exchange_submit_twice_presents_independently() {
         // Each submit acquires a fresh swapchain frame; both must be presentable.
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let present = scheme.register_present_exchange(&lease);
+        let present = register_exchange_with_copy(&mut scheme, &lease);
 
         let mut submission1 = scheme.submit().expect("submit 1");
         let mut submission2 = scheme.submit().expect("submit 2");
@@ -4941,7 +5103,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_present_scheme_records_once_per_slot() {
+    fn present_exchange_scheme_records_once_per_slot() {
         // The present-aware retention path must record the first time a given
         // swapchain slot is seen and resubmit from cache on subsequent encounters.
         // Because the mock backend cycles through slots, the N-th submit may
@@ -4952,7 +5114,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let present = scheme.register_present_exchange(&lease);
+        let present = register_exchange_with_copy(&mut scheme, &lease);
 
         // Submit many frames; the mock backend has a fixed pool of slot ids
         // so after depth frames we must see at least one cache hit.
@@ -4981,7 +5143,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        scheme.register_present_exchange(&lease);
+        register_exchange_with_copy(&mut scheme, &lease);
 
         let before = mock_present_count(&device);
         {

@@ -290,9 +290,9 @@ impl SlotResolver {
             if *slot != PRESENT_LEASE_SLOT_PLACEHOLDER {
                 continue;
             }
-            let id = present_iter.next().expect(
-                "SlotResolver::resolve_slots: PRESENT_LEASE_SLOT_PLACEHOLDER without PresentLease binding",
-            );
+            let id = present_iter
+                .next()
+                .expect("SlotResolver::resolve_slots: PRESENT_LEASE_SLOT_PLACEHOLDER without PresentLease binding");
             let sc = self
                 .present_leases
                 .get(&id)

@@ -480,8 +480,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        // GrantRead/GrantPresent participate in ordering edges but emit no GPU work in the IR.
-        NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. } => UsageKindFlags::empty(),
+        // GrantRead participates in ordering edges but emits no GPU work in the IR.
+        NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
     }
 }
 
@@ -543,10 +543,8 @@ fn compute_barriers(
             // GrantRead emits no GPU work in this command stream (copy is out-of-band in
             // `Scheme::finish_submit_frame`).  Skip it for barrier semantics so recording
             // grant before dispatch does not emit bogus COMMON→UAV global barriers on WARP.
-            if matches!(
-                from_node.kind,
-                NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }
-            ) || matches!(to_node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. })
+            if matches!(from_node.kind, NodeKind::GrantRead { .. })
+                || matches!(to_node.kind, NodeKind::GrantRead { .. })
             {
                 continue;
             }
@@ -786,10 +784,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
                 }
-                NodeKind::Dispatch { .. }
-                | NodeKind::RenderPass { .. }
-                | NodeKind::GrantRead { .. }
-                | NodeKind::GrantPresent { .. } => {}
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
             }
         }
 
@@ -1506,10 +1501,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
-                NodeKind::Dispatch { .. }
-                | NodeKind::RenderPass { .. }
-                | NodeKind::GrantRead { .. }
-                | NodeKind::GrantPresent { .. } => {}
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
             }
         }
 

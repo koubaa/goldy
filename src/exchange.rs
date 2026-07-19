@@ -170,7 +170,7 @@ impl SurfaceExchange {
 
     fn ensure_unbound(&self, scheme: &Scheme) -> Result<PresentLease, GoldyError> {
         let lease = self.pool.lease();
-        if scheme.has_present_grant_for(&lease) {
+        if scheme.has_present_transaction_for(&lease) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "SurfaceExchange: lease already bound in this scheme"
             )));
