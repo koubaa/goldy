@@ -253,37 +253,178 @@ impl SlotResolver {
         }
     }
 
-    /// Resolve a dispatch's `resource_slots`, patching transient and swapchain
-    /// entries to their concrete bindless indices.
+    /// Resolve a dispatch's `resource_slots`, patching transient and late-bound
+    /// present/swapchain entries to their concrete bindless indices.
+    ///
+    /// Present and swapchain placeholders live at **shader-slot** positions.
+    /// Barrier [`ir::ResourceBinding`]s are not required to share those indices:
+    /// samplers contribute slots without bindings, and dependency-only declarations
+    /// contribute bindings without slots. Placeholders are therefore matched to
+    /// `PresentLease` / `SwapchainOutput` bindings in declaration order, not by
+    /// binding-vector index.
     pub fn resolve_slots(&self, resource_slots: &[u32], bindings: &[ir::ResourceBinding]) -> Vec<u32> {
         let mut out = resource_slots.to_vec();
+
+        // Transient buffers are always emitted as a paired slot+binding by the
+        // scheme builders, so binding index still identifies the slot.
         for (i, b) in bindings.iter().enumerate() {
             if i >= out.len() {
                 break;
             }
-            match b.resource {
-                ResourceId::TransientBuffer(t) => {
-                    let r = &self.buffers[&t.0];
-                    let is_read_only = b.access == ir::NodeAccess::Read;
-                    out[i] = if is_read_only { r.srv_index } else { r.uav_index };
-                }
-                ResourceId::SwapchainOutput if out[i] == SWAPCHAIN_SLOT_PLACEHOLDER => {
-                    let sc = self
-                        .swapchain
-                        .as_ref()
-                        .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
-                    out[i] = sc.uav_index;
-                }
-                ResourceId::PresentLease(id) if out[i] == PRESENT_LEASE_SLOT_PLACEHOLDER => {
-                    let sc = self
-                        .present_leases
-                        .get(&id)
-                        .expect("SlotResolver::resolve_slots: PresentLease before pool acquire");
-                    out[i] = sc.uav_index;
-                }
-                _ => {}
+            if let ResourceId::TransientBuffer(t) = b.resource {
+                let r = &self.buffers[&t.0];
+                let is_read_only = b.access == ir::NodeAccess::Read;
+                out[i] = if is_read_only { r.srv_index } else { r.uav_index };
             }
         }
+
+        let present_ids: Vec<u32> = bindings
+            .iter()
+            .filter_map(|b| match b.resource {
+                ResourceId::PresentLease(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let mut present_iter = present_ids.into_iter();
+        for slot in &mut out {
+            if *slot != PRESENT_LEASE_SLOT_PLACEHOLDER {
+                continue;
+            }
+            let id = present_iter
+                .next()
+                .expect("SlotResolver::resolve_slots: PRESENT_LEASE_SLOT_PLACEHOLDER without PresentLease binding");
+            let sc = self
+                .present_leases
+                .get(&id)
+                .expect("SlotResolver::resolve_slots: PresentLease before pool acquire");
+            *slot = sc.uav_index;
+        }
+        debug_assert!(
+            present_iter.next().is_none(),
+            "SlotResolver::resolve_slots: PresentLease binding without PRESENT_LEASE_SLOT_PLACEHOLDER"
+        );
+
+        let has_swapchain_binding = bindings
+            .iter()
+            .any(|b| matches!(b.resource, ResourceId::SwapchainOutput));
+        if has_swapchain_binding {
+            for slot in &mut out {
+                if *slot != SWAPCHAIN_SLOT_PLACEHOLDER {
+                    continue;
+                }
+                let sc = self
+                    .swapchain
+                    .as_ref()
+                    .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
+                *slot = sc.uav_index;
+            }
+        }
+
         out
+    }
+}
+
+#[cfg(test)]
+mod resolve_slots_tests {
+    use super::*;
+    use crate::task_graph::ir::{NodeAccess, ResourceBinding};
+
+    fn present_binding(id: u32) -> ResourceBinding {
+        ResourceBinding {
+            resource: ResourceId::PresentLease(id),
+            access: NodeAccess::Write,
+        }
+    }
+
+    fn buffer_binding(handle: u64) -> ResourceBinding {
+        ResourceBinding {
+            resource: ResourceId::Buffer(handle),
+            access: NodeAccess::Read,
+        }
+    }
+
+    #[test]
+    fn present_placeholder_resolves_when_sampler_slot_precedes_it() {
+        // Shader slots: [sampler, present]. Barrier bindings: [PresentLease(0)] only —
+        // samplers do not contribute hazard bindings, so binding index 0 ≠ slot index 1.
+        let mut resolver = SlotResolver::new();
+        resolver.present_leases.insert(
+            0,
+            ResolvedSwapchain {
+                handle: 42,
+                uav_index: 7,
+            },
+        );
+
+        let slots = [11u32, PRESENT_LEASE_SLOT_PLACEHOLDER];
+        let bindings = [present_binding(0)];
+        let resolved = resolver.resolve_slots(&slots, &bindings);
+        assert_eq!(resolved, vec![11, 7]);
+    }
+
+    #[test]
+    fn present_placeholder_resolves_when_dependency_binding_precedes_it() {
+        // Shader slots: [present]. Barrier bindings: [Buffer, PresentLease(0)] —
+        // dependency-only bindings omit slots, so binding index 1 ≥ slots.len().
+        let mut resolver = SlotResolver::new();
+        resolver.present_leases.insert(
+            0,
+            ResolvedSwapchain {
+                handle: 42,
+                uav_index: 9,
+            },
+        );
+
+        let slots = [PRESENT_LEASE_SLOT_PLACEHOLDER];
+        let bindings = [buffer_binding(1), present_binding(0)];
+        let resolved = resolver.resolve_slots(&slots, &bindings);
+        assert_eq!(resolved, vec![9]);
+    }
+
+    #[test]
+    fn multiple_present_placeholders_match_bindings_in_order() {
+        let mut resolver = SlotResolver::new();
+        resolver.present_leases.insert(
+            0,
+            ResolvedSwapchain {
+                handle: 1,
+                uav_index: 3,
+            },
+        );
+        resolver.present_leases.insert(
+            1,
+            ResolvedSwapchain {
+                handle: 2,
+                uav_index: 5,
+            },
+        );
+
+        let slots = [
+            10u32,
+            PRESENT_LEASE_SLOT_PLACEHOLDER,
+            12u32,
+            PRESENT_LEASE_SLOT_PLACEHOLDER,
+        ];
+        // Sampler-like gap: only present bindings, so indices diverge from slots.
+        let bindings = [present_binding(0), present_binding(1)];
+        let resolved = resolver.resolve_slots(&slots, &bindings);
+        assert_eq!(resolved, vec![10, 3, 12, 5]);
+    }
+
+    #[test]
+    fn aligned_present_binding_and_slot_still_resolves() {
+        let mut resolver = SlotResolver::new();
+        resolver.present_leases.insert(
+            0,
+            ResolvedSwapchain {
+                handle: 42,
+                uav_index: 4,
+            },
+        );
+
+        let slots = [1u32, PRESENT_LEASE_SLOT_PLACEHOLDER];
+        let bindings = [buffer_binding(1), present_binding(0)];
+        let resolved = resolver.resolve_slots(&slots, &bindings);
+        assert_eq!(resolved, vec![1, 4]);
     }
 }

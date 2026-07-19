@@ -180,7 +180,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. } => UsageKindFlags::empty(),
+        NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
     }
 }
 
@@ -234,7 +234,7 @@ pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> Resource
 }
 
 fn absorb_node_net_access(net: &mut ResourceKeyMap<NetAccess>, node: &super::ir::TaskNode) {
-    if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
+    if matches!(node.kind, NodeKind::GrantRead { .. }) {
         return;
     }
     for binding in &node.bindings {
