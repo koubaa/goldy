@@ -305,7 +305,7 @@ pub(super) fn teardown_submission_context(
         }
         for (_, cbs) in sc.graphics_timeline_cmd_buffers.drain() {
             for cb in cbs {
-                ld.device.free_command_buffers(ld.command_pool, &[cb]);
+                ld.free_device_cmd_buffers_now(&[cb]);
             }
         }
         for cb in sc.free_cmd_buffers.drain(..) {
@@ -314,12 +314,11 @@ pub(super) fn teardown_submission_context(
         let mut rows_to_unpin = Vec::new();
         for (_, retained) in sc.retained_compute_cbs.drain() {
             rows_to_unpin.push(retained.frame_table_row);
-            let pool = if retained.on_graphics_queue {
-                ld.command_pool
+            if retained.on_graphics_queue {
+                ld.free_device_cmd_buffers_now(&[retained.command_buffer]);
             } else {
-                command_pool
-            };
-            ld.device.free_command_buffers(pool, &[retained.command_buffer]);
+                ld.device.free_command_buffers(command_pool, &[retained.command_buffer]);
+            }
         }
         for row in rows_to_unpin.into_iter().flatten() {
             super::frame_table::unpin_row(&sc.frame_table, row);

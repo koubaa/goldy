@@ -107,13 +107,7 @@ pub(super) fn create(
         .context("Failed to create render target view")?;
 
     // Allocate command buffer
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
+    let command_buffer = logical_device.acquire_device_cmd_buffer()?;
 
     let handle = render_targets.write().unwrap().alloc_handle();
 
@@ -133,7 +127,7 @@ pub(super) fn create(
             depth_view: None,
             staging_buffer: None,
             staging_memory: None,
-            command_buffer: command_buffers[0],
+            command_buffer,
             has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
@@ -285,13 +279,7 @@ pub(super) fn create_with_depth(
     };
 
     // Allocate command buffer
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
+    let command_buffer = logical_device.acquire_device_cmd_buffer()?;
 
     let handle = render_targets.write().unwrap().alloc_handle();
 
@@ -311,7 +299,7 @@ pub(super) fn create_with_depth(
             depth_view,
             staging_buffer: None,
             staging_memory: None,
-            command_buffer: command_buffers[0],
+            command_buffer,
             has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );

@@ -366,19 +366,6 @@ fn acquire_cmd_buffer(ld: &LogicalDevice, sc: &mut super::types::SubmissionConte
     Ok(cbs[0])
 }
 
-fn acquire_device_cmd_buffer(ld: &LogicalDevice) -> Result<vk::CommandBuffer> {
-    if let Some(cb) = ld.free_device_cmd_buffers.lock().unwrap().pop() {
-        return Ok(cb);
-    }
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(ld.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-    let cbs = unsafe { ld.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate device graphics command buffer")?;
-    Ok(cbs[0])
-}
-
 fn context_queue_target(scope: &VulkanSubmitScope<'_>) -> (vk::Queue, std::sync::Arc<std::sync::Mutex<()>>) {
     let sc = scope.sc.lock().unwrap();
     (sc.queue, std::sync::Arc::clone(&sc.queue_lock))
@@ -666,12 +653,10 @@ fn reap_signaled_fences(view: &VulkanSubmitView<'_>) {
     for token in signaled {
         if let Some((device_handle, fence, cmd_buf)) = pool.remove(&token) {
             if let Some(logical_device) = view.devices.get(&device_handle) {
+                if let Some(cb) = cmd_buf {
+                    logical_device.free_device_cmd_buffers_now(&[cb]);
+                }
                 unsafe {
-                    if let Some(cb) = cmd_buf {
-                        logical_device
-                            .device
-                            .free_command_buffers(logical_device.command_pool, &[cb]);
-                    }
                     logical_device.device.destroy_fence(fence, None);
                 }
             }
@@ -1623,11 +1608,8 @@ pub(super) fn submit_with_scope(
 
         // End command buffer
         if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
-            unsafe {
-                logical_device
-                    .device
-                    .free_command_buffers(logical_device.command_pool, &[cmd]);
-            }
+            let mut sc = scope.sc.lock().unwrap();
+            sc.free_cmd_buffers.push(cmd);
             return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
         }
 
@@ -1936,9 +1918,9 @@ pub(super) fn submit_graph_with_scope(
         };
         let begin_info = vk::CommandBufferBeginInfo::default().flags(flags);
         if route_device {
-            let cb = acquire_device_cmd_buffer(ld)?;
+            let cb = ld.acquire_device_cmd_buffer()?;
             if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
-                ld.free_device_cmd_buffers.lock().unwrap().push(cb);
+                ld.recycle_device_cmd_buffer(cb);
                 return Err(anyhow::anyhow!("Failed to begin device command buffer: {:?}", e));
             }
             cb
@@ -2675,13 +2657,11 @@ pub(super) fn submit_graph_with_scope(
 
     // --- End + submit ---
     if let Err(e) = unsafe { logical_device.device.end_command_buffer(cmd) } {
-        unsafe {
-            if route_device {
-                logical_device.free_device_cmd_buffers.lock().unwrap().push(cmd);
-            } else {
-                let ctx_pool = scope.sc.lock().unwrap().command_pool;
-                logical_device.device.free_command_buffers(ctx_pool, &[cmd]);
-            }
+        if route_device {
+            logical_device.recycle_device_cmd_buffer(cmd);
+        } else {
+            let mut sc = scope.sc.lock().unwrap();
+            sc.free_cmd_buffers.push(cmd);
         }
         return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
     }
@@ -3069,7 +3049,7 @@ fn reap_timeline_cmd_buffers_up_to_with_view(
             }
         }
         if !gfx_cbs.is_empty() {
-            ld.free_device_cmd_buffers.lock().unwrap().extend(gfx_cbs);
+            ld.recycle_device_cmd_buffers(&gfx_cbs);
         }
     }
 }

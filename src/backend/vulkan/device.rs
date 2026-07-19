@@ -955,9 +955,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             for tok in fence_tokens {
                 if let Some((_, fence, cmd_buf)) = fence_pool.remove(&tok) {
                     if let Some(cb) = cmd_buf {
-                        logical_device
-                            .device
-                            .free_command_buffers(logical_device.command_pool, &[cb]);
+                        logical_device.free_device_cmd_buffers_now(&[cb]);
                     }
                     logical_device.device.destroy_fence(fence, None);
                 }
@@ -975,6 +973,8 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 logical_device.device.destroy_descriptor_set_layout(layout, None);
             }
 
+            // Drop recycled CBs before destroying the pool that owns them.
+            logical_device.free_device_cmd_buffers.lock().unwrap().clear();
             logical_device
                 .device
                 .destroy_command_pool(logical_device.command_pool, None);
