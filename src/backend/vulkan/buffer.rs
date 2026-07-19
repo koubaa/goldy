@@ -20,14 +20,8 @@ fn submit_copy(
     dst_offset: u64,
     size: u64,
 ) -> Result<()> {
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate transfer command buffer")?;
-    let cmd = cmd_buffers[0];
+    let cmd = device.acquire_device_cmd_buffer()?;
+    let cmd_buffers = [cmd];
 
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -60,7 +54,7 @@ fn submit_copy(
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
         device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
         device.synchronized_queue_wait_idle()?;
-        device.device.free_command_buffers(device.command_pool, &cmd_buffers);
+        device.recycle_device_cmd_buffer(cmd);
     }
 
     Ok(())
@@ -914,14 +908,8 @@ fn submit_resize_transfer(
         (None, None)
     };
 
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate transfer command buffer (resize)")?;
-    let cmd = cmd_buffers[0];
+    let cmd = device.acquire_device_cmd_buffer()?;
+    let cmd_buffers = [cmd];
 
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -970,7 +958,7 @@ fn submit_resize_transfer(
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
         device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
         device.synchronized_queue_wait_idle()?;
-        device.device.free_command_buffers(device.command_pool, &cmd_buffers);
+        device.recycle_device_cmd_buffer(cmd);
     }
 
     if let (Some(zb), Some(zm)) = (zero_staging, zero_mem) {
@@ -1724,14 +1712,8 @@ pub(super) fn clear(
     }
 
     // Allocate command buffer
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers =
-        unsafe { device.device.allocate_command_buffers(&alloc_info) }.context("Failed to allocate command buffer")?;
-    let cmd = cmd_buffers[0];
+    let cmd = device.acquire_device_cmd_buffer()?;
+    let cmd_buffers = [cmd];
 
     // Record fill command
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1753,11 +1735,9 @@ pub(super) fn clear(
 
     // Submit and wait
     let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-    unsafe {
-        device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
-        device.synchronized_queue_wait_idle()?;
-        device.device.free_command_buffers(device.command_pool, &cmd_buffers);
-    }
+    device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
+    device.synchronized_queue_wait_idle()?;
+    device.recycle_device_cmd_buffer(cmd);
 
     Ok(())
 }

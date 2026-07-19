@@ -863,9 +863,14 @@ pub(crate) struct LogicalDevice {
     pub compute_queues_alias_graphics: bool,
     pub free_compute_queue_indices: std::sync::Mutex<std::collections::VecDeque<usize>>,
     /// Reusable primary command buffers for device-queue render submits.
+    ///
+    /// Also serialises allocate/free against [`Self::command_pool`] — see
+    /// [`Self::acquire_device_cmd_buffer`].
     pub free_device_cmd_buffers: std::sync::Mutex<Vec<vk::CommandBuffer>>,
     /// Queue used for [`vk::Device::queue_bind_sparse`] (often same as graphics).
     pub sparse_binding_queue: vk::Queue,
+    /// Shared device-queue command pool. Externally synchronised via
+    /// [`Self::free_device_cmd_buffers`] for allocate / free / recycle.
     pub command_pool: vk::CommandPool,
 
     /// Host-visible oversize pools use dense allocations; device-local oversize may use sparse binding.
@@ -1073,6 +1078,65 @@ impl LogicalDevice {
         let _ = self.submission_worker.check_error();
         let _guard = self.queue_lock.lock().unwrap();
         unsafe { self.device.queue_submit2(self.queue, submit_infos, fence) }
+    }
+
+    /// Acquire a primary command buffer from [`Self::command_pool`].
+    ///
+    /// Recycles from [`Self::free_device_cmd_buffers`] when possible. Allocation and the
+    /// free-list share one mutex so concurrent one-shot paths (texture/buffer uploads,
+    /// layout transitions) cannot race `vkAllocateCommandBuffers` /
+    /// `vkFreeCommandBuffers` on the shared device pool (Vulkan external sync).
+    pub(crate) fn acquire_device_cmd_buffer(&self) -> anyhow::Result<vk::CommandBuffer> {
+        let mut out = self.allocate_device_cmd_buffers(1)?;
+        Ok(out.pop().unwrap())
+    }
+
+    /// Acquire `count` primary command buffers from [`Self::command_pool`].
+    pub(crate) fn allocate_device_cmd_buffers(&self, count: u32) -> anyhow::Result<Vec<vk::CommandBuffer>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut free = self.free_device_cmd_buffers.lock().unwrap();
+        let mut out = Vec::with_capacity(count as usize);
+        while out.len() < count as usize {
+            if let Some(cb) = free.pop() {
+                out.push(cb);
+            } else {
+                break;
+            }
+        }
+        let need = count as usize - out.len();
+        if need > 0 {
+            let alloc_info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(self.command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(need as u32);
+            let cbs = unsafe { self.device.allocate_command_buffers(&alloc_info) }
+                .map_err(|e| anyhow::anyhow!("Failed to allocate device command buffers: {e:?}"))?;
+            out.extend(cbs);
+        }
+        Ok(out)
+    }
+
+    /// Return a device-pool command buffer for reuse (pool has `RESET_COMMAND_BUFFER`).
+    pub(crate) fn recycle_device_cmd_buffer(&self, cb: vk::CommandBuffer) {
+        self.free_device_cmd_buffers.lock().unwrap().push(cb);
+    }
+
+    /// Return several device-pool command buffers for reuse.
+    pub(crate) fn recycle_device_cmd_buffers(&self, cbs: &[vk::CommandBuffer]) {
+        self.free_device_cmd_buffers.lock().unwrap().extend_from_slice(cbs);
+    }
+
+    /// Free device-pool command buffers under the same lock as allocate/recycle.
+    pub(crate) fn free_device_cmd_buffers_now(&self, cbs: &[vk::CommandBuffer]) {
+        if cbs.is_empty() {
+            return;
+        }
+        let _guard = self.free_device_cmd_buffers.lock().unwrap();
+        unsafe {
+            self.device.free_command_buffers(self.command_pool, cbs);
+        }
     }
 }
 

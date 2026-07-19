@@ -366,14 +366,7 @@ pub(super) fn write(
     }
 
     // Allocate command buffer
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
-    let cmd_buffer = cmd_buffers[0];
+    let cmd_buffer = logical_device.acquire_device_cmd_buffer()?;
 
     // Record commands
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -479,9 +472,7 @@ pub(super) fn write(
             .context("Failed to wait for queue")?;
 
         // Cleanup
-        logical_device
-            .device
-            .free_command_buffers(logical_device.command_pool, &[cmd_buffer]);
+        logical_device.recycle_device_cmd_buffer(cmd_buffer);
         logical_device.device.destroy_buffer(staging_buffer, None);
         logical_device.device.free_memory(staging_memory, None);
     }
@@ -598,14 +589,7 @@ pub(super) fn write_region(
             .context("Failed to unmap staging memory")?;
     }
 
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
-    let cmd_buffer = cmd_buffers[0];
+    let cmd_buffer = logical_device.acquire_device_cmd_buffer()?;
 
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -707,9 +691,7 @@ pub(super) fn write_region(
             .context("Failed to wait for queue")?;
 
         // Cleanup
-        logical_device
-            .device
-            .free_command_buffers(logical_device.command_pool, &[cmd_buffer]);
+        logical_device.recycle_device_cmd_buffer(cmd_buffer);
         logical_device.device.destroy_buffer(staging_buffer, None);
         logical_device.device.free_memory(staging_memory, None);
     }
@@ -916,14 +898,7 @@ pub(super) fn read_to_cpu(
         }
     };
 
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
-    let cmd = cmd_buffers[0];
+    let cmd = logical_device.acquire_device_cmd_buffer()?;
 
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -1009,11 +984,7 @@ pub(super) fn read_to_cpu(
         .synchronized_queue_wait_idle()
         .context("Failed to wait for queue")?;
 
-    unsafe {
-        logical_device
-            .device
-            .free_command_buffers(logical_device.command_pool, &[cmd]);
-    }
+    logical_device.recycle_device_cmd_buffer(cmd);
 
     // Read from staging buffer
     unsafe {
@@ -1096,14 +1067,7 @@ pub(super) fn transition_image_layout(
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
 ) -> Result<()> {
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let cmd_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer for layout transition")?;
-    let cmd = cmd_buffers[0];
+    let cmd = logical_device.acquire_device_cmd_buffer()?;
 
     let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -1173,9 +1137,7 @@ pub(super) fn transition_image_layout(
         let wait = logical_device.synchronized_queue_wait_idle();
         wait.context("Failed to wait for layout transition")?;
 
-        logical_device
-            .device
-            .free_command_buffers(logical_device.command_pool, &cmd_buffers_arr);
+        logical_device.recycle_device_cmd_buffer(cmd);
     }
 
     Ok(())

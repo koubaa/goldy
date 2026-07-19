@@ -269,11 +269,8 @@ pub(super) fn create(
         // Allocate two primary command buffers per frame:
         //   [0] — render-path graphics CB (used by `surface::render`)
         //   [1] — copy CB recorded fresh each present (scratch → swapchain)
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(logical_device.command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(2);
-        let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+        let command_buffers = logical_device
+            .allocate_device_cmd_buffers(2)
             .context("Failed to allocate command buffers")?;
 
         frame_sync.push(FrameSync {
@@ -589,19 +586,12 @@ fn destroy_impl(
                     &surface_state.swapchain_compute_present_command_buffers,
                     &surface_state.swapchain_render_present_command_buffers,
                 ] {
-                    if !cbs.is_empty() {
-                        logical_device
-                            .device
-                            .free_command_buffers(logical_device.command_pool, cbs);
-                    }
+                    logical_device.free_device_cmd_buffers_now(cbs);
                 }
 
                 // Destroy per-frame sync resources and free per-frame CBs.
                 for frame in surface_state.frame_sync {
-                    logical_device.device.free_command_buffers(
-                        logical_device.command_pool,
-                        &[frame.command_buffer, frame.copy_command_buffer],
-                    );
+                    logical_device.free_device_cmd_buffers_now(&[frame.command_buffer, frame.copy_command_buffer]);
                     logical_device
                         .device
                         .destroy_semaphore(frame.image_available_semaphore, None);
@@ -1386,13 +1376,7 @@ pub(super) fn resize(
                     std::mem::take(&mut s.swapchain_compute_present_command_buffers),
                     std::mem::take(&mut s.swapchain_render_present_command_buffers),
                 ] {
-                    if !cbs.is_empty() {
-                        unsafe {
-                            logical_device
-                                .device
-                                .free_command_buffers(logical_device.command_pool, &cbs);
-                        }
-                    }
+                    logical_device.free_device_cmd_buffers_now(&cbs);
                 }
                 std::mem::take(&mut s.swapchain_texture_handles)
             })
@@ -1835,17 +1819,8 @@ fn ensure_scratch_texture_slot(
     // can write immediately on the first frame that uses this slot.
     {
         let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let cb = ld.acquire_device_cmd_buffer()?;
         unsafe {
-            let alloc_info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(ld.command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-            let cbs = ld
-                .device
-                .allocate_command_buffers(&alloc_info)
-                .context("Failed to alloc CB for scratch init")?;
-            let cb = cbs[0];
-
             let begin = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             ld.device
                 .begin_command_buffer(cb, &begin)
@@ -1877,8 +1852,7 @@ fn ensure_scratch_texture_slot(
                 .context("Failed to submit scratch texture init")?;
             ld.synchronized_queue_wait_idle()
                 .context("queue_wait_idle after scratch init")?;
-            ld.device
-                .free_command_buffers(ld.command_pool, std::slice::from_ref(&cb));
+            ld.recycle_device_cmd_buffer(cb);
         }
     }
 
@@ -2143,11 +2117,8 @@ fn alloc_and_record_present_cbs(
     new_layout: vk::ImageLayout,
 ) -> Result<Vec<vk::CommandBuffer>> {
     let count = swapchain_images.len() as u32;
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(logical_device.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(count);
-    let cbs = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+    let cbs = logical_device
+        .allocate_device_cmd_buffers(count)
         .context("Failed to allocate barrier command buffers")?;
 
     // No ONE_TIME_SUBMIT — these CBs are submitted multiple times (once per frame).
