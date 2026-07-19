@@ -18,7 +18,7 @@ let tv: TimelineValue = submission.timeline_value();
 
 This value represents a point on the device's timeline. When the GPU finishes executing that submission, the timeline advances past `tv`.
 
-Present-on-scheme paths also stamp a timeline when [`PresentGrant::consume`](https://docs.rs/goldy/latest/goldy/struct.PresentGrant.html) completes scanout.
+Present-on-scheme paths also stamp a timeline when [`Claim::consume`](https://docs.rs/goldy/latest/goldy/struct.Claim.html) completes scanout.
 
 ## Querying GPU progress
 

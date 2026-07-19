@@ -9,7 +9,7 @@ Every pipelined renderer needs the same bookkeeping:
 1. A ring of in-flight frame slots, each holding per-frame GPU resources.
 2. A pipeline-depth cap — block the CPU when the ring is full to prevent unbounded memory growth.
 3. Deferred retirement — pop completed slots from the front when `gpu_progress() >= epoch`.
-4. Present-path timeline patching — the epoch is only known *after* [`PresentGrant::consume`](https://docs.rs/goldy/latest/goldy/struct.PresentGrant.html), so the most recent slot must be stamped retroactively.
+4. Present-path timeline patching — the epoch is only known *after* [`Claim::consume`](https://docs.rs/goldy/latest/goldy/struct.Claim.html), so the most recent slot must be stamped retroactively.
 
 Without shared infrastructure, every consumer reimplements this independently. `FrameOrchestrator` centralizes all of it.
 
@@ -53,8 +53,8 @@ loop {
         my_cleanup(dev, retired.timeline, retired.data)
     })?;
 
-    let submission = scheme.submit()?;
-    present.consume(&submission)?;
+    let mut submission = scheme.submit()?;
+    present.claim(&mut submission)?.consume()?;
 
     let cleanup = MyCleanup { /* ... */ };
 
@@ -121,7 +121,7 @@ pub struct RetiredFrame<T> {
 
 ### Present path timeline is always deferred
 
-On the swapchain path the final scanout timeline may arrive only after `PresentGrant::consume`. The orchestrator holds the slot in a `timeline: None` state until `note_presented` arrives. The `Heap` transient allocator documents the same invariant — `end_frame` may legally arrive after the next `begin_frame` (mid-frame frees are stamped in `end_frame`).
+On the swapchain path the final scanout timeline may arrive only after `Claim::consume`. The orchestrator holds the slot in a `timeline: None` state until `note_presented` arrives. The `Heap` transient allocator documents the same invariant — `end_frame` may legally arrive after the next `begin_frame` (mid-frame frees are stamped in `end_frame`).
 
 ### Relationship to `TransientAllocator`
 

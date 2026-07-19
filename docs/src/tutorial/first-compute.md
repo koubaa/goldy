@@ -83,33 +83,32 @@ let uniform_buffer = retained_pool.acquire_buffer_with_data(
 
 ### Compute Pipeline and Scheme
 
-Compile the Slang source, create a `ComputePipeline`, and record a retained scheme once:
+Compile the Slang source, create a `ComputePipeline`, and record a retained scheme once via [`SurfaceExchange::bind_destination`](../surfaces/overview.md):
 
 ```rust
 let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
-let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
-let screen = swapchain.lease();
+let surface = SurfaceExchange::new_with_depth(&ctx, window.as_ref(), 3, SurfaceConfig::default())?;
 
 let mut scheme = Scheme::new(&ctx);
 let wg_x = width.div_ceil(8);
 let wg_y = height.div_ceil(8);
+let (lease, present) = surface.bind_destination(&mut scheme)?;
 scheme
     .node("compute", &compute_pipeline)
     .with_parcel(&uniform_buffer, NodeAccess::Read)
-    .with_present(&screen)
+    .with_present(&lease)
     .dispatch(wg_x, wg_y, 1);
-let present = scheme.grant_present(&screen);
 ```
 
 ### Rendering a Frame
 
-Each frame: upload new uniform values via a small upload scheme, submit the main scheme, consume the present grant.
+Each frame: upload new uniform values via a small upload scheme, submit the main scheme, claim and consume the surface transaction.
 
 ```rust
 fn render_frame(state: &mut RenderState) -> Result<()> {
-    let (width, height) = state.swapchain.size();
+    let (width, height) = state.surface.size();
     let elapsed = state.start_time.elapsed().as_secs_f32();
 
     let uniforms = Uniforms {
@@ -123,8 +122,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     upload.commit_write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
     upload.submit()?;
 
-    let submission = state.scheme.submit()?;
-    state.present.consume(&submission)?;
+    let mut submission = state.scheme.submit()?;
+    state.present.claim(&mut submission)?.consume()?;
     Ok(())
 }
 ```
@@ -133,9 +132,9 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
 
 **Update uniforms** — `Scheme::commit_write_parcel` on a short-lived upload scheme stages the new time/size values before the main submit.
 
-**Record the scheme once** — `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the swapchain drawable lease. `dispatch()` sets the workgroup count. `grant_present()` records the present easement.
+**Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 
-**Submit and present** — `scheme.submit()` records and submits GPU work. `present.consume(&submission)` presents the swapchain image. The compute shader already wrote the pixels — there is no blit or copy step.
+**Submit and present** — `scheme.submit()` records and submits GPU work. `present.claim(&mut submission)?.consume()` presents the swapchain image. The compute shader already wrote the pixels — there is no blit or copy step.
 
 ## Run It
 

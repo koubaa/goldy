@@ -13,16 +13,16 @@ Use compute-to-surface when your rendering is naturally a per-pixel computation 
 
 Use traditional rendering when you need the rasterization pipeline's features: triangle assembly, depth testing, MSAA, alpha blending, or vertex/fragment shader stages.
 
-## Present lease
+## Surface exchange
 
-Create a [`SwapchainPool`](../surfaces/overview.md) and call `lease()` to obtain a stable [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) identity. The physical swapchain image rotates each submission; the lease id is recorded once in the scheme.
+Create a [`SurfaceExchange`](../surfaces/overview.md) and call `bind_destination` to register direct compute-to-present in the scheme:
 
 ```rust
-let swapchain = SwapchainPool::new(&ctx, &window, 3)?;
-let screen = swapchain.lease();
+let surface = SurfaceExchange::new_with_depth(&ctx, &window, 3, SurfaceConfig::default())?;
+let (lease, present) = surface.bind_destination(&mut scheme)?;
 ```
 
-Bind the lease in a compute node with `with_present(&screen)`. Goldy handles barrier insertion between compute writes and the presentation engine.
+Bind the returned lease in a compute node with `with_present(&lease)`. Goldy handles barrier insertion between compute writes and the presentation engine.
 
 ## Building the scheme
 
@@ -33,24 +33,24 @@ let wg_x = width.div_ceil(8);
 let wg_y = height.div_ceil(8);
 
 let mut scheme = Scheme::new(&ctx);
+let (lease, present) = surface.bind_destination(&mut scheme)?;
 scheme
     .node("compute", &compute_pipeline)
     .with_parcel(&uniform_buffer, NodeAccess::Read)
-    .with_present(&screen)
+    .with_present(&lease)
     .dispatch(wg_x, wg_y, 1);
-let present = scheme.grant_present(&screen);
 ```
 
 ## Submitting and presenting
 
-Each frame, submit the scheme and consume the present grant:
+Each frame, submit the scheme and consume the surface claim:
 
 ```rust
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
-`submit` resolves transient resources, compiles the scheme into a command stream, and submits to the GPU. Presentation happens when you call `present.consume` — the compute shader has already written the pixels.
+`submit` resolves transient resources, compiles the scheme into a command stream, and submits to the GPU. Presentation happens when you call `claim(...).consume()` — the compute shader has already written the pixels.
 
 ## The compute shader
 
@@ -97,7 +97,7 @@ Guard against out-of-bounds writes in the shader when the resolution isn't a mul
 ```rust
 use goldy::{
     BufferKind, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PresentMode,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
 };
 
 let instance = Instance::new()?;
@@ -106,16 +106,14 @@ let device = instance
     .request_device(&DeviceDescriptor::default())?;
 let ctx = device.create_context()?;
 
-let swapchain = SwapchainPool::new_with_config(
+let surface = SurfaceExchange::new_with_config(
     &ctx,
     &window,
-    3,
     SurfaceConfig {
         present_mode: PresentMode::Fifo,
         depth_format: None,
     },
 )?;
-let screen = swapchain.lease();
 
 let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
@@ -127,12 +125,12 @@ let uniform_buffer = retained_pool.acquire_buffer_with_data(
 )?;
 
 let mut scheme = Scheme::new(&ctx);
+let (lease, present) = surface.bind_destination(&mut scheme)?;
 scheme
     .node("compute", &compute_pipeline)
     .with_parcel(&uniform_buffer, NodeAccess::Read)
-    .with_present(&screen)
+    .with_present(&lease)
     .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
-let present = scheme.grant_present(&screen);
 
 // --- Render loop ---
 let mut upload = Scheme::new(&ctx);
@@ -143,8 +141,8 @@ upload.commit_write_parcel(
 )?;
 upload.submit()?;
 
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
 See [`examples/compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) for the complete winit application.

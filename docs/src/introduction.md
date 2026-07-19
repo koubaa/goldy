@@ -47,22 +47,22 @@ let submission = scheme.submit()?;
 
 ## Compute-to-Surface
 
-Compute shaders can write directly to swapchain drawables via a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) — no graphics pipeline, no vertex buffers, no raster pass. Record once, submit each frame, consume the present grant:
+Compute shaders can write directly to swapchain drawables via [`SurfaceExchange::bind_destination`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html#method.bind_destination) — no graphics pipeline, no vertex buffers, no raster pass. Record once, submit each frame, claim and consume:
 
 ```rust
-let swapchain = SwapchainPool::new(&ctx, &window, 3)?;
-let screen = swapchain.lease();
+let surface = SurfaceExchange::new(&ctx, &window, SurfaceConfig::default())?;
 
+let mut scheme = Scheme::new(&ctx);
+let (lease, present) = surface.bind_destination(&mut scheme)?;
 scheme
     .node("compute", &compute_pipeline)
     .with_parcel(&uniform_buffer, NodeAccess::Read)
-    .with_present(&screen)
+    .with_present(&lease)
     .dispatch(wg_x, wg_y, 1);
-let present = scheme.grant_present(&screen);
 
 // Each frame:
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
 ## Multi-Backend, Single Shader Language

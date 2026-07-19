@@ -1,28 +1,28 @@
 # Your First Triangle
 
-This tutorial draws a colored triangle in a window using Goldy's render pipeline and present-on-scheme API (`SwapchainPool` + `Scheme` + `PresentGrant`).
+This tutorial draws a colored triangle in a window using Goldy's render pipeline and present-on-scheme API (`SurfaceExchange` + `Scheme` + `Transaction`).
 
 See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the full source.
 
 ## Recording the Scheme
 
-Once at init (and again on resize), record a retained scheme: offscreen render pass → copy to present lease → grant present.
+Once at init (and again on resize), record a retained scheme: offscreen render pass → copy to surface via [`SurfaceExchange::bind_render_target`](../surfaces/overview.md).
 
 ```rust
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool,
-    Scheme, ShaderModule, SwapchainPool, Vertex2D,
+    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, Vertex2D,
 };
 
 fn record_scheme(
     scheme: &mut Scheme,
+    surface: &SurfaceExchange,
     pipeline: &RenderPipeline,
     vertex_buffer: &Buffer,
     scene_rt: &Lease<LeaseRenderTarget>,
-    screen: &PresentLease,
     bg_color: Color,
-) -> PresentGrant {
+) -> anyhow::Result<Transaction> {
     let mut pass = scheme.render_pass("triangle", scene_rt);
     pass.with_parcel(vertex_buffer, NodeAccess::Read);
     pass.clear(bg_color);
@@ -30,18 +30,17 @@ fn record_scheme(
     pass.set_vertex_buffer(0, vertex_buffer);
     pass.draw(0..3, 0..1);
     pass.finish();
-    scheme.copy_to_present(scene_rt, screen);
-    scheme.grant_present(screen)
+    surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
 }
 ```
 
 ## Per-Frame Submit
 
-Each frame submits the retained scheme and consumes the present grant:
+Each frame submits the retained scheme and consumes the surface claim:
 
 ```rust
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
 ## Walkthrough
@@ -78,14 +77,14 @@ let vertex_buffer = pool.acquire_buffer_with_data(&vertices, BufferKind::Scatter
 
 ```rust
 let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
-let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
 let pipeline = RenderPipeline::new(
     &device,
     &shader,
     &shader,
     &RenderPipelineDesc {
         vertex_layout: Vertex2D::layout(),
-        target_format: swapchain.format(),
+        target_format: surface.format(),
         ..Default::default()
     },
 )?;
@@ -93,22 +92,21 @@ let pipeline = RenderPipeline::new(
 
 `builtins::VERTEX_COLOR_2D` uses `[goldy_vertex]` and `[goldy_fragment]` virtual entry points from the `goldy_exp` library.
 
-### Swapchain and Presentation
+### Surface and Presentation
 
 ```rust
-let screen = swapchain.lease();
 let mut scheme = Scheme::new(&ctx);
-let scene_rt = scheme.lease_render_target(width, height, swapchain.format(), None)?;
-let present = record_scheme(&mut scheme, &pipeline, &vertex_buffer, &scene_rt, &screen, bg_color);
+let scene_rt = scheme.lease_render_target(width, height, surface.format(), None)?;
+let present = record_scheme(&mut scheme, &surface, &pipeline, &vertex_buffer, &scene_rt, bg_color)?;
 
 // Each frame:
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
-`SwapchainPool` manages the OS swapchain. Scene color is rendered to a scheme-leased offscreen target, copied to the present lease, and displayed when the grant is consumed. Rendering stays on the GPU — no CPU readback.
+`SurfaceExchange` manages the OS swapchain. Scene color is rendered to a scheme-leased offscreen target, copied to the drawable, and displayed when the claim is consumed. Rendering stays on the GPU — no CPU readback.
 
-On resize, rebuild the scheme and present grant with the new dimensions (see `examples/triangle.rs`).
+On resize, rebuild the scheme and transaction with the new dimensions (see `examples/triangle.rs`).
 
 ## Run It
 

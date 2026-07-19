@@ -2,22 +2,22 @@
 
 Goldy supports two presentation paths:
 
-- **Present-on-scheme** (recommended) — [`SwapchainPool`](https://docs.rs/goldy/latest/goldy/struct.SwapchainPool.html) + [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) + [`PresentGrant`](https://docs.rs/goldy/latest/goldy/struct.PresentGrant.html). Record copy or compute-to-present once in a retained [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html); submit each frame.
-- **Legacy Surface API** — [`Surface`](https://docs.rs/goldy/latest/goldy/struct.Surface.html) acquire/present bracket (still used internally by `SwapchainPool`).
+- **Present-on-scheme** (recommended) — [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html) + [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) + [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html). Record copy or compute-to-present once in a retained [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html); submit each frame and settle the claim.
+- **Legacy Surface API** — [`Surface`](https://docs.rs/goldy/latest/goldy/struct.Surface.html) acquire/present bracket (still used internally by `SurfaceExchange`).
 
-All windowed Rust examples use present-on-scheme.
+All windowed Rust examples use present-on-scheme via `SurfaceExchange`.
 
-## SwapchainPool and PresentLease
+## SurfaceExchange
 
-A `SwapchainPool` wraps the platform window and supplies drawable backings for stable present leases:
+A `SurfaceExchange` wraps the platform window and records how scheme output reaches the swapchain:
 
 ```rust
-use goldy::{SwapchainPool, SurfaceConfig, PresentMode, DepthFormat};
+use goldy::{SurfaceExchange, SurfaceConfig, PresentMode, DepthFormat};
 
-let swapchain = SwapchainPool::new(&ctx, &window, 3)?;
+let surface = SurfaceExchange::new(&ctx, &window)?;
 
-// With explicit configuration
-let swapchain = SwapchainPool::new_with_config(
+// With explicit configuration and in-flight depth
+let surface = SurfaceExchange::new_with_depth(
     &ctx,
     &window,
     3,
@@ -26,10 +26,19 @@ let swapchain = SwapchainPool::new_with_config(
         depth_format: Some(DepthFormat::Depth32Float),
     },
 )?;
-let screen = swapchain.lease();
 ```
 
 Depth testing uses an offscreen scheme-leased render target, not the swapchain drawable.
+
+### Bind helpers
+
+| Method | Use |
+|--------|-----|
+| `bind_render_target(scheme, scene_rt)` | Offscreen render pass → surface copy |
+| `bind(scheme, texture)` | Texture → surface copy |
+| `bind_destination(scheme)` | Compute or other direct writes via `with_present(&lease)` |
+
+Each bind returns a reusable [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). After `scheme.submit()`, extract the per-frame claim with `transaction.claim(&mut submission)?` and settle with `claim.consume()`.
 
 ## SurfaceConfig
 
@@ -57,8 +66,8 @@ pub struct SurfaceConfig {
 Change the present mode at runtime:
 
 ```rust
-swapchain.set_present_mode(PresentMode::Immediate)?;
-let current = swapchain.present_mode();
+surface.set_present_mode(PresentMode::Immediate)?;
+let current = surface.present_mode();
 ```
 
 ## Present-on-Scheme Frame Cycle
@@ -73,15 +82,14 @@ pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.draw(0..3, 0..1);
 pass.finish();
-scheme.copy_to_present(&scene_rt, &screen);
-let present = scheme.grant_present(&screen);
+let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 
 // Each frame:
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
-For pure compute-to-surface, bind the present lease in a compute node with `with_present(&screen)` instead of a render pass + copy.
+For pure compute-to-surface, use `bind_destination` and bind the returned lease in a compute node with `with_present(&lease)` instead of a render pass + copy.
 
 ## Legacy Surface API
 
@@ -94,43 +102,43 @@ let frame = surface.begin()?;
 frame.present()?;
 ```
 
-New applications should prefer `SwapchainPool` + `Scheme`. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs).
+New applications should prefer `SurfaceExchange` + `Scheme`. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs).
 
-## Swapchain Queries
+## Surface Queries
 
 ```rust
-swapchain.width();
-swapchain.height();
-swapchain.size();        // (width, height)
-swapchain.format();      // TextureFormat of the swapchain images
+surface.width();
+surface.height();
+surface.size();        // (width, height)
+surface.format();      // TextureFormat of the swapchain images
 ```
 
-Always use `swapchain.format()` when creating pipelines to ensure a match:
+Always use `surface.format()` when creating pipelines to ensure a match:
 
 ```rust
 let desc = RenderPipelineDesc {
-    target_format: swapchain.format(),
+    target_format: surface.format(),
     ..Default::default()
 };
 ```
 
 ## Resize Handling
 
-Call `resize()` when the window size changes. Zero-size dimensions are silently ignored (common during window minimize). Rebuild the scheme and present grant when dimensions change.
+Call `resize()` when the window size changes. Zero-size dimensions are silently ignored (common during window minimize). Rebuild the scheme and transaction when dimensions change.
 
 ```rust
-swapchain.resize(width, height)?;
-// rebuild scheme + present grant
+surface.resize(width, height)?;
+// rebuild scheme + transaction
 ```
 
-## Present Grant Lifetime
+## Transaction Lifetime
 
-- Record `grant_present(&screen)` once when building the scheme.
-- Each frame: `scheme.submit()` then `present.consume(&submission)`.
-- Each submission may be consumed at most once per grant.
+- Record a bind (`bind_render_target`, `bind`, or `bind_destination`) once when building the scheme.
+- Each frame: `scheme.submit()` then `transaction.claim(&mut submission)?.consume()?`.
+- Each submission may be claimed at most once per transaction.
 
 ```rust
-let submission = scheme.submit()?;
-present.consume(&submission)?;
-// submission consumed — do not reuse
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
+// claim consumed — do not reuse this submission's claim slot
 ```

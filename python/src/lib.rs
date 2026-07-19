@@ -67,7 +67,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheme::PySchemeRenderPass>()?;
     m.add_class::<scheme::PySchemeRenderTargetLease>()?;
     m.add_class::<scheme::PyPresentLease>()?;
-    m.add_class::<scheme::PyPresentGrant>()?;
     m.add_class::<exchange::PyTransaction>()?;
     m.add_class::<exchange::PyClaim>()?;
     m.add_class::<surface_exchange::PySurfaceExchange>()?;

@@ -132,7 +132,6 @@ public sealed class Scheme : IDisposable
     public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease);
     public void CopyToTexture(SchemeRenderTargetLease src, Texture dst);
     public void CopyToPresent(SchemeRenderTargetLease src, PresentLease dst);
-    public PresentGrant GrantPresent(PresentLease lease);
     public ReadGrant GrantRead(Parcel parcel);
     public ReadGrant GrantReadTexture(Texture texture);
     public SchemeSubmission Submit();
@@ -158,15 +157,14 @@ using (var node = scheme.ComputeNode("update", computePipeline))
 }
 ```
 
-### SwapchainPool / PresentGrant
+### SurfaceExchange / Transaction / Claim
 
 ```csharp
-using var swapchain = GlfwSwapchainPool.Create(ctx, window);
-using var screen = swapchain.Lease();
-var present = scheme.GrantPresent(screen);
+using var surface = GlfwSurfaceExchange.Create(ctx, window);
+var present = surface.BindRenderTarget(scheme, sceneRt);
 // each frame:
 using var submission = scheme.Submit();
-present.Consume(submission);
+present.Claim(submission).Consume();
 ```
 
 Graphics and compute both go through `Scheme`.
@@ -184,4 +182,4 @@ public enum NodeAccess   { Read, Write, ReadWrite }
 
 Headless: record a scheme, `GrantRead` or `GrantReadTexture`, `Submit()`, then `grant.Consume(submission)`.
 
-Windowed: record once with `CopyToPresent` + `GrantPresent`; each frame call `Submit()` and `present.Consume(submission)`.
+Windowed: record once with `SurfaceExchange.BindRenderTarget` (or `BindDestination` for compute-to-surface); each frame call `Submit()`, then `transaction.Claim(submission).Consume()`.

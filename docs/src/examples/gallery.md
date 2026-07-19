@@ -32,7 +32,7 @@ Examples that use `ComputePipeline` and `Scheme` for GPU-side data processing, i
 |---------|---------------------|--------|
 | **`compute_particles`** | Full compute + graphics loop. A compute shader updates 1024 particle positions and velocities each frame; a graphics shader renders them as instanced colored quads. Uses a retained scheme for dependency scheduling. | [`compute_particles.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_particles.rs) |
 | **`game_of_life`** | Conway's Game of Life on the GPU. A compute shader applies cellular-automaton rules on a 128×128 grid using **ping-pong sub-views** in one retained mosaic `Parcel`. A separate graphics pass renders the result. | [`game_of_life.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/game_of_life.rs) |
-| **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`, no raster pass, no vertex buffers. A compute shader writes directly to a `PresentLease` via `with_present` + `grant_present`. Demonstrates the compute-to-surface workflow. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) |
+| **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`, no raster pass, no vertex buffers. A compute shader writes directly to a swapchain drawable via `SurfaceExchange::bind_destination` + `with_present`. Demonstrates the compute-to-surface workflow. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) |
 
 ## Graphics Pipelines
 
@@ -90,12 +90,11 @@ pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.draw(0..vertex_count, 0..1);
 pass.finish();
-scheme.copy_to_present(&scene_rt, &screen);
-let present = scheme.grant_present(&screen);
+let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 
 // Each frame:
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
 ### Compute + Graphics with Scheme
