@@ -8,7 +8,7 @@ use crate::pipeline::PyRenderPipeline;
 use crate::pyutil::parse_index_range;
 use crate::texture::PyTexture;
 use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyTextureFormat};
-use goldy::scheme::{Lease, LeaseRenderTarget, PresentGrant, ReadGrant};
+use goldy::scheme::{Lease, LeaseRenderTarget, ReadGrant};
 use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
 use goldy::{Grant, GrantBuffer, GrantTexture, Scheme, Submission};
@@ -94,7 +94,7 @@ impl PyReadGrant {
     }
 }
 
-/// Stable present lease from a [`crate::swapchain_pool::PySwapchainPool`].
+/// Stable present lease returned by [`crate::surface_exchange::PySurfaceExchange::bind_destination`].
 #[pyclass(name = "PresentLease", module = "goldy", unsendable)]
 pub struct PyPresentLease {
     pub(crate) inner: PresentLease,
@@ -104,23 +104,6 @@ pub struct PyPresentLease {
 impl PyPresentLease {
     fn __repr__(&self) -> String {
         "PresentLease()".to_string()
-    }
-}
-
-/// Present easement grant recorded once via [`PyScheme::grant_present`].
-#[pyclass(name = "PresentGrant", module = "goldy", unsendable)]
-pub struct PyPresentGrant {
-    pub(crate) inner: PresentGrant,
-}
-
-#[pymethods]
-impl PyPresentGrant {
-    fn consume(&self, submission: &PySchemeSubmission) -> PyResult<()> {
-        self.inner.consume(&submission.inner).into_py_result()
-    }
-
-    fn __repr__(&self) -> String {
-        "PresentGrant()".to_string()
     }
 }
 
@@ -223,13 +206,6 @@ impl PyScheme {
         self.ensure_no_active_recorder()?;
         self.inner.borrow_mut().copy_to_present(&src.inner, &dst.inner);
         Ok(())
-    }
-
-    fn grant_present(&self, lease: &PyPresentLease) -> PyResult<PyPresentGrant> {
-        self.ensure_no_active_recorder()?;
-        Ok(PyPresentGrant {
-            inner: self.inner.borrow_mut().grant_present(&lease.inner),
-        })
     }
 
     fn grant_read(&self, parcel: &PyParcel) -> PyResult<PyReadGrant> {

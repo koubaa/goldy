@@ -2,12 +2,12 @@
 
 Graphics commands are recorded through [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html) render-pass nodes. The scheme declares resource dependencies (buffers, textures, parcels) and is retained across submissions.
 
-Windowed apps render to an offscreen leased target, copy to a [`PresentLease`](../surfaces/overview.md), then consume a [`PresentGrant`]. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the canonical loop.
+Windowed apps render to an offscreen leased target, then present via [`SurfaceExchange`](../surfaces/overview.md). See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the canonical loop.
 
 ## Per-Frame Loop (windowed)
 
 ```rust
-use goldy::{Color, NodeAccess, Scheme, SwapchainPool};
+use goldy::{Color, NodeAccess, Scheme, SurfaceExchange};
 
 // Record once at init (and on resize):
 let mut pass = scheme.render_pass("main", &scene_rt);
@@ -17,12 +17,11 @@ pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertex_buffer);
 pass.draw(0..3, 0..1);
 pass.finish();
-scheme.copy_to_present(&scene_rt, &screen);
-let present = scheme.grant_present(&screen);
+let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 
 // Each frame:
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
 ## Render Pass Builder
@@ -92,10 +91,9 @@ scheme.node("sim", &compute_pipeline)
     .dispatch(wg, 1, 1);
 let mut pass = scheme.render_pass("draw", &scene_rt);
 // ...
-scheme.copy_to_present(&scene_rt, &screen);
-let present = scheme.grant_present(&screen);
-let submission = scheme.submit()?;
-present.consume(&submission)?;
+let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
+let mut submission = scheme.submit()?;
+present.claim(&mut submission)?.consume()?;
 ```
 
 ## Notes

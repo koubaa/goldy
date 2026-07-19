@@ -71,8 +71,8 @@ pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField,
 pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
 pub use scheme::{
     ClaimKey, Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture,
-    Loan, PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, SubmissionHandle,
-    Transaction, UploadBuffer,
+    Loan, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, SubmissionHandle, Transaction,
+    UploadBuffer,
 };
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};

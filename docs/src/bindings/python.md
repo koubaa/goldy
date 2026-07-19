@@ -236,9 +236,10 @@ scheme.node("update", compute_pipeline).with_parcel(
     buf, goldy.NodeAccess.READ_WRITE
 ).dispatch(wg_x, wg_y, 1)
 
+surface = goldy.SurfaceExchange.from_glfw(ctx, window)
+present = surface.bind_render_target(scheme, rt)
 submission = scheme.submit()
-present = scheme.grant_present(screen)
-present.consume(submission)
+present.claim(submission).consume()
 ```
 
 #### `ShaderModule` / `RenderPipeline` / `ComputePipeline`

@@ -186,7 +186,7 @@ impl SurfaceExchange {
     pub fn bind(&self, scheme: &mut Scheme, source: &Texture) -> Result<Transaction, GoldyError> {
         let lease = self.ensure_unbound(scheme)?;
         scheme.copy_texture_to_present(source, &lease);
-        Ok(scheme.grant_present(&lease).transaction())
+        Ok(scheme.register_present_exchange(&lease))
     }
 
     /// Record a stable offscreen render-target → surface copy and return a transaction.
@@ -197,7 +197,7 @@ impl SurfaceExchange {
     ) -> Result<Transaction, GoldyError> {
         let lease = self.ensure_unbound(scheme)?;
         scheme.copy_to_present(source, &lease);
-        Ok(scheme.grant_present(&lease).transaction())
+        Ok(scheme.register_present_exchange(&lease))
     }
 
     /// Register present without a copy: the scheme writes the drawable directly.
@@ -206,7 +206,7 @@ impl SurfaceExchange {
     /// the erased transaction for claim extraction after submit.
     pub fn bind_destination(&self, scheme: &mut Scheme) -> Result<(PresentLease, Transaction), GoldyError> {
         let lease = self.ensure_unbound(scheme)?;
-        let transaction = scheme.grant_present(&lease).transaction();
+        let transaction = scheme.register_present_exchange(&lease);
         Ok((lease, transaction))
     }
 
