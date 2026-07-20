@@ -7,7 +7,7 @@ fragmentation. Goldy routes client allocation through two doors:
 | Door | Permanence | Acquire |
 |------|------------|---------|
 | [`RetainedPool`](./retained-pool.md) | Cross-submission identity (deeds) | `acquire_texture` / `acquire_buffer` / `acquire_record` |
-| Context transient pool | One-submission tenancy (leases) | `Context::acquire_transient_texture` or `Scheme::lease_texture` / `lease_buffer` |
+| Context transient pool | One-submission tenancy (leases) | `Context::acquire_transient_texture` / `acquire_transient_buffer`, or `Scheme::lease_texture` / `lease_buffer` |
 
 The runtime owns reclaim: retained release transfers into the transient pool
 with a `ready_after` stamp; transient bins reissue only after GPU retirement.

@@ -155,6 +155,30 @@ impl Context {
         self.with_transient_pool(|pool| pool.clear_textures());
     }
 
+    /// Acquire a one-submission buffer from this context's transient pool.
+    pub fn acquire_transient_buffer(
+        &self,
+        size: u64,
+        kind: crate::types::BufferKind,
+        flags: crate::types::BufferFlags,
+        element_stride: Option<u32>,
+    ) -> anyhow::Result<crate::parcel::Buffer> {
+        self.with_transient_pool(|pool| pool.acquire_whole_buffer(self, size, kind, flags, element_stride))
+    }
+
+    /// Return a transient buffer to this context's pool for epoch-gated reuse.
+    pub fn return_transient_buffer(&self, buf: crate::parcel::Buffer) {
+        let ready_after = buf.last_referenced();
+        match buf.into_transient_parcel() {
+            Ok(parcel) => {
+                self.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+            }
+            Err(e) => {
+                tracing::warn!("return_transient_buffer: dropping non-binneable buffer: {e}");
+            }
+        }
+    }
+
     /// Bytes held outside this context's transient pool (leased or otherwise acquired).
     ///
     /// Aggregate memory telemetry for debug checking and tracing
@@ -379,7 +403,7 @@ impl Context {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
             // `RetainedPool::release` parks parcels here for epoch-gated reuse (leases,
             // future scheme-held transients). Until ekrano migrates off its own VRAM
-            // machinery (`ResourcePool`, `DeferredPayload` returns, pipeline cache) and
+            // machinery (`DeferredPayload` returns, pipeline cache) and
             // acquires through the transient pool, those parked buffers are not re-issued
             // — only dropped once `ready_after` retires. Without this drain at every frame
             // boundary, `release` leaks GPU heap (velato: Metal buffer heaps exhausted).

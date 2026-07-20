@@ -45,17 +45,19 @@ struct TexturePendingEntry {
     ready_after: ReferenceTable,
 }
 
-/// Recycle-bin key for buffer parcels: buffers are interchangeable iff size, kind, and flags match.
+/// Recycle-bin key for buffer parcels: interchangeable iff size, kind, flags, and stride match.
 ///
 /// Keying on size alone would allow an adopted non-Scattered buffer (from
 /// [`crate::retained_pool::RetainedPool::release_buffer`]) to be handed out to a
 /// [`TransientPool::acquire_buffer`] caller that expects a specific kind — which would produce
-/// wrong descriptor categories or silent garbage in the shader.
+/// wrong descriptor categories or silent garbage in the shader. Stride is included so ekrano
+/// scratch buffers with different structured strides never alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BufferKey {
     size: u64,
     kind: BufferKind,
     flags: BufferFlags,
+    element_stride: Option<u32>,
 }
 
 impl BufferKey {
@@ -67,6 +69,7 @@ impl BufferKey {
             size: parcel.byte_size(),
             kind,
             flags,
+            element_stride: parcel.buffer_element_stride(),
         }
     }
 }
@@ -84,7 +87,7 @@ pub struct TransientPool {
     /// Bytes held by clients through this pool (guard-decremented on drop).
     outstanding: Arc<PoolBookkeeping>,
     texture_bins: HashMap<TextureKey, Vec<TexturePendingEntry>>,
-    /// Buffer parcels keyed by `(size, kind, flags)`; excess ready entries are trimmed by
+    /// Buffer parcels keyed by `(size, kind, flags, stride)`; excess ready entries are trimmed by
     /// [`Self::drain_ready`] (see [`MAX_BUFFER_BIN_READY_SPARES`]).
     buffer_bins: HashMap<BufferKey, Vec<BufferBinEntry>>,
     /// Monotonic count of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`].
@@ -150,10 +153,22 @@ impl TransientPool {
 
     /// Acquire a one-submission buffer lease backing parcel, reusing a retired bin entry when possible.
     ///
-    /// `kind` and `flags` must match the values used to originally allocate any reused entry;
-    /// they are also forwarded to the backend when a fresh allocation is needed.
-    pub fn acquire_buffer(&mut self, ctx: &Context, size: u64, kind: BufferKind, flags: BufferFlags) -> Result<Parcel> {
-        let key = BufferKey { size, kind, flags };
+    /// `kind`, `flags`, and `element_stride` must match the values used to originally allocate any
+    /// reused entry; they are also forwarded to the backend when a fresh allocation is needed.
+    pub fn acquire_buffer(
+        &mut self,
+        ctx: &Context,
+        size: u64,
+        kind: BufferKind,
+        flags: BufferFlags,
+        element_stride: Option<u32>,
+    ) -> Result<Parcel> {
+        let key = BufferKey {
+            size,
+            kind,
+            flags,
+            element_stride,
+        };
         if let Some(bin) = self.buffer_bins.get_mut(&key) {
             if let Some(pos) = bin.iter().position(|e| ctx.parcel_ready(&e.ready_after)) {
                 let entry = bin.swap_remove(pos);
@@ -172,7 +187,7 @@ impl TransientPool {
 
         let alloc = ctx
             .device()
-            .alloc_buffer(size, kind, None, flags)
+            .alloc_buffer(size, kind, element_stride, flags)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         self.buffer_alloc_count += 1;
         let bytes = alloc.byte_size();
@@ -181,6 +196,20 @@ impl TransientPool {
         let mut parcel = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
         parcel.attach_bookkeeping(guard);
         Ok(parcel)
+    }
+
+    /// Acquire a whole-buffer [`Buffer`] wrapper for clients that bind via [`Buffer`] (not raw [`Parcel`]).
+    pub fn acquire_whole_buffer(
+        &mut self,
+        ctx: &Context,
+        size: u64,
+        kind: BufferKind,
+        flags: BufferFlags,
+        element_stride: Option<u32>,
+    ) -> Result<crate::parcel::Buffer> {
+        let home_device = Arc::downgrade(&ctx.device().inner);
+        let parcel = self.acquire_buffer(ctx, size, kind, flags, element_stride)?;
+        crate::parcel::Buffer::from_transient_parcel(parcel, home_device)
     }
 
     /// Return a scheme-held buffer lease parcel to the pool after its epoch retires.
@@ -451,6 +480,7 @@ mod tests {
                     64,
                     crate::types::BufferKind::Scattered,
                     crate::types::BufferFlags::empty(),
+                    None,
                 )
             })
             .expect("reuse binned buffer");
@@ -476,6 +506,7 @@ mod tests {
                     64,
                     crate::types::BufferKind::Scattered,
                     crate::types::BufferFlags::empty(),
+                    None,
                 )
             })
             .expect("initial acquire");
@@ -496,6 +527,7 @@ mod tests {
                     64,
                     crate::types::BufferKind::Scattered,
                     crate::types::BufferFlags::empty(),
+                    None,
                 )
             })
             .expect("reuse after return");
@@ -508,6 +540,28 @@ mod tests {
             ctx.with_transient_pool(|t| t.pending_count()),
             0,
             "bin emptied after reuse"
+        );
+    }
+
+    #[test]
+    fn context_acquire_return_transient_buffer_reuses() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        let alloc_before = ctx.transient_buffer_alloc_count();
+        let buf = ctx
+            .acquire_transient_buffer(128, BufferKind::Scattered, BufferFlags::empty(), Some(16))
+            .expect("acquire");
+        let handle = buf.whole().buffer_handle().expect("handle");
+        assert_eq!(ctx.transient_buffer_alloc_count(), alloc_before + 1);
+        ctx.return_transient_buffer(buf);
+        let buf2 = ctx
+            .acquire_transient_buffer(128, BufferKind::Scattered, BufferFlags::empty(), Some(16))
+            .expect("reacquire");
+        assert_eq!(buf2.whole().buffer_handle(), Some(handle));
+        assert_eq!(
+            ctx.transient_buffer_alloc_count(),
+            alloc_before + 1,
+            "reuse must not allocate again"
         );
     }
 

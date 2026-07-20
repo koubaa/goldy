@@ -564,6 +564,25 @@ impl Buffer {
         }
     }
 
+    /// Wrap a whole-buffer transient-pool parcel as a [`Buffer`] (preserves stamp + bookkeeping).
+    pub(crate) fn from_transient_parcel(mut parcel: Parcel, home_device: Weak<DeviceInner>) -> anyhow::Result<Self> {
+        let alloc = match &parcel.backing {
+            ParcelBacking::WholeBuffer(b) => Arc::clone(b),
+            _ => anyhow::bail!("from_transient_parcel requires a whole-buffer parcel"),
+        };
+        let bookkeeping = parcel
+            .bookkeeping
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("from_transient_parcel requires bookkeeping on the parcel"))?;
+        Ok(Self {
+            storage: BufferStorage::Single(alloc),
+            units: vec![parcel],
+            bookkeeping: Some(bookkeeping),
+            home_device,
+            handoff: false,
+        })
+    }
+
     pub(crate) fn from_partitioned(
         parent: Arc<Allocation>,
         views: Vec<BufferView>,

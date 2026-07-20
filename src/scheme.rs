@@ -730,6 +730,7 @@ impl UploadBufferPool {
                     self.size,
                     crate::types::BufferKind::Scattered,
                     BufferFlags::CPU_WRITABLE,
+                    None,
                 )
             })
             .map_err(|e| ctx.classify(e))?;
@@ -1406,7 +1407,7 @@ impl Scheme {
         self.dirty = true;
         let backing = self
             .ctx
-            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags))
+            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags, None))
             .map_err(|e| self.ctx.classify(e))?;
         let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
         self.leases.push(backing);
