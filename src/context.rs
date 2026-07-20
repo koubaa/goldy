@@ -31,13 +31,6 @@ pub(crate) struct ContextInner {
     reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
     submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
     high_water_timeline: AtomicU64,
-    /// Per-context transient resource heap (backing buffer + cached views/textures).
-    ///
-    /// Scoped to the context rather than the device so that independent contexts —
-    /// e.g. concurrent renders that each own a context — never share transient
-    /// `BufferView`/`Texture` handles. Sharing a device-global heap across contexts
-    /// caused GPU-level write-write races on the cached transient textures.
-    pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
     /// Epoch-gated transient parcel pool backing scheme-held leases.
     transient_pool: Mutex<TransientPool>,
 }
@@ -58,12 +51,6 @@ impl std::fmt::Debug for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
-        // Drop the placement heap (and its views/buffer/textures) while the device is
-        // still alive (this `ContextInner` still holds a `Device` clone). The heap's
-        // resource `Drop`s route through the backend deletion queue.
-        if let Ok(mut heap_guard) = self.placement_heap.lock() {
-            *heap_guard = None;
-        }
         // Drop the transient pool (and its parked parcels) while the device is alive.
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
@@ -112,7 +99,6 @@ impl Context {
                 reclamation_scope: Some(reclamation_scope),
                 submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
-                placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
             }),
         })
@@ -159,9 +145,16 @@ impl Context {
     ///
     /// Does not increment when a retired bin entry is reused. Monotonically increasing.
     /// Useful in tests to assert that the pool's recycling path fires (alloc count stays
-    /// flat across a lease reuse cycle, mirroring [`Self::transient_texture_create_count`]).
+    /// flat across a lease reuse cycle, mirroring [`Self::transient_texture_alloc_count`]).
     pub fn transient_buffer_alloc_count(&self) -> usize {
         self.with_transient_pool(|pool| pool.buffer_alloc_count())
+    }
+
+    /// Total number of fresh GPU texture allocations made by this context's transient pool.
+    ///
+    /// Does not increment when a retired bin entry is reused. Monotonically increasing.
+    pub fn transient_texture_alloc_count(&self) -> usize {
+        self.with_transient_pool(|pool| pool.texture_alloc_count())
     }
 
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
@@ -459,39 +452,6 @@ impl Context {
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         }
         Ok(result)
-    }
-
-    /// Snapshot of this context's placement-heap state for diagnostics.
-    ///
-    /// Returns `None` if the heap hasn't been created yet (no transient-resource
-    /// scheme submits have run on this context).
-    pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.stats())
-    }
-
-    /// Number of `BufferView`s and `Texture`s currently held in this context's placement
-    /// heap caches. Returns `(cached_views, cached_textures)`.
-    pub fn transient_cache_counts(&self) -> (usize, usize) {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        match heap_guard.as_ref() {
-            Some(h) => (h.cached_view_count(), h.cached_texture_count()),
-            None => (0, 0),
-        }
-    }
-
-    /// Total number of `create_buffer_view` backend calls made by this context's placement
-    /// heap view cache since initialization. Monotonically increasing.
-    pub fn transient_view_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.view_create_count()).unwrap_or(0)
-    }
-
-    /// Total number of `Texture::new` calls made by this context's placement heap texture
-    /// cache since initialization. Monotonically increasing.
-    pub fn transient_texture_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.texture_create_count()).unwrap_or(0)
     }
 }
 

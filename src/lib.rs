@@ -53,7 +53,6 @@ pub mod exchange;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
-pub mod placement_heap;
 pub mod retained_pool;
 pub mod scheme;
 pub mod signal;

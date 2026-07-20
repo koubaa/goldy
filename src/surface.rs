@@ -305,11 +305,6 @@ impl Frame {
 
     fn apply_frame_bookkeeping(&self, submit_tv: TimelineValue) -> Result<()> {
         tracy_frame_mark!();
-        if let Ok(mut heap_guard) = self.context.inner.placement_heap.lock() {
-            if let Some(ref mut heap) = *heap_guard {
-                heap.stamp_all_pending(submit_tv);
-            }
-        }
         let keepalive = std::mem::take(&mut *self.keepalive.lock().unwrap());
         if !keepalive.is_empty() {
             self.context.defer_release(submit_tv, keepalive);

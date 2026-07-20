@@ -28,7 +28,6 @@ use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
 use crate::error::GoldyError;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
-use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -564,10 +563,6 @@ impl Device {
     // =======================================================================
     // VramAllocator
     // =======================================================================
-
-    pub(crate) fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
-        self.inner.vram_allocator.defer_release(epoch, payload);
-    }
 
     /// Returns the currently installed [`VramAllocator`].
     ///

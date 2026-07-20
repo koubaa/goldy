@@ -93,6 +93,8 @@ pub struct TransientPool {
     /// [`crate::Context::transient_buffer_alloc_count`] for tests that verify the recycling
     /// path fires (alloc count stays flat across a reuse cycle).
     buffer_alloc_count: usize,
+    /// Monotonic count of fresh `alloc_texture` calls made by [`Self::acquire_texture`].
+    texture_alloc_count: usize,
 }
 
 impl TransientPool {
@@ -103,6 +105,7 @@ impl TransientPool {
             texture_bins: HashMap::new(),
             buffer_bins: HashMap::new(),
             buffer_alloc_count: 0,
+            texture_alloc_count: 0,
         }
     }
 
@@ -138,6 +141,7 @@ impl TransientPool {
             .device()
             .alloc_texture(width, height, format, access, flags)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.texture_alloc_count += 1;
         let bytes = tex.byte_size() as u64;
         self.outstanding.add(ParcelType::Texture, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Texture, bytes);
@@ -320,6 +324,12 @@ impl TransientPool {
     /// construction. Does not count bin reuses. Monotonically increasing.
     pub fn buffer_alloc_count(&self) -> usize {
         self.buffer_alloc_count
+    }
+
+    /// Total number of fresh `alloc_texture` calls made by [`Self::acquire_texture`] since
+    /// construction. Does not count bin reuses. Monotonically increasing.
+    pub fn texture_alloc_count(&self) -> usize {
+        self.texture_alloc_count
     }
 }
 

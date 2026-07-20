@@ -53,13 +53,6 @@ pub(crate) struct TransientBufferSpec {
     pub(crate) stride: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct TransientTextureKey {
-    pub width: u32,
-    pub height: u32,
-    pub format: TextureFormat,
-}
-
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(crate) struct TransientTextureSpec {
@@ -192,7 +185,7 @@ pub(crate) struct ResolvedUploadBuffer {
 /// `PresentLease`, `UploadBuffer`) through this table at emission time.
 /// No IR clone is ever necessary.
 ///
-/// Transient entries are page-local (supplied by `PlacementHeap::advance_page`).
+/// Transient entries are scheme-local (resolved at submit from lease backing).
 /// The swapchain entry is boundary-local (filled after `surface.begin()`).
 /// Upload buffers are scheme-local (filled by [`crate::Scheme`] before submit).
 #[derive(Debug, Clone, Default)]
