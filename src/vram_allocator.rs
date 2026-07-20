@@ -5,7 +5,7 @@
 //! `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity` / `Device::alloc_texture`
 //! method passes through the installed allocator:
 //!
-//! - **Transient backing** — [`TransientAllocator`] → [`BufferPool`] → `Device::alloc_buffer`
+//! - **Transient backing** — [`TransientAllocator`] → scattered bump arena → `Device::alloc_buffer`
 //! - **Standalone named buffers** — `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity`
 //! - **Textures** — [`TexturePool`] → `Device::alloc_texture`
 //!
@@ -32,7 +32,7 @@
 //! │  │TransientAlloc│  │Device::alloc_│  │Texture  │ │
 //! │  │ (recycling)  │  │buffer()      │  │Pool     │ │
 //! │  └──────┬───────┘  └──────┬───────┘  └────┬────┘ │
-//! │         │ via BufferPool  │               │      │
+//! │         │ via bump arena  │               │      │
 //! │  ┌──────▼─────────────────▼───────────────▼─────┐│
 //! │  │              VramAllocator trait              ││
 //! │  │  alloc_buffer / alloc_texture / notify_freed  ││
@@ -55,7 +55,6 @@
 //! tracking and budget enforcement.
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
-//! [`BufferPool`]: crate::buffer::BufferPool
 //! [`Texture`]: crate::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
@@ -84,20 +83,6 @@ use std::sync::{Arc, Mutex, RwLock};
 /// Passed to [`VramAllocator::defer_release`] to register resources for deferred dropping.
 /// The allocator holds the payload until [`VramAllocator::boundary_crossed`] determines that the
 /// associated epoch has been reached, then drops all resources in the payload.
-///
-/// # Example
-///
-/// ```no_run
-/// # use goldy::vram_allocator::DeferredPayload;
-/// # use goldy::{BufferPool, Device};
-/// # fn example(device: &Device) -> anyhow::Result<()> {
-/// let mut pool = BufferPool::new(device, 4096)?;
-/// let view = pool.alloc::<u32>(16)?;
-/// let mut payload = DeferredPayload::new();
-/// payload.push(view);
-/// # Ok(())
-/// # }
-/// ```
 pub struct DeferredPayload(pub(crate) Vec<Box<dyn Any + Send>>);
 
 impl DeferredPayload {

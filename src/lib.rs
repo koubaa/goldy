@@ -80,7 +80,7 @@ pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
 
 // Re-export main types
-pub use buffer::{BufferPool, BufferSource, BufferView, StructuredBufferElement};
+pub use buffer::{BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::ComputePipeline;
 pub use signal::{OversubscribedReason, Signal};

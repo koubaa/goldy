@@ -77,6 +77,32 @@ mod buffer_alloc_tests {
     }
 
     #[test]
+    fn buffer_pool_alloc_with_data() {
+        let device = make_device();
+        const N: usize = 64;
+        let total = BufferPool::padded_size(&[(N, std::mem::size_of::<u32>())]);
+        let mut pool = BufferPool::new(&device, total).expect("create pool");
+        let data: Vec<u32> = (1..=N as u32).collect();
+        let view = pool.alloc_with_data(&data).expect("alloc_with_data");
+        assert_eq!(view.size(), (N * std::mem::size_of::<u32>()) as u64);
+
+        let mut output = vec![0u8; total as usize];
+        pool.read_to_cpu(&device, &mut output).expect("readback");
+        let roundtripped: &[u32] = bytemuck::cast_slice(&output[..N * 4]);
+        for (i, &val) in roundtripped.iter().enumerate() {
+            assert_eq!(val, (i + 1) as u32, "mismatch at index {}", i);
+        }
+    }
+
+    #[test]
+    fn buffer_pool_alloc_with_data_empty() {
+        let device = make_device();
+        let mut pool = BufferPool::new(&device, 1024).expect("create pool");
+        let view = pool.alloc_with_data::<u32>(&[]).expect("alloc_with_data empty");
+        assert_eq!(view.size(), 0);
+    }
+
+    #[test]
     fn new_with_capacity_hint_smoke() {
         let device = make_device();
         let b = device
