@@ -1,7 +1,7 @@
 //! Internal GPU texture backing for [`crate::Texture`] parcels.
 //!
 //! Public callers acquire [`crate::Texture`] (a parcel wrapper) from
-//! [`crate::RetainedPool::acquire_texture`] or [`crate::TexturePool::acquire`].
+//! [`crate::RetainedPool::acquire_texture`] or [`crate::Context::acquire_transient_texture`].
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;

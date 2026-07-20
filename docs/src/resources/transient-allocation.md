@@ -125,9 +125,9 @@ Possible future strategies:
 
 | Type | Scope | Lifecycle |
 |------|-------|-----------|
-| `BufferPool` | Manual sub-allocation from one buffer | Caller manages reset timing |
+| Scattered bump arena (`BufferPool`) | Internal sub-allocation | Used by `TransientAllocator` strategies |
 | `FrameOrchestrator<T>` | Frame-slot ring with typed cleanup payloads | Epoch-aware, depth-capped, callback-driven |
-| `TexturePool` | Acquire/release cache for textures | Keyed recycling, no sub-allocation |
+| `TransientPool` | Context-owned lease recycle bins | Epoch-gated; deeds/leases are the client API |
 | **`TransientAllocator`** | **Pluggable per-frame bump allocation** | **Epoch-aware, strategy-selectable** |
 
-`TransientAllocator` *uses* `BufferPool` internally (each strategy is backed by one), but adds lifecycle management that `BufferPool` alone does not provide.
+`TransientAllocator` *uses* the scattered bump arena internally (each strategy is backed by one), but adds lifecycle management that the bump cursor alone does not provide.

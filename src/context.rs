@@ -132,6 +132,29 @@ impl Context {
         f(&mut pool)
     }
 
+    /// Acquire a one-submission texture from this context's transient pool.
+    pub fn acquire_transient_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::TextureKind,
+        flags: crate::types::TextureFlags,
+    ) -> anyhow::Result<crate::Texture> {
+        self.with_transient_pool(|pool| pool.acquire_texture(self, width, height, format, access, flags))
+    }
+
+    /// Return a transient texture to this context's pool for epoch-gated reuse.
+    pub fn return_transient_texture(&self, texture: crate::Texture) {
+        let ready_after = texture.last_referenced();
+        self.with_transient_pool(|pool| pool.return_texture(texture, ready_after));
+    }
+
+    /// Drop all parked transient textures (Metal resize purge).
+    pub fn clear_transient_textures(&self) {
+        self.with_transient_pool(|pool| pool.clear_textures());
+    }
+
     /// Bytes held outside this context's transient pool (leased or otherwise acquired).
     ///
     /// Aggregate memory telemetry for debug checking and tracing

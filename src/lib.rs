@@ -31,7 +31,6 @@ pub mod shaders;
 pub mod surface;
 pub mod task_graph;
 pub mod texture;
-pub mod texture_pool;
 pub mod types;
 
 pub mod shader_cache;
@@ -102,7 +101,6 @@ pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, Struc
 pub use surface::{Frame, Surface};
 pub use task_graph::{GraphIR, NodeAccess};
 
-pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use transient_allocator::{
     BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
 };

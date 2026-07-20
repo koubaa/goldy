@@ -7,7 +7,7 @@
 //!
 //! - **Transient backing** — [`TransientAllocator`] → scattered bump arena → `Device::alloc_buffer`
 //! - **Standalone named buffers** — `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity`
-//! - **Textures** — [`TexturePool`] → `Device::alloc_texture`
+//! - **Textures** — [`RetainedPool`] / [`TransientPool`] → `Device::alloc_texture`
 //!
 //! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
 //! a `Weak` back-reference to the allocator. When the backing buffer or texture is dropped,
@@ -29,8 +29,8 @@
 //! ┌───────────────────────────────────────────────────┐
 //! │  Consumers (ekrano, user code)                    │
 //! │  ┌──────────────┐  ┌──────────────┐  ┌─────────┐ │
-//! │  │TransientAlloc│  │Device::alloc_│  │Texture  │ │
-//! │  │ (recycling)  │  │buffer()      │  │Pool     │ │
+//! │  │TransientAlloc│  │Device::alloc_│  │Retained /│ │
+//! │  │ (recycling)  │  │buffer()      │  │Transient │ │
 //! │  └──────┬───────┘  └──────┬───────┘  └────┬────┘ │
 //! │         │ via bump arena  │               │      │
 //! │  ┌──────▼─────────────────▼───────────────▼─────┐│
@@ -56,7 +56,8 @@
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`Texture`]: crate::Texture
-//! [`TexturePool`]: crate::texture_pool::TexturePool
+//! [`RetainedPool`]: crate::retained_pool::RetainedPool
+//! [`TransientPool`]: crate::transient_pool::TransientPool
 //! [`Device`]: crate::device::Device
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator

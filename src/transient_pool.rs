@@ -197,6 +197,29 @@ impl TransientPool {
             .push(BufferBinEntry { parcel, ready_after });
     }
 
+    /// Return a scheme-held texture to the pool after its epoch retires.
+    ///
+    /// Called when filter-scratch (or other one-shot) textures are done for the frame.
+    /// The texture's bookkeeping must still be attached; this method releases it.
+    pub(crate) fn return_texture(&mut self, mut texture: Texture, ready_after: ReferenceTable) {
+        texture.release_bookkeeping();
+        let parcel = texture.into_parcel();
+        let bytes = parcel.byte_size();
+        let (width, height, format, access, flags) = parcel.texture_descriptor().expect("texture descriptor");
+        let key = TextureKey {
+            width,
+            height,
+            format,
+            access,
+            flags,
+        };
+        self.pending.add(ParcelType::Texture, bytes);
+        self.texture_bins
+            .entry(key)
+            .or_default()
+            .push(TexturePendingEntry { parcel, ready_after });
+    }
+
     pub(crate) fn adopt(&mut self, stamped: StampedParcel) {
         let StampedParcel { hold, ready_after } = stamped;
         match hold {
@@ -240,23 +263,19 @@ impl TransientPool {
         }
     }
 
-    fn park_texture(&mut self, mut texture: Texture, ready_after: ReferenceTable) {
-        texture.release_bookkeeping();
-        let parcel = texture.into_parcel();
-        let bytes = parcel.byte_size();
-        let (width, height, format, access, flags) = parcel.texture_descriptor().expect("texture hold has descriptor");
-        let key = TextureKey {
-            width,
-            height,
-            format,
-            access,
-            flags,
-        };
-        self.pending.add(ParcelType::Texture, bytes);
-        self.texture_bins
-            .entry(key)
-            .or_default()
-            .push(TexturePendingEntry { parcel, ready_after });
+    fn park_texture(&mut self, texture: Texture, ready_after: ReferenceTable) {
+        self.return_texture(texture, ready_after);
+    }
+
+    /// Drop all parked textures (including not-yet-ready). Used when a Metal resize
+    /// must free overflow-heap-backed textures immediately after waiting for GPU work.
+    pub(crate) fn clear_textures(&mut self) {
+        for bin in self.texture_bins.values() {
+            for entry in bin {
+                self.pending.subtract(ParcelType::Texture, entry.parcel.byte_size());
+            }
+        }
+        self.texture_bins.clear();
     }
 
     pub fn drain_ready(&mut self, ctx: &Context) -> usize {

@@ -4,7 +4,7 @@ All GPU buffer and texture allocations route through the device's installed `Vra
 
 1. **Transient sub-allocations** — `TransientAllocator` → `BufferPool` → `Device::alloc_buffer`
 2. **Standalone buffers** — `Device::alloc_buffer` / `alloc_buffer_with_*`
-3. **Textures** — `TexturePool` → `Device::alloc_texture`
+3. **Textures** — `RetainedPool` / `TransientPool` → `Device::alloc_texture`
 
 The `VramAllocator` trait sits **below** all three, providing a single customization point for where GPU memory comes from. The transient allocator controls *when* to reclaim; the VRAM allocator controls *how* to allocate.
 
@@ -40,7 +40,7 @@ let tex = device.alloc_texture(width, height, format, access, flags)?;
 
 Every `device.alloc_*` call attaches an allocator **deed** and calls `VramAllocator::notify_freed` on drop. Borrowing sub-parcels such as `BufferView` never account.
 
-Goldy's built-in pooling systems (`TexturePool`, `BufferPool`, ekrano's `ResourcePool`) all route through the device's allocator automatically.
+Goldy's pooling paths (`RetainedPool`, `TransientPool`, `TransientAllocator` backing) all route through the device's allocator automatically.
 
 ## Allocation Policy (Tracking and Budget)
 
