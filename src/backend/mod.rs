@@ -834,7 +834,6 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>>;
-    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 }
 
@@ -914,7 +913,6 @@ impl ContextSubmitSession for LockedSubmitSession {
         self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
     }
 
-    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {
         self.backend.lock().unwrap().evict_retained(ctx, key);
     }

@@ -307,13 +307,6 @@ impl MockBackend {
         }
     }
 
-    #[allow(dead_code)]
-    fn complete_context_seq(&mut self, ctx: ContextHandle, seq: u64) {
-        let mut state = self.context_state_mut(ctx);
-        state.completed = seq;
-        state.last_submitted_seq = seq;
-    }
-
     fn push_context_signal(&self, ctx: ContextHandle, signal: crate::signal::Signal) {
         self.context_state(ctx).signal_queue.push(signal);
     }
@@ -1809,7 +1802,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
 
-        let target = backend
+        let _target = backend
             .create_render_target_with_depth(device, 800, 600, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 

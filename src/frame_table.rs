@@ -3,7 +3,6 @@
 //! Bindless indices are staged on the CPU and copied into a device-local table
 //! before each submission; shader preambles resolve `index = table[selector][base + k]`
 //! instead of reading baked push-constant words.
-#![allow(dead_code)]
 
 /// Metal argument-buffer slot for the (unused) selector cell.
 ///
@@ -11,8 +10,10 @@
 /// the device descriptor registry) and reach shaders via push constants
 /// `_rs1`/`_rs2`; these constants only describe Metal's fixed device-level
 /// argument-buffer layout.
+#[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_SELECTOR_SLOT: u32 = 0;
 /// Metal argument-buffer slot for the device-local index table (`Scattered<u32>`).
+#[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
 /// First bindless slot available to program resources (low protocol slots reserved).
 pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
@@ -28,6 +29,7 @@ pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
 pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;
 
 /// Byte size of one device-local table buffer.
+#[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_TABLE_BYTES: u64 = (FRAME_TABLE_TABLE_U32S * 4) as u64;
 /// Per-row selector slots at the front of CPU upload staging.
 pub const FRAME_TABLE_STAGING_SELECTOR_U32S: usize = FRAME_TABLE_MAX_ROWS as usize;
@@ -151,7 +153,6 @@ pub fn lower_gpu_commands(_commands: &mut Vec<crate::backend::GpuCommand>) {}
 mod tests {
     use super::*;
     use crate::backend::{GpuCommand, RenderCommand};
-    use crate::types::{ResourceCategory, ResourceHandle};
 
     #[test]
     fn lower_render_skips_already_lowered_raw() {

@@ -21,7 +21,6 @@ pub(crate) use ir::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
 
 use crate::backend::{BufferHandle, TextureHandle};
-use crate::types::TextureFormat;
 
 /// Opaque id for a transient buffer slot in graph IR (`ResourceId::TransientBuffer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,30 +39,6 @@ pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 /// of a `ResourceId::PresentLease` binding. Replaced by the real UAV bindless
 /// index when the swapchain pool resolves backing at submit time.
 pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
-
-/// Opaque handle for a swapchain output binding in graph IR.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub(crate) struct SwapchainOutputHandle;
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct TransientBufferSpec {
-    pub(crate) id: u32,
-    pub(crate) size: u64,
-    /// Element stride for the structured buffer descriptor (bytes).
-    /// Defaults to 4 (u32) when not specified.
-    pub(crate) stride: u32,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct TransientTextureSpec {
-    pub id: u32,
-    pub width: u32,
-    pub height: u32,
-    pub format: TextureFormat,
-}
 
 /// Identifies a GPU resource within a task graph.
 ///
@@ -99,7 +74,7 @@ pub(crate) enum ResourceId {
     /// an explicit `Read` binding so the scheduler orders copy after render.
     RenderTarget(crate::backend::RenderTargetHandle),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
-    #[allow(dead_code)] // TaskGraph placement-heap path removed; kept for IR/analysis matching
+    #[allow(dead_code)] // constructed in analysis tests / future transient-graph paths
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
     #[allow(dead_code)]
@@ -149,7 +124,6 @@ impl ResourceId {
 
 /// Resolved storage for a transient buffer slot.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedTransientBuffer {
     pub parent: BufferHandle,
     pub offset: u64,
@@ -160,14 +134,12 @@ pub(crate) struct ResolvedTransientBuffer {
 
 /// Resolved storage for a transient texture slot.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedTransientTexture {
     pub handle: TextureHandle,
 }
 
 /// Resolved storage for the swapchain output slot.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedSwapchain {
     pub handle: TextureHandle,
     pub uav_index: u32,
@@ -208,7 +180,6 @@ impl SlotResolver {
     }
 
     /// Resolve a `ResourceId` to its concrete form.  Concrete ids pass through.
-    #[allow(dead_code)]
     pub fn resolve(&self, id: ResourceId) -> ResourceId {
         match id {
             ResourceId::TransientBuffer(t) => {
