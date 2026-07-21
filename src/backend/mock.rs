@@ -43,8 +43,6 @@ pub(crate) struct MockBackend {
     pub targets_created: Vec<(u32, u32, TextureFormat)>,
     /// Targets with depth buffer that were created (for verification)
     pub targets_with_depth_created: Vec<(u32, u32, TextureFormat, Option<DepthFormat>)>,
-    /// Count of CPU readbacks performed
-    pub cpu_readback_count: usize,
     /// Count of surface presents performed
     pub surface_present_count: usize,
     /// Count of textures created
@@ -180,7 +178,6 @@ struct MockRenderTarget {
     height: u32,
     format: TextureFormat,
     depth_format: Option<DepthFormat>,
-    has_rendered: bool,
     /// Simulated pixel data (all zeros by default)
     data: Vec<u8>,
 }
@@ -251,7 +248,6 @@ impl MockBackend {
             recorded_compute_commands: Vec::new(),
             targets_created: Vec::new(),
             targets_with_depth_created: Vec::new(),
-            cpu_readback_count: 0,
             surface_present_count: 0,
             textures_created: 0,
             samplers_created: 0,
@@ -417,7 +413,6 @@ impl MockBackend {
         self.recorded_compute_commands.clear();
         self.targets_created.clear();
         self.targets_with_depth_created.clear();
-        self.cpu_readback_count = 0;
         self.surface_present_count = 0;
         self.textures_created = 0;
         self.samplers_created = 0;
@@ -1231,7 +1226,6 @@ impl GpuBackend for MockBackend {
                 height,
                 format: color_format,
                 depth_format,
-                has_rendered: false,
                 data: vec![0u8; size],
             },
         );
@@ -1292,29 +1286,6 @@ impl GpuBackend for MockBackend {
                 render_target.data[i + 3] = a;
             }
         }
-
-        render_target.has_rendered = true;
-
-        Ok(())
-    }
-
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        let render_target = self
-            .render_targets
-            .get(&target)
-            .ok_or_else(|| anyhow::anyhow!("Invalid render target handle"))?;
-
-        if !render_target.has_rendered {
-            anyhow::bail!("Cannot read from render target that hasn't been rendered to");
-        }
-
-        let expected_size = render_target.data.len();
-        if output.len() < expected_size {
-            anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
-        }
-
-        output[..expected_size].copy_from_slice(&render_target.data);
-        self.cpu_readback_count += 1;
 
         Ok(())
     }
@@ -1889,50 +1860,8 @@ mod tests {
         let commands = vec![RenderCommand::Clear(Color::RED)];
         backend.render_to_target(device, target, &commands).unwrap();
 
-        // No CPU readback should have occurred
-        assert_eq!(backend.cpu_readback_count, 0);
-
         // Commands should be recorded
         assert_eq!(backend.recorded_commands.len(), 1);
-    }
-
-    #[test]
-    fn test_explicit_readback() {
-        let mut backend = MockBackend::new();
-        let device = backend.create_device(0).unwrap();
-        let target = backend
-            .create_render_target(device, 2, 2, TextureFormat::Rgba8Unorm)
-            .unwrap();
-
-        let commands = vec![RenderCommand::Clear(Color::RED)];
-        backend.render_to_target(device, target, &commands).unwrap();
-
-        // Now explicitly read back
-        let mut output = vec![0u8; 2 * 2 * 4];
-        backend.read_target_to_cpu(target, &mut output).unwrap();
-
-        assert_eq!(backend.cpu_readback_count, 1);
-
-        // Check the clear color was applied (RED = 255, 0, 0, 255)
-        assert_eq!(output[0], 255); // R
-        assert_eq!(output[1], 0); // G
-        assert_eq!(output[2], 0); // B
-        assert_eq!(output[3], 255); // A
-    }
-
-    #[test]
-    fn test_readback_requires_render() {
-        let mut backend = MockBackend::new();
-        let device = backend.create_device(0).unwrap();
-        let target = backend
-            .create_render_target(device, 10, 10, TextureFormat::Rgba8Unorm)
-            .unwrap();
-
-        // Try to read without rendering first
-        let mut output = vec![0u8; 10 * 10 * 4];
-        let result = backend.read_target_to_cpu(target, &mut output);
-
-        assert!(result.is_err());
     }
 
     #[test]

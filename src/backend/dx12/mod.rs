@@ -940,9 +940,6 @@ impl GpuBackend for Dx12Backend {
     ) -> Result<()> {
         render_target::render(&mut self.state, device_handle, target, commands)
     }
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        render_target::read_to_cpu(&mut self.state, target, output)
-    }
     fn create_surface(
         &mut self,
         device_handle: DeviceHandle,

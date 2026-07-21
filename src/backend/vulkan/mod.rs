@@ -900,16 +900,6 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        render_target::read_to_cpu(
-            &self.state.instance,
-            &self.state.devices,
-            &self.state.render_targets,
-            target,
-            output,
-        )
-    }
-
     fn create_surface(
         &mut self,
         device_handle: DeviceHandle,

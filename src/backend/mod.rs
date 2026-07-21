@@ -1249,7 +1249,7 @@ pub(crate) trait GpuBackend:
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle>;
 
-    // RenderTarget API - GPU buffer stays on GPU, readback is optional
+    // RenderTarget API - GPU-only; no CPU readback
     fn create_render_target(
         &mut self,
         device: DeviceHandle,
@@ -1273,7 +1273,6 @@ pub(crate) trait GpuBackend:
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()>;
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
 
     // Texture management
     fn create_texture(

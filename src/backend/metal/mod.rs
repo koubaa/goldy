@@ -681,10 +681,6 @@ impl GpuBackend for MetalBackend {
         render_target::render_to(&mut self.state, device, target, commands)
     }
 
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        render_target::read_to_cpu(&self.state, target, output)
-    }
-
     fn create_texture(
         &mut self,
         device: DeviceHandle,

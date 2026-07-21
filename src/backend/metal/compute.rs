@@ -1862,15 +1862,6 @@ pub(super) fn submit_graph(
         maybe_log_mem_diag(ld);
     }
 
-    // Mark render targets as rendered.
-    for cmd in commands {
-        if let GraphCommand::Render { target, .. } = cmd {
-            if let Some(rt) = state.render_targets.get_mut(target) {
-                rt.has_rendered = true;
-            }
-        }
-    }
-
     if let Some(key) = retain_key {
         let used_slots = collect_metal_slots_from_graph_commands(state, commands);
         let graph = super::types::MetalRetainedGraph {

@@ -7,7 +7,7 @@ use super::pso_cache;
 use super::shader;
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
-use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
+use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, ShaderHandle};
 use crate::backend::submission_worker::allocate_timeline_value;
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
@@ -2575,7 +2575,6 @@ pub(super) fn submit_graph_with_scope(
         prof
     };
 
-    let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
     let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
     let (belt_idx_final, pending_deletions, frame_table_row);
     {
@@ -2666,7 +2665,6 @@ pub(super) fn submit_graph_with_scope(
                             }
                         }
                     }
-                    rendered_targets.push(*target);
                 }
             }
         }
@@ -2738,13 +2736,6 @@ pub(super) fn submit_graph_with_scope(
             sync,
         )?
     };
-
-    for t in rendered_targets {
-        let mut render_targets_write = scope.render_targets().write().unwrap();
-        if let Some(rt) = render_targets_write.entries.get_mut(&t) {
-            rt.has_rendered = true;
-        }
-    }
 
     Ok(result)
 }

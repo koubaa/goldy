@@ -3,7 +3,7 @@
 //! Handles creation, destruction, rendering, and readback of off-screen render targets.
 
 use super::types::{LogicalDevice, RenderTargetState, SharedRenderTargetTable};
-use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk, with_buffer_sharing, with_image_sharing};
+use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk, with_image_sharing};
 use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, TextureFormat};
@@ -117,7 +117,6 @@ pub(super) fn create(
             device_handle,
             width,
             height,
-            format,
             image,
             image_memory,
             image_view,
@@ -125,10 +124,7 @@ pub(super) fn create(
             depth_image: None,
             depth_memory: None,
             depth_view: None,
-            staging_buffer: None,
-            staging_memory: None,
             command_buffer,
-            has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
 
@@ -289,7 +285,6 @@ pub(super) fn create_with_depth(
             device_handle,
             width,
             height,
-            format: color_format,
             image,
             image_memory,
             image_view,
@@ -297,10 +292,7 @@ pub(super) fn create_with_depth(
             depth_image,
             depth_memory,
             depth_view,
-            staging_buffer: None,
-            staging_memory: None,
             command_buffer,
-            has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
 
@@ -335,12 +327,6 @@ pub(super) fn destroy(
                 }
                 if let Some(depth_memory) = state.depth_memory {
                     logical_device.device.free_memory(depth_memory, None);
-                }
-                if let Some(staging_buffer) = state.staging_buffer {
-                    logical_device.device.destroy_buffer(staging_buffer, None);
-                }
-                if let Some(staging_memory) = state.staging_memory {
-                    logical_device.device.free_memory(staging_memory, None);
                 }
             }
         }
@@ -610,188 +596,6 @@ where
         .context("Failed to wait for queue")?;
     // Legacy path waits idle — clear the reservation (no timeline token).
     row_guard.commit(0);
-
-    if let Some(rt) = render_targets.read().unwrap().entries.get(&target) {
-        rt.has_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    Ok(())
-}
-
-/// Read render target contents to CPU memory.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn read_to_cpu(
-    instance: &Instance,
-    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    render_targets: &SharedRenderTargetTable,
-    target: RenderTargetHandle,
-    output: &mut [u8],
-) -> Result<()> {
-    // Get render target info and device
-    let (device_handle, width, height, format, image, physical_device) = {
-        let render_targets_guard = render_targets.read().unwrap();
-        let render_target = render_targets_guard
-            .entries
-            .get(&target)
-            .context("Invalid render target handle")?;
-
-        if !render_target.has_rendered.load(std::sync::atomic::Ordering::Relaxed) {
-            anyhow::bail!("Cannot read from render target that hasn't been rendered to");
-        }
-
-        let logical_device = devices
-            .get(&render_target.device_handle)
-            .context("Invalid device handle")?;
-
-        (
-            render_target.device_handle,
-            render_target.width,
-            render_target.height,
-            render_target.format,
-            render_target.image,
-            logical_device.physical_device,
-        )
-    };
-
-    let expected_size = (width * height * format.bytes_per_pixel()) as usize;
-    if output.len() < expected_size {
-        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
-    }
-
-    // Ensure staging buffer exists (lazy creation)
-    let needs_staging = {
-        let render_targets_guard = render_targets.read().unwrap();
-        let render_target = render_targets_guard.entries.get(&target).unwrap();
-        render_target.staging_buffer.is_none()
-    };
-
-    if needs_staging {
-        // Create staging buffer
-        let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
-        let logical_device = devices.get(&device_handle).unwrap();
-        let buffer_size = expected_size as u64;
-
-        let qf = logical_device.concurrent_queue_families();
-        let staging_info = with_buffer_sharing(
-            vk::BufferCreateInfo::default()
-                .size(buffer_size)
-                .usage(vk::BufferUsageFlags::TRANSFER_DST),
-            qf.as_ref(),
-        );
-
-        let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_info, None) }
-            .context("Failed to create staging buffer")?;
-
-        let staging_reqs = unsafe { logical_device.device.get_buffer_memory_requirements(staging_buffer) };
-        let staging_memory_type = find_memory_type(
-            &mem_props,
-            staging_reqs.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )
-        .context("Failed to find memory type for staging buffer")?;
-
-        let staging_alloc = vk::MemoryAllocateInfo::default()
-            .allocation_size(staging_reqs.size)
-            .memory_type_index(staging_memory_type);
-
-        let staging_memory = unsafe { logical_device.device.allocate_memory(&staging_alloc, None) }
-            .context("Failed to allocate staging buffer memory")?;
-
-        unsafe {
-            logical_device
-                .device
-                .bind_buffer_memory(staging_buffer, staging_memory, 0)
-        }
-        .context("Failed to bind staging buffer memory")?;
-
-        let mut render_targets_write = render_targets.write().unwrap();
-        let render_target = render_targets_write.entries.get_mut(&target).unwrap();
-        render_target.staging_buffer = Some(staging_buffer);
-        render_target.staging_memory = Some(staging_memory);
-
-        tracing::debug!("Created staging buffer for render target {}", target);
-    }
-
-    // Now copy and read
-    let render_targets_guard = render_targets.read().unwrap();
-    let render_target = render_targets_guard.entries.get(&target).unwrap();
-    let staging_buffer = render_target.staging_buffer.unwrap();
-    let staging_memory = render_target.staging_memory.unwrap();
-    let cmd = render_target.command_buffer;
-
-    let logical_device = devices.get(&device_handle).unwrap();
-
-    // Graph/render submits may still be in flight on the async worker; wait for the
-    // render-pass layout transition (COLOR_ATTACHMENT → TRANSFER_SRC) before copy.
-    logical_device.submission_worker.flush()?;
-    logical_device.synchronized_queue_wait_idle()?;
-
-    // Reset and record copy command
-    unsafe {
-        logical_device
-            .device
-            .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-    }
-    .context("Failed to reset command buffer")?;
-
-    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-    unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
-        .context("Failed to begin command buffer")?;
-
-    // Copy image to staging buffer
-    let region = vk::BufferImageCopy::default()
-        .buffer_offset(0)
-        .buffer_row_length(0)
-        .buffer_image_height(0)
-        .image_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        })
-        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-        .image_extent(vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        });
-
-    unsafe {
-        logical_device.device.cmd_copy_image_to_buffer(
-            cmd,
-            image,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            staging_buffer,
-            std::slice::from_ref(&region),
-        );
-    }
-
-    unsafe { logical_device.device.end_command_buffer(cmd) }.context("Failed to end command buffer")?;
-
-    // Submit
-    let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-    logical_device
-        .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
-        .context("Failed to submit command buffer")?;
-
-    logical_device
-        .synchronized_queue_wait_idle()
-        .context("Failed to wait for queue")?;
-
-    // Read from staging buffer
-    unsafe {
-        let ptr = logical_device
-            .map_memory2(staging_memory, 0, expected_size as u64)
-            .context("Failed to map staging buffer")?;
-
-        std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), expected_size);
-
-        logical_device
-            .unmap_memory2(staging_memory)
-            .context("Failed to unmap staging buffer")?;
-    }
 
     Ok(())
 }

@@ -8,7 +8,7 @@ use super::types::{
     BufferState, ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable, SharedComputePipelineTable,
     SharedPipelineTable, SlotKey, TimelineWaitTarget,
 };
-use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
+use super::{BufferHandle, ComputePipelineHandle, DeviceHandle};
 use crate::backend::submission_worker::allocate_timeline_value;
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::gpu_profiler::{self, DispatchGpuNs};
@@ -1958,7 +1958,6 @@ pub(super) fn submit_graph_with_scope(
     let mut current_compute_pipeline: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
-    let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
     let mut frame_table_prologue_in_cb = false;
     let mut frame_table_row: Option<u32> = None;
     let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
@@ -2594,8 +2593,6 @@ pub(super) fn submit_graph_with_scope(
                     },
                 )?;
 
-                rendered_targets.push(*target);
-
                 // Make render writes visible to subsequent compute
                 unsafe {
                     let barrier = vk::MemoryBarrier2::default()
@@ -2740,13 +2737,6 @@ pub(super) fn submit_graph_with_scope(
         texture_entries,
         gpu_profile_work,
     )?;
-
-    // Mark rendered targets
-    for t in rendered_targets {
-        if let Some(rt) = view.render_targets.read().unwrap().entries.get(&t) {
-            rt.has_rendered.store(true, Ordering::Relaxed);
-        }
-    }
 
     Ok(signal_value)
 }

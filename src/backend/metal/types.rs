@@ -1437,18 +1437,15 @@ pub(crate) struct ComputePipelineState {
     pub shader_debug_name: String,
 }
 
-/// GPU render target state with optional staging for CPU readback.
+/// GPU render target state.
 pub(crate) struct RenderTargetState {
     pub device_handle: DeviceHandle,
     pub width: u32,
     pub height: u32,
-    pub format: TextureFormat,
     /// GPU render target texture
     pub texture: MTLTexture,
     /// Depth buffer (optional)
     pub depth_texture: Option<MTLTexture>,
-    /// Track if we've rendered (for readback validation)
-    pub has_rendered: bool,
 }
 
 /// GPU texture state.
