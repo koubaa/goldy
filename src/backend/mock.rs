@@ -63,7 +63,7 @@ pub(crate) struct MockBackend {
     /// rely on the scoped prologue that was folded into the command list.
     pub recorded_graph_syncs: Vec<bool>,
     /// Retained command lists keyed by `(ctx, retention_key)`.
-    retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
+    pub(crate) retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     /// Count of zero-record resubmits served from `retained_graphs`.
     pub retained_resubmit_count: usize,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
@@ -392,19 +392,6 @@ impl MockBackend {
             self.recorded_deferred_host_writes.push(Vec::new());
         }
         Ok(())
-    }
-
-    /// Set the default surface format for testing different GPU preferences.
-    ///
-    /// Use this to verify that your code correctly uses `Surface::format()`
-    /// rather than assuming a hardcoded format.
-    pub fn set_default_surface_format(&mut self, format: TextureFormat) {
-        self.default_surface_format = format;
-    }
-
-    /// Number of live retained command lists (test introspection).
-    pub fn retained_graph_count(&self) -> usize {
-        self.retained_graphs.len()
     }
 
     /// Reset recorded state for a new test.
@@ -1192,16 +1179,6 @@ impl GpuBackend for MockBackend {
     }
 
     // RenderTarget API
-    fn create_render_target(
-        &mut self,
-        device: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle> {
-        self.create_render_target_with_depth(device, width, height, format, None)
-    }
-
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -1235,10 +1212,6 @@ impl GpuBackend for MockBackend {
             .push((width, height, color_format, depth_format));
 
         Ok(handle)
-    }
-
-    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
-        self.render_targets.remove(&target);
     }
 
     fn render_to_target(
@@ -1630,10 +1603,6 @@ impl GpuBackend for MockBackend {
         }
     }
 
-    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
-        self.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
@@ -1778,16 +1747,6 @@ impl GpuBackend for MockBackend {
         Ok(tv)
     }
 
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
-        let work = self.take_present_gpu_work(frame, submit_tv)?;
-        let finish = work.run()?;
-        self.finish_present(finish, submit_tv)
-    }
-
     // Compute pipeline management
     fn create_compute_pipeline(
         &mut self,
@@ -1816,6 +1775,17 @@ impl GpuBackend for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::GpuBackendPresentSplit;
+
+    fn mock_pending_acquire(backend: &MockBackend, surface: SurfaceHandle) -> u32 {
+        backend.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
+    }
+
+    fn mock_present(backend: &mut MockBackend, frame: FrameToken, submit_tv: u64) {
+        let work = backend.take_present_gpu_work(frame, submit_tv).unwrap();
+        let finish = work.run().unwrap();
+        backend.finish_present(finish, submit_tv).unwrap();
+    }
 
     #[test]
     fn test_mock_backend_creation() {
@@ -1840,13 +1810,11 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let target = backend
-            .create_render_target(device, 800, 600, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 800, 600, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         assert_eq!(backend.targets_created.len(), 1);
         assert_eq!(backend.targets_created[0], (800, 600, TextureFormat::Rgba8Unorm));
-
-        backend.destroy_render_target(target);
     }
 
     #[test]
@@ -1854,7 +1822,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         let commands = vec![RenderCommand::Clear(Color::RED)];
@@ -1869,7 +1837,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 10, 10, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 10, 10, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         // Render multiple times to the same target
@@ -1896,7 +1864,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         // Create an index buffer
@@ -1969,7 +1937,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
         let index_buffer = backend
             .create_buffer(device, 24, BufferKind::Scattered, None, BufferFlags::empty())
@@ -2055,7 +2023,7 @@ mod tests {
         let mut backend = MockBackend::new();
 
         // Configure a different format (simulating a GPU that prefers RGBA)
-        backend.set_default_surface_format(TextureFormat::Rgba8Unorm);
+        backend.default_surface_format = TextureFormat::Rgba8Unorm;
 
         let device = backend.create_device(0).unwrap();
 
@@ -2117,7 +2085,7 @@ mod tests {
         assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
 
         // Change default and create second surface
-        backend.set_default_surface_format(TextureFormat::Rgba8UnormSrgb);
+        backend.default_surface_format = TextureFormat::Rgba8UnormSrgb;
         let surface2 = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         // First surface should retain its original format
@@ -2241,7 +2209,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         let buffer1 = backend
@@ -2278,7 +2246,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         let commands = vec![
@@ -2351,7 +2319,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let target = backend
-            .create_render_target(device, 8, 8, TextureFormat::Rgba8Unorm)
+            .create_render_target_with_depth(device, 8, 8, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
         let commands = vec![
@@ -2412,10 +2380,10 @@ mod tests {
         let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         let (frame, _tex) = backend.begin_frame(surface, ctx).unwrap();
-        assert_eq!(backend.pending_acquire_count(surface), 1);
+        assert_eq!(mock_pending_acquire(&backend, surface), 1);
 
-        backend.present_frame(frame, 0).unwrap();
-        assert_eq!(backend.pending_acquire_count(surface), 0);
+        mock_present(&mut backend, frame, 0);
+        assert_eq!(mock_pending_acquire(&backend, surface), 0);
 
         let signals = backend.poll_signals(ctx, backend.gpu_progress(ctx));
         assert!(signals
@@ -2461,7 +2429,7 @@ mod tests {
         assert_eq!(backend.gpu_progress(ctx_a), tv);
         assert_eq!(backend.gpu_progress(ctx_b), 0);
 
-        backend.present_frame(frame, tv).unwrap();
+        mock_present(&mut backend, frame, tv);
         let a_signals = backend.poll_signals(ctx_a, backend.gpu_progress(ctx_a));
         assert!(a_signals
             .iter()
@@ -2497,10 +2465,10 @@ mod tests {
         let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         let (_frame, _tex) = backend.begin_frame(surface, ctx).unwrap();
-        assert_eq!(backend.pending_acquire_count(surface), 1);
+        assert_eq!(mock_pending_acquire(&backend, surface), 1);
 
         backend.surface_resize(surface, 1024, 768).unwrap();
-        assert_eq!(backend.pending_acquire_count(surface), 0);
+        assert_eq!(mock_pending_acquire(&backend, surface), 0);
 
         let signals = backend.poll_signals(ctx, backend.gpu_progress(ctx));
         assert!(!signals

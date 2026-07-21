@@ -2,33 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::buffer::StructuredBufferElement;
-use goldy::types::{Color, VertexBufferLayout, VertexFormat};
-
-/// Slang shader for the digital clock.
-pub const SHADER_SOURCE: &str = r#"
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-"#;
+use goldy::types::Color;
 
 /// Vertex with 2D position and RGBA color.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -45,10 +19,6 @@ impl ClockVertex {
             position: [x, y],
             color: [color.r, color.g, color.b, color.a],
         }
-    }
-
-    pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout::from_formats::<Self>(&[VertexFormat::Float32x2, VertexFormat::Float32x4])
     }
 }
 

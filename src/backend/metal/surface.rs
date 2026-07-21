@@ -452,6 +452,28 @@ pub(super) fn finish_present(
     Ok(finish.present_timeline)
 }
 
+pub(super) fn submit_frame(state: &mut MetalState, frame: &FrameToken) -> Result<TimelineValue> {
+    let pending = {
+        let surf = state
+            .surfaces
+            .get_mut(&frame.surface)
+            .context("Invalid surface handle")?;
+        std::mem::take(&mut surf.frame_pending_gpu_commands)
+    };
+
+    if !pending.is_empty() {
+        return compute::submit(state, frame.context, &pending, None);
+    }
+
+    let sc_arc = state.contexts.get(&frame.context).context("Invalid context handle")?;
+    let sc = sc_arc.lock().unwrap();
+    Ok(sc
+        .timeline_event
+        .as_ref()
+        .signaled_value()
+        .max(sc.last_committed_timeline.unwrap_or(0)))
+}
+
 struct MetalSkipPresentGpuWork {
     frame: crate::backend::FrameToken,
     present_timeline: TimelineValue,
@@ -521,42 +543,6 @@ impl PresentGpuWork for MetalPresentGpuWork {
             present_ok: true,
         })
     }
-}
-
-/// Present the acquired drawable (legacy single-lock entry — prefer split path).
-pub(super) fn present(state: &mut MetalState, frame: crate::backend::FrameToken) -> Result<TimelineValue> {
-    let work = prepare_present_work(state, frame, 0)?;
-    let finish = work.run()?;
-    finish_present(state, finish, 0)
-}
-pub(super) fn submit_frame(state: &mut MetalState, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
-    let pending = {
-        let surf = state
-            .surfaces
-            .get_mut(&frame.surface)
-            .context("Invalid surface handle")?;
-        std::mem::take(&mut surf.frame_pending_gpu_commands)
-    };
-
-    if !pending.is_empty() {
-        return compute::submit(state, frame.context, &pending, None);
-    }
-
-    let sc_arc = state.contexts.get(&frame.context).context("Invalid context handle")?;
-    let sc = sc_arc.lock().unwrap();
-    Ok(sc
-        .timeline_event
-        .as_ref()
-        .signaled_value()
-        .max(sc.last_committed_timeline.unwrap_or(0)))
-}
-
-pub(super) fn present_frame(
-    state: &mut MetalState,
-    frame: FrameToken,
-    _submit_tv: crate::timeline::TimelineValue,
-) -> Result<crate::timeline::TimelineValue> {
-    present(state, frame)
 }
 
 /// Set the present mode on the CAMetalLayer.

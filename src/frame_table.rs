@@ -144,72 +144,8 @@ pub fn lower_render_pass_commands(
         .collect()
 }
 
-/// Ensure compute commands route bindless indices through the frame table.
-pub fn lower_gpu_commands(commands: &mut Vec<crate::backend::GpuCommand>) {
-    let has_typed = commands
-        .iter()
-        .any(|c| matches!(c, crate::backend::GpuCommand::BindResourcesTyped { .. }));
-    if !has_typed {
-        // No typed binds to lower. Pass any pre-existing staging through unchanged;
-        // if there is none, do NOT insert an empty prologue — bind-free streams
-        // (pure copy/upload/barrier) must not bump the submission counter or
-        // overwrite the selector with zeros.
-        return;
-    }
-
-    let mut staging_data = commands
-        .iter()
-        .find_map(|c| match c {
-            crate::backend::GpuCommand::FrameTableStaging { data } => Some((**data).to_vec()),
-            _ => None,
-        })
-        .unwrap_or_else(|| FrameTableStaging::new().data);
-    let mut next_dispatch_base = 0u32;
-    for cmd in commands.iter() {
-        if let crate::backend::GpuCommand::BindResourcesRaw {
-            frame_table_base,
-            indices,
-            ..
-        } = cmd
-        {
-            next_dispatch_base = next_dispatch_base.max(
-                frame_table_base
-                    .saturating_add(indices.len() as u32)
-                    .min(FRAME_TABLE_ROW_STRIDE),
-            );
-        }
-    }
-    let mut staging = FrameTableStaging {
-        data: staging_data,
-        next_dispatch_base,
-    };
-
-    let mut lowered = Vec::with_capacity(commands.len());
-    for cmd in commands.drain(..) {
-        match cmd {
-            crate::backend::GpuCommand::FrameTableStaging { .. } => {}
-            crate::backend::GpuCommand::BindResourcesTyped { handles } => {
-                let indices: Vec<u32> = handles.iter().map(|h| h.index()).collect();
-                let frame_table_base = staging.alloc_dispatch(indices.len() as u32);
-                staging.write_dispatch_indices(frame_table_base, &indices);
-                lowered.push(crate::backend::GpuCommand::BindResourcesRaw {
-                    indices,
-                    user: Vec::new(),
-                    frame_table_base,
-                });
-            }
-            other => lowered.push(other),
-        }
-    }
-    staging_data = staging.data;
-    lowered.insert(
-        0,
-        crate::backend::GpuCommand::FrameTableStaging {
-            data: staging_data.as_slice().into(),
-        },
-    );
-    *commands = lowered;
-}
+/// Frame-table staging is built directly by the task-graph analyzer; kept for call-site stability.
+pub fn lower_gpu_commands(_commands: &mut Vec<crate::backend::GpuCommand>) {}
 
 #[cfg(test)]
 mod tests {
@@ -235,32 +171,6 @@ mod tests {
             }
         ));
     }
-
-    #[test]
-    fn lower_gpu_inserts_staging_prefix_for_typed_bind() {
-        let mut cmds = vec![
-            GpuCommand::BindResourcesTyped {
-                handles: vec![ResourceHandle::new(ResourceCategory::Scattered, 7)],
-            },
-            GpuCommand::Dispatch {
-                label: None,
-                workgroups_x: 1,
-                workgroups_y: 1,
-                workgroups_z: 1,
-            },
-        ];
-        lower_gpu_commands(&mut cmds);
-        assert!(matches!(cmds[0], GpuCommand::FrameTableStaging { .. }));
-        assert!(matches!(
-            cmds[1],
-            GpuCommand::BindResourcesRaw {
-                frame_table_base: 0,
-                ..
-            }
-        ));
-    }
-
-    // ── New regression / coverage tests ─────────────────────────────────────
 
     /// A bind-free stream (copies, uploads, barriers) must NOT receive a
     /// FrameTableStaging prefix; doing so would bump the submission counter and

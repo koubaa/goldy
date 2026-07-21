@@ -31,7 +31,6 @@ fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
             c,
             GpuCommand::WriteBuffer { .. }
                 | GpuCommand::FrameTableStaging { .. }
-                | GpuCommand::Barrier
                 | GpuCommand::ResourceBarrier { .. }
         )
     })
@@ -128,13 +127,6 @@ fn collect_metal_slots_from_gpu_command(
             if let Some(h) = *current_pipeline {
                 if let Some(p) = state.compute_pipelines.get(&h) {
                     slots.extend(collect_metal_slots_from_raw_bind(indices, &p.push_constant_categories));
-                }
-            }
-        }
-        GpuCommand::BindResourcesTyped { handles } => {
-            for h in handles {
-                if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
-                    slots.push(key);
                 }
             }
         }
@@ -1002,9 +994,6 @@ pub(super) fn record_commands_to_buffer(
                         layout_bytes.as_ptr() as *const _,
                     );
             }
-            GpuCommand::BindResourcesTyped { .. } => {
-                anyhow::bail!("BindResourcesTyped in frame-table path: call frame_table::lower_gpu_commands first");
-            }
             GpuCommand::Dispatch {
                 label,
                 workgroups_x,
@@ -1239,15 +1228,6 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
-            GpuCommand::Barrier => {
-                if let Some(enc) = guard.compute {
-                    if super::api_log::enabled() {
-                        super::api_log::log_barrier();
-                    }
-                    const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
-                    let () = unsafe { msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES] };
-                }
-            }
             GpuCommand::ResourceBarrier {
                 buffers: buf_entries,
                 textures: tex_entries,
@@ -1467,14 +1447,13 @@ fn stage_uploads(
             | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)
             | GpuCommand::BindResourcesRaw { .. }
-            | GpuCommand::BindResourcesTyped { .. }
             | GpuCommand::Dispatch { .. }
             | GpuCommand::DispatchBatch { .. }
             | GpuCommand::DispatchIndirect { .. } => {
                 would_have_gpu_work = true;
             }
             GpuCommand::FrameTableStaging { .. } => {}
-            GpuCommand::Barrier | GpuCommand::ResourceBarrier { .. } => {}
+            GpuCommand::ResourceBarrier { .. } => {}
         }
     }
 

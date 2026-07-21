@@ -1988,7 +1988,7 @@ mod slice_retention_tests {
 
     /// Read the number of live retained graph entries.
     fn retained_count(device: &Device) -> usize {
-        device.with_mock(|m| m.retained_graph_count())
+        device.with_mock(|m| m.retained_graphs.len())
     }
 
     fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR, ir_clean: bool) {

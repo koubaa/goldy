@@ -86,13 +86,6 @@ fn collect_slot_keys_from_gpu_commands(
                     }
                 }
             }
-            GpuCommand::BindResourcesTyped { handles } => {
-                for h in handles {
-                    if let Some(key) = slot_key_from_category(h.category(), h.index()) {
-                        slots.push(key);
-                    }
-                }
-            }
             GpuCommand::DispatchBatch { arg_data, count, .. } => {
                 if let Some(h) = current_pipeline {
                     if let Some(p) = compute_read.entries.get(&h) {
@@ -139,13 +132,6 @@ fn collect_slot_keys_from_graph_commands(
                     if let Some(h) = current_compute_pipeline {
                         if let Some(p) = compute_read.entries.get(&h) {
                             slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
-                        }
-                    }
-                }
-                GpuCommand::BindResourcesTyped { handles } => {
-                    for h in handles {
-                        if let Some(key) = slot_key_from_category(h.category(), h.index()) {
-                            slots.push(key);
                         }
                     }
                 }
@@ -1078,20 +1064,6 @@ pub(super) fn submit_with_scope(
                         }
                     }
                 }
-                GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-                    let pipelines_read = compute_pipelines.read().unwrap();
-                    if let Some(pipeline) = current_pipeline.and_then(|h| pipelines_read.entries.get(&h)) {
-                        crate::backend::validate_typed_push_constants(
-                            typed_handles,
-                            &pipeline.push_constant_categories,
-                            &pipeline.shader_debug_name,
-                        )?;
-                    }
-                    anyhow::bail!(
-                        "GpuCommand::BindResourcesTyped must be lowered before Vulkan submit; \
-                         call frame_table::lower_gpu_commands first"
-                    );
-                }
                 GpuCommand::Dispatch {
                     label: _label,
                     workgroups_x,
@@ -1203,19 +1175,6 @@ pub(super) fn submit_with_scope(
                         }
                     }
                     vk_dispatch_idx += 1;
-                }
-                GpuCommand::Barrier => {
-                    let _tz = tracy_zone!("vk.barrier");
-                    unsafe {
-                        let mem_barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
-                        let dep_info =
-                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
-                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
-                    }
                 }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
@@ -2036,20 +1995,6 @@ pub(super) fn submit_graph_with_scope(
                         }
                     }
                 }
-                GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-                    let pipelines_read = compute_pipelines.read().unwrap();
-                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p)) {
-                        crate::backend::validate_typed_push_constants(
-                            typed_handles,
-                            &pipeline.push_constant_categories,
-                            &pipeline.shader_debug_name,
-                        )?;
-                    }
-                    anyhow::bail!(
-                        "GpuCommand::BindResourcesTyped must be lowered before Vulkan graph submit; \
-                         call frame_table::lower_gpu_commands first"
-                    );
-                }
                 GpuCommand::Dispatch {
                     label: _label,
                     workgroups_x,
@@ -2161,19 +2106,6 @@ pub(super) fn submit_graph_with_scope(
                         }
                     }
                     vk_dispatch_idx += 1;
-                }
-                GpuCommand::Barrier => {
-                    let _tz = tracy_zone!("vk.barrier");
-                    unsafe {
-                        let mem_barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
-                        let dep_info =
-                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
-                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
-                    }
                 }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,

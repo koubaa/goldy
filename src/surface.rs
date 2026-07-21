@@ -323,7 +323,7 @@ mod tests {
 
     fn create_test_device_with_format(format: TextureFormat) -> Device {
         let mut backend = MockBackend::new();
-        backend.set_default_surface_format(format);
+        backend.default_surface_format = format;
         Device::from_backend(Box::new(backend)).unwrap()
     }
 

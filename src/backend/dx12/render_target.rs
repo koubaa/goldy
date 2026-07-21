@@ -18,16 +18,6 @@ use windows::{
     },
 };
 
-/// Create a render target without depth buffer.
-pub(super) fn create(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-) -> Result<RenderTargetHandle> {
-    create_with_depth(state, device_handle, width, height, format, None)
-}
 
 /// Create a render target with optional depth buffer.
 #[allow(clippy::too_many_lines)]
@@ -201,17 +191,6 @@ pub(super) fn create_with_depth(
 }
 
 /// Destroy a render target.
-pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
-    if let Some(rt) = state.render_targets.write().unwrap().entries.remove(&target) {
-        state.free_rtv_offsets.push(rt.rtv_offset);
-        if let Some(dsv_off) = rt.dsv_offset {
-            state.free_dsv_offsets.push(dsv_off);
-        }
-    }
-}
-
-/// Record an offscreen render pass into an existing command list without closing/executing.
-///
 /// Records COMMON -> RENDER_TARGET barriers, clear, viewport/scissor, descriptor heap
 /// binding, draw commands, and RENDER_TARGET -> COPY_SOURCE barrier into `cmd_list`.
 /// Does NOT close/execute/signal.

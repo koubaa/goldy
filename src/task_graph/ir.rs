@@ -81,10 +81,6 @@ impl SlotUsageSet {
         self.access = self.access.widen(access);
         self.kinds |= kind;
     }
-
-    pub fn is_empty(self) -> bool {
-        self.kinds.is_empty()
-    }
 }
 
 /// Logical access a task node has on a resource, orthogonal to the

@@ -540,19 +540,12 @@ pub(crate) enum GpuCommand {
     ///
     /// `indices` go to region A (bindless, packed as u16).
     /// `user` go to region B (user scalars, full u32).
-    ///
-    /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
-    /// bypasses per-slot category validation.
     BindResourcesRaw {
         indices: Vec<u32>,
         user: Vec<u32>,
         /// Offset within the frame-table row where this dispatch's indices live.
         frame_table_base: u32,
     },
-    /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
-    /// each handle's [`crate::types::ResourceCategory`]
-    /// against the bound shader's reflection and emit the raw indices.
-    BindResourcesTyped { handles: Vec<ResourceHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         /// Debug label from [`crate::Scheme::node`] when emitted by the analyzer.
@@ -664,11 +657,6 @@ pub(crate) enum GpuCommand {
     /// Frame-table staging payload — written to the upload staging buffer and copied
     /// to the device-local table by the prologue at the start of each submission.
     FrameTableStaging { data: std::sync::Arc<[u32]> },
-    ///
-    /// Within a [`crate::Scheme`] submission, prefer
-    /// `ResourceBarrier` which is produced by the scheduler with precise
-    /// `src_usage` / `dst_usage` derived from the dependency graph.
-    Barrier,
     /// Per-resource memory barrier with full access semantics.
     ///
     /// Emitted by the compute graph scheduler at dependency edges.
@@ -1250,13 +1238,6 @@ pub(crate) trait GpuBackend:
     ) -> Result<PipelineHandle>;
 
     // RenderTarget API - GPU-only; no CPU readback
-    fn create_render_target(
-        &mut self,
-        device: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle>;
     /// Create a render target with an optional depth buffer.
     fn create_render_target_with_depth(
         &mut self,
@@ -1266,7 +1247,6 @@ pub(crate) trait GpuBackend:
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
-    fn destroy_render_target(&mut self, target: RenderTargetHandle);
     fn render_to_target(
         &mut self,
         device: DeviceHandle,
@@ -1388,9 +1368,6 @@ pub(crate) trait GpuBackend:
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;
 
-    /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
-    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
-
     fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         if let Some(wait) = self.take_timeline_blocking_wait(ctx, value)? {
             wait.block()?;
@@ -1504,16 +1481,6 @@ pub(crate) trait GpuBackend:
     /// completes on the GPU. When no work was recorded, returns the latest completed
     /// or scheduled compute timeline appropriate for the backend.
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue>;
-
-    /// Present the swapchain image for this frame after [`Self::submit_frame`].
-    ///
-    /// `submit_tv` is the value returned by [`Self::submit_frame`] so backends that use
-    /// separate present queues can wait for compute before presenting.
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue>;
 
     // Compute pipeline management
     /// Create a compute pipeline from a compute shader.

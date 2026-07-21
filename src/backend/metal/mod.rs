@@ -647,16 +647,6 @@ impl GpuBackend for MetalBackend {
         pipeline::destroy(&mut self.state, pipeline);
     }
 
-    fn create_render_target(
-        &mut self,
-        device: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle> {
-        render_target::create(&mut self.state, device, width, height, format)
-    }
-
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -666,10 +656,6 @@ impl GpuBackend for MetalBackend {
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
         render_target::create_with_depth(&mut self.state, device, width, height, color_format, depth_format)
-    }
-
-    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
-        render_target::destroy(&mut self.state, target);
     }
 
     fn render_to_target(
@@ -857,15 +843,7 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
-        self.state
-            .surfaces
-            .get(&surface)
-            .map(|s| s.pending_acquire_count)
-            .unwrap_or(0)
-    }
-
-    fn submit_standalone(
+fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
@@ -908,14 +886,6 @@ impl GpuBackend for MetalBackend {
 
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         surface::submit_frame(&mut self.state, frame)
-    }
-
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
-        surface::present_frame(&mut self.state, frame, submit_tv)
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {

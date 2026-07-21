@@ -9,16 +9,6 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 
-/// Create a render target.
-pub(super) fn create(
-    state: &mut MetalState,
-    device_handle: DeviceHandle,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-) -> Result<RenderTargetHandle> {
-    create_with_depth(state, device_handle, width, height, format, None)
-}
 
 /// Create a render target with optional depth buffer.
 pub(super) fn create_with_depth(
@@ -75,11 +65,6 @@ pub(super) fn create_with_depth(
 }
 
 /// Destroy a render target.
-pub(super) fn destroy(state: &mut MetalState, target: RenderTargetHandle) {
-    state.render_targets.remove(&target);
-}
-
-/// Render commands to an offscreen render target.
 pub(super) fn render_to(
     state: &mut MetalState,
     device_handle: DeviceHandle,

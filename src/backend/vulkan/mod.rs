@@ -842,29 +842,7 @@ impl GpuBackend for VulkanBackend {
         pipeline::destroy(&self.state.devices, &self.state.pipelines, pipeline_handle);
     }
 
-    fn create_render_target(
-        &mut self,
-        device_handle: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle> {
-        render_target::create(
-            &self.state.instance,
-            &self.state.devices,
-            &self.state.render_targets,
-            device_handle,
-            width,
-            height,
-            format,
-        )
-    }
-
-    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
-        render_target::destroy(&self.state.devices, &self.state.render_targets, target);
-    }
-
-    fn render_to_target(
+fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,
         target: RenderTargetHandle,
@@ -1260,15 +1238,7 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn pending_acquire_count(&self, surface_handle: SurfaceHandle) -> u32 {
-        self.state
-            .surfaces
-            .get(&surface_handle)
-            .map(|s| s.pending_acquire_count)
-            .unwrap_or(0)
-    }
-
-    fn submit_standalone(
+fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
@@ -1311,16 +1281,6 @@ impl GpuBackend for VulkanBackend {
 
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         surface::submit_frame(&mut self.state, frame)
-    }
-
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
-        let work = self.take_present_gpu_work(frame, submit_tv)?;
-        let finish = work.run()?;
-        self.finish_present(finish, submit_tv)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {

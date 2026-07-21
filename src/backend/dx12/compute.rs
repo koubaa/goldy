@@ -68,9 +68,6 @@ fn collect_bindless_slots_from_gpu_commands(
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 slots.extend(indices.iter().copied().map(DeferredSlot::CbvSrvUav));
             }
-            GpuCommand::BindResourcesTyped { handles } => {
-                slots.extend(handles.iter().map(|h| DeferredSlot::CbvSrvUav(h.index())));
-            }
             GpuCommand::DispatchBatch { arg_data, count, .. } => {
                 let layout_size = std::mem::size_of::<PushLayout>();
                 for i in 0..*count as usize {
@@ -1117,37 +1114,6 @@ fn record_gpu_command(
                 );
             }
         }
-        GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-            let pipelines_read = scope.compute_pipelines().read().unwrap();
-            if let Some(h) = ctx.current_compute_pipeline {
-                if let Some(pipeline) = pipelines_read.entries.get(&h) {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                    let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
-                    crate::backend::with_layout_validation(|| {
-                        crate::backend::validate_bindless_slot_kinds(
-                            &indices,
-                            &pipeline.push_constant_slot_kinds,
-                            |idx| {
-                                super::buffer::bindless_slot_kind_for_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )
-                    })?;
-                }
-            }
-            anyhow::bail!(
-                "GpuCommand::BindResourcesTyped must be lowered to BindResourcesRaw before DX12 record; \
-                 call frame_table::lower_gpu_commands first"
-            );
-        }
         GpuCommand::Dispatch {
             label: _,
             workgroups_x,
@@ -1318,18 +1284,6 @@ fn record_gpu_command(
                     }
                 }
             }
-        }
-        GpuCommand::Barrier => {
-            // Legacy non-graph barrier: no access semantics available, use the
-            // conservative global sync.  This path is audited by `remove-legacy-barrier`.
-            let _tz = tracy_zone!("dx12.barrier");
-            let g = D3D12_GLOBAL_BARRIER {
-                SyncBefore: D3D12_BARRIER_SYNC_ALL,
-                SyncAfter: D3D12_BARRIER_SYNC_ALL,
-                AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
-                AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-            };
-            unsafe { barriers::barrier_globals(cl7, &[g]) };
         }
         GpuCommand::ResourceBarrier {
             buffers: buf_entries,
