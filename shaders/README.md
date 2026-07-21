@@ -94,7 +94,7 @@ float4 fs_main(FullscreenVarying input) : SV_Target {
 | `goldy_exp/math.slang` | Math utilities: `PI`, `TAU`, `hash()`, `hash2()`, `center_uv()`, `scale_uv()`, `to_polar()`, `smootherstep()` |
 | `goldy_exp/color.slang` | Color utilities: `rainbow()`, `palette()`, `heat()`, `hsv_to_rgb()`, `luminance()`, `gamma_correct()` |
 | `goldy_exp/vertex.slang` | Vertex formats and shaders (see below) |
-| `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
+| `goldy_exp/types.slang` | Common data types: `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D` |
 | `goldy_exp/primitives.slang` | Procedural geometry: `quad_local()`, `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
 | `goldy_exp/descriptor_handle.slang` | Cross-platform `DescriptorHandle<T>` support (routes by access pattern) |
 | `goldy_exp/access.slang` | Resource type aliases (`Scattered<T>` = `StorageBuffer<T>`, `BufRO<T>`, `Interpolated<T>`, etc.) and SV types (`ThreadId`, `VertexId`, etc.). Declare any struct type directly as a parameter for implicit constant-buffer broadcast. |
@@ -146,14 +146,14 @@ fullscreen_uv(vertex_id)                               // Fullscreen UV
 
 ### Common Types (from goldy_exp.types)
 
-These types have matching Rust structs in `goldy::common_types`:
+Shader-side layouts for shared CPU/GPU structs. Define matching Rust types in the
+example that uses them (see `examples/instance2d.rs` for instancing).
 
 ```slang
 Particle2D     // float2 position, float2 velocity
 Particle3D     // float3 position, float3 velocity, float age, float lifetime
 FrameUniforms  // float time, float delta_time, uint frame, uint _pad
 Transform2D    // float2 position, float rotation, float2 scale, float _pad
-Instance2D     // float2 position, float rotation, float scale, float4 color
 ```
 
 ## Usage

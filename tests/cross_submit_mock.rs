@@ -1,7 +1,6 @@
 //! Deterministic mock-backend integration tests for epoch-driven cross-scheme sync.
 
 use goldy::backend::GpuCommand;
-use goldy::task_graph::BarrierUsage;
 use goldy::test_support::{mock_device, with_mock};
 use goldy::{
     BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RetainedPool,
@@ -24,16 +23,16 @@ fn recorded_waits(device: &Device) -> Vec<Vec<goldy::timeline::Epoch>> {
     with_mock(device, |m| m.recorded_waits.clone())
 }
 
-fn barrier_buffers(device: &Device) -> Vec<(u64, BarrierUsage)> {
+fn barrier_buffer_count(device: &Device) -> usize {
     with_mock(device, |m| {
         m.recorded_compute_commands
             .iter()
             .flat_map(|batch| batch.iter())
             .find_map(|cmd| match cmd {
-                GpuCommand::ResourceBarrier { buffers, .. } => Some(buffers.clone()),
+                GpuCommand::ResourceBarrier { buffers, .. } => Some(buffers.len()),
                 _ => None,
             })
-            .unwrap_or_default()
+            .unwrap_or(0)
     })
 }
 
@@ -107,15 +106,15 @@ fn ping_pong_buffers_emit_alternating_prologue() {
 
     clear_mock(&device);
     read_a.submit().expect("read_a after write_a");
-    assert_eq!(barrier_buffers(&device).len(), 1, "RAW on buf_a");
+    assert_eq!(barrier_buffer_count(&device), 1, "RAW on buf_a");
 
     clear_mock(&device);
     write_b.submit().expect("write_b");
-    assert!(barrier_buffers(&device).is_empty(), "fresh write on buf_b");
+    assert_eq!(barrier_buffer_count(&device), 0, "fresh write on buf_b");
 
     clear_mock(&device);
     read_b.submit().expect("read_b after write_b");
-    assert_eq!(barrier_buffers(&device).len(), 1, "RAW on buf_b");
+    assert_eq!(barrier_buffer_count(&device), 1, "RAW on buf_b");
 }
 
 #[test]
@@ -139,7 +138,7 @@ fn upload_then_consumer_emits_raw_barrier() {
     clear_mock(&device);
     let mut consumer = read_scheme(&ctx, &parcel, &read_pipe);
     consumer.submit().expect("consumer");
-    assert_eq!(barrier_buffers(&device).len(), 1);
+    assert_eq!(barrier_buffer_count(&device), 1);
     assert!(recorded_waits(&device).last().is_some_and(|w| w.is_empty()));
 }
 
@@ -162,7 +161,7 @@ fn retention_resubmit_bakes_prologue_no_extra_standalone_cb() {
     clear_mock(&device);
     let mut touch = write_scheme(&ctx, &parcel, &write_pipe);
     touch.submit().expect("touch ledger");
-    assert_eq!(barrier_buffers(&device).len(), 1, "foreign writer emits hazard barrier");
+    assert_eq!(barrier_buffer_count(&device), 1, "foreign writer emits hazard barrier");
 
     clear_mock(&device);
     for _ in 0..3 {
@@ -250,7 +249,7 @@ fn same_context_raw_emits_barrier_not_wait() {
     clear_mock(&device);
     let mut consumer = read_scheme(&ctx, &parcel, &read_pipe);
     consumer.submit().expect("same ctx");
-    assert_eq!(barrier_buffers(&device).len(), 1);
+    assert_eq!(barrier_buffer_count(&device), 1);
     assert!(recorded_waits(&device).iter().all(|w| w.is_empty()));
 }
 
@@ -275,7 +274,7 @@ fn war_same_context_emits_prologue_on_write_after_read() {
     let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
     writer.submit().expect("write after read");
     assert_eq!(
-        barrier_buffers(&device).len(),
+        barrier_buffer_count(&device),
         1,
         "WAR: same-context scheduled write-after-read uses a baked prologue barrier"
     );
@@ -409,7 +408,7 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     // The scoped prologue barrier must appear in the recorded compute commands
     // (folded in as a GraphCommand::Compute before the Render command).
     assert_eq!(
-        barrier_buffers(&device).len(),
+        barrier_buffer_count(&device),
         1,
         "render-read after compute-write must emit a scoped prologue barrier"
     );

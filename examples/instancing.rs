@@ -6,10 +6,13 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, Lease,
-    LeaseRenderTarget, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
 };
+
+mod instance2d;
+use instance2d::Instance2D;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{

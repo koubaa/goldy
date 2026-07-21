@@ -1,13 +1,13 @@
 //! Digital Clock example - render an animated 7-segment clock in a window.
 //!
-//! This example uses shared rendering code from `goldy::examples::digital_clock`,
-//! demonstrating that the same logic can be used on both native and web platforms.
 //! Uses retained scheme with offscreen render pass → copy-to-present.
 //!
 //! Run with: `cargo run --example digital_clock`
 
+mod digital_clock_shared;
+
+use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE};
 use goldy::{
-    examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
     Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
     SurfaceExchange, Transaction,
@@ -352,7 +352,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Clock Example (using shared rendering code, retained scheme)");
+    println!("Goldy Clock Example (retained scheme)");
     println!("==================================================================");
     println!("Controls:");
     println!("  Space - Toggle pause");

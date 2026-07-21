@@ -1,8 +1,8 @@
 // Common data types for Goldy shaders (EXPERIMENTAL)
-// Part of the goldy_exp module
+// Part of the goldy_exp module.
 //
-// These types have matching Rust definitions in goldy::common_types
-// for zero-copy buffer sharing between CPU and GPU.
+// Shader-side layouts for shared CPU/GPU structs. Matching Rust definitions live
+// next to the examples that use them (e.g. `examples/instance2d.rs` for instancing).
 
 implementing goldy_exp;
 
@@ -59,19 +59,9 @@ public struct FrameUniforms {
 // ============================================================================
 
 /// 2D transform (position, rotation, scale)
-/// Rust equivalent: goldy::Transform2D
 public struct Transform2D {
     public float2 position;
     public float rotation;    // Radians
     public float2 scale;
     public float _pad;        // Padding for alignment
-};
-
-/// Instance data for 2D instanced rendering (transform + color)
-/// Useful for instancing.rs-style effects
-public struct Instance2D {
-    public float2 position;
-    public float rotation;
-    public float scale;
-    public float4 color;
 };

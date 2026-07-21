@@ -14,12 +14,10 @@
 
 pub mod backend;
 pub mod buffer;
-pub mod common_types;
 pub mod compute;
 pub mod context;
 pub mod device;
 pub mod error;
-pub mod examples;
 pub mod frame_orchestrator;
 pub(crate) mod frame_table;
 pub mod pipeline;
@@ -65,7 +63,7 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
 pub use scheme::{
-    Grant, GrantBuffer, GrantTexture, Lease, LeaseRenderTarget, ReadGrant, ReplayStats, Scheme,
+    Grant, GrantBuffer, GrantBytes, GrantTexture, Lease, LeaseRenderTarget, ReadGrant, ReplayStats, Scheme,
     SchemeRenderPassBuilder, Submission, Transaction, UploadBuffer,
 };
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
@@ -74,7 +72,6 @@ pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use buffer::StructuredBufferElement;
-pub use common_types::Instance2D;
 pub use compute::ComputePipeline;
 pub use signal::{OversubscribedReason, Signal};
 pub use timeline::TimelineValue;

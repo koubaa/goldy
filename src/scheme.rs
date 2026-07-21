@@ -44,7 +44,7 @@ static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Returned staging buffers are stamped with the submission timeline that must retire
 /// before reuse (`ready_after`). This matches transient-pool epoch gating: dropping a
-/// [`Submission`] or [`Loan`] without consuming does not require a CPU wait, but in-flight
+/// [`Submission`] without consuming does not require a CPU wait, but in-flight
 /// staging is not handed to a later submit until `gpu_progress` passes that stamp.
 enum GrantStagingAllocSpec {
     Buffer { byte_size: u64 },
@@ -548,29 +548,26 @@ struct GrantInfo {
     staging_pool: Arc<GrantStagingPool>,
 }
 
-/// Readable bytes for one `(grant × submission)` cell — returned by [`ReadGrant::consume`].
+/// CPU-readable bytes from a consumed read grant.
 ///
-/// Dropping the loan returns the staging buffer to the grant's reuse pool once its
-/// submission timeline has retired; otherwise the buffer
-/// is freed immediately when the owning [`Scheme`] is gone.
-pub struct Loan<T> {
+/// Dropping returns the staging buffer to the grant pool once the submission timeline retires.
+pub struct GrantBytes {
     bytes: Vec<u8>,
     handle: BufferHandle,
     ready_after: TimelineValue,
     return_pool: Arc<GrantStagingPool>,
-    _marker: PhantomData<T>,
 }
 
-impl<T> fmt::Debug for Loan<T> {
+impl fmt::Debug for GrantBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Loan")
+        f.debug_struct("GrantBytes")
             .field("len", &self.bytes.len())
             .field("handle", &self.handle)
             .finish_non_exhaustive()
     }
 }
 
-impl<T> Deref for Loan<T> {
+impl Deref for GrantBytes {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -578,7 +575,7 @@ impl<T> Deref for Loan<T> {
     }
 }
 
-impl<T> Drop for Loan<T> {
+impl Drop for GrantBytes {
     fn drop(&mut self) {
         self.return_pool.return_handle(self.handle, self.ready_after);
     }
@@ -606,7 +603,7 @@ impl<T> ReadGrant<T> {
 }
 
 impl<T> Grant for ReadGrant<T> {
-    type Output = Loan<T>;
+    type Output = GrantBytes;
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
         if submission.handle.scheme_id() != self.scheme_id {
@@ -648,12 +645,11 @@ impl<T> Grant for ReadGrant<T> {
             }
         };
         read_result.map_err(|e| self.ctx.classify(e))?;
-        Ok(Loan {
+        Ok(GrantBytes {
             bytes,
             handle,
             ready_after: submission.timeline_value(),
             return_pool: Arc::clone(&self.return_pool),
-            _marker: PhantomData,
         })
     }
 }
@@ -2569,62 +2565,6 @@ fn validate_dispatch_shape_parcel(parcel: &Parcel) -> Result<u64, GoldyError> {
     Ok(parcel.source_offset())
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// Argument to [`SchemeNodeBuilder::dispatch`]: fixed workgroup counts or a device-resident shape parcel.
-///
-/// Implemented for [`DispatchShape`] and [`Parcel`]. Fixed triples use
-/// [`SchemeNodeBuilder::dispatch`] `(x, y, z)`.
-pub trait IntoDispatch: sealed::Sealed {
-    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError>;
-}
-
-impl sealed::Sealed for DispatchShape {}
-impl sealed::Sealed for &Parcel {}
-
-impl IntoDispatch for DispatchShape {
-    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError> {
-        builder.push_dispatch_node(DispatchDim::Direct {
-            x: self.x,
-            y: self.y,
-            z: self.z,
-        });
-        Ok(())
-    }
-}
-
-impl IntoDispatch for &Parcel {
-    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError> {
-        let offset = validate_dispatch_shape_parcel(self)?;
-        let resource = self.resource_id();
-        builder
-            .scheme
-            .submit_state
-            .register_stamp_parts(resource, self.stamp_handle());
-        let mut bindings = builder.bindings;
-        bindings.push(ResourceBinding {
-            resource,
-            access: NodeAccess::Read,
-        });
-        let buffer = self
-            .buffer_handle()
-            .expect("validate_dispatch_shape_parcel ensures buffer parcel");
-        builder.scheme.ir.nodes.push(TaskNode {
-            label: builder.label,
-            bindings,
-            kind: NodeKind::Dispatch {
-                pipeline: builder.pipeline,
-                resource_slots: builder.resource_slots,
-                user_slots: builder.user_slots,
-                dispatch: DispatchDim::Indirect { buffer, offset },
-            },
-        });
-        Ok(())
-    }
-}
-
 /// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, scheme-held
 /// leases, samplers, and textures.
 ///
@@ -2835,15 +2775,35 @@ impl<'a> SchemeNodeBuilder<'a> {
         self.push_dispatch_node(DispatchDim::Direct { x, y, z });
     }
 
-    /// Finalize the node with a host [`DispatchShape`] or a device-resident shape parcel.
+    /// Finalize the node with a device-resident [`DispatchShape`] parcel (indirect dispatch).
     ///
-    /// Passing a `&Parcel` selects device-sourced (indirect) dispatch. The shape parcel's
-    /// ordering dependency is registered automatically and is not a shader resource slot.
-    ///
-    /// Rust does not allow overloading [`Self::dispatch`] `(x, y, z)` and this shape/parcel
-    /// form under the same name; this is the shape/parcel dispatch entry point.
-    pub fn dispatch_shape(self, dim: impl IntoDispatch) -> Result<(), GoldyError> {
-        dim.finish(self)
+    /// The shape parcel's ordering dependency is registered automatically and is not a shader
+    /// resource slot. Fixed workgroup counts use [`Self::dispatch`] instead.
+    pub fn dispatch_shape_parcel(self, parcel: &Parcel) -> Result<(), GoldyError> {
+        let offset = validate_dispatch_shape_parcel(parcel)?;
+        let resource = parcel.resource_id();
+        self.scheme
+            .submit_state
+            .register_stamp_parts(resource, parcel.stamp_handle());
+        let mut bindings = self.bindings;
+        bindings.push(ResourceBinding {
+            resource,
+            access: NodeAccess::Read,
+        });
+        let buffer = parcel
+            .buffer_handle()
+            .expect("validate_dispatch_shape_parcel ensures buffer parcel");
+        self.scheme.ir.nodes.push(TaskNode {
+            label: self.label,
+            bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Indirect { buffer, offset },
+            },
+        });
+        Ok(())
     }
 
     fn push_dispatch_node(self, dispatch: DispatchDim) {

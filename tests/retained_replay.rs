@@ -270,7 +270,7 @@ fn indirect_scheme_resubmits_without_rerecord() {
     scheme
         .node("work", &work_pipe)
         .with_parcel(&work, NodeAccess::Write)
-        .dispatch_shape(&*shape)
+        .dispatch_shape_parcel(&*shape)
         .expect("indirect dispatch");
 
     scheme.submit().expect("submit 0");

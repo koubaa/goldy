@@ -2317,7 +2317,7 @@ mod imp {
         scheme
             .node("work", &work_pipe)
             .with_parcel(&work, NodeAccess::ReadWrite)
-            .dispatch_shape(&*shape)
+            .dispatch_shape_parcel(&*shape)
             .expect("indirect dispatch");
 
         let grant = scheme.grant_read(&work).expect("grant_read");
@@ -2351,7 +2351,7 @@ mod imp {
             scheme
                 .node("work", &work_pipe)
                 .with_parcel(&work, NodeAccess::Write)
-                .dispatch_shape(&*shape)
+                .dispatch_shape_parcel(&*shape)
                 .expect("record indirect dispatch");
             drop(shape);
         }
@@ -2382,7 +2382,7 @@ mod imp {
         let err = scheme
             .node("work", &work_pipe)
             .with_parcel(&work, NodeAccess::Write)
-            .dispatch_shape(&*shape)
+            .dispatch_shape_parcel(&*shape)
             .expect_err("wrong element stride must be rejected");
         let msg = format!("{err:?}");
         assert!(
@@ -2429,7 +2429,7 @@ mod imp {
             .node("copy_indirect", &copy_pipe)
             .with_parcel(&src, NodeAccess::Read)
             .with_parcel(&out, NodeAccess::Write)
-            .dispatch_shape(&*shape)
+            .dispatch_shape_parcel(&*shape)
             .expect("indirect dispatch");
 
         let grant = scheme.grant_read(&out).expect("grant_read");
