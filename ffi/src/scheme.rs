@@ -12,7 +12,7 @@ use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTextur
 use crate::types::GoldyNodeAccess;
 use goldy::scheme::{ReadGrant, Scheme};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord};
-use goldy::{Grant, GrantBuffer, GrantTexture, ParcelType};
+use goldy::{Grant, GrantBuffer, GrantTexture};
 use std::ffi::CStr;
 
 /// Opaque per-submission token returned by [`goldy_scheme_submit`].
@@ -427,7 +427,9 @@ pub unsafe extern "C" fn goldy_scheme_submission_wait(
     }
 }
 
-/// Record a read-easement grant over a buffer parcel (once per scheme).
+/// Record a read-easement grant over a **buffer** parcel (once per scheme).
+///
+/// For texture parcels use [`goldy_scheme_grant_read_texture`].
 ///
 /// Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
 /// Call after the producing dispatch node(s). Marks the scheme dirty.
@@ -447,25 +449,14 @@ pub unsafe extern "C" fn goldy_scheme_grant_read(
         set_last_error("Cannot grant_read while recording a compute node");
         return std::ptr::null_mut();
     }
-    match (*parcel).inner.kind() {
-        ParcelType::Texture => match (*scheme).inner.grant_read_texture(&(*parcel).inner) {
-            Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
-                inner: ReadGrantInner::Texture(grant),
-            })),
-            Err(e) => {
-                set_last_error(format!("{e}"));
-                std::ptr::null_mut()
-            }
-        },
-        ParcelType::Buffer => match (*scheme).inner.grant_read(&(*parcel).inner) {
-            Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
-                inner: ReadGrantInner::Buffer(grant),
-            })),
-            Err(e) => {
-                set_last_error(format!("{e}"));
-                std::ptr::null_mut()
-            }
-        },
+    match (*scheme).inner.grant_read(&(*parcel).inner) {
+        Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
+            inner: ReadGrantInner::Buffer(grant),
+        })),
+        Err(e) => {
+            set_last_error(format!("{e}"));
+            std::ptr::null_mut()
+        }
     }
 }
 

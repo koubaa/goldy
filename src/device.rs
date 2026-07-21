@@ -617,10 +617,12 @@ impl Device {
         self.inner.vram_allocator.set_allocation_policy(policy)
     }
 
-    /// Install an allocation policy if the device still has the default [`NoPolicy`](crate::NoPolicy).
+    /// Install an allocation policy if the device still has the default no-op policy.
+    ///
+    /// Pass a [`BudgetPolicy`](crate::BudgetPolicy) for live-byte tracking (and optional budget).
     pub fn ensure_allocation_policy(
         &self,
-        policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
+        policy: Arc<crate::allocation_policy::BudgetPolicy>,
     ) -> anyhow::Result<()> {
         self.inner.vram_allocator.ensure_allocation_policy(policy)
     }

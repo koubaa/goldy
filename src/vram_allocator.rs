@@ -121,7 +121,7 @@ impl Default for DeferredPayload {
 ///
 /// Not used for separate accounting code paths — only passed to [`VramAllocator::notify_freed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParcelType {
+pub(crate) enum ParcelType {
     Buffer,
     Texture,
 }

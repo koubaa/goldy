@@ -235,7 +235,7 @@ impl RetainedPool {
         }
     }
 
-    /// Committed bytes currently held through this pool, by [`ParcelType`].
+    /// Committed bytes currently held through this pool (buffers vs textures).
     pub fn bytes_by_kind(&self) -> BytesByKind {
         self.bookkeeping.snapshot()
     }
@@ -288,8 +288,7 @@ mod tests {
     fn acquire_texture_without_init_allocates() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(64, 64, fmt, acc, flags, None).unwrap();
-        assert_eq!(p.kind(), ParcelType::Texture);
+        let _p = pool.acquire_texture(64, 64, fmt, acc, flags, None).unwrap();
         assert!(pool.bytes_by_kind().texture > 0);
         assert_eq!(pool.bytes_by_kind().buffer, 0);
     }
@@ -306,7 +305,6 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(b.kind(), ParcelType::Buffer);
         assert_eq!(b.byte_size(), 256);
         assert!(pool.bytes_by_kind().buffer >= 256);
         assert_eq!(b.unit_count(), 1);

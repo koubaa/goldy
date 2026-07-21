@@ -731,7 +731,9 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
 
-// Record a read-easement grant over a buffer parcel (once per scheme).
+// Record a read-easement grant over a **buffer** parcel (once per scheme).
+//
+// For texture parcels use [`goldy_scheme_grant_read_texture`].
 //
 // Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
 // Call after the producing dispatch node(s). Marks the scheme dirty.

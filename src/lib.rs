@@ -46,7 +46,7 @@ pub mod tracy;
 #[cfg(feature = "tracy")]
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
-pub mod allocation_policy;
+pub(crate) mod allocation_policy;
 mod buffer_alloc_tests;
 pub mod exchange;
 #[cfg(test)]
@@ -59,7 +59,7 @@ pub mod swapchain_pool;
 pub mod timeline;
 pub mod transient_pool;
 pub(crate) mod vram_allocator;
-pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
+pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 pub use exchange::{Claim, SurfaceExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
@@ -74,7 +74,7 @@ pub use scheme::{
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
 pub use transient_pool::TransientPool;
-pub use vram_allocator::{DeferredPayload, ParcelType};
+pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use buffer::{BufferSource, BufferView, StructuredBufferElement};

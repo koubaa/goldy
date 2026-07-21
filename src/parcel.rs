@@ -284,14 +284,6 @@ impl Parcel {
         }
     }
 
-    /// Zoning / telemetry label (buffer vs texture).
-    pub fn kind(&self) -> ParcelType {
-        match &self.backing {
-            ParcelBacking::WholeBuffer(_) | ParcelBacking::BufferRange { .. } => ParcelType::Buffer,
-            ParcelBacking::Texture(_) => ParcelType::Texture,
-        }
-    }
-
     /// Approximate committed byte size for this bindable unit.
     pub fn byte_size(&self) -> u64 {
         match &self.backing {
@@ -649,11 +641,6 @@ impl Buffer {
         &self.units[0]
     }
 
-    /// Zoning / telemetry label.
-    pub fn kind(&self) -> ParcelType {
-        ParcelType::Buffer
-    }
-
     /// Total committed byte size (backing allocation).
     pub fn byte_size(&self) -> u64 {
         match &self.storage {
@@ -933,10 +920,6 @@ impl Texture {
 
     pub fn is_owned(&self) -> bool {
         self.parcel.texture_is_owned()
-    }
-
-    pub fn kind(&self) -> ParcelType {
-        ParcelType::Texture
     }
 
     pub fn last_referenced(&self) -> ReferenceTable {
