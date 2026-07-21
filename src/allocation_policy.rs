@@ -10,7 +10,6 @@
 //! module).
 
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -75,11 +74,6 @@ pub trait AllocationPolicy: Send + Sync {
     /// Net bytes tracked by this policy (allocations minus frees).
     fn allocated_bytes(&self) -> u64 {
         0
-    }
-
-    /// Optional byte budget enforced by [`Self::before_alloc`].
-    fn budget(&self) -> Option<u64> {
-        None
     }
 
     /// `true` when this is the default no-op policy ([`NoPolicy`]).
@@ -174,18 +168,6 @@ impl AllocationPolicy for BudgetPolicy {
     fn allocated_bytes(&self) -> u64 {
         BudgetPolicy::allocated_bytes(self)
     }
-
-    fn budget(&self) -> Option<u64> {
-        self.budget_bytes
-    }
-}
-
-/// Install `policy` on `allocator` when it is a [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
-pub fn set_on_default(
-    allocator: &Arc<dyn crate::vram_allocator::VramAllocator>,
-    policy: Arc<dyn AllocationPolicy>,
-) -> Result<()> {
-    allocator.set_allocation_policy(policy)
 }
 
 #[cfg(test)]

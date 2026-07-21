@@ -58,7 +58,7 @@ pub mod signal;
 pub mod swapchain_pool;
 pub mod timeline;
 pub mod transient_pool;
-pub mod vram_allocator;
+pub(crate) mod vram_allocator;
 pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
 pub use error::GoldyError;
 pub use exchange::{Claim, SurfaceExchange};

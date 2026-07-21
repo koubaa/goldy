@@ -50,7 +50,7 @@
 //! ([`DefaultVramAllocator`]) delegates directly to the backend and implements the deferred
 //! ring at zero overhead when [`NoPolicy`] is installed.
 //! Install a custom [`AllocationPolicy`] via
-//! [`Device::set_allocation_policy`](crate::device::Device::set_allocation_policy) for byte
+//! [`Device::ensure_allocation_policy`](crate::device::Device::ensure_allocation_policy) for byte
 //! tracking and budget enforcement.
 //!
 //! [`Texture`]: crate::Texture
@@ -140,7 +140,7 @@ impl ParcelDeed {
         Self { allocator }
     }
 
-    pub fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
+    pub(crate) fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
         if let Some(alloc) = self.allocator.upgrade() {
             alloc.notify_freed(reserved, committed, kind);
         }
@@ -159,7 +159,7 @@ impl ParcelDeed {
 /// Methods take `&self` and must be internally synchronized (the trait is `Send + Sync`).
 /// Use [`AtomicI64`](std::sync::atomic::AtomicI64) / [`AtomicU64`](std::sync::atomic::AtomicU64) for lock-free counters,
 /// or a `Mutex` for more complex state.
-pub trait VramAllocator: Send + Sync {
+pub(crate) trait VramAllocator: Send + Sync {
     /// Notify the allocator that a deed-holding parcel has been freed.
     ///
     /// Called automatically when a deed-holding buffer or texture is dropped after allocation
@@ -176,16 +176,6 @@ pub trait VramAllocator: Send + Sync {
     fn allocated_bytes(&self) -> u64 {
         0
     }
-
-    /// Optional byte budget. Returns `None` if no budget is enforced.
-    /// When set, buffer and texture allocation methods should return an error if
-    /// the allocation would exceed the budget.
-    fn budget(&self) -> Option<u64> {
-        None
-    }
-
-    /// Strategy identifier for diagnostics and tracing.
-    fn name(&self) -> &'static str;
 
     /// Register `payload` for deferred dropping after GPU timeline `epoch` retires.
     ///
@@ -219,16 +209,6 @@ pub trait VramAllocator: Send + Sync {
     /// The default implementation always returns `false`.
     fn has_deferred_payloads(&self) -> bool {
         false
-    }
-
-    /// The oldest epoch currently in the deferred ring, if any.
-    ///
-    /// If non-`None`, waiting for this timeline value then calling
-    /// [`boundary_crossed`](Self::boundary_crossed) would free the oldest batch of deferred resources.
-    ///
-    /// The default implementation returns `None`.
-    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        None
     }
 
     /// Drop all deferred payloads unconditionally, regardless of their epoch.
@@ -272,6 +252,7 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
     }
 
     /// Allocate a GPU buffer with a pre-reserved capacity hint.
+    #[cfg(test)]
     fn alloc_buffer_with_capacity(
         &self,
         device: &Device,
@@ -314,7 +295,7 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
 /// when `epoch <= device_retired` (max completed over all live contexts). Any context may
 /// poll boundaries; multi-context deferral is sound under this conservative collapse.
 /// Per-handle last-touch reclamation (tighter than `device_retired`) is a future optimization.
-pub struct DefaultVramAllocator {
+pub(crate) struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
     policy: RwLock<Arc<dyn AllocationPolicy>>,
 }
@@ -325,14 +306,6 @@ impl DefaultVramAllocator {
         Self {
             deferred: Mutex::new(VecDeque::new()),
             policy: RwLock::new(Arc::new(NoPolicy)),
-        }
-    }
-
-    /// Create a default allocator with the given [`AllocationPolicy`].
-    pub fn with_policy(policy: Arc<dyn AllocationPolicy>) -> Self {
-        Self {
-            deferred: Mutex::new(VecDeque::new()),
-            policy: RwLock::new(policy),
         }
     }
 
@@ -389,6 +362,7 @@ impl VramAllocatorAlloc for DefaultVramAllocator {
         Ok(buf)
     }
 
+    #[cfg(test)]
     fn alloc_buffer_with_capacity(
         &self,
         device: &Device,
@@ -449,20 +423,12 @@ impl VramAllocator for DefaultVramAllocator {
         self.with_policy_read(|policy| policy.allocated_bytes())
     }
 
-    fn budget(&self) -> Option<u64> {
-        self.with_policy_read(|policy| policy.budget())
-    }
-
     fn set_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
         self.set_policy(policy)
     }
 
     fn ensure_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
         self.ensure_policy(policy)
-    }
-
-    fn name(&self) -> &'static str {
-        "default"
     }
 
     fn defer_release(&self, epoch: TimelineValue, payload: DeferredPayload) {
@@ -492,10 +458,6 @@ impl VramAllocator for DefaultVramAllocator {
 
     fn has_deferred_payloads(&self) -> bool {
         !self.deferred.lock().unwrap().is_empty()
-    }
-
-    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.deferred.lock().unwrap().front().map(|(epoch, _)| *epoch)
     }
 
     fn drain(&self) {

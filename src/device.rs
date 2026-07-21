@@ -571,7 +571,7 @@ impl Device {
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
-    pub fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
+    pub(crate) fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
         self.inner.vram_allocator.as_ref()
     }
 
@@ -609,7 +609,8 @@ impl Device {
     /// device's [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
     ///
     /// Fails if a policy is already installed.
-    pub fn set_allocation_policy(
+    #[cfg(test)]
+    pub(crate) fn set_allocation_policy(
         &self,
         policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
     ) -> anyhow::Result<()> {
@@ -667,6 +668,7 @@ impl Device {
     /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    #[cfg(test)]
     pub(crate) fn alloc_buffer_with_capacity(
         &self,
         initial_size: u64,

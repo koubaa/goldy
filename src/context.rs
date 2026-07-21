@@ -369,15 +369,9 @@ impl Context {
     /// device-global submission sequence values, so `device_retired >= epoch` proves the GPU
     /// work is done regardless of which context originally submitted the payload.
     ///
-    /// The placement-heap ring is reclaimed against the signal `epoch` itself rather than
-    /// `device_retired`. Placement-heap regions are stamped with the exact submission epoch
-    /// that guards their contents; advancing past that epoch is sufficient to reclaim them,
-    /// and using `device_retired` would over-reclaim regions whose guard epoch has not yet
-    /// completed on the submitting context.
-    ///
     /// Per-handle last-touch reclamation (tighter than `device_retired` for the VRAM ring)
     /// is a future optimization.
-    pub fn boundary_crossed(&self, epoch: TimelineValue) {
+    pub(crate) fn boundary_crossed(&self, epoch: TimelineValue) {
         self.boundary_crossed_inner(epoch, self.device().timeline_retired());
     }
 
@@ -435,15 +429,12 @@ impl Context {
         self.device().vram_allocator().has_deferred_payloads()
     }
 
-    pub fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.device().vram_allocator().oldest_deferred_epoch()
-    }
-
     pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
         self.device().vram_allocator().defer_release(epoch, payload);
     }
 
-    pub fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
+    #[cfg(test)]
+    pub(crate) fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
         let mut payload = crate::vram_allocator::DeferredPayload::new();
         payload.push(resource);
         self.device().vram_allocator().defer_release(epoch, payload);
