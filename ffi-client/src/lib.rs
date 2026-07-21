@@ -15,11 +15,9 @@ mod exchange;
 mod instance;
 mod parcel;
 mod pipeline;
-mod render_target;
 mod retained_pool;
 mod scheme;
 mod shader_module;
-mod surface;
 mod surface_exchange;
 mod sys;
 mod texture;
@@ -35,14 +33,12 @@ pub use exchange::{Claim, Transaction};
 pub use instance::{AdapterInfo, Instance};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
-pub use render_target::RenderTarget;
 pub use retained_pool::{RecordBuilder, RecordField, RetainedPool};
 pub use scheme::{
     ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentLease, ReadGrant, ReplayStats, Scheme,
     SchemeRenderPassBuilder, SchemeRenderTargetLease, SchemeSubmission,
 };
 pub use shader_module::ShaderModule;
-pub use surface::{Frame, Surface};
 pub use surface_exchange::SurfaceExchange;
 pub use texture::Texture;
 pub use types::{

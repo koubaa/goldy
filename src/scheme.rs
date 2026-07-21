@@ -1443,8 +1443,8 @@ impl Scheme {
         })
     }
 
-    /// Borrow the backing [`RenderTarget`] for a scheme-held lease.
-    pub fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
+    /// Borrow the backing render target for a scheme-held lease.
+    pub(crate) fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
         &self.rt_leases[lease.id.0 as usize]
     }
 

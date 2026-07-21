@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 /// you will render to. Mismatched formats cause undefined behavior or errors.
 ///
 /// - For `Surface`: use `surface.format()`
-/// - For `RenderTarget`: use the format passed to `RenderTarget::new()`
+/// - For offscreen targets: use the format passed to [`Scheme::lease_render_target`]
 ///
 /// # Example
 ///
@@ -36,8 +36,8 @@ pub struct RenderPipelineDesc {
     pub topology: PrimitiveTopology,
     /// Target texture format.
     ///
-    /// **Must match** the format of the Surface or RenderTarget you render to.
-    /// Use `surface.format()` or the format you passed to `RenderTarget::new()`.
+    /// **Must match** the format of the swapchain or scheme-leased render target you render to.
+    /// Use `surface.format()` or the format passed to [`Scheme::lease_render_target`].
     pub target_format: TextureFormat,
     /// Depth/stencil state (optional, None = no depth testing).
     pub depth_stencil: Option<DepthStencilState>,

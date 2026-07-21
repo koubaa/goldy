@@ -1,11 +1,8 @@
 # Rendering Outputs
 
-Goldy supports two presentation paths:
+Windowed rendering uses **present-on-scheme**: [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html) + [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) + [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html). Record copy or compute-to-present once in a retained [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html); submit each frame and settle the claim.
 
-- **Present-on-scheme** (recommended) — [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html) + [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) + [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html). Record copy or compute-to-present once in a retained [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html); submit each frame and settle the claim.
-- **Legacy Surface API** — [`Surface`](https://docs.rs/goldy/latest/goldy/struct.Surface.html) acquire/present bracket (still used internally by `SurfaceExchange`).
-
-All windowed Rust examples use present-on-scheme via `SurfaceExchange`.
+All windowed Rust examples use this path.
 
 ## SurfaceExchange
 
@@ -90,19 +87,6 @@ present.claim(&mut submission)?.consume()?;
 ```
 
 For pure compute-to-surface, use `bind_destination` and bind the returned lease in a compute node with `with_present(&lease)` instead of a render pass + copy.
-
-## Legacy Surface API
-
-`Surface` manages a swapchain for direct acquire/present workflows. It wraps the platform window handle and acquires drawable textures each frame.
-
-```rust
-let surface = Surface::new(&device, &window)?;
-let frame = surface.begin()?;
-// ... lower-level frame bracket ...
-frame.present()?;
-```
-
-New applications should prefer `SurfaceExchange` + `Scheme`. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs).
 
 ## Surface Queries
 

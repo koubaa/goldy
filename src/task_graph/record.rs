@@ -10,7 +10,6 @@ use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
 use crate::pipeline::RenderPipeline;
-use crate::render_target::RenderTarget;
 use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle};
 use std::sync::Arc;
 
@@ -70,17 +69,6 @@ pub struct RenderPassRecord {
 }
 
 impl RenderPassRecord {
-    pub fn new(label: &'static str, target: &RenderTarget) -> Self {
-        Self {
-            label,
-            target: target.backend_handle(),
-            bindings: Vec::new(),
-            commands: Vec::new(),
-            stamp_targets: Vec::new(),
-            pending_push_constants: Vec::new(),
-        }
-    }
-
     pub fn with_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {

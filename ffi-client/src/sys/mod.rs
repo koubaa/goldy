@@ -187,57 +187,6 @@ pub unsafe fn goldy_render_pipeline_destroy(pipeline: *mut GoldyRenderPipeline) 
     (lib().goldy_render_pipeline_destroy)(pipeline)
 }
 
-pub unsafe fn goldy_render_target_buffer_size(target: *const GoldyRenderTarget) -> usize {
-    (lib().goldy_render_target_buffer_size)(target)
-}
-
-pub unsafe fn goldy_render_target_create(
-    device: *const GoldyDevice,
-    width: u32,
-    height: u32,
-    format: GoldyTextureFormat,
-) -> *mut GoldyRenderTarget {
-    (lib().goldy_render_target_create)(device, width, height, format)
-}
-
-pub unsafe fn goldy_render_target_create_with_depth(
-    device: *const GoldyDevice,
-    width: u32,
-    height: u32,
-    format: GoldyTextureFormat,
-    depth_format: GoldyDepthFormat,
-) -> *mut GoldyRenderTarget {
-    (lib().goldy_render_target_create_with_depth)(device, width, height, format, depth_format)
-}
-
-pub unsafe fn goldy_render_target_destroy(target: *mut GoldyRenderTarget) {
-    (lib().goldy_render_target_destroy)(target)
-}
-
-pub unsafe fn goldy_render_target_format(target: *const GoldyRenderTarget) -> GoldyTextureFormat {
-    (lib().goldy_render_target_format)(target)
-}
-
-pub unsafe fn goldy_render_target_has_depth(target: *const GoldyRenderTarget) -> bool {
-    (lib().goldy_render_target_has_depth)(target)
-}
-
-pub unsafe fn goldy_render_target_height(target: *const GoldyRenderTarget) -> u32 {
-    (lib().goldy_render_target_height)(target)
-}
-
-pub unsafe fn goldy_render_target_read_to_buffer(
-    target: *const GoldyRenderTarget,
-    buffer: *mut u8,
-    size: usize,
-) -> GoldyResult {
-    (lib().goldy_render_target_read_to_buffer)(target, buffer, size)
-}
-
-pub unsafe fn goldy_render_target_width(target: *const GoldyRenderTarget) -> u32 {
-    (lib().goldy_render_target_width)(target)
-}
-
 pub unsafe fn goldy_sampler_create(device: *const GoldyDevice, desc: *const GoldySamplerDesc) -> *mut GoldySampler {
     (lib().goldy_sampler_create)(device, desc)
 }
@@ -263,55 +212,6 @@ pub unsafe fn goldy_shader_create(
 
 pub unsafe fn goldy_shader_destroy(shader: *mut GoldyShaderModule) {
     (lib().goldy_shader_destroy)(shader)
-}
-
-pub unsafe fn goldy_surface_acquire(surface: *const GoldySurface) -> *mut GoldySurfaceFrame {
-    (lib().goldy_surface_acquire)(surface)
-}
-
-#[cfg(target_os = "macos")]
-pub unsafe fn goldy_surface_create_appkit(
-    device: *const GoldyDevice,
-    ns_view: *mut std::ffi::c_void,
-) -> *mut GoldySurface {
-    (lib().goldy_surface_create_appkit)(device, ns_view)
-}
-
-#[cfg(windows)]
-pub unsafe fn goldy_surface_create_win32(device: *const GoldyDevice, hwnd: *mut std::ffi::c_void) -> *mut GoldySurface {
-    (lib().goldy_surface_create_win32)(device, hwnd)
-}
-
-pub unsafe fn goldy_surface_destroy(surface: *mut GoldySurface) {
-    (lib().goldy_surface_destroy)(surface)
-}
-
-pub unsafe fn goldy_surface_format(surface: *const GoldySurface) -> GoldyTextureFormat {
-    (lib().goldy_surface_format)(surface)
-}
-
-pub unsafe fn goldy_surface_frame_height(frame: *const GoldySurfaceFrame) -> u32 {
-    (lib().goldy_surface_frame_height)(frame)
-}
-
-pub unsafe fn goldy_surface_frame_width(frame: *const GoldySurfaceFrame) -> u32 {
-    (lib().goldy_surface_frame_width)(frame)
-}
-
-pub unsafe fn goldy_surface_height(surface: *const GoldySurface) -> u32 {
-    (lib().goldy_surface_height)(surface)
-}
-
-pub unsafe fn goldy_surface_present(surface: *const GoldySurface, frame: *mut GoldySurfaceFrame) -> GoldyResult {
-    (lib().goldy_surface_present)(surface, frame)
-}
-
-pub unsafe fn goldy_surface_resize(surface: *mut GoldySurface, width: u32, height: u32) -> GoldyResult {
-    (lib().goldy_surface_resize)(surface, width, height)
-}
-
-pub unsafe fn goldy_surface_width(surface: *const GoldySurface) -> u32 {
-    (lib().goldy_surface_width)(surface)
 }
 
 pub unsafe fn goldy_scheme_create(ctx: *const GoldyContext) -> *mut GoldyScheme {

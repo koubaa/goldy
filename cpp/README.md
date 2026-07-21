@@ -86,8 +86,8 @@ int main() {
 }
 ```
 
-Windowed rendering: see `examples/triangle.cpp` (Win32 / macOS). Check
-`goldy::Surface::is_supported()` before using `Surface`.
+Windowed rendering: see `examples/triangle.cpp` (Win32 / macOS). Use
+`goldy::SurfaceExchange` for swapchain presentation.
 
 ## Installation
 
@@ -163,9 +163,9 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 | `goldy::RecordBuilder` | Build partitioned buffer records (multiple field parcels) |
 | `goldy::ShaderModule` | Compiled Slang shader |
 | `goldy::RenderPipeline` | Graphics pipeline |
-| `goldy::RenderTarget` | Offscreen render target (readback) |
+| `goldy::SchemeRenderTargetLease` | Offscreen render target declared on a scheme |
 | `goldy::Scheme` | Retained dependency graph (render passes, compute, present) |
-| `goldy::Surface` | Window swapchain (Win32 / macOS only) |
+| `goldy::SurfaceExchange` | Window swapchain (Win32 / macOS / Wayland) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
 | `goldy::Sampler` | Texture sampler |
 

@@ -873,7 +873,7 @@ pub(crate) struct PresentFinishState {
 }
 
 /// GPU-side present work (copy + queue present) cloned out of the backend under the
-/// global lock so [`Frame::present`](crate::Frame::present) can drop it during execution.
+/// global lock so [`crate::surface::Frame::present`] can drop it during execution.
 pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
 }
@@ -1006,7 +1006,7 @@ impl ContextSubmitSession for LockedSubmitSession {
     }
 }
 
-/// Split present hooks used by [`Frame::present`](crate::Frame::present) to drop the
+/// Split present hooks used by [`crate::surface::Frame::present`] to drop the
 /// global backend lock during copy + WSI present.
 pub(crate) trait GpuBackendPresentSplit {
     fn take_present_gpu_work(

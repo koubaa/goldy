@@ -67,38 +67,6 @@ internal static partial class NativeMethods
     internal static partial bool DeviceHasLibrary(nint device, string name);
 
     // ========================================================================
-    // RenderTarget
-    // ========================================================================
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_create")]
-    internal static partial nint RenderTargetCreate(nint device, uint width, uint height, TextureFormat format);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_create_with_depth")]
-    internal static partial nint RenderTargetCreateWithDepth(nint device, uint width, uint height, TextureFormat colorFormat, DepthFormat depthFormat);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_destroy")]
-    internal static partial void RenderTargetDestroy(nint target);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_width")]
-    internal static partial uint RenderTargetWidth(nint target);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_height")]
-    internal static partial uint RenderTargetHeight(nint target);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_format")]
-    internal static partial TextureFormat RenderTargetFormat(nint target);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_has_depth")]
-    [return: MarshalAs(UnmanagedType.U1)]
-    internal static partial bool RenderTargetHasDepth(nint target);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_buffer_size")]
-    internal static partial nuint RenderTargetBufferSize(nint target);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_read_to_buffer")]
-    internal static partial GoldyResult RenderTargetReadToBuffer(nint target, nint output, nuint outputSize);
-
-    // ========================================================================
     // Shader
     // ========================================================================
 
@@ -143,37 +111,6 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_sampler_destroy")]
     internal static partial void SamplerDestroy(nint sampler);
-
-    // ========================================================================
-    // Surface
-    // ========================================================================
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_destroy")]
-    internal static partial void SurfaceDestroy(nint surface);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_width")]
-    internal static partial uint SurfaceWidth(nint surface);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_height")]
-    internal static partial uint SurfaceHeight(nint surface);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_format")]
-    internal static partial TextureFormat SurfaceFormat(nint surface);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_resize")]
-    internal static partial GoldyResult SurfaceResize(nint surface, uint width, uint height);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_acquire")]
-    internal static partial nint SurfaceAcquire(nint surface);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_present")]
-    internal static partial GoldyResult SurfacePresent(nint surface, nint frame);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_width")]
-    internal static partial uint SurfaceFrameWidth(nint frame);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_height")]
-    internal static partial uint SurfaceFrameHeight(nint frame);
 
     // ========================================================================
     // Context
@@ -373,22 +310,6 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_parcel_byte_size")]
     internal static partial ulong ParcelByteSize(nint parcel);
-
-    // ========================================================================
-    // Surface - Platform-specific creation
-    // ========================================================================
-
-    /// <summary>
-    /// Create a surface from a Win32 HWND.
-    /// </summary>
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_win32")]
-    internal static partial nint SurfaceCreateWin32(nint device, nint hwnd);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_appkit")]
-    internal static partial nint SurfaceCreateAppKit(nint device, nint nsView);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_wayland")]
-    internal static partial nint SurfaceCreateWayland(nint device, nint display, nint surface);
 
     // ========================================================================
     // SurfaceExchange / Transaction / Claim

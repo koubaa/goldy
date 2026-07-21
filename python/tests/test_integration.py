@@ -129,29 +129,29 @@ float4 fs_main(VertexOutput input) : SV_Target {
     assert shader is not None
 
 
-def test_render_target_creation(device):
-    """Test RenderTarget creation."""
+def test_scheme_render_target_lease(device):
+    """Test scheme-held render target lease."""
     import goldy
-    
-    target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
-    assert target.width == 800
-    assert target.height == 600
-    assert target.buffer_size == 800 * 600 * 4
-    assert not target.has_depth()
+
+    ctx = device.create_context()
+    scheme = goldy.Scheme(ctx)
+    lease = scheme.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
+    assert lease is not None
 
 
-def test_render_target_with_depth(device):
-    """Test RenderTarget with depth buffer."""
+def test_scheme_render_target_lease_with_depth(device):
+    """Test scheme-held render target lease with depth."""
     import goldy
-    
-    target = goldy.RenderTarget.with_depth(
-        device, 1024, 768,
+
+    ctx = device.create_context()
+    scheme = goldy.Scheme(ctx)
+    lease = scheme.lease_render_target(
+        1024,
+        768,
         goldy.TextureFormat.RGBA8_UNORM,
         goldy.DepthFormat.DEPTH24_PLUS,
     )
-    assert target.width == 1024
-    assert target.height == 768
-    assert target.has_depth()
+    assert lease is not None
 
 
 def test_render_clear_via_scheme(device):

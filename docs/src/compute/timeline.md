@@ -89,18 +89,18 @@ let result = grant.consume(&submission)?;
 
 ### Multi-frame pipelining
 
-For production renderers, use [`FrameOrchestrator`](./pipelined-frames.md). It manages the in-flight slot ring, depth cap, retirement callbacks, and present-path timeline patching with no boilerplate:
+For production renderers, use [`FrameOrchestrator`](./pipelined-frames.md). It manages the in-flight timeline ring, depth cap, and present-path timeline patching:
 
 ```rust
-let mut orch: FrameOrchestrator<MyCleanup> = FrameOrchestrator::new(&ctx, 3);
+let mut orch = FrameOrchestrator::new(&ctx, 3);
 
 loop {
-    let handle = orch.begin_frame(|dev, retired| my_cleanup(dev, retired))?;
+    let handle = orch.begin_frame()?;
     let submission = scheme.submit()?;
-    orch.end_frame_standalone(handle, submission.timeline_value(), cleanup)?;
+    orch.end_frame_standalone(handle, submission.timeline_value())?;
 }
 
-orch.drain_all(|dev, retired| my_cleanup(dev, retired))?;
+orch.drain_all()?;
 ```
 
 When you only need a one-off overlap without full frame management, the raw `TimelineValue` pattern works:

@@ -196,9 +196,6 @@ typedef struct GoldyRecordBuilder GoldyRecordBuilder;
 // Opaque handle to a Goldy RenderPipeline.
 typedef struct GoldyRenderPipeline GoldyRenderPipeline;
 
-// Opaque handle to a Goldy RenderTarget.
-typedef struct GoldyRenderTarget GoldyRenderTarget;
-
 // Opaque handle to a Goldy retained allocation pool.
 typedef struct GoldyRetainedPool GoldyRetainedPool;
 
@@ -219,17 +216,8 @@ typedef struct GoldySchemeSubmission GoldySchemeSubmission;
 // Opaque handle to a Goldy ShaderModule.
 typedef struct GoldyShaderModule GoldyShaderModule;
 
-// Opaque handle to a Goldy Surface.
-//
-// Surface creation is platform-specific and typically done through
-// higher-level bindings that can pass window handles.
-typedef struct GoldySurface GoldySurface;
-
 // Opaque handle to a window-surface exchange.
 typedef struct GoldySurfaceExchange GoldySurfaceExchange;
-
-// Opaque handle to a Goldy SurfaceFrame.
-typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
 // Opaque handle to an acquired [`goldy::Texture`].
 typedef struct GoldyTexture GoldyTexture;
@@ -542,74 +530,6 @@ struct GoldyRenderPipeline *goldy_render_pipeline_create(const struct GoldyDevic
 // # Safety
 // The pointer must be valid and not used after this call.
 void goldy_render_pipeline_destroy(struct GoldyRenderPipeline *pipeline);
-
-// Get the buffer size in bytes.
-//
-// # Safety
-// The target pointer must be valid.
-size_t goldy_render_target_buffer_size(const struct GoldyRenderTarget *target);
-
-// Create a new render target without depth buffer.
-//
-// Returns a pointer to the render target, or null on failure.
-//
-// # Safety
-// The device pointer must be valid.
-struct GoldyRenderTarget *goldy_render_target_create(const struct GoldyDevice *device,
-                                                     uint32_t width,
-                                                     uint32_t height,
-                                                     enum GoldyTextureFormat format);
-
-// Create a new render target with depth buffer.
-//
-// Returns a pointer to the render target, or null on failure.
-//
-// # Safety
-// The device pointer must be valid.
-struct GoldyRenderTarget *goldy_render_target_create_with_depth(const struct GoldyDevice *device,
-                                                                uint32_t width,
-                                                                uint32_t height,
-                                                                enum GoldyTextureFormat color_format,
-                                                                enum GoldyDepthFormat depth_format);
-
-// Destroy a render target.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_render_target_destroy(struct GoldyRenderTarget *target);
-
-// Get the render target format.
-//
-// # Safety
-// The target pointer must be valid.
-enum GoldyTextureFormat goldy_render_target_format(const struct GoldyRenderTarget *target);
-
-// Check if the render target has a depth buffer.
-//
-// # Safety
-// The target pointer must be valid.
-bool goldy_render_target_has_depth(const struct GoldyRenderTarget *target);
-
-// Get the render target height.
-//
-// # Safety
-// The target pointer must be valid.
-uint32_t goldy_render_target_height(const struct GoldyRenderTarget *target);
-
-// Read the rendered pixels to a CPU buffer.
-//
-// # Safety
-// The target pointer must be valid.
-// The output pointer must point to a buffer of at least `goldy_render_target_buffer_size()` bytes.
-enum GoldyResult goldy_render_target_read_to_buffer(const struct GoldyRenderTarget *target,
-                                                    uint8_t *output,
-                                                    size_t output_size);
-
-// Get the render target width.
-//
-// # Safety
-// The target pointer must be valid.
-uint32_t goldy_render_target_width(const struct GoldyRenderTarget *target);
 
 struct GoldyBuffer *goldy_retained_pool_acquire_buffer(struct GoldyRetainedPool *pool,
                                                        uint64_t size,
@@ -941,54 +861,6 @@ struct GoldyShaderModule *goldy_shader_create(const struct GoldyDevice *device, 
 // The pointer must be valid and not used after this call.
 void goldy_shader_destroy(struct GoldyShaderModule *shader);
 
-// Acquire the next frame from the surface.
-//
-// Returns a pointer to the frame, or null on failure.
-//
-// # Safety
-// The surface pointer must be valid.
-struct GoldySurfaceFrame *goldy_surface_acquire(const struct GoldySurface *surface);
-
-// Create a surface from an AppKit `NSView` pointer.
-//
-// # Safety
-// - `device` must be valid.
-// - `ns_view` must be a valid `NSView*` for the window's content view.
-// - The view must outlive the surface.
-struct GoldySurface *goldy_surface_create_appkit(const struct GoldyDevice *device, void *ns_view);
-
-// Create a surface from Wayland `wl_display` and `wl_surface` pointers.
-//
-// # Safety
-// - `device` must be valid.
-// - `display` and `surface` must be valid Wayland handles for the window.
-// - They must outlive the surface.
-struct GoldySurface *goldy_surface_create_wayland(const struct GoldyDevice *device,
-                                                  void *display,
-                                                  void *surface);
-
-// Create a surface from a Win32 HWND.
-//
-// # Arguments
-// * `device` - A valid Goldy device pointer
-// * `hwnd` - A Win32 HWND (window handle)
-//
-// # Returns
-// A pointer to the created surface, or null on failure.
-// Call `goldy_get_last_error()` for error details on failure.
-//
-// # Safety
-// - The device pointer must be valid and not null.
-// - The hwnd must be a valid Win32 window handle.
-// - The window must remain valid for the lifetime of the surface.
-struct GoldySurface *goldy_surface_create_win32(const struct GoldyDevice *device, void *hwnd);
-
-// Destroy a surface.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_surface_destroy(struct GoldySurface *surface);
-
 // Record texture → surface copy and return a transaction.
 //
 // # Safety
@@ -1085,54 +957,6 @@ enum GoldyResult goldy_surface_exchange_resize(struct GoldySurfaceExchange *exch
 // # Safety
 // `exchange` must be valid.
 uint32_t goldy_surface_exchange_width(const struct GoldySurfaceExchange *exchange);
-
-// Get the surface format.
-//
-// # Safety
-// The surface pointer must be valid.
-enum GoldyTextureFormat goldy_surface_format(const struct GoldySurface *surface);
-
-// Get the frame height.
-//
-// # Safety
-// The frame pointer must be valid.
-uint32_t goldy_surface_frame_height(const struct GoldySurfaceFrame *frame);
-
-// Get the frame width.
-//
-// # Safety
-// The frame pointer must be valid.
-uint32_t goldy_surface_frame_width(const struct GoldySurfaceFrame *frame);
-
-// Get the surface height.
-//
-// # Safety
-// The surface pointer must be valid.
-uint32_t goldy_surface_height(const struct GoldySurface *surface);
-
-// Present a frame to the surface.
-//
-// This consumes the frame.
-//
-// # Safety
-// Both pointers must be valid.
-// The frame is consumed and must not be used after this call.
-enum GoldyResult goldy_surface_present(const struct GoldySurface *surface,
-                                       struct GoldySurfaceFrame *frame);
-
-// Resize the surface.
-//
-// # Safety
-// The surface pointer must be valid.
-enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
-                                      uint32_t width,
-                                      uint32_t height);
-
-// Get the surface width.
-//
-// # Safety
-// The surface pointer must be valid.
-uint32_t goldy_surface_width(const struct GoldySurface *surface);
 
 uint64_t goldy_texture_byte_size(const struct GoldyTexture *texture);
 

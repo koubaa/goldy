@@ -12,7 +12,9 @@
  *   goldy::Instance instance;
  *   auto adapters = instance.enumerate_adapters();
  *   goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
- *   goldy::RenderTarget target(device, 800, 600);
+ *   goldy::Context ctx(device);
+ *   goldy::Scheme scheme(ctx);
+ *   auto rt = scheme.lease_render_target(800, 600);
  *   // ...
  */
 
@@ -71,8 +73,6 @@ class Parcel;
 class RecordBuilder;
 class ShaderModule;
 class RenderPipeline;
-class RenderTarget;
-class Surface;
 class Scheme;
 class SchemeRenderTargetLease;
 class SchemeSubmission;
@@ -247,14 +247,6 @@ struct ShaderDeleter {
 
 struct RenderPipelineDeleter {
     void operator()(GoldyRenderPipeline* p) const { if (p) goldy_render_pipeline_destroy(p); }
-};
-
-struct RenderTargetDeleter {
-    void operator()(GoldyRenderTarget* p) const { if (p) goldy_render_target_destroy(p); }
-};
-
-struct SurfaceDeleter {
-    void operator()(GoldySurface* p) const { if (p) goldy_surface_destroy(p); }
 };
 
 struct SchemeDeleter {
@@ -947,229 +939,6 @@ public:
 private:
     std::unique_ptr<GoldyRenderPipeline, detail::RenderPipelineDeleter> ptr_;
 };
-
-// =============================================================================
-// RenderTarget
-// =============================================================================
-
-/**
- * @brief A GPU render target (offscreen framebuffer).
- */
-class RenderTarget {
-public:
-    /**
-     * @brief Create a render target without depth buffer.
-     * @param device The device.
-     * @param width Width in pixels.
-     * @param height Height in pixels.
-     * @param format Texture format.
-     * @throws Exception if creation fails.
-     */
-    RenderTarget(const Device& device, uint32_t width, uint32_t height,
-                 GoldyTextureFormat format = GOLDY_TEXTURE_FORMAT_RGBA8_UNORM) {
-        GoldyRenderTarget* ptr = goldy_render_target_create(device.get(), width, height, format);
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    /**
-     * @brief Create a render target with depth buffer.
-     */
-    RenderTarget(const Device& device, uint32_t width, uint32_t height,
-                 GoldyTextureFormat color_format, GoldyDepthFormat depth_format) {
-        GoldyRenderTarget* ptr = goldy_render_target_create_with_depth(
-            device.get(), width, height, color_format, depth_format);
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    RenderTarget(const RenderTarget&) = delete;
-    RenderTarget& operator=(const RenderTarget&) = delete;
-    RenderTarget(RenderTarget&&) = default;
-    RenderTarget& operator=(RenderTarget&&) = default;
-
-    /**
-     * @brief Get width in pixels.
-     */
-    uint32_t width() const { return goldy_render_target_width(ptr_.get()); }
-
-    /**
-     * @brief Get height in pixels.
-     */
-    uint32_t height() const { return goldy_render_target_height(ptr_.get()); }
-
-    /**
-     * @brief Get texture format.
-     */
-    GoldyTextureFormat format() const { return goldy_render_target_format(ptr_.get()); }
-
-    /**
-     * @brief Check if has depth buffer.
-     */
-    bool has_depth() const { return goldy_render_target_has_depth(ptr_.get()); }
-
-    /**
-     * @brief Get buffer size in bytes for CPU readback.
-     */
-    size_t buffer_size() const { return goldy_render_target_buffer_size(ptr_.get()); }
-
-    /**
-     * @brief Read rendered pixels to CPU memory.
-     * @return Vector containing pixel data.
-     * @throws Exception if readback fails.
-     */
-    std::vector<uint8_t> read_to_cpu() {
-        std::vector<uint8_t> data(buffer_size());
-        GoldyResult result = goldy_render_target_read_to_buffer(ptr_.get(), data.data(), data.size());
-        if (result != GOLDY_RESULT_OK) {
-            throw Exception::from_last_error();
-        }
-        return data;
-    }
-
-    /**
-     * @brief Read rendered pixels to an existing buffer.
-     * @param output Buffer to write to (must be at least buffer_size() bytes).
-     * @throws Exception if readback fails.
-     */
-    void read_to_buffer(std::span<uint8_t> output) {
-        GoldyResult result = goldy_render_target_read_to_buffer(ptr_.get(), output.data(), output.size());
-        if (result != GOLDY_RESULT_OK) {
-            throw Exception::from_last_error();
-        }
-    }
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyRenderTarget* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyRenderTarget, detail::RenderTargetDeleter> ptr_;
-};
-
-// =============================================================================
-// Surface
-// =============================================================================
-
-/**
- * @brief An acquired swapchain frame.
- *
- * Consumed by Surface::present().
- */
-class SurfaceFrame {
-public:
-    SurfaceFrame() = default;
-    SurfaceFrame(SurfaceFrame&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
-    SurfaceFrame& operator=(SurfaceFrame&& other) noexcept {
-        if (this != &other) {
-            ptr_ = other.ptr_;
-            other.ptr_ = nullptr;
-        }
-        return *this;
-    }
-    SurfaceFrame(const SurfaceFrame&) = delete;
-    SurfaceFrame& operator=(const SurfaceFrame&) = delete;
-
-    GoldySurfaceFrame* get() const { return ptr_; }
-
-private:
-    friend class Surface;
-    explicit SurfaceFrame(GoldySurfaceFrame* ptr) : ptr_(ptr) {}
-    GoldySurfaceFrame* release() {
-        GoldySurfaceFrame* p = ptr_;
-        ptr_ = nullptr;
-        return p;
-    }
-
-    GoldySurfaceFrame* ptr_ = nullptr;
-};
-
-/**
- * @brief A window swapchain surface.
- *
- * Created from platform window handles via goldy_surface_create_win32 /
- * goldy_surface_create_appkit / goldy_surface_create_wayland. Window toolkit
- * code stays in the application; this wrapper only wraps the stable C ABI.
- */
-class Surface {
-public:
-    static constexpr bool is_supported() noexcept { return true; }
-
-#if defined(_WIN32)
-    Surface(const Device& device, void* hwnd) {
-        GoldySurface* ptr = goldy_surface_create_win32(device.get(), hwnd);
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-#elif defined(__APPLE__)
-    Surface(const Device& device, void* ns_view) {
-        GoldySurface* ptr = goldy_surface_create_appkit(device.get(), ns_view);
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-#else
-    Surface(const Device& device, void* wayland_display, void* wayland_surface) {
-        GoldySurface* ptr = goldy_surface_create_wayland(
-            device.get(), wayland_display, wayland_surface);
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-#endif
-
-    Surface(const Surface&) = delete;
-    Surface& operator=(const Surface&) = delete;
-    Surface(Surface&&) = default;
-    Surface& operator=(Surface&&) = default;
-
-    std::pair<uint32_t, uint32_t> size() const {
-        return {goldy_surface_width(ptr_.get()), goldy_surface_height(ptr_.get())};
-    }
-
-    uint32_t width() const { return goldy_surface_width(ptr_.get()); }
-    uint32_t height() const { return goldy_surface_height(ptr_.get()); }
-
-    GoldyTextureFormat format() const { return goldy_surface_format(ptr_.get()); }
-
-    void resize(uint32_t width, uint32_t height) {
-        detail::throw_on_result(goldy_surface_resize(ptr_.get(), width, height));
-    }
-
-    /**
-     * @brief Begin the next frame (acquire swapchain image).
-     */
-    SurfaceFrame begin() {
-        GoldySurfaceFrame* frame = goldy_surface_acquire(ptr_.get());
-        if (!frame) {
-            throw Exception::from_last_error();
-        }
-        return SurfaceFrame(frame);
-    }
-
-    /**
-     * @brief Present a frame to the screen (consumes the frame).
-     */
-    void present(SurfaceFrame frame);
-
-    GoldySurface* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldySurface, detail::SurfaceDeleter> ptr_;
-};
-
-inline void Surface::present(SurfaceFrame frame) {
-    detail::throw_on_result(goldy_surface_present(ptr_.get(), frame.release()));
-}
 
 // =============================================================================
 // ComputePipeline

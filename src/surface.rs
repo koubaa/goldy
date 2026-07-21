@@ -16,7 +16,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::{Arc, Mutex};
 
 /// A GPU surface for zero-copy presentation to a window.
-pub struct Surface {
+pub(crate) struct Surface {
     context: GpuContext,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     ctx_handle: crate::backend::ContextHandle,
@@ -26,19 +26,14 @@ pub struct Surface {
 }
 
 /// A frame acquired from a surface — explicit bracket for render/compute + present.
-pub struct Frame {
+pub(crate) struct Frame {
     context: GpuContext,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     token: FrameToken,
     texture: Option<Texture>,
-    width: u32,
-    height: u32,
     presented: bool,
     /// Timeline returned by [`GpuBackend::submit_frame`] for this bracket.
     submit_tv: Option<TimelineValue>,
-    /// Timeline of the early (pre-swapchain) compute partition submitted during scheme present.
-    /// Frame-pipeline depth enforcement can gate on this value rather than `submit_tv`.
-    early_tv: Option<TimelineValue>,
     /// Resources (e.g. transient textures) that must outlive the frame's GPU work.
     /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
     /// submit_compute can push to it via &self without requiring &mut Frame.
@@ -46,15 +41,7 @@ pub struct Frame {
 }
 
 impl Surface {
-    /// Create a surface for any type that exposes window/display handles (e.g. winit, SDL).
-    ///
-    /// This only requires [`HasWindowHandle`] and [`HasDisplayHandle`] — it is not tied to a
-    /// particular window toolkit. The stable C ABI (`libgoldy_ffi`) currently exposes separate
-    /// platform entry points instead (`goldy_surface_create_win32`, `goldy_surface_create_appkit`),
-    /// which forces FFI clients and examples to extract raw handles themselves. That coupling
-    /// should be loosened over time (e.g. a portable surface-create descriptor in the C header)
-    /// so `goldy-ffi-client` can offer the same constructor shape without window-toolkit code
-    /// in application examples.
+    #[cfg(test)]
     pub fn new<W>(context: &GpuContext, window: &W) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
@@ -131,23 +118,10 @@ impl Surface {
             backend: Arc::clone(&self.backend),
             token,
             texture,
-            width: w,
-            height: h,
             presented: false,
             submit_tv: None,
-            early_tv: None,
             keepalive: Mutex::new(DeferredPayload::new()),
         })
-    }
-
-    /// Acquire the next frame (legacy name for [`Surface::begin`]).
-    pub fn acquire(&self) -> Result<Frame> {
-        self.begin()
-    }
-
-    /// Present a rendered frame (legacy API — prefer [`Frame::present`]).
-    pub fn present(&self, mut frame: Frame) -> Result<TimelineValue> {
-        frame.do_present_sync()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -173,14 +147,6 @@ impl Surface {
         (self.width, self.height)
     }
 
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
     pub fn format(&self) -> TextureFormat {
         let backend = self.backend.lock().unwrap();
         backend.surface_format(self.handle)
@@ -189,30 +155,6 @@ impl Surface {
     pub fn set_present_mode(&mut self, mode: PresentMode) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
         backend.surface_set_present_mode(self.handle, mode)
-    }
-
-    pub fn present_mode(&self) -> PresentMode {
-        let backend = self.backend.lock().unwrap();
-        backend.surface_present_mode(self.handle)
-    }
-
-    /// How many swapchain drawables are in-flight (acquired or presented, not yet returned).
-    pub fn pending_acquire_count(&self) -> u32 {
-        let backend = self.backend.lock().unwrap();
-        backend.pending_acquire_count(self.handle)
-    }
-
-    pub fn validate_pipeline_format(&self, pipeline_format: TextureFormat) -> Result<()> {
-        let surface_format = self.format();
-        if pipeline_format != surface_format {
-            anyhow::bail!(
-                "Pipeline format mismatch: pipeline uses {:?} but surface uses {:?}.\n\
-                 Set RenderPipelineDesc::target_format = surface.format() to fix this.",
-                pipeline_format,
-                surface_format
-            );
-        }
-        Ok(())
     }
 }
 
@@ -229,12 +171,6 @@ impl Frame {
         self.texture
             .as_ref()
             .expect("swapchain texture is only cleared after present")
-    }
-
-    /// Timeline of the early (pre-swapchain) compute partition, if one was submitted during
-    /// scheme present. `None` when the graph was not split.
-    pub fn early_timeline(&self) -> Option<TimelineValue> {
-        self.early_tv
     }
 
     /// Timeline already associated with this frame's GPU submit, if any.
@@ -310,19 +246,6 @@ impl Frame {
             self.context.defer_release(submit_tv, keepalive);
         }
         Ok(())
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Swapchain image index acquired by [`Surface::begin`] for this frame.
-    pub fn image_index(&self) -> u32 {
-        self.token.image as u32
     }
 
     /// In-flight slot index for the compute/scratch texture bound this frame.
@@ -412,8 +335,6 @@ mod tests {
         assert_eq!(window.size(), (800, 600));
         let surface = Surface::new(&ctx, &window).unwrap();
 
-        assert_eq!(surface.width(), 800);
-        assert_eq!(surface.height(), 600);
         assert_eq!(surface.size(), (800, 600));
     }
 
@@ -444,8 +365,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(surface.width(), 800);
-        assert_eq!(surface.height(), 600);
+        assert_eq!(surface.size(), (800, 600));
     }
 
     #[test]
@@ -467,8 +387,6 @@ mod tests {
 
         surface.resize(1920, 1080).unwrap();
 
-        assert_eq!(surface.width(), 1920);
-        assert_eq!(surface.height(), 1080);
         assert_eq!(surface.size(), (1920, 1080));
     }
 
@@ -481,8 +399,7 @@ mod tests {
 
         surface.resize(0, 0).unwrap();
 
-        assert_eq!(surface.width(), 800);
-        assert_eq!(surface.height(), 600);
+        assert_eq!(surface.size(), (800, 600));
     }
 
     #[test]
@@ -494,23 +411,10 @@ mod tests {
 
         let frame = surface.begin().unwrap();
 
-        assert_eq!(frame.width(), 800);
-        assert_eq!(frame.height(), 600);
         assert_eq!(frame.texture().width(), 800);
         assert_eq!(frame.texture().height(), 600);
 
         frame.present().unwrap();
-    }
-
-    #[test]
-    fn test_surface_present_legacy() {
-        let device = create_test_device();
-        let ctx = device.create_context().unwrap();
-        let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&ctx, &window).unwrap();
-
-        let frame = surface.begin().unwrap();
-        surface.present(frame).unwrap();
     }
 
     #[test]
@@ -524,40 +428,6 @@ mod tests {
             let frame = surface.begin().unwrap();
             frame.present().unwrap();
         }
-    }
-
-    #[test]
-    fn test_validate_pipeline_format_matching() {
-        let device = create_test_device();
-        let ctx = device.create_context().unwrap();
-        let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&ctx, &window).unwrap();
-
-        let result = surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_pipeline_format_mismatch() {
-        let device = create_test_device();
-        let ctx = device.create_context().unwrap();
-        let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&ctx, &window).unwrap();
-
-        let result = surface.validate_pipeline_format(TextureFormat::Rgba8Unorm);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_surface_validate_custom_format() {
-        let device = create_test_device_with_format(TextureFormat::Rgba8Unorm);
-        let ctx = device.create_context().unwrap();
-        let window = MockWindow::new(800, 600);
-        let surface = Surface::new(&ctx, &window).unwrap();
-
-        assert!(surface.validate_pipeline_format(TextureFormat::Rgba8Unorm).is_ok());
-
-        assert!(surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb).is_err());
     }
 
     #[test]
@@ -575,8 +445,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(surface.width(), 800);
-        assert_eq!(surface.height(), 600);
+        assert_eq!(surface.size(), (800, 600));
     }
 
     #[test]

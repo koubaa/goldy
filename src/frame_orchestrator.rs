@@ -1,11 +1,15 @@
-//! Pipelined frame lifecycle: ring of in-flight frames, depth cap, and deferred retirement.
+//! Pipelined frame scheduling: in-flight timeline ring, depth cap, present stamp.
 //!
-//! [`FrameOrchestrator`] centralizes the pattern of pushing per-frame cleanup bundles keyed by
-//! [`TimelineValue`], including swapchain paths where the epoch arrives only after
-//! [`crate::surface::Frame::present`].
+//! [`FrameOrchestrator`] is a **client pacing** helper only. It does not own GPU
+//! bytes or run cleanup callbacks — recycle lives in [`crate::TransientPool`] /
+//! [`crate::RetainedPool`]. Use it to bound how far the CPU runs ahead of the GPU
+//! and to track open-frame / present-timeline bookkeeping.
+//!
+//! When cross-frame ordering is enforced elsewhere (scheme submit sidecars,
+//! present easement), close with [`Self::end_frame_externally_ordered`] so the
+//! ring stays empty and [`Self::begin_frame`] does not wait.
 
 use crate::context::Context;
-use crate::device::Device;
 use crate::error::GoldyError;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
@@ -19,41 +23,31 @@ use std::collections::VecDeque;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameHandle(pub(crate) u64);
 
-/// A completed frame slot ready for application-specific cleanup.
-#[derive(Debug)]
-pub struct RetiredFrame<T> {
-    /// GPU timeline epoch used for pool / allocator retirement (may be `0` if unknown).
-    pub timeline: TimelineValue,
-    /// User payload supplied when the frame was closed.
-    pub data: T,
-}
-
-struct FrameSlot<T> {
+struct FrameSlot {
     timeline: Option<TimelineValue>,
-    data: T,
 }
 
-/// Owns an in-flight ring of per-frame cleanup slots and enforces a maximum pipelining depth.
+/// Owns an in-flight ring of frame timelines and enforces a maximum pipelining depth.
 ///
 /// Typical use:
-/// 1. [`Self::begin_frame`] (with retire closure)
+/// 1. [`Self::begin_frame`]
 /// 2. Record and submit work via [`crate::Scheme`]
 /// 3. [`Self::end_frame_standalone`], [`Self::end_frame_for_present`], or
 ///    [`Self::end_frame_externally_ordered`]
-/// 4. For swapchain frames, [`Self::note_presented`] after present.
-pub struct FrameOrchestrator<T> {
+/// 4. For swapchain frames on the ring path, [`Self::note_presented`] after present.
+pub struct FrameOrchestrator {
     context: Context,
     max_depth: usize,
-    ring: VecDeque<FrameSlot<T>>,
+    ring: VecDeque<FrameSlot>,
     /// Monotonic id for the next [`FrameHandle`].
     next_id: u64,
     /// `Some` between [`Self::begin_frame`] and a matching end-frame call.
     open: Option<FrameHandle>,
 }
 
-impl<T> FrameOrchestrator<T> {
+impl FrameOrchestrator {
     /// Create an orchestrator. `max_depth` bounds how many frames may be in flight before the
-    /// next [`Self::begin_frame`] blocks or forces the oldest slot to retire.
+    /// next [`Self::begin_frame`] blocks on the oldest slot.
     pub fn new(context: &Context, max_depth: usize) -> Self {
         Self {
             context: context.clone(),
@@ -88,7 +82,7 @@ impl<T> FrameOrchestrator<T> {
         self.open.is_some()
     }
 
-    /// Discard the currently open frame without pushing a cleanup slot.
+    /// Discard the currently open frame without pushing a ring slot.
     ///
     /// Call this when a `run_frame` error makes it impossible to call an end-frame
     /// method. Leaves the ring intact so subsequent frames can begin normally.
@@ -99,34 +93,26 @@ impl<T> FrameOrchestrator<T> {
     }
 
     /// Non-blocking drain of slots whose GPU timeline has completed, plus mandatory pops when the
-    /// ring is deeper than [`Self::max_depth`]. Same ordering rules as a manual cleanup deque.
-    pub fn reclaim<E, F>(&mut self, mut retire: F) -> Result<(), GoldyError>
-    where
-        E: std::fmt::Display,
-        F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
-    {
-        self.drain_ring_with_retire(&mut retire)
+    /// ring is deeper than [`Self::max_depth`].
+    pub fn reclaim(&mut self) -> Result<(), GoldyError> {
+        self.drain_ring()
     }
 
-    /// Begin recording a new frame: reclaims completed slots, then returns a handle if there is
+    /// Begin recording a new frame: drains completed slots, then returns a handle if there is
     /// capacity (possibly after blocking on the oldest in-flight work).
     ///
     /// # Errors
     ///
-    /// Returns [`GoldyError`] if a frame is already open (missing end-frame call), or if
-    /// `retire` returns an error.
-    pub fn begin_frame<E, F>(&mut self, mut retire: F) -> Result<FrameHandle, GoldyError>
-    where
-        E: std::fmt::Display,
-        F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
-    {
+    /// Returns [`GoldyError`] if a frame is already open (missing end-frame call), or if a
+    /// depth-cap wait fails.
+    pub fn begin_frame(&mut self) -> Result<FrameHandle, GoldyError> {
         let _tz = tracy_zone!("orchestrator.begin_frame");
         if self.open.is_some() {
             return Err(GoldyError::Backend(anyhow!(
                 "FrameOrchestrator::begin_frame: a frame is already open"
             )));
         }
-        self.drain_ring_with_retire(&mut retire)?;
+        self.drain_ring()?;
         let h = FrameHandle(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         self.open = Some(h);
@@ -136,19 +122,17 @@ impl<T> FrameOrchestrator<T> {
     /// End a standalone (headless / render-to-texture) frame whose GPU work was already
     /// submitted (e.g. via [`crate::Scheme::submit`]).
     ///
-    /// Pushes a retirement-ring slot stamped with `timeline`, clears the open handle, and
+    /// Pushes a ring slot stamped with `timeline`, clears the open handle, and
     /// emits a Tracy frame mark.
     pub fn end_frame_standalone(
         &mut self,
         handle: FrameHandle,
         timeline: TimelineValue,
-        cleanup: T,
     ) -> Result<TimelineValue, GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
         self.ring.push_back(FrameSlot {
             timeline: Some(timeline),
-            data: cleanup,
         });
         self.open = None;
         tracy_frame_mark!();
@@ -158,21 +142,16 @@ impl<T> FrameOrchestrator<T> {
     /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
     /// [`crate::Claim::consume`].
     ///
-    /// Same retirement semantics as a surface frame closed before present: pushes a ring slot
-    /// whose timeline is filled later via [`Self::note_presented`], and does **not** emit a
-    /// Tracy frame mark (the mark belongs at present time).
+    /// Pushes a ring slot whose timeline is filled later via [`Self::note_presented`], and does
+    /// **not** emit a Tracy frame mark (the mark belongs at present time).
     pub fn end_frame_for_present(
         &mut self,
         handle: FrameHandle,
         submit_timeline: TimelineValue,
-        cleanup: T,
     ) -> Result<TimelineValue, GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_for_present");
         self.expect_open(handle)?;
-        self.ring.push_back(FrameSlot {
-            timeline: None,
-            data: cleanup,
-        });
+        self.ring.push_back(FrameSlot { timeline: None });
         self.open = None;
         Ok(submit_timeline)
     }
@@ -189,7 +168,7 @@ impl<T> FrameOrchestrator<T> {
         Ok(())
     }
 
-    /// After [`crate::Frame::present`], stamp the most recent surface slot with the returned timeline.
+    /// After [`crate::surface::Frame::present`], stamp the most recent surface slot with the returned timeline.
     pub fn note_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.ring.back_mut() {
             if back.timeline.is_none() {
@@ -198,16 +177,12 @@ impl<T> FrameOrchestrator<T> {
         }
     }
 
-    /// Block until every pending slot has retired and invoke `retire` for each.
+    /// Block until every pending slot has retired.
     ///
     /// Slots whose timeline is still unknown (`None`, i.e. surface path before
     /// [`Self::note_presented`]) use [`crate::Context::high_water_timeline`] as a completion fence —
     /// callers draining mid-presentation should prefer [`Self::reclaim`] / presenting first.
-    pub fn drain_all<E, F>(&mut self, mut retire: F) -> Result<(), GoldyError>
-    where
-        E: std::fmt::Display,
-        F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
-    {
+    pub fn drain_all(&mut self) -> Result<(), GoldyError> {
         while let Some(slot) = self.ring.pop_front() {
             let timeline = match slot.timeline {
                 Some(t) => t,
@@ -216,14 +191,6 @@ impl<T> FrameOrchestrator<T> {
             if self.context.gpu_progress() < timeline {
                 self.context.wait_until(timeline)?;
             }
-            retire(
-                self.context.device(),
-                RetiredFrame {
-                    timeline,
-                    data: slot.data,
-                },
-            )
-            .map_err(|e| GoldyError::Backend(anyhow!("{e}")))?;
         }
         Ok(())
     }
@@ -240,11 +207,7 @@ impl<T> FrameOrchestrator<T> {
         }
     }
 
-    fn drain_ring_with_retire<E, F>(&mut self, retire: &mut F) -> Result<(), GoldyError>
-    where
-        E: std::fmt::Display,
-        F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
-    {
+    fn drain_ring(&mut self) -> Result<(), GoldyError> {
         let _tz = tracy_zone!("orchestrator.drain_ring");
         let mut progress = {
             let _pg = tracy_zone!("orchestrator.drain_ring.gpu_progress");
@@ -264,18 +227,6 @@ impl<T> FrameOrchestrator<T> {
                         self.context.wait_until(tv)?;
                         progress = tv;
                     }
-                }
-                let timeline = slot.timeline.unwrap_or(0);
-                {
-                    let _rz = tracy_zone!("orchestrator.retire_cb");
-                    retire(
-                        self.context.device(),
-                        RetiredFrame {
-                            timeline,
-                            data: slot.data,
-                        },
-                    )
-                    .map_err(|e| GoldyError::Backend(anyhow!("{e}")))?;
                 }
             } else {
                 break;
