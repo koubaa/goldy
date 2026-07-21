@@ -822,7 +822,7 @@ pub(crate) struct SubmissionContext {
     ///
     /// Holds resources whose GPU lifetime is bounded exclusively by **this**
     /// context's timeline semaphore (e.g. submit-internal temporaries).  Drained
-    /// on each submit using `ctx_completed_value` — never via `device_retired` —
+    /// on each submit using the context timeline semaphore — never via `device_retired` —
     /// so no other context's progress can block reclaim here.
     ///
     /// Dispatch-batch arg buffers and other resources whose lifetime is bounded by

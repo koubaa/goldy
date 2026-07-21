@@ -28,15 +28,14 @@
 //! Handles window surface creation, presentation, and resize.
 
 use super::barriers;
-use super::render_commands;
 use super::texture;
 use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{
     depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device, execute_with_waits_and_signal_device,
 };
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
-use crate::backend::{FrameToken, GpuCommand, RenderCommand};
-use crate::types::{Color, DepthFormat, TextureFlags, TextureFormat, TextureKind};
+use crate::backend::FrameToken;
+use crate::types::{DepthFormat, TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use raw_window_handle::RawWindowHandle;
 use windows::{
@@ -425,18 +424,6 @@ pub(super) fn acquire(
     Ok((image_index as SwapchainImageHandle, present_slot as u32))
 }
 
-pub(super) fn record_gpu_work(
-    state: &mut Dx12State,
-    surface_handle: SurfaceHandle,
-    commands: &[GpuCommand],
-) -> Result<()> {
-    let surf = state
-        .surfaces
-        .get_mut(&surface_handle)
-        .context("Invalid surface handle")?;
-    surf.pending_frame_compute.extend_from_slice(commands);
-    Ok(())
-}
 
 pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<u64> {
     let device_handle = state
@@ -475,221 +462,7 @@ pub(super) fn frame_texture(state: &Dx12State, surface_handle: SurfaceHandle) ->
         .and_then(|s| s.current_texture_handle)
 }
 
-/// Render commands to a surface.
-#[allow(clippy::too_many_lines)]
-pub(super) fn render(
-    state: &mut Dx12State,
-    surface_handle: SurfaceHandle,
-    image: SwapchainImageHandle,
-    present_slot: u32,
-    ctx: super::ContextHandle,
-    commands: &[RenderCommand],
-) -> Result<()> {
-    let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
 
-    let image_index = image as usize;
-    let present_slot = present_slot as usize;
-    let device_handle = surface.device_handle;
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
-
-    let frame = &surface.frame_sync[present_slot];
-    let cmd = &frame.command_list;
-    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
-    let width = surface.width;
-    let height = surface.height;
-    let render_target = &surface.render_targets[image_index];
-    let rtv_offset = surface.rtv_offsets[image_index];
-    let depth_resource = surface.depth_texture.clone();
-
-    // Reset command allocator and list
-    unsafe { frame.command_allocator.Reset() }.context("Failed to reset command allocator")?;
-    unsafe { cmd_gfx.Reset(&frame.command_allocator, None) }.context("Failed to reset command list")?;
-
-    // PRESENT -> RENDER_TARGET (enhanced barrier, per MS DirectX-Graphics-Samples).
-    // SYNC_NONE + NO_ACCESS: no preceding work on this resource in this command list.
-    let to_rt = barriers::texture_barrier_full(
-        render_target,
-        D3D12_BARRIER_SYNC_NONE,
-        D3D12_BARRIER_SYNC_RENDER_TARGET,
-        D3D12_BARRIER_ACCESS_NO_ACCESS,
-        D3D12_BARRIER_ACCESS_RENDER_TARGET,
-        D3D12_BARRIER_LAYOUT_PRESENT,
-        D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-    );
-    let mut start_barriers = vec![to_rt];
-    if let Some(ref depth_res) = surface.depth_texture {
-        start_barriers.push(barriers::texture_barrier_full(
-            depth_res,
-            D3D12_BARRIER_SYNC_NONE,
-            D3D12_BARRIER_SYNC_DEPTH_STENCIL,
-            D3D12_BARRIER_ACCESS_NO_ACCESS,
-            D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
-            D3D12_BARRIER_LAYOUT_COMMON,
-            D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
-        ));
-    }
-    unsafe { barriers::barrier_textures(cmd, &start_barriers) };
-    unsafe { barriers::drop_texture_barriers(&mut start_barriers) };
-
-    // Get RTV handle
-    let rtv_handle = unsafe {
-        let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += (rtv_offset * logical_device.rtv_descriptor_size) as usize;
-        handle
-    };
-
-    // Find clear color and clear depth
-    let clear_color = commands
-        .iter()
-        .find_map(|c| match c {
-            RenderCommand::Clear(color) => Some(*color),
-            _ => None,
-        })
-        .unwrap_or(Color::BLACK);
-    let clear_depth = commands
-        .iter()
-        .find_map(|c| match c {
-            RenderCommand::ClearDepth(d) => Some(*d),
-            _ => None,
-        })
-        .unwrap_or(1.0);
-
-    unsafe {
-        cmd_gfx.ClearRenderTargetView(
-            rtv_handle,
-            &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
-            None,
-        );
-    }
-
-    // Set render target(s) and optionally depth/stencil
-    if let (Some(dsv_off), Some(_df)) = (surface.dsv_offset, surface.depth_format) {
-        let dsv_handle = unsafe {
-            let mut handle = logical_device.dsv_heap.GetCPUDescriptorHandleForHeapStart();
-            handle.ptr += (dsv_off * logical_device.dsv_descriptor_size) as usize;
-            handle
-        };
-        unsafe {
-            cmd_gfx.ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
-            cmd_gfx.OMSetRenderTargets(1, Some(&rtv_handle), false, Some(&dsv_handle));
-        }
-    } else {
-        unsafe {
-            cmd_gfx.OMSetRenderTargets(1, Some(&rtv_handle), false, None);
-        }
-    }
-
-    // Set viewport and scissor
-    let viewport = D3D12_VIEWPORT {
-        TopLeftX: 0.0,
-        TopLeftY: 0.0,
-        Width: width as f32,
-        Height: height as f32,
-        MinDepth: 0.0,
-        MaxDepth: 1.0,
-    };
-    let scissor = RECT {
-        left: 0,
-        top: 0,
-        right: width as i32,
-        bottom: height as i32,
-    };
-    unsafe {
-        cmd_gfx.RSSetViewports(&[viewport]);
-        cmd_gfx.RSSetScissorRects(&[scissor]);
-    }
-
-    // Bind descriptor heaps for bindless rendering
-    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-    unsafe {
-        cmd_gfx.SetDescriptorHeaps(&[
-            Some(logical_device.cbv_srv_uav_heap.clone()),
-            Some(logical_device.sampler_heap.clone()),
-        ]);
-    }
-
-    let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands_state(state, ctx, device_handle, commands)?;
-    let ft = {
-        let contexts_read = state.contexts.read().unwrap();
-        let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
-        drop(contexts_read);
-        let sc_guard = sc_arc.lock().unwrap();
-        let ft = std::sync::Arc::clone(&sc_guard.frame_table);
-        drop(sc_guard);
-        ft
-    };
-    let mut row_guard = super::frame_table::RowReservation::new(&ft);
-    if has_bindings {
-        // Per-context frame-table slots are bound once at context init; no
-        // per-submit rebinding needed.
-        let row = super::frame_table::record_prologue(
-            &state.contexts,
-            logical_device,
-            ctx,
-            &ft,
-            &state.buffers.read().unwrap().entries,
-            cmd,
-            &staging_data,
-        )?;
-        row_guard.set(row);
-    }
-
-    // Execute render commands
-    render_commands::record_state(cmd, &lowered, device_handle, ctx, state)?;
-
-    // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
-    // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.
-    let mut end_barriers = vec![barriers::texture_barrier_full(
-        render_target,
-        D3D12_BARRIER_SYNC_RENDER_TARGET,
-        D3D12_BARRIER_SYNC_NONE,
-        D3D12_BARRIER_ACCESS_RENDER_TARGET,
-        D3D12_BARRIER_ACCESS_NO_ACCESS,
-        D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-        D3D12_BARRIER_LAYOUT_PRESENT,
-    )];
-    if let Some(ref depth_res) = depth_resource {
-        end_barriers.push(barriers::texture_barrier_full(
-            depth_res,
-            D3D12_BARRIER_SYNC_DEPTH_STENCIL,
-            D3D12_BARRIER_SYNC_NONE,
-            D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
-            D3D12_BARRIER_ACCESS_NO_ACCESS,
-            D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
-            D3D12_BARRIER_LAYOUT_COMMON,
-        ));
-    }
-    unsafe { barriers::barrier_textures(cmd, &end_barriers) };
-    unsafe { barriers::drop_texture_barriers(&mut end_barriers) };
-
-    // Close and execute
-    unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
-
-    let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
-    row_guard.commit(fence_value);
-
-    // Update fence value for next operation
-
-    if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-        surf.frame_sync[present_slot].fence_value = fence_value;
-        surf.frame_sync[present_slot].render_pass_submitted = true;
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
-pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, submit_tv: u64) -> Result<u64> {
-    let work = prepare_present_work(state, frame, submit_tv)?;
-    let finish = work.run()?;
-    finish_present(state, finish, submit_tv)
-}
 
 pub(super) fn prepare_present_work(
     state: &mut Dx12State,
@@ -945,12 +718,6 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
     }
 }
 
-/// Present a rendered surface (legacy single-lock entry — prefer split path).
-#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
-pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<()> {
-    present_frame(state, frame, 0)?;
-    Ok(())
-}
 
 /// Resize a surface.
 #[allow(clippy::too_many_lines)]
@@ -1256,11 +1023,3 @@ pub(super) fn set_present_mode(
     Ok(())
 }
 
-/// Get the current present mode of a surface.
-pub(super) fn get_present_mode(state: &Dx12State, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
-    state
-        .surfaces
-        .get(&surface_handle)
-        .map(|s| s.present_mode)
-        .unwrap_or_default()
-}

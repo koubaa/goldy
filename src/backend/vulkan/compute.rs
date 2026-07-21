@@ -552,30 +552,6 @@ pub(super) unsafe fn vulkan_readback_gpu_profile(
     Ok(())
 }
 
-/// Returns the GPU-completed timeline value for a single context by reading its
-/// timeline semaphore counter directly, without consulting any other context.
-///
-/// Used on the submit hot path as the reclaim gate for per-context resources.
-/// With independent per-context compute queues, device-global retirement is a
-/// contiguous prefix over attributed values — not a max over context semaphores.
-pub(super) fn ctx_completed_value(
-    view: &VulkanSubmitView<'_>,
-    ctx: super::ContextHandle,
-    device_handle: super::DeviceHandle,
-) -> u64 {
-    let sem = view
-        .contexts
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .map(|sc| sc.lock().unwrap().timeline_semaphore);
-    let dev = view.devices.get(&device_handle).map(|ld| &ld.device);
-    match (dev, sem) {
-        (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
-        _ => 0,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn enqueue_vulkan_compute_with_housekeeping(
     scope: &super::submit_session::VulkanSubmitScope<'_>,

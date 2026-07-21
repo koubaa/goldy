@@ -794,17 +794,6 @@ pub(crate) fn prepare_render_commands(
     Ok((staging.data, lowered, has_bindings))
 }
 
-/// Lower render commands and build staging (backend state lookup).
-pub(crate) fn prepare_render_commands_state(
-    state: &Dx12State,
-    ctx: super::ContextHandle,
-    device_handle: super::DeviceHandle,
-    commands: &[crate::backend::RenderCommand],
-) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
-    let record = super::submit_session::record_state_from_backend(state, ctx, device_handle)?;
-    prepare_render_commands(&record, commands)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

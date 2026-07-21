@@ -36,9 +36,8 @@
 //! and rotate through them. Frame N writes to slot `N % 3` while the GPU reads
 //! slot `(N-1) % 3` — the slots never alias across concurrent frames.
 
-use super::super::{DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle};
+use super::super::{DeviceHandle, FrameToken, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use super::compute;
-use super::render_commands::{create_render_pass, record};
 use super::types::{
     MetalState, ResourceRegistry, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE, MAX_FRAMES_IN_FLIGHT,
 };
@@ -326,130 +325,6 @@ pub(super) fn frame_texture(state: &MetalState, surface: SurfaceHandle) -> Optio
     state.surfaces.get(&surface).and_then(|s| s.current_texture_handle)
 }
 
-/// Render commands to the swapchain using the already-acquired drawable.
-pub(super) fn render(
-    state: &mut MetalState,
-    surface: SurfaceHandle,
-    _image: SwapchainImageHandle,
-    present_slot: u32,
-    commands: &[RenderCommand],
-) -> Result<()> {
-    let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
-    let present_slot = present_slot as usize;
-
-    let drawable_ptr =
-        surface_state.drawable_slots[present_slot].context("No drawable acquired — call surface_acquire first")?;
-    let drawable = drawable_ptr as id;
-
-    let device_handle = surface_state.device_handle;
-    let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
-
-    let (staging_data, lowered_commands, has_bindings) =
-        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, commands)?;
-
-    let completed = super::context::device_retired(state, device_handle);
-    let prologue_row = if has_bindings {
-        Some(super::frame_table::run_prologue_for_device(
-            state,
-            device_handle,
-            logical_device,
-            &staging_data,
-            completed,
-        )?)
-    } else {
-        None
-    };
-
-    let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-    let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
-
-    let mut clear_color = None;
-    let mut clear_depth = None;
-    for cmd in commands {
-        match cmd {
-            RenderCommand::Clear(color) => clear_color = Some(*color),
-            RenderCommand::ClearDepth(depth) => clear_depth = Some(*depth),
-            _ => {}
-        }
-    }
-    let render_pass = create_render_pass(
-        texture,
-        surface_state.depth_texture.as_deref(),
-        clear_color,
-        clear_depth,
-    );
-
-    let command_buffer = logical_device.command_queue.new_command_buffer();
-    let encoder = command_buffer.new_render_command_encoder(render_pass);
-
-    let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-    logical_device
-        .heap_allocator
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    logical_device
-        .texture_heap
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle {
-            encoder.use_resource_at(
-                &buf_state.buffer,
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-                render_stages,
-            );
-        }
-    }
-    {
-        let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
-    }
-
-    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
-    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
-    tracing::trace!("Bound global argument buffer at slot 0");
-
-    encoder.set_viewport(mtl::MTLViewport {
-        originX: 0.0,
-        originY: 0.0,
-        width: surface_state.width as f64,
-        height: surface_state.height as f64,
-        znear: 0.0,
-        zfar: 1.0,
-    });
-    encoder.set_scissor_rect(mtl::MTLScissorRect {
-        x: 0,
-        y: 0,
-        width: surface_state.width as u64,
-        height: surface_state.height as u64,
-    });
-
-    record(
-        encoder,
-        &lowered_commands,
-        &state.pipelines,
-        &state.buffers,
-        prologue_row,
-    )?;
-
-    encoder.end_encoding();
-    command_buffer.commit();
-
-    // When the frame table was used we must wait for the GPU to finish reading
-    // the ring row before we can allow it to be overwritten.  Surface renders
-    // don't carry a context-level timeline signal, so we block here.  For frames
-    // without any frame-table bindings (prologue_row == None) we remain async.
-    if let Some(row) = prologue_row {
-        command_buffer.wait_until_completed();
-        if let Some(ld) = state.devices.get(&device_handle) {
-            super::frame_table::record_submission_for_device(ld, row, completed);
-        }
-    }
-
-    Ok(())
-}
 
 /// Clone present resources under the global backend lock for lock-free GPU enqueue.
 pub(super) fn prepare_present_work(

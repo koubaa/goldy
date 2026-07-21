@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -129,44 +129,12 @@ impl SubmissionWorker {
         Ok(())
     }
 
-    pub fn wait_submitted_timeout(&self, tv: u64, timeout_ms: u32) -> Result<bool> {
-        self.check_error()?;
-        if tv == 0 {
-            return Ok(true);
-        }
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        wait_for_submitted_epoch(
-            &self.submitted_epoch,
-            &self.wait_notify,
-            &self.latched_error,
-            tv,
-            Some(deadline),
-        )
-    }
-
     /// Like [`wait_submitted`](Self::wait_submitted), but no-ops when `tv` was never scheduled.
     pub fn wait_submitted_if_scheduled(&self, tv: u64, scheduled_horizon: u64) -> Result<()> {
         if tv == 0 || tv > scheduled_horizon {
             return Ok(());
         }
         self.wait_submitted(tv)
-    }
-
-    /// Like [`wait_submitted_timeout`](Self::wait_submitted_timeout), but returns `false`
-    /// immediately when `tv` was never scheduled.
-    pub fn wait_submitted_if_scheduled_timeout(
-        &self,
-        tv: u64,
-        scheduled_horizon: u64,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        if tv == 0 {
-            return Ok(true);
-        }
-        if tv > scheduled_horizon {
-            return Ok(false);
-        }
-        self.wait_submitted_timeout(tv, timeout_ms)
     }
 
     pub fn flush(&self) -> Result<()> {
