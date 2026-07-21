@@ -16,39 +16,16 @@ use anyhow::Result;
 use std::sync::Arc;
 
 /// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
-pub enum RetainedHold {
+pub(crate) enum RetainedHold {
     Buffer(Buffer),
     Texture(Texture),
 }
 
-impl RetainedHold {
-    pub fn byte_size(&self) -> u64 {
-        match self {
-            RetainedHold::Buffer(b) => b.byte_size(),
-            RetainedHold::Texture(t) => t.byte_size(),
-        }
-    }
-
-    pub fn last_referenced(&self) -> ReferenceTable {
-        match self {
-            RetainedHold::Buffer(b) => b.last_referenced(),
-            RetainedHold::Texture(t) => t.last_referenced(),
-        }
-    }
-
-    pub fn texture_descriptor(&self) -> Option<(u32, u32, TextureFormat, TextureKind, TextureFlags)> {
-        match self {
-            RetainedHold::Buffer(_) => None,
-            RetainedHold::Texture(t) => t.whole().texture_descriptor(),
-        }
-    }
-}
-
 /// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
-pub struct StampedParcel {
-    pub hold: RetainedHold,
+pub(crate) struct StampedParcel {
+    pub(crate) hold: RetainedHold,
     /// Per-context timelines after which the resource may be reused; empty if never referenced.
-    pub ready_after: ReferenceTable,
+    pub(crate) ready_after: ReferenceTable,
 }
 
 /// Deed-governed pool: allocates retained resources; no epoch gate while held.

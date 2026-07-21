@@ -3,6 +3,7 @@
 //! Bindless indices are staged on the CPU and copied into a device-local table
 //! before each submission; shader preambles resolve `index = table[selector][base + k]`
 //! instead of reading baked push-constant words.
+#![allow(dead_code)]
 
 /// Metal argument-buffer slot for the (unused) selector cell.
 ///

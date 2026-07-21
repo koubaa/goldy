@@ -81,7 +81,7 @@ struct BufferBinEntry {
 }
 
 /// Epoch-gated recycling pool for transient parcels.
-pub struct TransientPool {
+pub(crate) struct TransientPool {
     /// Bytes parked in recycle bins.
     pending: Arc<PoolBookkeeping>,
     /// Bytes held by clients through this pool (guard-decremented on drop).
@@ -356,15 +356,17 @@ impl TransientPool {
         trimmed
     }
 
-    pub fn pending_bytes(&self) -> BytesByKind {
+    #[cfg(test)]
+    pub(crate) fn pending_bytes(&self) -> BytesByKind {
         self.pending.snapshot()
     }
 
-    pub fn outstanding_bytes(&self) -> BytesByKind {
+    pub(crate) fn outstanding_bytes(&self) -> BytesByKind {
         self.outstanding.snapshot()
     }
 
-    pub fn pending_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn pending_count(&self) -> usize {
         self.texture_bins.values().map(Vec::len).sum::<usize>() + self.buffer_bins.values().map(Vec::len).sum::<usize>()
     }
 

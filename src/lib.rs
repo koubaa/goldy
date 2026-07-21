@@ -21,7 +21,7 @@ pub mod device;
 pub mod error;
 pub mod examples;
 pub mod frame_orchestrator;
-pub mod frame_table;
+pub(crate) mod frame_table;
 pub mod pipeline;
 pub mod render_target;
 pub mod sampler;
@@ -38,9 +38,8 @@ pub mod slang;
 pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
-pub mod gpu_guard;
-pub mod gpu_profiler;
-pub mod instrumentation;
+pub(crate) mod gpu_profiler;
+pub(crate) mod instrumentation;
 pub mod tracy;
 
 #[cfg(feature = "tracy")]
@@ -62,29 +61,23 @@ pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 pub use exchange::{Claim, SurfaceExchange};
-pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
-pub use gpu_guard::GpuGuard;
-pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField, Texture};
-pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
+pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
+pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
+pub use retained_pool::RetainedPool;
 pub use scheme::{
-    ClaimKey, Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture,
-    Loan, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, SubmissionHandle, Transaction,
-    UploadBuffer,
+    Grant, GrantBuffer, GrantTexture, Lease, LeaseRenderTarget, ReadGrant, ReplayStats, Scheme,
+    SchemeRenderPassBuilder, Submission, Transaction, UploadBuffer,
 };
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
-pub use transient_pool::TransientPool;
 pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
-pub use buffer::{BufferSource, BufferView, StructuredBufferElement};
-pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
+pub use buffer::StructuredBufferElement;
+pub use common_types::Instance2D;
 pub use compute::ComputePipeline;
 pub use signal::{OversubscribedReason, Signal};
-pub use timeline::{Epoch, ReferenceTable, TimelineValue};
-
-pub use backend::GraphCommand;
-pub use backend::{BufferHeapStats, TextureCopyFootprint, TextureHeapStats, VideoMemoryInfo};
+pub use timeline::TimelineValue;
 pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
@@ -98,7 +91,7 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
-pub use task_graph::{GraphIR, NodeAccess};
+pub use task_graph::NodeAccess;
 
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};

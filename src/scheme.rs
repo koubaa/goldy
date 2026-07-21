@@ -171,7 +171,7 @@ impl fmt::Debug for GrantStagingPool {
 
 /// Cloneable GPU submission identity and timeline (no exchange claims).
 #[derive(Debug, Clone)]
-pub struct SubmissionHandle {
+pub(crate) struct SubmissionHandle {
     core: Arc<SubmissionCore>,
 }
 
@@ -206,7 +206,7 @@ impl From<SubmissionHandle> for TimelineValue {
 
 /// Dense index of a present/exchange claim slot on a [`Submission`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClaimKey {
+pub(crate) struct ClaimKey {
     pub(crate) present_idx: u32,
 }
 
@@ -288,7 +288,8 @@ impl fmt::Debug for Submission {
 
 impl Submission {
     /// Cloneable timeline / scheme identity (does not share claim ownership).
-    pub fn handle(&self) -> SubmissionHandle {
+    #[cfg(test)]
+    pub(crate) fn handle(&self) -> SubmissionHandle {
         self.handle.clone()
     }
 
