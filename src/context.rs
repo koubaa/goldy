@@ -31,13 +31,6 @@ pub(crate) struct ContextInner {
     reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
     submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
     high_water_timeline: AtomicU64,
-    /// Per-context transient resource heap (backing buffer + cached views/textures).
-    ///
-    /// Scoped to the context rather than the device so that independent contexts —
-    /// e.g. concurrent renders that each own a context — never share transient
-    /// `BufferView`/`Texture` handles. Sharing a device-global heap across contexts
-    /// caused GPU-level write-write races on the cached transient textures.
-    pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
     /// Epoch-gated transient parcel pool backing scheme-held leases.
     transient_pool: Mutex<TransientPool>,
 }
@@ -58,12 +51,6 @@ impl std::fmt::Debug for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
-        // Drop the placement heap (and its views/buffer/textures) while the device is
-        // still alive (this `ContextInner` still holds a `Device` clone). The heap's
-        // resource `Drop`s route through the backend deletion queue.
-        if let Ok(mut heap_guard) = self.placement_heap.lock() {
-            *heap_guard = None;
-        }
         // Drop the transient pool (and its parked parcels) while the device is alive.
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
@@ -112,7 +99,6 @@ impl Context {
                 reclamation_scope: Some(reclamation_scope),
                 submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
-                placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
             }),
         })
@@ -146,6 +132,53 @@ impl Context {
         f(&mut pool)
     }
 
+    /// Acquire a one-submission texture from this context's transient pool.
+    pub fn acquire_transient_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::TextureKind,
+        flags: crate::types::TextureFlags,
+    ) -> anyhow::Result<crate::Texture> {
+        self.with_transient_pool(|pool| pool.acquire_texture(self, width, height, format, access, flags))
+    }
+
+    /// Return a transient texture to this context's pool for epoch-gated reuse.
+    pub fn return_transient_texture(&self, texture: crate::Texture) {
+        let ready_after = texture.last_referenced();
+        self.with_transient_pool(|pool| pool.return_texture(texture, ready_after));
+    }
+
+    /// Drop all parked transient textures (Metal resize purge).
+    pub fn clear_transient_textures(&self) {
+        self.with_transient_pool(|pool| pool.clear_textures());
+    }
+
+    /// Acquire a one-submission buffer from this context's transient pool.
+    pub fn acquire_transient_buffer(
+        &self,
+        size: u64,
+        kind: crate::types::BufferKind,
+        flags: crate::types::BufferFlags,
+        element_stride: Option<u32>,
+    ) -> anyhow::Result<crate::parcel::Buffer> {
+        self.with_transient_pool(|pool| pool.acquire_whole_buffer(self, size, kind, flags, element_stride))
+    }
+
+    /// Return a transient buffer to this context's pool for epoch-gated reuse.
+    pub fn return_transient_buffer(&self, buf: crate::parcel::Buffer) {
+        let ready_after = buf.last_referenced();
+        match buf.into_transient_parcel() {
+            Ok(parcel) => {
+                self.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+            }
+            Err(e) => {
+                tracing::warn!("return_transient_buffer: dropping non-binneable buffer: {e}");
+            }
+        }
+    }
+
     /// Bytes held outside this context's transient pool (leased or otherwise acquired).
     ///
     /// Aggregate memory telemetry for debug checking and tracing
@@ -159,9 +192,16 @@ impl Context {
     ///
     /// Does not increment when a retired bin entry is reused. Monotonically increasing.
     /// Useful in tests to assert that the pool's recycling path fires (alloc count stays
-    /// flat across a lease reuse cycle, mirroring [`Self::transient_texture_create_count`]).
+    /// flat across a lease reuse cycle, mirroring [`Self::transient_texture_alloc_count`]).
     pub fn transient_buffer_alloc_count(&self) -> usize {
         self.with_transient_pool(|pool| pool.buffer_alloc_count())
+    }
+
+    /// Total number of fresh GPU texture allocations made by this context's transient pool.
+    ///
+    /// Does not increment when a retired bin entry is reused. Monotonically increasing.
+    pub fn transient_texture_alloc_count(&self) -> usize {
+        self.with_transient_pool(|pool| pool.texture_alloc_count())
     }
 
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
@@ -329,15 +369,9 @@ impl Context {
     /// device-global submission sequence values, so `device_retired >= epoch` proves the GPU
     /// work is done regardless of which context originally submitted the payload.
     ///
-    /// The placement-heap ring is reclaimed against the signal `epoch` itself rather than
-    /// `device_retired`. Placement-heap regions are stamped with the exact submission epoch
-    /// that guards their contents; advancing past that epoch is sufficient to reclaim them,
-    /// and using `device_retired` would over-reclaim regions whose guard epoch has not yet
-    /// completed on the submitting context.
-    ///
     /// Per-handle last-touch reclamation (tighter than `device_retired` for the VRAM ring)
     /// is a future optimization.
-    pub fn boundary_crossed(&self, epoch: TimelineValue) {
+    pub(crate) fn boundary_crossed(&self, epoch: TimelineValue) {
         self.boundary_crossed_inner(epoch, self.device().timeline_retired());
     }
 
@@ -363,7 +397,7 @@ impl Context {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
             // `RetainedPool::release` parks parcels here for epoch-gated reuse (leases,
             // future scheme-held transients). Until ekrano migrates off its own VRAM
-            // machinery (`ResourcePool`, `DeferredPayload` returns, pipeline cache) and
+            // machinery (`DeferredPayload` returns, pipeline cache) and
             // acquires through the transient pool, those parked buffers are not re-issued
             // — only dropped once `ready_after` retires. Without this drain at every frame
             // boundary, `release` leaks GPU heap (velato: Metal buffer heaps exhausted).
@@ -395,15 +429,12 @@ impl Context {
         self.device().vram_allocator().has_deferred_payloads()
     }
 
-    pub fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.device().vram_allocator().oldest_deferred_epoch()
-    }
-
     pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
         self.device().vram_allocator().defer_release(epoch, payload);
     }
 
-    pub fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
+    #[cfg(test)]
+    pub(crate) fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
         let mut payload = crate::vram_allocator::DeferredPayload::new();
         payload.push(resource);
         self.device().vram_allocator().defer_release(epoch, payload);
@@ -459,39 +490,6 @@ impl Context {
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         }
         Ok(result)
-    }
-
-    /// Snapshot of this context's placement-heap state for diagnostics.
-    ///
-    /// Returns `None` if the heap hasn't been created yet (no transient-resource
-    /// scheme submits have run on this context).
-    pub fn placement_heap_stats(&self) -> Option<crate::placement_heap::PlacementHeapStats> {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.stats())
-    }
-
-    /// Number of `BufferView`s and `Texture`s currently held in this context's placement
-    /// heap caches. Returns `(cached_views, cached_textures)`.
-    pub fn transient_cache_counts(&self) -> (usize, usize) {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        match heap_guard.as_ref() {
-            Some(h) => (h.cached_view_count(), h.cached_texture_count()),
-            None => (0, 0),
-        }
-    }
-
-    /// Total number of `create_buffer_view` backend calls made by this context's placement
-    /// heap view cache since initialization. Monotonically increasing.
-    pub fn transient_view_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.view_create_count()).unwrap_or(0)
-    }
-
-    /// Total number of `Texture::new` calls made by this context's placement heap texture
-    /// cache since initialization. Monotonically increasing.
-    pub fn transient_texture_create_count(&self) -> usize {
-        let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard.as_ref().map(|h| h.texture_create_count()).unwrap_or(0)
     }
 }
 

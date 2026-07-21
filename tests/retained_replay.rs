@@ -270,7 +270,7 @@ fn indirect_scheme_resubmits_without_rerecord() {
     scheme
         .node("work", &work_pipe)
         .with_parcel(&work, NodeAccess::Write)
-        .dispatch_shape(&*shape)
+        .dispatch_shape_parcel(&*shape)
         .expect("indirect dispatch");
 
     scheme.submit().expect("submit 0");
@@ -460,7 +460,7 @@ fn lease_backing_pool_hygiene() {
     let ctx = submission_context(&device);
 
     let outstanding_before = ctx.transient_outstanding_bytes().texture;
-    let create_count_before = ctx.transient_texture_create_count();
+    let alloc_count_before = ctx.transient_texture_alloc_count();
 
     {
         let mut scheme = Scheme::new(&ctx);
@@ -473,6 +473,11 @@ fn lease_backing_pool_hygiene() {
                 TextureFlags::empty(),
             )
             .expect("lease texture");
+        assert_eq!(
+            ctx.transient_texture_alloc_count(),
+            alloc_count_before + 1,
+            "first lease allocates fresh backing"
+        );
         assert!(
             ctx.transient_outstanding_bytes().texture > outstanding_before,
             "leased backing counts as pool outstanding"
@@ -496,8 +501,8 @@ fn lease_backing_pool_hygiene() {
         )
         .expect("re-lease texture");
     assert_eq!(
-        ctx.transient_texture_create_count(),
-        create_count_before,
+        ctx.transient_texture_alloc_count(),
+        alloc_count_before + 1,
         "re-lease reused parked backing instead of allocating"
     );
     assert!(

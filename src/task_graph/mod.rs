@@ -1,24 +1,26 @@
 //! Shared graph IR, barrier analysis, and submit engine used by [`crate::Scheme`].
 //!
-//! Schemes record a [`GraphIR`], then submit through the IR submit path, which
+//! Schemes record a graph IR, then submit through the IR submit path, which
 //! schedules waves, inserts barriers, and drives backend `submit_graph` paths.
 
 pub(crate) mod analysis;
 pub(crate) mod cb_replay;
 pub(crate) mod cross_submit;
-pub(crate) use cross_submit::CrossSubmitSync;
 mod graph;
 mod ir;
 pub mod record;
 
 pub use graph::ShaderResourceSlot;
 pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, PartitionSubmitResult, ResolvedPresentSlot};
-pub use ir::{BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+pub use ir::NodeAccess;
+pub(crate) use ir::{BarrierSet, BarrierUsage, GraphIR};
+// Re-exported for backend barrier lowering (vulkan/dx12); unused with --no-default-features.
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
+#[allow(unused_imports)]
+pub(crate) use ir::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
 
 use crate::backend::{BufferHandle, TextureHandle};
-use crate::types::TextureFormat;
 
 /// Opaque id for a transient buffer slot in graph IR (`ResourceId::TransientBuffer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,37 +40,6 @@ pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 /// index when the swapchain pool resolves backing at submit time.
 pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
 
-/// Opaque handle for a swapchain output binding in graph IR.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub(crate) struct SwapchainOutputHandle;
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct TransientBufferSpec {
-    pub(crate) id: u32,
-    pub(crate) size: u64,
-    /// Element stride for the structured buffer descriptor (bytes).
-    /// Defaults to 4 (u32) when not specified.
-    pub(crate) stride: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct TransientTextureKey {
-    pub width: u32,
-    pub height: u32,
-    pub format: TextureFormat,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct TransientTextureSpec {
-    pub id: u32,
-    pub width: u32,
-    pub height: u32,
-    pub format: TextureFormat,
-}
-
 /// Identifies a GPU resource within a task graph.
 ///
 /// Used internally by the graph IR. The public API accepts `&Buffer` /
@@ -77,11 +48,11 @@ pub(crate) struct TransientTextureSpec {
 /// # View semantics
 ///
 /// `BufferRange` represents a sub-range of a parent `Buffer` (e.g. a
-/// `BufferPool` allocation). Two `BufferRange`s with the same parent are
-/// **independent** unless their byte ranges overlap. This enables the
-/// scheduler to execute dispatches that touch non-overlapping pool views
-/// in the same wave, matching the behaviour of per-allocation tracking in
-/// wgpu and the GPU's own memory model.
+/// partitioned retained record field). Two `BufferRange`s with the same parent
+/// are **independent** unless their byte ranges overlap. This enables the
+/// scheduler to execute dispatches that touch non-overlapping views in the
+/// same wave, matching the behaviour of per-allocation tracking in wgpu and
+/// the GPU's own memory model.
 ///
 /// Backends never see `BufferRange` — barriers are always emitted against
 /// the parent handle via [`ResourceId::canonical_buffer_handle`].
@@ -103,7 +74,7 @@ pub(crate) enum ResourceId {
     /// an explicit `Read` binding so the scheduler orders copy after render.
     RenderTarget(crate::backend::RenderTargetHandle),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
-    #[allow(dead_code)] // TaskGraph placement-heap path removed; kept for IR/analysis matching
+    #[allow(dead_code)] // constructed in analysis tests / future transient-graph paths
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
     #[allow(dead_code)]
@@ -153,7 +124,6 @@ impl ResourceId {
 
 /// Resolved storage for a transient buffer slot.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedTransientBuffer {
     pub parent: BufferHandle,
     pub offset: u64,
@@ -164,14 +134,12 @@ pub(crate) struct ResolvedTransientBuffer {
 
 /// Resolved storage for a transient texture slot.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedTransientTexture {
     pub handle: TextureHandle,
 }
 
 /// Resolved storage for the swapchain output slot.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedSwapchain {
     pub handle: TextureHandle,
     pub uav_index: u32,
@@ -192,7 +160,7 @@ pub(crate) struct ResolvedUploadBuffer {
 /// `PresentLease`, `UploadBuffer`) through this table at emission time.
 /// No IR clone is ever necessary.
 ///
-/// Transient entries are page-local (supplied by `PlacementHeap::advance_page`).
+/// Transient entries are scheme-local (resolved at submit from lease backing).
 /// The swapchain entry is boundary-local (filled after `surface.begin()`).
 /// Upload buffers are scheme-local (filled by [`crate::Scheme`] before submit).
 #[derive(Debug, Clone, Default)]
@@ -212,7 +180,6 @@ impl SlotResolver {
     }
 
     /// Resolve a `ResourceId` to its concrete form.  Concrete ids pass through.
-    #[allow(dead_code)]
     pub fn resolve(&self, id: ResourceId) -> ResourceId {
         match id {
             ResourceId::TransientBuffer(t) => {

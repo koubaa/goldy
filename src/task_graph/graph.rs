@@ -1988,7 +1988,7 @@ mod slice_retention_tests {
 
     /// Read the number of live retained graph entries.
     fn retained_count(device: &Device) -> usize {
-        device.with_mock(|m| m.retained_graph_count())
+        device.with_mock(|m| m.retained_graphs.len())
     }
 
     fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR, ir_clean: bool) {
@@ -2477,8 +2477,14 @@ mod slice_retention_tests {
         let ctx = device.create_context().unwrap();
 
         // Create a real mock render target so submit_graph's render path succeeds.
-        let rt =
-            crate::render_target::RenderTarget::new(&device, 4, 4, crate::types::TextureFormat::Rgba8Unorm).unwrap();
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {

@@ -9,10 +9,11 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureCopyFootprint, TextureHandle};
+use crate::backend::{BufferHandle, GpuCommand, RenderCommand};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
+use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
@@ -25,6 +26,7 @@ use crate::task_graph::{
     DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
     PRESENT_LEASE_SLOT_PLACEHOLDER,
 };
+use crate::texture::TextureCopyFootprint;
 use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
 use crate::types::{
     BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
@@ -44,7 +46,7 @@ static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Returned staging buffers are stamped with the submission timeline that must retire
 /// before reuse (`ready_after`). This matches transient-pool epoch gating: dropping a
-/// [`Submission`] or [`Loan`] without consuming does not require a CPU wait, but in-flight
+/// [`Submission`] without consuming does not require a CPU wait, but in-flight
 /// staging is not handed to a later submit until `gpu_progress` passes that stamp.
 enum GrantStagingAllocSpec {
     Buffer { byte_size: u64 },
@@ -171,7 +173,7 @@ impl fmt::Debug for GrantStagingPool {
 
 /// Cloneable GPU submission identity and timeline (no exchange claims).
 #[derive(Debug, Clone)]
-pub struct SubmissionHandle {
+pub(crate) struct SubmissionHandle {
     core: Arc<SubmissionCore>,
 }
 
@@ -206,7 +208,7 @@ impl From<SubmissionHandle> for TimelineValue {
 
 /// Dense index of a present/exchange claim slot on a [`Submission`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClaimKey {
+pub(crate) struct ClaimKey {
     pub(crate) present_idx: u32,
 }
 
@@ -240,7 +242,7 @@ impl fmt::Debug for Transaction {
 /// Unique receipt returned by [`Scheme::submit`].
 ///
 /// Owns untaken exchange claims and read-grant staging cells. Clone the
-/// [`SubmissionHandle`] for timeline identity that must outlive claim extraction.
+/// submission handle for timeline identity that must outlive claim extraction.
 /// Dropping this receipt discards every claim that has not been taken.
 pub struct Submission {
     handle: SubmissionHandle,
@@ -288,7 +290,8 @@ impl fmt::Debug for Submission {
 
 impl Submission {
     /// Cloneable timeline / scheme identity (does not share claim ownership).
-    pub fn handle(&self) -> SubmissionHandle {
+    #[cfg(test)]
+    pub(crate) fn handle(&self) -> SubmissionHandle {
         self.handle.clone()
     }
 
@@ -547,29 +550,26 @@ struct GrantInfo {
     staging_pool: Arc<GrantStagingPool>,
 }
 
-/// Readable bytes for one `(grant × submission)` cell — returned by [`ReadGrant::consume`].
+/// CPU-readable bytes from a consumed read grant.
 ///
-/// Dropping the loan returns the staging buffer to the grant's reuse pool once its
-/// submission timeline has retired; otherwise the buffer
-/// is freed immediately when the owning [`Scheme`] is gone.
-pub struct Loan<T> {
+/// Dropping returns the staging buffer to the grant pool once the submission timeline retires.
+pub struct GrantBytes {
     bytes: Vec<u8>,
     handle: BufferHandle,
     ready_after: TimelineValue,
     return_pool: Arc<GrantStagingPool>,
-    _marker: PhantomData<T>,
 }
 
-impl<T> fmt::Debug for Loan<T> {
+impl fmt::Debug for GrantBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Loan")
+        f.debug_struct("GrantBytes")
             .field("len", &self.bytes.len())
             .field("handle", &self.handle)
             .finish_non_exhaustive()
     }
 }
 
-impl<T> Deref for Loan<T> {
+impl Deref for GrantBytes {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -577,7 +577,7 @@ impl<T> Deref for Loan<T> {
     }
 }
 
-impl<T> Drop for Loan<T> {
+impl Drop for GrantBytes {
     fn drop(&mut self) {
         self.return_pool.return_handle(self.handle, self.ready_after);
     }
@@ -605,7 +605,7 @@ impl<T> ReadGrant<T> {
 }
 
 impl<T> Grant for ReadGrant<T> {
-    type Output = Loan<T>;
+    type Output = GrantBytes;
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
         if submission.handle.scheme_id() != self.scheme_id {
@@ -647,12 +647,11 @@ impl<T> Grant for ReadGrant<T> {
             }
         };
         read_result.map_err(|e| self.ctx.classify(e))?;
-        Ok(Loan {
+        Ok(GrantBytes {
             bytes,
             handle,
             ready_after: submission.timeline_value(),
             return_pool: Arc::clone(&self.return_pool),
-            _marker: PhantomData,
         })
     }
 }
@@ -730,6 +729,7 @@ impl UploadBufferPool {
                     self.size,
                     crate::types::BufferKind::Scattered,
                     BufferFlags::CPU_WRITABLE,
+                    None,
                 )
             })
             .map_err(|e| ctx.classify(e))?;
@@ -1406,7 +1406,7 @@ impl Scheme {
         self.dirty = true;
         let backing = self
             .ctx
-            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags))
+            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags, None))
             .map_err(|e| self.ctx.classify(e))?;
         let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
         self.leases.push(backing);
@@ -1441,8 +1441,8 @@ impl Scheme {
         })
     }
 
-    /// Borrow the backing [`RenderTarget`] for a scheme-held lease.
-    pub fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
+    /// Borrow the backing render target for a scheme-held lease.
+    pub(crate) fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
         &self.rt_leases[lease.id.0 as usize]
     }
 
@@ -2567,62 +2567,6 @@ fn validate_dispatch_shape_parcel(parcel: &Parcel) -> Result<u64, GoldyError> {
     Ok(parcel.source_offset())
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// Argument to [`SchemeNodeBuilder::dispatch`]: fixed workgroup counts or a device-resident shape parcel.
-///
-/// Implemented for [`DispatchShape`] and [`Parcel`]. Fixed triples use
-/// [`SchemeNodeBuilder::dispatch`] `(x, y, z)`.
-pub trait IntoDispatch: sealed::Sealed {
-    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError>;
-}
-
-impl sealed::Sealed for DispatchShape {}
-impl sealed::Sealed for &Parcel {}
-
-impl IntoDispatch for DispatchShape {
-    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError> {
-        builder.push_dispatch_node(DispatchDim::Direct {
-            x: self.x,
-            y: self.y,
-            z: self.z,
-        });
-        Ok(())
-    }
-}
-
-impl IntoDispatch for &Parcel {
-    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError> {
-        let offset = validate_dispatch_shape_parcel(self)?;
-        let resource = self.resource_id();
-        builder
-            .scheme
-            .submit_state
-            .register_stamp_parts(resource, self.stamp_handle());
-        let mut bindings = builder.bindings;
-        bindings.push(ResourceBinding {
-            resource,
-            access: NodeAccess::Read,
-        });
-        let buffer = self
-            .buffer_handle()
-            .expect("validate_dispatch_shape_parcel ensures buffer parcel");
-        builder.scheme.ir.nodes.push(TaskNode {
-            label: builder.label,
-            bindings,
-            kind: NodeKind::Dispatch {
-                pipeline: builder.pipeline,
-                resource_slots: builder.resource_slots,
-                user_slots: builder.user_slots,
-                dispatch: DispatchDim::Indirect { buffer, offset },
-            },
-        });
-        Ok(())
-    }
-}
-
 /// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, scheme-held
 /// leases, samplers, and textures.
 ///
@@ -2833,15 +2777,35 @@ impl<'a> SchemeNodeBuilder<'a> {
         self.push_dispatch_node(DispatchDim::Direct { x, y, z });
     }
 
-    /// Finalize the node with a host [`DispatchShape`] or a device-resident shape parcel.
+    /// Finalize the node with a device-resident [`DispatchShape`] parcel (indirect dispatch).
     ///
-    /// Passing a `&Parcel` selects device-sourced (indirect) dispatch. The shape parcel's
-    /// ordering dependency is registered automatically and is not a shader resource slot.
-    ///
-    /// Rust does not allow overloading [`Self::dispatch`] `(x, y, z)` and this shape/parcel
-    /// form under the same name; this is the shape/parcel dispatch entry point.
-    pub fn dispatch_shape(self, dim: impl IntoDispatch) -> Result<(), GoldyError> {
-        dim.finish(self)
+    /// The shape parcel's ordering dependency is registered automatically and is not a shader
+    /// resource slot. Fixed workgroup counts use [`Self::dispatch`] instead.
+    pub fn dispatch_shape_parcel(self, parcel: &Parcel) -> Result<(), GoldyError> {
+        let offset = validate_dispatch_shape_parcel(parcel)?;
+        let resource = parcel.resource_id();
+        self.scheme
+            .submit_state
+            .register_stamp_parts(resource, parcel.stamp_handle());
+        let mut bindings = self.bindings;
+        bindings.push(ResourceBinding {
+            resource,
+            access: NodeAccess::Read,
+        });
+        let buffer = parcel
+            .buffer_handle()
+            .expect("validate_dispatch_shape_parcel ensures buffer parcel");
+        self.scheme.ir.nodes.push(TaskNode {
+            label: self.label,
+            bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Indirect { buffer, offset },
+            },
+        });
+        Ok(())
     }
 
     fn push_dispatch_node(self, dispatch: DispatchDim) {
@@ -2964,7 +2928,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     /// Declare push-constant slots in shader parameter order and register graph bindings.
     ///
-    /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
+    /// [`Self::set_pipeline`] emits typed bindless resource binds from these
     /// handles before each pipeline bind.
     pub fn with_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
         for slot in slots {
@@ -3263,8 +3227,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     #[cfg(not(feature = "metal"))]
     fn clean_resubmit_performs_no_cpu_wait() {
-        use crate::backend::GpuBackend;
-
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
@@ -3273,11 +3235,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.submit().unwrap();
 
         let backend = device.inner.backend.lock().unwrap();
-        assert_eq!(
-            backend.test_wait_until_count(),
-            0,
-            "clean scheme resubmits must not call wait_until on the submit path"
-        );
+        device.with_mock_backend(|mock| {
+            assert_eq!(
+                mock.wait_until_count, 0,
+                "clean scheme resubmits must not call wait_until on the submit path"
+            );
+        });
         assert!(
             !scheme.partition_last_tvs().is_empty(),
             "per-partition timelines are tracked after submit"

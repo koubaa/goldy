@@ -270,7 +270,7 @@ Plain scalar parameters (`uint offset`) are also push-constant bindings — no w
 | `goldy_exp/math.slang` | `PI`, `TAU`, `hash()`, `hash2()`, `center_uv()`, `scale_uv()`, `to_polar()`, `smootherstep()` |
 | `goldy_exp/color.slang` | `rainbow()`, `palette()`, `heat()`, `hsv_to_rgb()`, `luminance()`, `gamma_correct()` |
 | `goldy_exp/primitives.slang` | `quad_position()`, `quad_position_rotated()`, `billboard_position()`, `fullscreen_position()`, `fullscreen_uv()` |
-| `goldy_exp/types.slang` | `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `Instance2D` |
+| `goldy_exp/types.slang` | `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `DispatchShape` |
 | `goldy_exp/vertex.slang` | `FullscreenVarying`, `ColoredVertex`, `ColoredVarying`, `vs_fullscreen_triangle()` |
 | `goldy_exp/access.slang` | Resource type aliases and system-value types (documented above) |
 

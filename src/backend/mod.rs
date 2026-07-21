@@ -20,18 +20,25 @@
 //! ```
 
 #[cfg(feature = "vulkan")]
-pub mod vulkan;
+pub(crate) mod vulkan;
 
 // DX12 backend for Windows
 #[cfg(all(feature = "dx12", target_os = "windows"))]
-pub mod dx12;
+pub(crate) mod dx12;
 
 // Mock backend for testing (always available)
-pub mod mock;
+pub(crate) mod mock;
 
 // Metal backend for macOS (native Metal, not MoltenVK)
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub mod metal;
+pub(crate) mod metal;
+
+pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
+pub(crate) use crate::handles::{
+    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle,
+};
+pub(crate) use crate::texture::TextureCopyFootprint;
 
 /// Shared primitives reused across Vulkan, DX12, and Metal backends, and by
 /// task-graph command emission (e.g. `DispatchBatch` argument packing).
@@ -48,7 +55,7 @@ pub(crate) mod host_sidecar;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat, PresentMode,
+    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, IndexFormat, PresentMode,
     PrimitiveTopology, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
     VertexBufferLayout,
 };
@@ -341,44 +348,13 @@ where
     Ok(())
 }
 
-// Re-export raw_window_handle for Surface API users
-pub use raw_window_handle;
-
-/// Information about a GPU adapter (physical device).
-#[derive(Debug, Clone)]
-pub struct AdapterInfo {
-    /// Adapter index.
-    pub id: u32,
-    /// Device name.
-    pub name: String,
-    /// Vendor name.
-    pub vendor: String,
-    /// Backend type.
-    pub backend: BackendType,
-    /// Device type (discrete, integrated, etc.).
-    pub device_type: DeviceType,
-}
-
-/// Opaque handle types.
-pub type DeviceHandle = u64;
-pub type ContextHandle = u64;
-pub type BufferHandle = u64;
-pub type ShaderHandle = u64;
-pub type PipelineHandle = u64;
-pub type ComputePipelineHandle = u64;
-pub type RenderTargetHandle = u64;
-pub type SurfaceHandle = u64;
-pub type SwapchainImageHandle = u64;
-pub type TextureHandle = u64;
-pub type SamplerHandle = u64;
-
 /// Opaque token tying surface work to an acquired swapchain frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FrameToken {
+pub(crate) struct FrameToken {
     pub surface: SurfaceHandle,
     /// WSI swapchain image index (which drawable will be presented).
     pub image: SwapchainImageHandle,
-    /// Submission context that owns this frame's timeline (set by [`crate::surface::Frame`]).
+    /// Submission context that owns this frame's timeline (set when the surface frame is acquired).
     pub context: ContextHandle,
     /// In-flight slot index for the compute/scratch texture bound this frame.
     ///
@@ -398,8 +374,9 @@ pub struct FrameToken {
 }
 
 /// Render command for command buffer recording.
+#[allow(dead_code)] // fields matched by GPU backends behind feature flags
 #[derive(Debug, Clone)]
-pub enum RenderCommand {
+pub(crate) enum RenderCommand {
     /// Clear the color render target.
     Clear(Color),
     /// Clear the depth buffer.
@@ -457,51 +434,12 @@ pub enum RenderCommand {
     },
 }
 
-/// Process GPU memory usage reported by the OS / driver (when available).
-///
-/// On DX12 this comes from `IDXGIAdapter3::QueryVideoMemoryInfo`. Other backends
-/// may leave this unset; callers can still use tracked allocator bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct VideoMemoryInfo {
-    /// Bytes currently used in the local (device) memory segment.
-    pub local_current_bytes: u64,
-    /// OS-reported budget for the local segment.
-    pub local_budget_bytes: u64,
-    /// Bytes currently used in the non-local (system / shared) segment, if queried.
-    pub non_local_current_bytes: u64,
-    /// OS-reported budget for the non-local segment.
-    pub non_local_budget_bytes: u64,
-}
-
-/// Linear buffer layout for copying a 2D texture subresource into a buffer.
-///
-/// `logical_bytes` is the tight linear size clients observe (`width * height * bpp`).
-/// `staging_bytes`, `row_pitch`, and `footprint_offset` describe how rows are laid out in
-/// the destination buffer (DX12 may pad rows to alignment; Vulkan/Metal use tight rows).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextureCopyFootprint {
-    pub width: u32,
-    pub height: u32,
-    pub format: TextureFormat,
-    pub logical_bytes: u64,
-    pub staging_bytes: u64,
-    pub row_pitch: u32,
-    /// Byte offset of the subresource footprint within the staging buffer (DX12 placed copy).
-    pub footprint_offset: u64,
-}
-
-impl TextureCopyFootprint {
-    pub fn tight_row_bytes(&self) -> u32 {
-        self.width.saturating_mul(self.format.bytes_per_pixel())
-    }
-}
-
 /// CPU-side write deferred to the submission worker, after [`SubmitSync::host_observed_waits`]
 /// retire on the host.
 ///
 /// Currently applied by the DX12, Vulkan, and Metal submission workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeferredHostWrite {
+pub(crate) struct DeferredHostWrite {
     pub buffer: BufferHandle,
     pub offset: u64,
     pub data: Arc<[u8]>,
@@ -509,7 +447,7 @@ pub struct DeferredHostWrite {
 
 /// Cross-submission synchronization derived from the runtime's ledger (spec §5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SubmitSync {
+pub(crate) struct SubmitSync {
     /// Same-context scoped memory barrier prepended before command execution.
     pub prologue: crate::task_graph::BarrierSet,
     /// Cross-context GPU queue-waits on producer timeline values.
@@ -545,26 +483,18 @@ impl SubmitSync {
         crate::backend::host_sidecar::merge_epochs(&mut self.host_observed_waits, extra);
     }
 
-    pub fn from_cross_submit(cross: &crate::task_graph::CrossSubmitSync) -> Self {
-        Self {
-            prologue: cross.prologue.clone(),
-            waits: cross.waits.clone(),
-            cpu_waits: cross.cpu_waits.clone(),
-            host_observed_waits: Vec::new(),
-            deferred_host_writes: Vec::new(),
-        }
-    }
-
     /// True when this submit should use the legacy blanket cross-submission acquire
     /// instead of epoch-driven scoped barriers.
     ///
     /// Epoch-driven scheme/task-graph submits pass `Some(SubmitSync)` with a scoped
     /// prologue and/or cross-context waits; they must not also emit the blanket acquire.
+    #[cfg_attr(not(any(test, feature = "vulkan")), allow(dead_code))]
     pub fn use_legacy_acquire(&self) -> bool {
         false
     }
 
     /// Whether `sync` selects the legacy blanket acquire path.
+    #[cfg_attr(not(any(test, feature = "vulkan")), allow(dead_code))]
     pub fn use_legacy_acquire_from(sync: Option<&SubmitSync>) -> bool {
         match sync {
             None => true,
@@ -603,26 +533,19 @@ pub(crate) fn commands_with_sync_prologue(commands: &[GpuCommand], sync: Option<
 /// Includes compute dispatches, buffer upload/clear, texture uploads, and
 /// scheduling barriers — not compute-only despite historical naming in call sites.
 #[derive(Debug, Clone, PartialEq)]
-pub enum GpuCommand {
+pub(crate) enum GpuCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
     /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
     /// `indices` go to region A (bindless, packed as u16).
     /// `user` go to region B (user scalars, full u32).
-    ///
-    /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
-    /// bypasses per-slot category validation.
     BindResourcesRaw {
         indices: Vec<u32>,
         user: Vec<u32>,
         /// Offset within the frame-table row where this dispatch's indices live.
         frame_table_base: u32,
     },
-    /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
-    /// each handle's [`crate::types::ResourceCategory`]
-    /// against the bound shader's reflection and emit the raw indices.
-    BindResourcesTyped { handles: Vec<ResourceHandle> },
     /// Dispatch compute workgroups.
     Dispatch {
         /// Debug label from [`crate::Scheme::node`] when emitted by the analyzer.
@@ -734,11 +657,6 @@ pub enum GpuCommand {
     /// Frame-table staging payload — written to the upload staging buffer and copied
     /// to the device-local table by the prologue at the start of each submission.
     FrameTableStaging { data: std::sync::Arc<[u32]> },
-    ///
-    /// Within a [`crate::Scheme`] submission, prefer
-    /// `ResourceBarrier` which is produced by the scheduler with precise
-    /// `src_usage` / `dst_usage` derived from the dependency graph.
-    Barrier,
     /// Per-resource memory barrier with full access semantics.
     ///
     /// Emitted by the compute graph scheduler at dependency edges.
@@ -754,7 +672,7 @@ pub enum GpuCommand {
 
 /// Mixed compute + offscreen render commands from [`crate::Scheme`].
 #[derive(Debug, Clone)]
-pub enum GraphCommand {
+pub(crate) enum GraphCommand {
     /// Compute / upload / barrier from [`GpuCommand`].
     Compute(GpuCommand),
     /// Graphics work recorded against a [`RenderTargetHandle`] (offscreen render target).
@@ -763,10 +681,6 @@ pub enum GraphCommand {
         commands: Vec<RenderCommand>,
     },
 }
-
-/// Deprecated alias for [`GpuCommand`].
-#[deprecated(since = "0.1.0", note = "renamed to GpuCommand")]
-pub type ComputeCommand = GpuCommand;
 
 /// Blocking GPU timeline wait, cloned out of the backend under the global lock so
 /// [`TimelineBlockingWait::block`] can run without holding it.
@@ -783,7 +697,7 @@ pub(crate) trait TimelineBlockingWait: Send {
 /// Context teardown detached from live lookup tables. [`Self::wait`] and [`Self::finish`]
 /// run without holding the global backend mutex.
 #[doc(hidden)]
-pub trait ContextDestroyHandle: Send {
+pub(crate) trait ContextDestroyHandle: Send {
     fn wait(&self) -> Result<()>;
     fn finish(self: Box<Self>) -> Result<()>;
 }
@@ -824,19 +738,19 @@ pub(crate) fn destroy_context(backend: &std::sync::Arc<std::sync::Mutex<Box<dyn 
 /// needs internally; the trait no longer takes `device_retired` as a parameter so callers
 /// do not need to produce it.
 #[doc(hidden)]
-pub trait ContextDeferredDeletionFlush: Send + Sync {
+pub(crate) trait ContextDeferredDeletionFlush: Send + Sync {
     fn flush(&self);
 }
 
 /// Lock-free per-context GPU timeline progress query (Vulkan/DX12 fence or semaphore value).
 #[doc(hidden)]
-pub trait ContextGpuProgress: Send + Sync {
+pub(crate) trait ContextGpuProgress: Send + Sync {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue;
 }
 
 /// Per-context reclamation epoch scope (Metal heap routing during `boundary_crossed`).
 #[doc(hidden)]
-pub trait ContextReclamationScope: Send + Sync {
+pub(crate) trait ContextReclamationScope: Send + Sync {
     fn set_epoch(&self, epoch: Option<crate::timeline::TimelineValue>);
 }
 
@@ -873,7 +787,7 @@ pub(crate) struct PresentFinishState {
 }
 
 /// GPU-side present work (copy + queue present) cloned out of the backend under the
-/// global lock so [`Frame::present`](crate::Frame::present) can drop it during execution.
+/// global lock so [`crate::surface::Frame::present`] can drop it during execution.
 pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
 }
@@ -920,7 +834,6 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>>;
-    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 }
 
@@ -1000,13 +913,12 @@ impl ContextSubmitSession for LockedSubmitSession {
         self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
     }
 
-    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {
         self.backend.lock().unwrap().evict_retained(ctx, key);
     }
 }
 
-/// Split present hooks used by [`Frame::present`](crate::Frame::present) to drop the
+/// Split present hooks used by [`crate::surface::Frame::present`] to drop the
 /// global backend lock during copy + WSI present.
 pub(crate) trait GpuBackendPresentSplit {
     fn take_present_gpu_work(
@@ -1045,7 +957,9 @@ pub(crate) trait GpuBackendTimelineWait {
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
-pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit + GpuBackendSubmitSession {
+pub(crate) trait GpuBackend:
+    Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit + GpuBackendSubmitSession
+{
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
@@ -1208,19 +1122,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         0
     }
 
-    /// Mock-backend wait_until call counter (tests only).
-    #[doc(hidden)]
-    #[cfg(test)]
-    fn test_wait_until_count(&self) -> usize {
-        let _ = self;
-        0
-    }
-
-    /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
-    fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let _ = device;
-        crate::device::DeviceCapabilities::default()
-    }
     /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
@@ -1334,14 +1235,7 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle>;
 
-    // RenderTarget API - GPU buffer stays on GPU, readback is optional
-    fn create_render_target(
-        &mut self,
-        device: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle>;
+    // RenderTarget API - GPU-only; no CPU readback
     /// Create a render target with an optional depth buffer.
     fn create_render_target_with_depth(
         &mut self,
@@ -1351,14 +1245,12 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
-    fn destroy_render_target(&mut self, target: RenderTargetHandle);
     fn render_to_target(
         &mut self,
         device: DeviceHandle,
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()>;
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
 
     // Texture management
     fn create_texture(
@@ -1441,11 +1333,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         Ok(())
     }
 
-    /// Get the current present mode for a surface.
-    fn surface_present_mode(&self, _surface: SurfaceHandle) -> PresentMode {
-        PresentMode::Auto
-    }
-
     // --- Timeline + explicit frame bracket ---
 
     /// Latest GPU completion point on this context's timeline (`value` is done when
@@ -1479,22 +1366,12 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;
 
-    /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
-    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
-
     fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         if let Some(wait) = self.take_timeline_blocking_wait(ctx, value)? {
             wait.block()?;
         }
         self.finish_timeline_wait(ctx, value)
     }
-
-    fn wait_until_timeout(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-        timeout_ms: u32,
-    ) -> Result<bool>;
 
     /// Submit compute (and transfer) commands on the context timeline, not tied to a surface frame.
     ///
@@ -1586,15 +1463,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         Ok(None)
     }
 
-    /// Whether the backend can retain present-touching partitions across submits.
-    ///
-    /// Backends that resolve the drawable to a fresh [`TextureHandle`] each frame
-    /// (Metal) return `false` so the present partition is re-resolved and re-recorded
-    /// each submit rather than resubmitting a stale cached command list.
-    fn retains_present_partitions(&self) -> bool {
-        true
-    }
-
     /// Drop the retained command list associated with `key`, marking its allocator slot
     /// as available for re-use.  No-op if no retained list exists.
     fn evict_retained(&mut self, _ctx: ContextHandle, _key: u64) {}
@@ -1605,37 +1473,12 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// submit/present and swapchain signals are routed through it.
     fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)>;
 
-    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()>;
-
-    /// Record GPU work that must be ordered with the active surface frame (e.g. compute into the swapchain).
-    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()>;
-
     /// Submit all recorded GPU work for this frame bracket. Does not present.
     ///
     /// Returns the timeline value signaled when the frame's compute (and transfer) work
     /// completes on the GPU. When no work was recorded, returns the latest completed
     /// or scheduled compute timeline appropriate for the backend.
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue>;
-
-    /// Present the swapchain image for this frame after [`Self::submit_frame`].
-    ///
-    /// `submit_tv` is the value returned by [`Self::submit_frame`] so backends that use
-    /// separate present queues can wait for compute before presenting.
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue>;
-
-    /// Submit recorded work and present. Convenience for callers that do not split the bracket.
-    ///
-    /// Default implementation calls [`Self::submit_frame`] then [`Self::present_frame`].
-    /// The returned timeline is from present (when present allocates its own signal) or
-    /// from submit when present reuses the submit timeline.
-    fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
-        let submit_tv = self.submit_frame(&frame)?;
-        self.present_frame(frame, submit_tv)
-    }
 
     // Compute pipeline management
     /// Create a compute pipeline from a compute shader.
@@ -1719,21 +1562,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         u32::MAX
     }
 
-    /// Process pending GPU deletions and reclaim bindless descriptor slots
-    /// whose GPU timeline barrier has been signaled.
-    ///
-    /// Normally called internally at acquire/present/submit, but consumers
-    /// that drop buffers between those points (e.g. during a non-blocking
-    /// frame drain) can call this explicitly to reclaim slots immediately.
-    fn flush_deferred_deletions(&mut self, _ctx: ContextHandle) {}
-
-    /// Install a per-thread reclamation epoch for the next deferred-payload drop window.
-    ///
-    /// Metal uses this so `Buffer::drop` during [`crate::Context::boundary_crossed`] queues heap
-    /// frees with the already-retired epoch instead of `timeline_scheduled_max`. Only the
-    /// installing thread observes the override; other threads keep conservative barriers.
-    fn set_reclamation_context(&mut self, _ctx: ContextHandle, _epoch: Option<crate::timeline::TimelineValue>) {}
-
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
     fn deferred_deletion_pending_count(&self, _ctx: ContextHandle) -> usize {
@@ -1769,29 +1597,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     }
 }
 
-/// Snapshot of a Metal buffer heap allocator's state.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BufferHeapStats {
-    /// Total number of buffers ever allocated from the heap hierarchy (monotonically increasing).
-    /// This counter does NOT decrease when buffers are freed.
-    pub buffer_count: u32,
-    /// Number of overflow heaps currently alive (0 in steady state).
-    pub overflow_count: usize,
-    /// Peak total bytes used across all heaps since last reset.
-    pub high_water_bytes: u64,
-    /// Size of the primary heap in bytes.
-    pub primary_heap_bytes: u64,
-}
-
-/// Snapshot of a Metal texture heap allocator's state.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TextureHeapStats {
-    /// Number of live textures currently allocated from the heap hierarchy.
-    pub texture_count: u32,
-    /// Number of overflow heaps currently alive (0 in steady state).
-    pub overflow_count: usize,
-}
-
 /// Create the default backend for the current platform.
 ///
 /// The backend can be overridden at runtime by setting the `GOLDY_BACKEND`
@@ -1801,7 +1606,7 @@ pub struct TextureHeapStats {
 /// - macOS: Metal
 /// - Windows: DX12  
 /// - Linux: Vulkan
-pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
+pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     // Check for runtime override via environment variable
     if let Ok(backend_str) = std::env::var("GOLDY_BACKEND") {
         let backend_type = match backend_str.to_lowercase().as_str() {
@@ -1861,7 +1666,7 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 ///
 /// For DX12, each [`crate::Instance`] gets its own backend with independent mutable state;
 /// DXGI factory/adapters are shared process-wide. Other backends create a fresh instance.
-pub fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
+pub(crate) fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
     use std::sync::{Arc, Mutex};
 
     #[cfg(all(feature = "dx12", target_os = "windows"))]
@@ -1880,7 +1685,7 @@ pub fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn
 }
 
 /// Create a specific backend by type.
-pub fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> {
+pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> {
     match backend_type {
         #[cfg(feature = "vulkan")]
         BackendType::Vulkan => {

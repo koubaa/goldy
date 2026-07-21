@@ -12,14 +12,10 @@ fn orchestrator_double_begin_fails() {
         .expect("device");
     let ctx = device.create_context().expect("context");
 
-    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&ctx, 3);
-    let h = orch
-        .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
-        .expect("begin");
+    let mut orch = FrameOrchestrator::new(&ctx, 3);
+    let h = orch.begin_frame().expect("begin");
 
-    assert!(orch
-        .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
-        .is_err());
+    assert!(orch.begin_frame().is_err());
 
     orch.end_frame_externally_ordered(h).expect("end");
 }
@@ -34,8 +30,8 @@ fn orchestrator_reclaim_empty_is_ok() {
         .expect("device");
     let ctx = device.create_context().expect("context");
 
-    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&ctx, 2);
-    orch.reclaim(|_d, _r| Ok::<_, std::convert::Infallible>(())).unwrap();
+    let mut orch = FrameOrchestrator::new(&ctx, 2);
+    orch.reclaim().unwrap();
 }
 
 #[test]
@@ -48,18 +44,14 @@ fn end_frame_externally_ordered_leaves_ring_empty() {
         .expect("device");
     let ctx = device.create_context().expect("context");
 
-    let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&ctx, 1);
-    let h = orch
-        .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
-        .expect("begin");
+    let mut orch = FrameOrchestrator::new(&ctx, 1);
+    let h = orch.begin_frame().expect("begin");
     orch.end_frame_externally_ordered(h).expect("end externally");
     assert_eq!(orch.pending_frames(), 0);
     assert!(!orch.has_open_frame());
 
     // Next begin must not block: no retirement slot was created.
-    let h2 = orch
-        .begin_frame(|_d, _r| Ok::<_, std::convert::Infallible>(()))
-        .expect("begin 2");
+    let h2 = orch.begin_frame().expect("begin 2");
     orch.end_frame_externally_ordered(h2).expect("end 2");
     assert_eq!(orch.pending_frames(), 0);
 }

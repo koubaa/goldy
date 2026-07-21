@@ -1,16 +1,16 @@
 //! Digital Clock example - render an animated 7-segment clock in a window.
 //!
-//! This example uses shared rendering code from `goldy::examples::digital_clock`,
-//! demonstrating that the same logic can be used on both native and web platforms.
 //! Uses retained scheme with offscreen render pass → copy-to-present.
 //!
 //! Run with: `cargo run --example digital_clock`
 
+mod digital_clock_shared;
+
+use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, TimeData};
 use goldy::{
-    examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
     Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Transaction,
+    SurfaceExchange, Transaction, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +25,35 @@ mod common;
 
 /// Upper bound on seven-segment clock vertices (8 glyphs × 7 segments × 6 verts).
 const MAX_CLOCK_VERTICES: usize = 384;
+
+const SHADER_SOURCE: &str = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;
+}
+"#;
+
+fn clock_vertex_layout() -> VertexBufferLayout {
+    VertexBufferLayout::from_formats::<ClockVertex>(&[VertexFormat::Float32x2, VertexFormat::Float32x4])
+}
 
 struct App {
     instance: Instance,
@@ -84,7 +113,7 @@ impl App {
             shader,
             surface,
             RenderPipelineDesc {
-                vertex_layout: ClockVertex::layout(),
+                vertex_layout: clock_vertex_layout(),
                 ..Default::default()
             },
         )
@@ -352,7 +381,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Clock Example (using shared rendering code, retained scheme)");
+    println!("Goldy Clock Example (retained scheme)");
     println!("==================================================================");
     println!("Controls:");
     println!("  Space - Toggle pause");

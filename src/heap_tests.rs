@@ -456,27 +456,20 @@ mod heap_tests {
         }
 
         assert!(ctx.has_deferred_payloads());
-        let oldest_before = ctx.oldest_deferred_epoch().unwrap();
 
         // Wait for the first frame and flush.
         ctx.wait_until(timelines[0]).unwrap();
         ctx.flush_deferred_deletions();
 
-        let oldest_after = ctx.oldest_deferred_epoch();
-        if let Some(after) = oldest_after {
+        // Remaining deferred entries (if any) must still be gated on later epochs.
+        if ctx.has_deferred_payloads() {
+            ctx.wait_until(*timelines.last().unwrap()).unwrap();
+            ctx.flush_deferred_deletions();
             assert!(
-                after > oldest_before,
-                "oldest_deferred_epoch should advance: before={oldest_before} after={after}"
+                !ctx.has_deferred_payloads(),
+                "flush after full GPU progress must drain the ring"
             );
         }
-    }
-
-    #[test]
-    fn oldest_deferred_epoch_is_none_when_empty() {
-        let device = make_device();
-        let ctx = submission_context(&device);
-        assert_eq!(ctx.oldest_deferred_epoch(), None);
-        assert!(!ctx.has_deferred_payloads());
     }
 
     #[test]

@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
-    use crate::buffer::BufferPool;
     use crate::test_support::SerialGpuDevice;
     use crate::types::{BufferFlags, ResourceAccess};
     use crate::BufferKind;
@@ -60,20 +59,6 @@ mod buffer_alloc_tests {
         buf.resize_to_uninitialized(8).expect("resize uni");
         let mut out = vec![0u8; 8];
         buf.read_to_cpu(&device, &mut out).expect("read");
-    }
-
-    #[test]
-    fn buffer_pool_resize() {
-        let device = make_device();
-        let mut pool = BufferPool::new(&device, 1024).expect("pool");
-        let v1 = pool.alloc::<u32>(4).expect("v1");
-        let v2 = pool.alloc::<u32>(4).expect("v2");
-        let i1 = v1.resource_index(ResourceAccess::Write).unwrap();
-        let i2 = v2.resource_index(ResourceAccess::Write).unwrap();
-        pool.resize(2048).expect("resize pool");
-        let _v3 = pool.alloc::<u32>(8).expect("v3");
-        assert_eq!(v1.resource_index(ResourceAccess::Write), Some(i1));
-        assert_eq!(v2.resource_index(ResourceAccess::Write), Some(i2));
     }
 
     #[test]

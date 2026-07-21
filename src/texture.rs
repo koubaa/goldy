@@ -1,14 +1,38 @@
 //! Internal GPU texture backing for [`crate::Texture`] parcels.
 //!
 //! Public callers acquire [`crate::Texture`] (a parcel wrapper) from
-//! [`crate::RetainedPool::acquire_texture`] or [`crate::TexturePool::acquire`].
+//! [`crate::RetainedPool::acquire_texture`] or [`crate::Context::acquire_transient_texture`].
 
-use crate::backend::{GpuBackend, TextureHandle};
+use crate::backend::GpuBackend;
 use crate::device::Device;
+use crate::handles::TextureHandle;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
+
+/// Linear buffer layout for copying a 2D texture subresource into a buffer.
+///
+/// `logical_bytes` is the tight linear size clients observe (`width * height * bpp`).
+/// `staging_bytes`, `row_pitch`, and `footprint_offset` describe how rows are laid out in
+/// the destination buffer (DX12 may pad rows to alignment; Vulkan/Metal use tight rows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureCopyFootprint {
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub logical_bytes: u64,
+    pub staging_bytes: u64,
+    pub row_pitch: u32,
+    /// Byte offset of the subresource footprint within the staging buffer (DX12 placed copy).
+    pub footprint_offset: u64,
+}
+
+impl TextureCopyFootprint {
+    pub fn tight_row_bytes(&self) -> u32 {
+        self.width.saturating_mul(self.format.bytes_per_pixel())
+    }
+}
 
 /// Low-level GPU texture allocation (internal to Goldy).
 #[derive(Clone)]

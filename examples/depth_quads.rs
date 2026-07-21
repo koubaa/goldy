@@ -1,7 +1,7 @@
 //! Depth quads example - two fullscreen quads whose depths cross periodically.
 //!
-//! Depth-tested rendering via an offscreen [`RenderTarget`] with a depth attachment
-//! (`RenderTarget::new_with_depth`), then copy-to-present through a retained scheme.
+//! Depth-tested rendering via an offscreen scheme-leased render target with a depth attachment,
+//! (`Scheme::lease_render_target` with depth), then copy-to-present through a retained scheme.
 //!
 //! Run with: cargo run --example depth_quads
 

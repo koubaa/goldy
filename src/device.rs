@@ -12,7 +12,7 @@
 //!   These operations are safe from any thread but serialize internally.
 //!
 //! - **Command Submission**: Submitting via [`crate::Scheme::submit`] or
-//!   [`crate::surface::Frame::present`] acquires the backend lock.
+//!   presenting a surface frame acquires the backend lock.
 //!
 //! ## Best Practices
 //!
@@ -24,11 +24,11 @@
 //! This model is sufficient for most applications. Future versions may add
 //! multi-queue support for parallel command submission if needed.
 
-use crate::backend::{self, AdapterInfo, DeviceHandle, GpuBackend};
+use crate::backend::{self, GpuBackend};
 use crate::error::GoldyError;
+use crate::handles::DeviceHandle;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
-use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -38,6 +38,60 @@ use std::sync::{Arc, Mutex};
 
 /// Unique ID generator for temp directories
 static REGISTRY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Information about a GPU adapter (physical device).
+#[derive(Debug, Clone)]
+pub struct AdapterInfo {
+    /// Adapter index.
+    pub id: u32,
+    /// Device name.
+    pub name: String,
+    /// Vendor name.
+    pub vendor: String,
+    /// Backend type.
+    pub backend: BackendType,
+    /// Device type (discrete, integrated, etc.).
+    pub device_type: DeviceType,
+}
+
+/// Process GPU memory usage reported by the OS / driver (when available).
+///
+/// On DX12 this comes from `IDXGIAdapter3::QueryVideoMemoryInfo`. Other backends
+/// may leave this unset; callers can still use tracked allocator bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VideoMemoryInfo {
+    /// Bytes currently used in the local (device) memory segment.
+    pub local_current_bytes: u64,
+    /// OS-reported budget for the local segment.
+    pub local_budget_bytes: u64,
+    /// Bytes currently used in the non-local (system / shared) segment, if queried.
+    pub non_local_current_bytes: u64,
+    /// OS-reported budget for the non-local segment.
+    pub non_local_budget_bytes: u64,
+}
+
+/// Snapshot of a Metal buffer heap allocator's state.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BufferHeapStats {
+    /// Total number of buffers ever allocated from the heap hierarchy (monotonically increasing).
+    /// This counter does NOT decrease when buffers are freed.
+    pub buffer_count: u32,
+    /// Number of overflow heaps currently alive (0 in steady state).
+    pub overflow_count: usize,
+    /// Peak total bytes used across all heaps since last reset.
+    pub high_water_bytes: u64,
+    /// Size of the primary heap in bytes.
+    pub primary_heap_bytes: u64,
+}
+
+/// Snapshot of a Metal texture heap allocator's state.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextureHeapStats {
+    /// Number of live textures currently allocated from the heap hierarchy.
+    pub texture_count: u32,
+    /// Number of overflow heaps currently alive (0 in steady state).
+    pub overflow_count: usize,
+}
 
 /// GPU instance - entry point for Goldy.
 ///
@@ -565,10 +619,6 @@ impl Device {
     // VramAllocator
     // =======================================================================
 
-    pub(crate) fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
-        self.inner.vram_allocator.defer_release(epoch, payload);
-    }
-
     /// Returns the currently installed [`VramAllocator`].
     ///
     /// The default is [`DefaultVramAllocator`] which delegates directly to the
@@ -576,7 +626,7 @@ impl Device {
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
-    pub fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
+    pub(crate) fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
         self.inner.vram_allocator.as_ref()
     }
 
@@ -614,18 +664,18 @@ impl Device {
     /// device's [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
     ///
     /// Fails if a policy is already installed.
-    pub fn set_allocation_policy(
+    #[cfg(test)]
+    pub(crate) fn set_allocation_policy(
         &self,
         policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
     ) -> anyhow::Result<()> {
         self.inner.vram_allocator.set_allocation_policy(policy)
     }
 
-    /// Install an allocation policy if the device still has the default [`NoPolicy`](crate::NoPolicy).
-    pub fn ensure_allocation_policy(
-        &self,
-        policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
-    ) -> anyhow::Result<()> {
+    /// Install an allocation policy if the device still has the default no-op policy.
+    ///
+    /// Pass a [`BudgetPolicy`](crate::BudgetPolicy) for live-byte tracking (and optional budget).
+    pub fn ensure_allocation_policy(&self, policy: Arc<crate::allocation_policy::BudgetPolicy>) -> anyhow::Result<()> {
         self.inner.vram_allocator.ensure_allocation_policy(policy)
     }
 
@@ -672,6 +722,7 @@ impl Device {
     /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
+    #[cfg(test)]
     pub(crate) fn alloc_buffer_with_capacity(
         &self,
         initial_size: u64,
@@ -839,7 +890,7 @@ impl Device {
     /// OS/driver video-memory usage for this device, when the backend can query it.
     ///
     /// On DX12 this is `IDXGIAdapter3::QueryVideoMemoryInfo` (local + non-local segments).
-    pub fn video_memory_info(&self) -> Option<crate::backend::VideoMemoryInfo> {
+    pub fn video_memory_info(&self) -> Option<VideoMemoryInfo> {
         self.inner.backend.lock().unwrap().query_video_memory(self.inner.handle)
     }
 
@@ -877,7 +928,7 @@ impl Device {
     /// Snapshot of the Metal buffer heap allocator state.
     /// Returns `None` on non-Metal backends.
     #[doc(hidden)]
-    pub fn buffer_heap_stats(&self) -> Option<crate::backend::BufferHeapStats> {
+    pub fn buffer_heap_stats(&self) -> Option<BufferHeapStats> {
         let backend = self.inner.backend.lock().unwrap();
         backend.buffer_heap_stats(self.inner.handle)
     }
@@ -885,7 +936,7 @@ impl Device {
     /// Snapshot of the Metal texture heap allocator state.
     /// Returns `None` on non-Metal backends.
     #[doc(hidden)]
-    pub fn texture_heap_stats(&self) -> Option<crate::backend::TextureHeapStats> {
+    pub fn texture_heap_stats(&self) -> Option<TextureHeapStats> {
         let backend = self.inner.backend.lock().unwrap();
         backend.texture_heap_stats(self.inner.handle)
     }
@@ -1056,7 +1107,7 @@ impl Device {
     /// Query the platform row-pitch and staging buffer layout for an UPLOAD from a 2-D texture region.
     ///
     /// On DX12 rows are padded to 256-byte alignment; on Vulkan and Metal rows are tight
-    /// (`width × bpp`).  Use the returned [`crate::backend::TextureCopyFootprint`] to allocate
+    /// (`width × bpp`).  Use the returned [`crate::TextureCopyFootprint`] to allocate
     /// a `CPU_WRITABLE` buffer of `staging_bytes` capacity and write each row at `row_pitch`
     /// stride starting from byte `footprint_offset` — then pass `row_pitch` as the
     /// `src_row_pitch` argument to [`crate::Scheme::copy_buffer_to_texture_parcel`] so the
@@ -1066,7 +1117,7 @@ impl Device {
         width: u32,
         height: u32,
         format: crate::types::TextureFormat,
-    ) -> Result<crate::backend::TextureCopyFootprint, GoldyError> {
+    ) -> Result<crate::texture::TextureCopyFootprint, GoldyError> {
         let backend = self.inner.backend.lock().unwrap();
         backend
             .query_texture_copy_footprint(self.inner.handle, width, height, format)
@@ -1141,6 +1192,7 @@ impl Device {
     }
 
     #[doc(hidden)]
+    #[allow(private_bounds)]
     pub fn with_mock_backend<R>(&self, f: impl FnOnce(&mut crate::backend::mock::MockBackend) -> R) -> R {
         let mut guard = self.inner.backend.lock().unwrap();
         let mock = guard

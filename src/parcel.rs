@@ -7,8 +7,10 @@ use crate::backend::{BufferHandle, ContextHandle};
 use crate::buffer::{Allocation, BufferSource, BufferView, StructuredBufferElement};
 use crate::context::Context;
 use crate::device::DeviceInner;
+use crate::handles::TextureHandle;
 use crate::task_graph::ResourceId;
 use crate::texture::TextureBacking;
+use crate::texture::TextureCopyFootprint;
 use crate::timeline::{
     PromiseState, ReferenceTable, ResourceSync, Settle, TimelinePromise, TimelineValue, WRITE_KINDS_TRANSFER,
 };
@@ -284,14 +286,6 @@ impl Parcel {
         }
     }
 
-    /// Zoning / telemetry label (buffer vs texture).
-    pub fn kind(&self) -> ParcelType {
-        match &self.backing {
-            ParcelBacking::WholeBuffer(_) | ParcelBacking::BufferRange { .. } => ParcelType::Buffer,
-            ParcelBacking::Texture(_) => ParcelType::Texture,
-        }
-    }
-
     /// Approximate committed byte size for this bindable unit.
     pub fn byte_size(&self) -> u64 {
         match &self.backing {
@@ -390,7 +384,7 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn texture_handle(&self) -> Option<crate::backend::TextureHandle> {
+    pub(crate) fn texture_handle(&self) -> Option<TextureHandle> {
         match &self.backing {
             ParcelBacking::Texture(t) => Some(t.gpu_handle()),
             _ => None,
@@ -564,6 +558,25 @@ impl Buffer {
         }
     }
 
+    /// Wrap a whole-buffer transient-pool parcel as a [`Buffer`] (preserves stamp + bookkeeping).
+    pub(crate) fn from_transient_parcel(mut parcel: Parcel, home_device: Weak<DeviceInner>) -> anyhow::Result<Self> {
+        let alloc = match &parcel.backing {
+            ParcelBacking::WholeBuffer(b) => Arc::clone(b),
+            _ => anyhow::bail!("from_transient_parcel requires a whole-buffer parcel"),
+        };
+        let bookkeeping = parcel
+            .bookkeeping
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("from_transient_parcel requires bookkeeping on the parcel"))?;
+        Ok(Self {
+            storage: BufferStorage::Single(alloc),
+            units: vec![parcel],
+            bookkeeping: Some(bookkeeping),
+            home_device,
+            handoff: false,
+        })
+    }
+
     pub(crate) fn from_partitioned(
         parent: Arc<Allocation>,
         views: Vec<BufferView>,
@@ -628,11 +641,6 @@ impl Buffer {
             "Buffer::whole: cannot bind a partitioned buffer as one descriptor; bind individual parcels via indexing"
         );
         &self.units[0]
-    }
-
-    /// Zoning / telemetry label.
-    pub fn kind(&self) -> ParcelType {
-        ParcelType::Buffer
     }
 
     /// Total committed byte size (backing allocation).
@@ -879,7 +887,7 @@ impl Texture {
     ///
     /// Requires [`TextureFlags::COPY_SRC`]. Swapchain drawables and other non-copyable
     /// textures do not satisfy that requirement and this method panics.
-    pub fn copy_layout(&self) -> crate::backend::TextureCopyFootprint {
+    pub fn copy_layout(&self) -> TextureCopyFootprint {
         if !self.flags().contains(TextureFlags::COPY_SRC) {
             panic!(
                 "Texture::copy_layout requires TextureFlags::COPY_SRC; \
@@ -896,7 +904,7 @@ impl Texture {
             .unwrap_or_else(|e| panic!("Texture::copy_layout backend query failed: {e}"))
     }
 
-    pub fn gpu_handle(&self) -> crate::backend::TextureHandle {
+    pub fn gpu_handle(&self) -> TextureHandle {
         self.parcel.texture_handle().expect("texture parcel")
     }
 
@@ -914,10 +922,6 @@ impl Texture {
 
     pub fn is_owned(&self) -> bool {
         self.parcel.texture_is_owned()
-    }
-
-    pub fn kind(&self) -> ParcelType {
-        ParcelType::Texture
     }
 
     pub fn last_referenced(&self) -> ReferenceTable {

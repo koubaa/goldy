@@ -1470,13 +1470,12 @@ pub(crate) struct ComputePipelineState {
     pub shader_debug_name: String,
 }
 
-/// GPU render target state with optional staging for CPU readback.
+/// GPU render target state.
 #[allow(dead_code)]
 pub(crate) struct RenderTargetState {
     pub device_handle: DeviceHandle,
     pub width: u32,
     pub height: u32,
-    pub format: TextureFormat,
     /// GPU-only render target texture
     pub texture: Direct3D12::ID3D12Resource,
     /// RTV descriptor handle offset
@@ -1485,12 +1484,8 @@ pub(crate) struct RenderTargetState {
     pub depth_format: Option<DepthFormat>,
     pub depth_texture: Option<Direct3D12::ID3D12Resource>,
     pub dsv_offset: Option<u32>,
-    /// Staging buffer for CPU readback (lazy-created on first read)
-    pub staging_buffer: Option<Direct3D12::ID3D12Resource>,
     /// Command list for rendering
     pub command_list: Direct3D12::ID3D12GraphicsCommandList7,
-    /// Track if we've rendered (for readback validation)
-    pub has_rendered: bool,
 }
 
 /// GPU texture state.

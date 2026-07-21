@@ -10,10 +10,20 @@
 /// the device descriptor registry) and reach shaders via push constants
 /// `_rs1`/`_rs2`; these constants only describe Metal's fixed device-level
 /// argument-buffer layout.
+#[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_SELECTOR_SLOT: u32 = 0;
 /// Metal argument-buffer slot for the device-local index table (`Scattered<u32>`).
+#[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
 /// First bindless slot available to program resources (low protocol slots reserved).
+#[cfg_attr(
+    not(any(
+        feature = "vulkan",
+        all(feature = "dx12", target_os = "windows"),
+        all(feature = "metal", target_os = "macos"),
+    )),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
 /// Maximum bindless indices routed through the table per submission row.
@@ -27,21 +37,42 @@ pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
 pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;
 
 /// Byte size of one device-local table buffer.
+#[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_TABLE_BYTES: u64 = (FRAME_TABLE_TABLE_U32S * 4) as u64;
 /// Per-row selector slots at the front of CPU upload staging.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_STAGING_SELECTOR_U32S: usize = FRAME_TABLE_MAX_ROWS as usize;
 /// Total `u32` elements in CPU upload staging (selectors + row payloads).
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_STAGING_U32S: usize = FRAME_TABLE_STAGING_SELECTOR_U32S + FRAME_TABLE_TABLE_U32S;
 /// Byte size of CPU upload staging (per-row selectors + row-strided table payloads).
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_STAGING_BYTES: u64 = (FRAME_TABLE_STAGING_U32S * 4) as u64;
 
 /// Byte offset of row `row`'s selector word in CPU staging.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 #[inline]
 pub fn staging_selector_byte_offset(row: u32) -> u64 {
     (row as u64) * 4
 }
 
 /// Byte offset of row `row`'s payload in CPU staging.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 #[inline]
 pub fn staging_row_payload_byte_offset(row: u32) -> u64 {
     (FRAME_TABLE_STAGING_SELECTOR_U32S as u64 + row as u64 * FRAME_TABLE_ROW_STRIDE as u64) * 4
@@ -143,78 +174,21 @@ pub fn lower_render_pass_commands(
         .collect()
 }
 
-/// Ensure compute commands route bindless indices through the frame table.
-pub fn lower_gpu_commands(commands: &mut Vec<crate::backend::GpuCommand>) {
-    let has_typed = commands
-        .iter()
-        .any(|c| matches!(c, crate::backend::GpuCommand::BindResourcesTyped { .. }));
-    if !has_typed {
-        // No typed binds to lower. Pass any pre-existing staging through unchanged;
-        // if there is none, do NOT insert an empty prologue — bind-free streams
-        // (pure copy/upload/barrier) must not bump the submission counter or
-        // overwrite the selector with zeros.
-        return;
-    }
-
-    let mut staging_data = commands
-        .iter()
-        .find_map(|c| match c {
-            crate::backend::GpuCommand::FrameTableStaging { data } => Some((**data).to_vec()),
-            _ => None,
-        })
-        .unwrap_or_else(|| FrameTableStaging::new().data);
-    let mut next_dispatch_base = 0u32;
-    for cmd in commands.iter() {
-        if let crate::backend::GpuCommand::BindResourcesRaw {
-            frame_table_base,
-            indices,
-            ..
-        } = cmd
-        {
-            next_dispatch_base = next_dispatch_base.max(
-                frame_table_base
-                    .saturating_add(indices.len() as u32)
-                    .min(FRAME_TABLE_ROW_STRIDE),
-            );
-        }
-    }
-    let mut staging = FrameTableStaging {
-        data: staging_data,
-        next_dispatch_base,
-    };
-
-    let mut lowered = Vec::with_capacity(commands.len());
-    for cmd in commands.drain(..) {
-        match cmd {
-            crate::backend::GpuCommand::FrameTableStaging { .. } => {}
-            crate::backend::GpuCommand::BindResourcesTyped { handles } => {
-                let indices: Vec<u32> = handles.iter().map(|h| h.index()).collect();
-                let frame_table_base = staging.alloc_dispatch(indices.len() as u32);
-                staging.write_dispatch_indices(frame_table_base, &indices);
-                lowered.push(crate::backend::GpuCommand::BindResourcesRaw {
-                    indices,
-                    user: Vec::new(),
-                    frame_table_base,
-                });
-            }
-            other => lowered.push(other),
-        }
-    }
-    staging_data = staging.data;
-    lowered.insert(
-        0,
-        crate::backend::GpuCommand::FrameTableStaging {
-            data: staging_data.as_slice().into(),
-        },
-    );
-    *commands = lowered;
-}
+/// Frame-table staging is built directly by the task-graph analyzer; kept for call-site stability.
+#[cfg_attr(
+    not(any(
+        feature = "vulkan",
+        all(feature = "dx12", target_os = "windows"),
+        all(feature = "metal", target_os = "macos"),
+    )),
+    allow(dead_code)
+)]
+pub fn lower_gpu_commands(_commands: &mut Vec<crate::backend::GpuCommand>) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::{GpuCommand, RenderCommand};
-    use crate::types::{ResourceCategory, ResourceHandle};
 
     #[test]
     fn lower_render_skips_already_lowered_raw() {
@@ -234,32 +208,6 @@ mod tests {
             }
         ));
     }
-
-    #[test]
-    fn lower_gpu_inserts_staging_prefix_for_typed_bind() {
-        let mut cmds = vec![
-            GpuCommand::BindResourcesTyped {
-                handles: vec![ResourceHandle::new(ResourceCategory::Scattered, 7)],
-            },
-            GpuCommand::Dispatch {
-                label: None,
-                workgroups_x: 1,
-                workgroups_y: 1,
-                workgroups_z: 1,
-            },
-        ];
-        lower_gpu_commands(&mut cmds);
-        assert!(matches!(cmds[0], GpuCommand::FrameTableStaging { .. }));
-        assert!(matches!(
-            cmds[1],
-            GpuCommand::BindResourcesRaw {
-                frame_table_base: 0,
-                ..
-            }
-        ));
-    }
-
-    // ── New regression / coverage tests ─────────────────────────────────────
 
     /// A bind-free stream (copies, uploads, barriers) must NOT receive a
     /// FrameTableStaging prefix; doing so would bump the submission counter and

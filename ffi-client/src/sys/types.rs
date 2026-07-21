@@ -12,7 +12,6 @@ pub enum GoldyContext {}
 pub enum GoldyDevice {}
 pub enum GoldyInstance {}
 pub enum GoldyRenderPipeline {}
-pub enum GoldyRenderTarget {}
 pub enum GoldySampler {}
 pub enum GoldyScheme {}
 pub enum GoldySchemeRenderTargetLease {}
@@ -21,8 +20,6 @@ pub enum GoldySurfaceExchange {}
 pub enum GoldyTransaction {}
 pub enum GoldyClaim {}
 pub enum GoldyShaderModule {}
-pub enum GoldySurface {}
-pub enum GoldySurfaceFrame {}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

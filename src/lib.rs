@@ -12,26 +12,24 @@
 //! let device = adapter.request_device(&Default::default()).unwrap();
 //! ```
 
-pub mod backend;
+pub(crate) mod backend;
 pub mod buffer;
-pub mod common_types;
 pub mod compute;
 pub mod context;
 pub mod device;
 pub mod error;
-pub mod examples;
 pub mod frame_orchestrator;
-pub mod frame_table;
+pub(crate) mod frame_table;
+pub(crate) mod handles;
 pub mod pipeline;
-pub mod render_target;
+pub(crate) mod render_target;
 pub mod sampler;
 pub mod shader;
 pub mod shader_library;
 pub mod shaders;
-pub mod surface;
+pub(crate) mod surface;
 pub mod task_graph;
 pub mod texture;
-pub mod texture_pool;
 pub mod types;
 
 pub mod shader_cache;
@@ -39,82 +37,83 @@ pub mod slang;
 pub mod validation_env;
 
 // Structured instrumentation for debugging and profiling
-pub mod gpu_guard;
-pub mod gpu_profiler;
-pub mod instrumentation;
+pub(crate) mod gpu_profiler;
+pub(crate) mod instrumentation;
 pub mod tracy;
 
 #[cfg(feature = "tracy")]
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
-pub mod allocation_policy;
+pub(crate) mod allocation_policy;
 mod buffer_alloc_tests;
 pub mod exchange;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
-pub mod placement_heap;
 pub mod retained_pool;
 pub mod scheme;
 pub mod signal;
 pub mod swapchain_pool;
 pub mod timeline;
-pub mod transient_allocator;
 pub mod transient_pool;
-pub mod vram_allocator;
-pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
+pub(crate) mod vram_allocator;
+pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 pub use exchange::{Claim, SurfaceExchange};
-pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
-pub use gpu_guard::GpuGuard;
-pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField, Texture};
-pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
+pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
+pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
+pub use retained_pool::RetainedPool;
 pub use scheme::{
-    ClaimKey, Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture,
-    Loan, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, SubmissionHandle, Transaction,
-    UploadBuffer,
+    Grant, GrantBuffer, GrantBytes, GrantTexture, Lease, LeaseRenderTarget, ReadGrant, ReplayStats, Scheme,
+    SchemeRenderPassBuilder, Submission, Transaction, UploadBuffer,
 };
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
-pub use transient_pool::TransientPool;
-pub use vram_allocator::{DeferredPayload, ParcelType};
+pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
-pub use buffer::{BufferPool, BufferSource, BufferView, StructuredBufferElement};
-pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
+pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
-pub use signal::{OversubscribedReason, Signal};
-pub use timeline::{Epoch, ReferenceTable, TimelineValue};
-
-pub use backend::GraphCommand;
-pub use backend::{BufferHeapStats, TextureCopyFootprint, TextureHeapStats, VideoMemoryInfo};
 pub use context::Context;
 pub use device::{
-    Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
+    Adapter, AdapterInfo, BufferHeapStats, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
+    RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
 };
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
-pub use render_target::RenderTarget;
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
+pub use signal::{OversubscribedReason, Signal};
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
-pub use surface::{Frame, Surface};
-pub use task_graph::{GraphIR, NodeAccess};
+pub use task_graph::NodeAccess;
+pub use texture::TextureCopyFootprint;
+pub use timeline::TimelineValue;
 
-pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
-pub use transient_allocator::{
-    BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
-};
+pub use handles::{SamplerHandle, TextureHandle};
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};
+
+pub use raw_window_handle;
 
 #[cfg(test)]
 mod boundary_reclamation;
 
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub use backend::dx12::WARP_ADAPTER_ID;
+
+/// Whether the DX12 backend is running with the D3D12 debug layer enabled.
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub fn dx12_debug_mode() -> bool {
+    backend::dx12::is_debug_mode()
+}
+
+/// Whether the DX12 backend is running with the D3D12 debug layer enabled.
+#[cfg(not(all(feature = "dx12", target_os = "windows")))]
+pub fn dx12_debug_mode() -> bool {
+    false
+}
 
 /// Test helpers for `--lib` and integration tests.
 ///
@@ -134,8 +133,60 @@ pub mod test_support {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
+    #[allow(private_bounds)]
     pub fn with_mock<R>(device: &Device, f: impl FnOnce(&mut MockBackend) -> R) -> R {
         device.with_mock_backend(f)
+    }
+
+    pub fn mock_reset_tracking(device: &Device) {
+        with_mock(device, |m| m.reset_tracking());
+    }
+
+    pub fn mock_recorded_waits(device: &Device) -> Vec<Vec<crate::timeline::Epoch>> {
+        with_mock(device, |m| m.recorded_waits.clone())
+    }
+
+    pub fn mock_retained_resubmit_count(device: &Device) -> usize {
+        with_mock(device, |m| m.retained_resubmit_count)
+    }
+
+    pub fn mock_compute_dispatch_count(device: &Device) -> usize {
+        with_mock(device, |m| m.compute_dispatch_count)
+    }
+
+    pub fn mock_all_graph_syncs_some(device: &Device) -> bool {
+        with_mock(device, |m| m.recorded_graph_syncs.iter().all(|&s| s))
+    }
+
+    pub fn mock_recorded_graph_syncs(device: &Device) -> Vec<bool> {
+        with_mock(device, |m| m.recorded_graph_syncs.clone())
+    }
+
+    pub fn mock_has_nonempty_host_observed_waits(device: &Device) -> bool {
+        with_mock(device, |m| {
+            m.recorded_host_observed_waits.iter().any(|batch| !batch.is_empty())
+        })
+    }
+
+    pub fn mock_has_nonempty_deferred_host_writes(device: &Device) -> bool {
+        with_mock(device, |m| {
+            m.recorded_deferred_host_writes.iter().any(|batch| !batch.is_empty())
+        })
+    }
+
+    /// Count buffer entries in the first recorded `ResourceBarrier` on the mock backend.
+    pub fn mock_barrier_buffer_count(device: &Device) -> usize {
+        use crate::backend::GpuCommand;
+        with_mock(device, |m| {
+            m.recorded_compute_commands
+                .iter()
+                .flat_map(|batch| batch.iter())
+                .find_map(|cmd| match cmd {
+                    GpuCommand::ResourceBarrier { buffers, .. } => Some(buffers.len()),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        })
     }
 
     /// Headless surface exchange backed by mock window handles (mock backend only).

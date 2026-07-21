@@ -2,7 +2,8 @@
 
 use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
-use crate::backend::{AdapterInfo, BackendType, DeviceType};
+use crate::backend::{AdapterInfo, BackendType};
+use crate::types::DeviceType;
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
@@ -868,12 +869,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     }
                     if let Some(depth_memory) = target.depth_memory {
                         logical_device.device.free_memory(depth_memory, None);
-                    }
-                    if let Some(staging_buffer) = target.staging_buffer {
-                        logical_device.device.destroy_buffer(staging_buffer, None);
-                    }
-                    if let Some(staging_memory) = target.staging_memory {
-                        logical_device.device.free_memory(staging_memory, None);
                     }
                 }
             }

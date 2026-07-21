@@ -228,7 +228,7 @@ pub struct LayoutCheck<'a> {
     pub rust_fields: &'a [(&'a str, usize, usize)],
 }
 
-/// Stored on backend [`ShaderState`](crate::backend) for deferred per-stage compilation.
+/// Stored on backend shader state for deferred per-stage compilation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedLayoutCheck {
     pub type_name: String,

@@ -5,7 +5,7 @@
 //! Buffers are acquired aggregates; bind their [`crate::Parcel`] units. Relinquish via
 //! [`RetainedPool::release_buffer`] / [`RetainedPool::release_texture`] or by dropping.
 
-use crate::buffer::{BufferPool, StructuredBufferElement};
+use crate::buffer::{alloc_scattered_subregions, ScatteredSubregionSpec, StructuredBufferElement};
 use crate::context::Context;
 use crate::device::Device;
 use crate::parcel::{BookkeepingGuard, Buffer, BytesByKind, Init, PoolBookkeeping, RecordField, Texture};
@@ -16,39 +16,16 @@ use anyhow::Result;
 use std::sync::Arc;
 
 /// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
-pub enum RetainedHold {
+pub(crate) enum RetainedHold {
     Buffer(Buffer),
     Texture(Texture),
 }
 
-impl RetainedHold {
-    pub fn byte_size(&self) -> u64 {
-        match self {
-            RetainedHold::Buffer(b) => b.byte_size(),
-            RetainedHold::Texture(t) => t.byte_size(),
-        }
-    }
-
-    pub fn last_referenced(&self) -> ReferenceTable {
-        match self {
-            RetainedHold::Buffer(b) => b.last_referenced(),
-            RetainedHold::Texture(t) => t.last_referenced(),
-        }
-    }
-
-    pub fn texture_descriptor(&self) -> Option<(u32, u32, TextureFormat, TextureKind, TextureFlags)> {
-        match self {
-            RetainedHold::Buffer(_) => None,
-            RetainedHold::Texture(t) => t.whole().texture_descriptor(),
-        }
-    }
-}
-
 /// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
-pub struct StampedParcel {
-    pub hold: RetainedHold,
+pub(crate) struct StampedParcel {
+    pub(crate) hold: RetainedHold,
     /// Per-context timelines after which the resource may be reused; empty if never referenced.
-    pub ready_after: ReferenceTable,
+    pub(crate) ready_after: ReferenceTable,
 }
 
 /// Deed-governed pool: allocates retained resources; no epoch gate while held.
@@ -139,39 +116,34 @@ impl RetainedPool {
         let fields: Vec<RecordField> = fields.into_iter().collect();
         assert!(!fields.is_empty(), "acquire_record requires at least one field");
 
-        let pairs: Vec<(usize, usize)> = fields
+        let regions: Vec<ScatteredSubregionSpec<'_>> = fields
             .iter()
-            .map(|f| match &f.init {
-                Init::Data { count, stride, .. } | Init::Reserve { count, stride } => {
-                    (*count as usize, *stride as usize)
-                }
+            .map(|field| match &field.init {
+                Init::Data { bytes, count, stride } => ScatteredSubregionSpec {
+                    byte_size: *count * *stride as u64,
+                    element_stride: *stride,
+                    init: Some(bytes.as_slice()),
+                },
+                Init::Reserve { count, stride } => ScatteredSubregionSpec {
+                    byte_size: *count * *stride as u64,
+                    element_stride: *stride,
+                    init: None,
+                },
             })
             .collect();
-        let total = BufferPool::padded_size(&pairs);
-        let mut pool = BufferPool::new(&self.device, total)?;
+        let (backing, views) = alloc_scattered_subregions(&self.device, &regions)?;
 
-        let mut views = Vec::with_capacity(fields.len());
         let mut field_names = Vec::with_capacity(fields.len());
         for field in &fields {
-            let (count, stride, data) = match &field.init {
-                Init::Data { bytes, count, stride } => (*count, *stride, Some(bytes.as_slice())),
-                Init::Reserve { count, stride } => (*count, *stride, None),
-            };
-            let size = count * stride as u64;
-            let view = pool.alloc_bytes(size, Some(stride))?;
-            if let Some(data) = data {
-                view.write_data(data)?;
-            }
-            views.push(view);
             field_names.push(field.name.as_ref().map(|n| n.to_string()));
         }
 
-        let bytes = pool.capacity();
+        let bytes = backing.size();
         let kind = ParcelType::Buffer;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
         Ok(Buffer::from_partitioned(
-            Arc::new(pool.into_backing()),
+            Arc::new(backing),
             views,
             field_names,
             guard,
@@ -240,7 +212,7 @@ impl RetainedPool {
         }
     }
 
-    /// Committed bytes currently held through this pool, by [`ParcelType`].
+    /// Committed bytes currently held through this pool (buffers vs textures).
     pub fn bytes_by_kind(&self) -> BytesByKind {
         self.bookkeeping.snapshot()
     }
@@ -293,8 +265,7 @@ mod tests {
     fn acquire_texture_without_init_allocates() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(64, 64, fmt, acc, flags, None).unwrap();
-        assert_eq!(p.kind(), ParcelType::Texture);
+        let _p = pool.acquire_texture(64, 64, fmt, acc, flags, None).unwrap();
         assert!(pool.bytes_by_kind().texture > 0);
         assert_eq!(pool.bytes_by_kind().buffer, 0);
     }
@@ -311,7 +282,6 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(b.kind(), ParcelType::Buffer);
         assert_eq!(b.byte_size(), 256);
         assert!(pool.bytes_by_kind().buffer >= 256);
         assert_eq!(b.unit_count(), 1);

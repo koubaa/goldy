@@ -162,12 +162,6 @@ pub struct CrossSubmitSync {
     pub cpu_waits: Vec<Epoch>,
 }
 
-impl CrossSubmitSync {
-    pub fn is_empty(&self) -> bool {
-        self.prologue.is_empty() && self.waits.is_empty() && self.cpu_waits.is_empty()
-    }
-}
-
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
         NodeKind::Dispatch { .. } => UsageKindFlags::COMPUTE,
@@ -1108,7 +1102,7 @@ mod tests {
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Read);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
-        assert!(sync.is_empty());
+        assert!(sync.prologue.is_empty() && sync.waits.is_empty() && sync.cpu_waits.is_empty());
     }
 
     #[test]
@@ -1136,7 +1130,7 @@ mod tests {
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &LedgerSnapshot::default(), ctx);
-        assert!(sync.is_empty());
+        assert!(sync.prologue.is_empty() && sync.waits.is_empty() && sync.cpu_waits.is_empty());
     }
 
     #[test]
@@ -1172,7 +1166,7 @@ mod tests {
         let ir = single_binding_ir(ResourceId::Buffer(20), NodeAccess::Read);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
-        assert!(sync.is_empty());
+        assert!(sync.prologue.is_empty() && sync.waits.is_empty() && sync.cpu_waits.is_empty());
     }
 
     #[test]

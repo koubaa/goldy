@@ -8,6 +8,10 @@
 //! `validation_env::retained_cb_reuse_disabled`): each submit re-records via ordinary
 //! `submit_graph` with a fresh timestamp query heap, and Goldy skips retention
 //! fingerprints / backend CB storage.
+//!
+//! Callers live in backend modules, so much of this module is unused under
+//! `--no-default-features`.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};

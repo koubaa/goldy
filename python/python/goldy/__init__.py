@@ -5,10 +5,10 @@ A modern GPU library targeting Vulkan 1.4+, DX12, and Metal.
 Example:
     >>> import goldy
     >>> import numpy as np
-    >>> 
+    >>>
     >>> instance = goldy.Instance()
     >>> device = instance.request_adapter().request_device()
-    >>> 
+    >>>
     >>> # Graphics via Scheme (headless)
     >>> ctx = goldy.Context(device)
     >>> scheme = goldy.Scheme(ctx)
@@ -34,7 +34,7 @@ if "GOLDY_SLANG_PATH" not in _os.environ:
         _slang_lib = "libslang-compiler.dylib"
     else:
         _slang_lib = "libslang-compiler.so"
-    
+
     _slang_path = _package_dir / _slang_lib
     if _slang_path.exists():
         _os.environ["GOLDY_SLANG_PATH"] = str(_slang_path)
@@ -70,7 +70,6 @@ from goldy._goldy import (
     ShaderModule,
     RenderPipeline,
     RenderPipelineDesc,
-    RenderTarget,
     Scheme,
     SchemeComputeNode,
     SchemeRenderPass,
@@ -86,9 +85,6 @@ from goldy._goldy import (
     Builtins,
     # Compute
     ComputePipeline,
-    # Surface (windowed rendering)
-    Surface,
-    SurfaceFrame,
 )
 
 __all__ = [
@@ -122,7 +118,6 @@ __all__ = [
     "ShaderModule",
     "RenderPipeline",
     "RenderPipelineDesc",
-    "RenderTarget",
     "Scheme",
     "SchemeComputeNode",
     "SchemeRenderPass",
@@ -138,9 +133,6 @@ __all__ = [
     "Builtins",
     # Compute
     "ComputePipeline",
-    # Surface (windowed rendering)
-    "Surface",
-    "SurfaceFrame",
 ]
 
 __version__ = "0.1.0"

@@ -3,8 +3,9 @@
 //! Samplers define how textures are sampled in shaders, including
 //! filtering modes and addressing (wrapping) behavior.
 
-use crate::backend::{GpuBackend, SamplerHandle};
+use crate::backend::GpuBackend;
 use crate::device::Device;
+use crate::handles::SamplerHandle;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, SamplerDesc};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};

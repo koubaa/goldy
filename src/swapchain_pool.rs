@@ -1,12 +1,12 @@
 //! Swapchain pool — N-backed present leases for retained schemes.
 //!
-//! A swapchain pool wraps a [`Surface`] and supplies drawable backings for
+//! A swapchain pool wraps a surface and supplies drawable backings for
 //! [`PresentLease`] handles. Callers may acquire a concrete drawable early
 //! (classic frame timing) or let [`crate::Scheme::submit`] defer acquire until
 //! the present partition is about to run.
 
-use crate::backend::TextureHandle;
 use crate::context::Context;
+use crate::handles::TextureHandle;
 use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
@@ -66,7 +66,7 @@ impl PresentLease {
 
 /// A swapchain drawable acquired before scheme submit (classic-like early acquire).
 ///
-/// Dropping an unconsumed claim cancels the underlying [`Surface`] frame so the
+/// Dropping an unconsumed claim cancels the underlying surface frame so the
 /// image is not presented.
 pub struct AcquiredPresent {
     /// Pool-local lease id (matches a [`PresentLease`], not the scheme binding id).

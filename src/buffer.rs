@@ -22,8 +22,7 @@ fn bindless_cache_from_backend(
     }
 }
 
-/// Types allowed as elements in [`RetainedPool::acquire_buffer_with_data`](crate::RetainedPool::acquire_buffer_with_data)
-/// and [`BufferPool::alloc_with_data`].
+/// Types allowed as elements in [`RetainedPool::acquire_buffer_with_data`](crate::RetainedPool::acquire_buffer_with_data).
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
 /// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
@@ -714,236 +713,107 @@ pub(crate) fn lcm(a: u64, b: u64) -> u64 {
     a * b / gcd(a, b)
 }
 
-/// A GPU buffer pool that sub-allocates views from a single large buffer.
-///
-/// Instead of allocating many small buffers (each a separate GPU allocation),
-/// create one pool and carve out typed regions. Each region gets its own
-/// bindless descriptor so shaders see independent zero-based buffers.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use goldy::{BufferPool, DeviceDescriptor, Instance, RequestAdapterOptions, ResourceAccess};
-///
-/// let instance = Instance::new()?;
-/// let device = instance
-///     .request_adapter(&RequestAdapterOptions::default())?
-///     .request_device(&DeviceDescriptor::default())?;
-///
-/// let mut pool = BufferPool::new(&device, 1024 * 1024)?; // 1 MB pool
-///
-/// let tiles = pool.alloc::<[u32; 2]>(1024)?;   // 8 KB for 1024 tiles
-/// let segments = pool.alloc::<[f32; 6]>(4096)?; // 96 KB for 4096 segments
-///
-/// // Use views via resource indices
-/// let tile_idx = tiles.resource_index(ResourceAccess::Write).unwrap();
-/// let seg_idx = segments.resource_index(ResourceAccess::Write).unwrap();
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-pub struct BufferPool {
-    backing: Allocation,
-    offset: u64,
-    alignment: u64,
+const SCATTERED_SUBALLOC_ALIGNMENT: u64 = 256;
+
+/// Compute the total scattered backing size for a set of sub-regions.
+fn scattered_suballoc_padded_size(allocs: &[(usize, usize)]) -> u64 {
+    let mut offset = 0u64;
+    for &(count, stride) in allocs {
+        let stride = stride as u64;
+        let alloc_align = lcm(SCATTERED_SUBALLOC_ALIGNMENT, stride);
+        let aligned_offset = offset.div_ceil(alloc_align) * alloc_align;
+        let size = (count as u64) * stride;
+        offset = aligned_offset + size;
+    }
+    offset
 }
 
-impl BufferPool {
-    /// Compute the total pool size needed for a set of allocations.
-    ///
-    /// Takes `(element_count, element_size)` pairs and returns the exact byte size
-    /// required, including alignment padding. Use with [`BufferPool::new`] to avoid
-    /// magic padding constants.
-    pub fn padded_size(allocs: &[(usize, usize)]) -> u64 {
-        const ALIGNMENT: u64 = 256;
-        let mut offset = 0u64;
-        for &(count, stride) in allocs {
-            let stride = stride as u64;
-            let alloc_align = lcm(ALIGNMENT, stride);
-            let aligned_offset = offset.div_ceil(alloc_align) * alloc_align;
-            let size = (count as u64) * stride;
-            offset = aligned_offset + size;
-        }
-        offset
-    }
+/// One sub-region to carve from a single scattered backing allocation.
+pub(crate) struct ScatteredSubregionSpec<'a> {
+    pub byte_size: u64,
+    pub element_stride: u32,
+    pub init: Option<&'a [u8]>,
+}
 
-    /// Create a new buffer pool with the given total size.
-    ///
-    /// The backing buffer is allocated as `BufferKind::Scattered` (storage buffer)
-    /// since sub-allocation only makes sense for storage buffers.
-    ///
-    /// `alignment` defaults to 256 bytes, which satisfies `minStorageBufferOffsetAlignment`
-    /// on all known Vulkan/DX12 hardware.
-    pub fn new(device: &Device, total_size: u64) -> Result<Self> {
-        Self::with_alignment(device, total_size, 256)
-    }
+/// Allocate one `BufferKind::Scattered` backing buffer and carve typed views for each region.
+pub(crate) fn alloc_scattered_subregions(
+    device: &Device,
+    regions: &[ScatteredSubregionSpec<'_>],
+) -> Result<(Allocation, Vec<BufferView>)> {
+    alloc_scattered_subregions_with_alignment(device, regions, SCATTERED_SUBALLOC_ALIGNMENT)
+}
 
-    /// Create a pool with a custom sub-allocation alignment.
-    pub fn with_alignment(device: &Device, total_size: u64, alignment: u64) -> Result<Self> {
-        assert!(alignment.is_power_of_two(), "alignment must be a power of two");
-        tracing::debug!(total_size, alignment, "Creating buffer pool");
-        let backing = device.alloc_buffer(total_size, BufferKind::Scattered, None, BufferFlags::empty())?;
-        Ok(Self {
-            backing,
-            offset: 0,
-            alignment,
+fn alloc_scattered_subregions_with_alignment(
+    device: &Device,
+    regions: &[ScatteredSubregionSpec<'_>],
+    alignment: u64,
+) -> Result<(Allocation, Vec<BufferView>)> {
+    assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    let pairs: Vec<(usize, usize)> = regions
+        .iter()
+        .map(|r| {
+            let stride = r.element_stride as usize;
+            let count = if stride == 0 {
+                0
+            } else {
+                (r.byte_size / r.element_stride as u64) as usize
+            };
+            (count, stride)
         })
-    }
-
-    /// Like [`Self::with_alignment`], but reserves up to `expected_max` bytes on supporting backends.
-    pub fn with_alignment_and_capacity_hint(
-        device: &Device,
-        total_size: u64,
-        expected_max: u64,
-        alignment: u64,
-    ) -> Result<Self> {
-        Self::with_alignment_capacity_hint_and_flags(device, total_size, expected_max, alignment, BufferFlags::empty())
-    }
-
-    /// Like [`Self::with_alignment_and_capacity_hint`] with [`BufferFlags`].
-    pub fn with_alignment_capacity_hint_and_flags(
-        device: &Device,
-        total_size: u64,
-        expected_max: u64,
-        alignment: u64,
-        flags: BufferFlags,
-    ) -> Result<Self> {
-        assert!(alignment.is_power_of_two(), "alignment must be a power of two");
-        tracing::debug!(
-            total_size,
-            expected_max,
+        .collect();
+    let total = scattered_suballoc_padded_size(&pairs);
+    let backing = device.alloc_buffer(total, BufferKind::Scattered, None, BufferFlags::empty())?;
+    let mut offset = 0u64;
+    let mut views = Vec::with_capacity(regions.len());
+    for region in regions {
+        let view = bump_scattered_subregion(
+            &backing,
+            &mut offset,
             alignment,
-            ?flags,
-            "Creating buffer pool with capacity hint"
+            region.byte_size,
+            Some(region.element_stride),
+        )?;
+        if let Some(data) = region.init {
+            view.write_data(data)?;
+        }
+        views.push(view);
+    }
+    Ok((backing, views))
+}
+
+fn bump_scattered_subregion(
+    backing: &Allocation,
+    offset: &mut u64,
+    pool_alignment: u64,
+    size: u64,
+    element_stride: Option<u32>,
+) -> Result<BufferView> {
+    let stride_u32 = element_stride.unwrap_or(4);
+    if stride_u32 == 0 {
+        anyhow::bail!("scattered suballoc: element stride must be non-zero");
+    }
+    if !size.is_multiple_of(stride_u32 as u64) {
+        anyhow::bail!(
+            "scattered suballoc: size {size} must be a multiple of element stride {stride_u32} \
+             (StructuredBuffer views require an integral element count)"
         );
-        let backing = device.alloc_buffer_with_capacity(total_size, expected_max, BufferKind::Scattered, flags)?;
-        Ok(Self {
-            backing,
-            offset: 0,
-            alignment,
-        })
+    }
+    let stride = stride_u32 as u64;
+    let alloc_align = lcm(pool_alignment, stride);
+    let aligned_offset = offset.div_ceil(alloc_align) * alloc_align;
+
+    if aligned_offset + size > backing.size() {
+        anyhow::bail!(
+            "scattered suballoc exhausted: need {} bytes at offset {}, backing size is {}",
+            size,
+            aligned_offset,
+            backing.size()
+        );
     }
 
-    /// Resize the backing buffer in place (stable handle) and reset the bump allocator.
-    pub fn resize(&mut self, new_size: u64) -> Result<()> {
-        self.backing.resize_to(new_size)?;
-        self.offset = 0;
-        Ok(())
-    }
-
-    /// Allocate a typed region from the pool.
-    ///
-    /// Returns a `BufferView` spanning `count` elements of type `T`, with the offset
-    /// aligned to the pool's alignment requirement.
-    pub fn alloc<T: StructuredBufferElement>(&mut self, count: u64) -> Result<BufferView> {
-        let stride = std::mem::size_of::<T>() as u64;
-        let size = count * stride;
-        self.alloc_bytes(size, Some(stride as u32))
-    }
-
-    /// Allocate and fill a typed region in one call.
-    ///
-    /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
-    /// Same element-stride rules as `Device::alloc_buffer_with_data`.
-    pub fn alloc_with_data<T: StructuredBufferElement>(&mut self, data: &[T]) -> Result<BufferView> {
-        let view = self.alloc::<T>(data.len() as u64)?;
-        view.write_data(data)?;
-        Ok(view)
-    }
-
-    /// Whether an [`Self::alloc_bytes`] of `size` bytes with the given `element_stride` would
-    /// fit in the remaining pool capacity without growth.
-    ///
-    /// Uses the same alignment math as [`Self::alloc_bytes`] so the answer is exact, including
-    /// for non-power-of-two strides (e.g. 12-byte `vec3<f32>`).
-    pub fn would_fit(&self, size: u64, element_stride: Option<u32>) -> bool {
-        let stride_u32 = element_stride.unwrap_or(4);
-        if stride_u32 == 0 || !size.is_multiple_of(stride_u32 as u64) {
-            return false;
-        }
-        let stride = stride_u32 as u64;
-        let alloc_align = lcm(self.alignment, stride);
-        let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
-        aligned_offset.saturating_add(size) <= self.backing.size()
-    }
-
-    /// Allocate a raw byte region from the pool.
-    ///
-    /// `element_stride` determines the structured buffer stride for the view's descriptor.
-    /// If `None`, defaults to 4 bytes (u32).
-    ///
-    /// Each allocation is aligned to satisfy both pool alignment (256) and
-    /// `offset % element_stride == 0` (required by DX12 StructuredBuffer views).
-    pub fn alloc_bytes(&mut self, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
-        let stride_u32 = element_stride.unwrap_or(4);
-        if stride_u32 == 0 {
-            anyhow::bail!("BufferPool alloc_bytes: element stride must be non-zero");
-        }
-        if !size.is_multiple_of(stride_u32 as u64) {
-            anyhow::bail!(
-                "BufferPool alloc_bytes: size {size} must be a multiple of element stride {stride_u32} \
-                 (StructuredBuffer views require an integral element count)"
-            );
-        }
-        let stride = stride_u32 as u64;
-        let alloc_align = lcm(self.alignment, stride);
-        let aligned_offset = self.offset.div_ceil(alloc_align) * alloc_align;
-
-        if aligned_offset + size > self.backing.size() {
-            anyhow::bail!(
-                "BufferPool exhausted: need {} bytes at offset {}, pool size is {}",
-                size,
-                aligned_offset,
-                self.backing.size()
-            );
-        }
-
-        let view = self.backing.create_view(aligned_offset, size, element_stride)?;
-        self.offset = aligned_offset + size;
-        Ok(view)
-    }
-
-    /// Reset the pool allocator to the beginning.
-    ///
-    /// This does NOT invalidate existing views — their descriptors still point at the
-    /// correct memory. Use this for frame-to-frame reuse where you know previous
-    /// views are no longer in flight.
-    pub fn reset(&mut self) {
-        self.offset = 0;
-    }
-
-    /// Bytes currently allocated from the pool.
-    pub fn used(&self) -> u64 {
-        self.offset
-    }
-
-    /// Total pool capacity in bytes.
-    pub fn capacity(&self) -> u64 {
-        self.backing.size()
-    }
-
-    /// Remaining bytes available for allocation.
-    pub fn remaining(&self) -> u64 {
-        self.backing.size().saturating_sub(self.offset)
-    }
-
-    /// Consume the pool and return its backing allocation.
-    pub(crate) fn into_backing(self) -> Allocation {
-        self.backing
-    }
-
-    /// Get a reference to the backing buffer (e.g., for bulk writes or clears).
-    pub(crate) fn backing_buffer(&self) -> &Allocation {
-        &self.backing
-    }
-
-    /// Read the entire backing allocation to CPU memory.
-    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
-        self.backing.read_to_cpu(device, output)
-    }
-
-    /// Forward `hint_unused_above` on the backing allocation.
-    pub fn hint_unused_above(&mut self, offset: u64) {
-        self.backing.hint_unused_above(offset);
-    }
+    let view = backing.create_view(aligned_offset, size, element_stride)?;
+    *offset = aligned_offset + size;
+    Ok(view)
 }
 
 #[cfg(test)]
@@ -953,20 +823,20 @@ mod tests {
 
     #[test]
     fn test_padded_size_empty() {
-        assert_eq!(BufferPool::padded_size(&[]), 0);
+        assert_eq!(scattered_suballoc_padded_size(&[]), 0);
     }
 
     #[test]
     fn test_padded_size_single_allocation() {
         // 64 u32s = 256 bytes, aligned to 256, no padding
-        assert_eq!(BufferPool::padded_size(&[(64, size_of::<u32>())]), 256);
+        assert_eq!(scattered_suballoc_padded_size(&[(64, size_of::<u32>())]), 256);
     }
 
     #[test]
     fn test_padded_size_multiple_allocations() {
         // Simulates goldy-doom: static_vb, static_ib, sky_vb, sky_ib, decor_vb, decor_ib
         // With varying strides, alignment padding is inserted between allocs
-        let size = BufferPool::padded_size(&[
+        let size = scattered_suballoc_padded_size(&[
             (100, size_of::<u32>()), // 400 bytes
             (200, size_of::<u32>()), // 800 bytes
             (50, 52),                // SpriteVertex-like stride

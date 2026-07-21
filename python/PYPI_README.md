@@ -98,9 +98,10 @@ pool = goldy.RetainedPool(device)
 parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 ```
 
-Render targets return numpy arrays:
+Readback uses scheme grants on textures or buffer units:
 ```python
-pixels = target.read_to_cpu()  # Shape: (height, width, 4), dtype: uint8
+grant = scheme.grant_read(texture)
+pixels = grant.consume()  # raw bytes; reshape as needed
 ```
 
 ### Context Managers
@@ -151,7 +152,7 @@ device.register_library('mylib', '''
 | `Parcel` | Retained buffer or texture resource |
 | `ShaderModule` | Compiled Slang shader |
 | `RenderPipeline` | Complete render state |
-| `RenderTarget` | Off-screen render target |
+| `SchemeRenderTargetLease` | Off-screen render target declared on a scheme |
 | `Scheme` | Retained GPU dependency graph (render passes, compute, present) |
 | `SchemeRenderPass` | Draw commands within a render-pass node |
 | `SchemeComputeNode` | Record a compute dispatch node on a scheme |

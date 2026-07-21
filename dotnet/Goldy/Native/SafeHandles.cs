@@ -35,22 +35,6 @@ internal sealed class DeviceHandle : SafeHandle
 }
 
 /// <summary>
-/// SafeHandle for Goldy RenderTarget.
-/// </summary>
-internal sealed class RenderTargetHandle : SafeHandle
-{
-    public RenderTargetHandle() : base(nint.Zero, true) { }
-    
-    public override bool IsInvalid => handle == nint.Zero;
-    
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.RenderTargetDestroy(handle);
-        return true;
-    }
-}
-
-/// <summary>
 /// SafeHandle for Goldy ShaderModule.
 /// </summary>
 internal sealed class ShaderModuleHandle : SafeHandle
@@ -110,22 +94,6 @@ internal sealed class SamplerHandle : SafeHandle
     protected override bool ReleaseHandle()
     {
         NativeMethods.SamplerDestroy(handle);
-        return true;
-    }
-}
-
-/// <summary>
-/// SafeHandle for Goldy Surface.
-/// </summary>
-internal sealed class SurfaceHandle : SafeHandle
-{
-    public SurfaceHandle() : base(nint.Zero, true) { }
-    
-    public override bool IsInvalid => handle == nint.Zero;
-    
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.SurfaceDestroy(handle);
         return true;
     }
 }

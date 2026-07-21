@@ -9,17 +9,6 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 
-/// Create a render target.
-pub(super) fn create(
-    state: &mut MetalState,
-    device_handle: DeviceHandle,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-) -> Result<RenderTargetHandle> {
-    create_with_depth(state, device_handle, width, height, format, None)
-}
-
 /// Create a render target with optional depth buffer.
 pub(super) fn create_with_depth(
     state: &mut MetalState,
@@ -59,10 +48,8 @@ pub(super) fn create_with_depth(
             device_handle,
             width,
             height,
-            format: color_format,
             texture,
             depth_texture,
-            has_rendered: false,
         },
     );
 
@@ -77,11 +64,6 @@ pub(super) fn create_with_depth(
 }
 
 /// Destroy a render target.
-pub(super) fn destroy(state: &mut MetalState, target: RenderTargetHandle) {
-    state.render_targets.remove(&target);
-}
-
-/// Render commands to an offscreen render target.
 pub(super) fn render_to(
     state: &mut MetalState,
     device_handle: DeviceHandle,
@@ -190,73 +172,6 @@ pub(super) fn render_to(
         if let Some(ld) = state.devices.get(&device_handle) {
             super::frame_table::record_submission_for_device(ld, row, completed);
         }
-    }
-
-    if let Some(rt) = state.render_targets.get_mut(&target) {
-        rt.has_rendered = true;
-    }
-
-    Ok(())
-}
-
-/// Read render target contents back to CPU.
-pub(super) fn read_to_cpu(state: &MetalState, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-    let render_target = state.render_targets.get(&target).context("Invalid render target")?;
-
-    if !render_target.has_rendered {
-        anyhow::bail!("Cannot read from render target that hasn't been rendered to");
-    }
-
-    let logical_device = state
-        .devices
-        .get(&render_target.device_handle)
-        .context("Device no longer valid")?;
-
-    let width = render_target.width;
-    let height = render_target.height;
-    let bytes_per_pixel = render_target.format.bytes_per_pixel();
-    let bytes_per_row = width * bytes_per_pixel;
-    let expected_size = (bytes_per_row * height) as usize;
-
-    if output.len() < expected_size {
-        anyhow::bail!(
-            "Output buffer too small: need {} bytes, got {}",
-            expected_size,
-            output.len()
-        );
-    }
-
-    let staging_buffer = logical_device
-        .device
-        .new_buffer(expected_size as u64, mtl::MTLResourceOptions::StorageModeShared);
-
-    let command_buffer = logical_device.command_queue.new_command_buffer();
-    let blit_encoder = command_buffer.new_blit_command_encoder();
-
-    blit_encoder.copy_from_texture_to_buffer(
-        &render_target.texture,
-        0,
-        0,
-        MTLOrigin { x: 0, y: 0, z: 0 },
-        MTLSize {
-            width: width as u64,
-            height: height as u64,
-            depth: 1,
-        },
-        &staging_buffer,
-        0,
-        bytes_per_row as u64,
-        (bytes_per_row * height) as u64,
-        mtl::MTLBlitOption::empty(),
-    );
-
-    blit_encoder.end_encoding();
-    command_buffer.commit();
-    command_buffer.wait_until_completed();
-
-    unsafe {
-        let ptr = staging_buffer.contents();
-        std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), expected_size);
     }
 
     Ok(())

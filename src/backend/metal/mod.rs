@@ -138,7 +138,7 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
 static METAL_VALIDATION_INIT: std::sync::Once = std::sync::Once::new();
 
 /// Metal backend for macOS.
-pub struct MetalBackend {
+pub(crate) struct MetalBackend {
     state: MetalState,
 }
 
@@ -489,10 +489,6 @@ impl GpuBackend for MetalBackend {
         buffer::hint_unused_above(&mut self.state, buffer, offset);
     }
 
-    fn device_capabilities(&self, _device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        device::adapter_capabilities(0)
-    }
-
     fn buffer_bindless_index(&self, buffer: BufferHandle) -> Option<u32> {
         buffer::bindless_index(&self.state, buffer)
     }
@@ -651,16 +647,6 @@ impl GpuBackend for MetalBackend {
         pipeline::destroy(&mut self.state, pipeline);
     }
 
-    fn create_render_target(
-        &mut self,
-        device: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle> {
-        render_target::create(&mut self.state, device, width, height, format)
-    }
-
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -672,10 +658,6 @@ impl GpuBackend for MetalBackend {
         render_target::create_with_depth(&mut self.state, device, width, height, color_format, depth_format)
     }
 
-    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
-        render_target::destroy(&mut self.state, target);
-    }
-
     fn render_to_target(
         &mut self,
         device: DeviceHandle,
@@ -683,10 +665,6 @@ impl GpuBackend for MetalBackend {
         commands: &[RenderCommand],
     ) -> Result<()> {
         render_target::render_to(&mut self.state, device, target, commands)
-    }
-
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        render_target::read_to_cpu(&self.state, target, output)
     }
 
     fn create_texture(
@@ -776,16 +754,6 @@ impl GpuBackend for MetalBackend {
         ))
     }
 
-    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        surface::render(
-            &mut self.state,
-            frame.surface,
-            frame.image,
-            frame.present_slot,
-            commands,
-        )
-    }
-
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         surface::resize(&mut self.state, surface, width, height)
     }
@@ -800,10 +768,6 @@ impl GpuBackend for MetalBackend {
 
     fn surface_set_present_mode(&mut self, surface: SurfaceHandle, mode: crate::types::PresentMode) -> Result<()> {
         surface::set_present_mode(&mut self.state, surface, mode)
-    }
-
-    fn surface_present_mode(&self, surface: SurfaceHandle) -> crate::types::PresentMode {
-        surface::present_mode(&self.state, surface)
     }
 
     fn create_compute_pipeline(
@@ -879,55 +843,6 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-    fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
-        self.state
-            .surfaces
-            .get(&surface)
-            .map(|s| s.pending_acquire_count)
-            .unwrap_or(0)
-    }
-
-    fn wait_until_timeout(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        use std::sync::atomic::Ordering;
-        let device = self.context_device(ctx);
-
-        if self.state.device_lost.load(Ordering::Relaxed) {
-            anyhow::bail!("Metal device lost");
-        }
-
-        let waiter = self
-            .state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .lock()
-            .unwrap()
-            .timeline_waiter
-            .clone();
-
-        let timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
-        if !waiter.wait_until(value, timeout) {
-            if self.state.device_lost.load(Ordering::Relaxed) {
-                anyhow::bail!("Metal device lost");
-            }
-            return Ok(false);
-        }
-
-        let retired = context::device_retired(&self.state, device);
-        if let Some(ld) = self.state.devices.get(&device) {
-            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-                drain_context_deletion_queue_up_to(ld, &mut sc_arc.lock().unwrap().deletion_queue, value);
-            }
-            process_device_deletions_up_to(&self.state, device, value.min(retired));
-        }
-        Ok(true)
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
@@ -965,34 +880,12 @@ impl GpuBackend for MetalBackend {
         compute::try_resubmit_retained(&mut self.state, ctx, key, sync)
     }
 
-    fn retains_present_partitions(&self) -> bool {
-        false
-    }
-
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
         compute::evict_retained(&mut self.state, ctx, key);
     }
 
-    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
-        let surf = self
-            .state
-            .surfaces
-            .get_mut(&frame.surface)
-            .context("Invalid surface handle")?;
-        surf.frame_pending_gpu_commands.extend_from_slice(commands);
-        Ok(())
-    }
-
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         surface::submit_frame(&mut self.state, frame)
-    }
-
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
-        surface::present_frame(&mut self.state, frame, submit_tv)
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
@@ -1015,25 +908,6 @@ impl GpuBackend for MetalBackend {
 
     fn max_bindless_slots_per_category(&self, _device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {
         types::MAX_RESOURCES_PER_CATEGORY
-    }
-
-    fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
-        let device = self.context_device(ctx);
-        let retired = context::device_retired(&self.state, device);
-        if let Some(ld) = self.state.devices.get(&device) {
-            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
-            }
-            process_device_deletions_up_to(&self.state, device, retired);
-        }
-    }
-
-    fn set_reclamation_context(&mut self, ctx: ContextHandle, epoch: Option<crate::timeline::TimelineValue>) {
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            sc_arc.lock().unwrap().reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
-        }
     }
 
     fn reset_buffer_heaps(&mut self, device: DeviceHandle) {

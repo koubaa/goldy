@@ -5,7 +5,7 @@
 
 use super::super::shared;
 use super::submit_session::Dx12RecordState;
-use super::types::{self, Dx12State};
+use super::types;
 use super::utils::{index_format_to_dxgi, topology_to_d3d12};
 use super::{DeviceHandle, RenderCommand};
 use windows::Win32::Graphics::Direct3D12::*;
@@ -19,17 +19,6 @@ pub(super) fn record(
     record: &Dx12RecordState<'_>,
 ) -> anyhow::Result<()> {
     record_with_tables(cmd, commands, device_handle, record)
-}
-
-pub(super) fn record_state(
-    cmd: &ID3D12GraphicsCommandList7,
-    commands: &[RenderCommand],
-    device_handle: DeviceHandle,
-    ctx: super::ContextHandle,
-    state: &Dx12State,
-) -> anyhow::Result<()> {
-    let record = super::submit_session::record_state_from_backend(state, ctx, device_handle)?;
-    record_with_tables(cmd, commands, device_handle, &record)
 }
 
 fn record_with_tables(

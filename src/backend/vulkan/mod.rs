@@ -85,7 +85,7 @@ fn vulkan_instance_validation_enabled() -> bool {
 }
 
 /// Vulkan backend.
-pub struct VulkanBackend {
+pub(crate) struct VulkanBackend {
     state: VulkanState,
 }
 
@@ -615,16 +615,6 @@ impl GpuBackend for VulkanBackend {
         buffer::hint_unused_above(&self.state.devices, &self.state.buffers, buffer_handle, offset);
     }
 
-    fn device_capabilities(&self, device_handle: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let adapter_id = self
-            .state
-            .devices
-            .get(&device_handle)
-            .map(|d| d.adapter_id)
-            .unwrap_or(0);
-        self.adapter_capabilities(adapter_id)
-    }
-
     fn buffer_bindless_index(&self, buffer_handle: BufferHandle) -> Option<u32> {
         buffer::bindless_index(&self.state.buffers, buffer_handle)
     }
@@ -852,28 +842,6 @@ impl GpuBackend for VulkanBackend {
         pipeline::destroy(&self.state.devices, &self.state.pipelines, pipeline_handle);
     }
 
-    fn create_render_target(
-        &mut self,
-        device_handle: DeviceHandle,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> Result<RenderTargetHandle> {
-        render_target::create(
-            &self.state.instance,
-            &self.state.devices,
-            &self.state.render_targets,
-            device_handle,
-            width,
-            height,
-            format,
-        )
-    }
-
-    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
-        render_target::destroy(&self.state.devices, &self.state.render_targets, target);
-    }
-
     fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,
@@ -907,16 +875,6 @@ impl GpuBackend for VulkanBackend {
                     (frame_table.selector_slot, frame_table.table_slot),
                 )
             },
-        )
-    }
-
-    fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-        render_target::read_to_cpu(
-            &self.state.instance,
-            &self.state.devices,
-            &self.state.render_targets,
-            target,
-            output,
         )
     }
 
@@ -965,40 +923,6 @@ impl GpuBackend for VulkanBackend {
         ))
     }
 
-    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        let timeline_sem = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .get(&frame.context)
-            .context("Invalid context handle")?
-            .lock()
-            .unwrap()
-            .timeline_semaphore;
-        surface::render(
-            &mut self.state,
-            frame.surface,
-            frame.image,
-            frame.present_slot,
-            frame.context,
-            timeline_sem,
-            commands,
-        )?;
-        if let Some(tv) = self
-            .state
-            .surfaces
-            .get(&frame.surface)
-            .and_then(|s| s.frame_sync.get(frame.present_slot as usize))
-            .and_then(|fs| fs.frame_timeline_value)
-        {
-            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&frame.context) {
-                sc_arc.lock().unwrap().last_submitted_seq = tv;
-            }
-        }
-        Ok(())
-    }
-
     fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         surface::resize(
             &self.state.entry,
@@ -1026,10 +950,6 @@ impl GpuBackend for VulkanBackend {
         mode: crate::types::PresentMode,
     ) -> Result<()> {
         surface::set_present_mode(&mut self.state, surface_handle, mode)
-    }
-
-    fn surface_present_mode(&self, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
-        surface::get_present_mode(&self.state.surfaces, surface_handle)
     }
 
     fn create_pipeline_with_depth(
@@ -1318,82 +1238,6 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn pending_acquire_count(&self, surface_handle: SurfaceHandle) -> u32 {
-        self.state
-            .surfaces
-            .get(&surface_handle)
-            .map(|s| s.pending_acquire_count)
-            .unwrap_or(0)
-    }
-
-    fn wait_until_timeout(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        let device_handle = self.context_device(ctx);
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            if !ld
-                .submission_worker
-                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
-            {
-                return Ok(false);
-            }
-            ld.submission_worker.check_error()?;
-        }
-        let sem = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .lock()
-            .unwrap()
-            .timeline_semaphore;
-        let dev = &self.state.devices.get(&device_handle).unwrap().device;
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(std::slice::from_ref(&sem))
-            .values(std::slice::from_ref(&value));
-        let timeout_ns = (timeout_ms as u64).saturating_mul(1_000_000);
-        match unsafe { dev.wait_semaphores(&wait, timeout_ns) } {
-            Ok(()) => {
-                compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
-                if let Some(ld) = self.state.devices.get(&device_handle) {
-                    if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
-                        pending_submit::vulkan_drain_context_deletion_up_to(
-                            ld,
-                            &self.state.contexts,
-                            device_handle,
-                            sc_arc,
-                            value,
-                        );
-                        pending_submit::vulkan_drain_pending_gpu_profiles_up_to(ld, &mut sc_arc.lock().unwrap(), value);
-                    }
-                    let completed_values =
-                        types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
-                    let device_batch = ld.drain_deletion_queue_ready(&completed_values);
-                    let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-                    let mut registry = descriptors_arc.lock().unwrap();
-                    for r in device_batch {
-                        types::destroy_pending_deletion(ld, &mut registry, r);
-                    }
-                    registry.drain_ready_slot_reclamations(&completed_values);
-                }
-                Ok(true)
-            }
-            Err(vk::Result::TIMEOUT) => Ok(false),
-            Err(e) => {
-                if e == vk::Result::ERROR_DEVICE_LOST {
-                    self.state.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                Err(anyhow::anyhow!("wait_semaphores: {:?}", e))
-            }
-        }
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
@@ -1435,28 +1279,8 @@ impl GpuBackend for VulkanBackend {
         compute::evict_retained(&self.state, ctx, key);
     }
 
-    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
-        let surf = self
-            .state
-            .surfaces
-            .get_mut(&frame.surface)
-            .context("Invalid surface handle")?;
-        surf.frame_pending_gpu_commands.extend_from_slice(commands);
-        Ok(())
-    }
-
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         surface::submit_frame(&mut self.state, frame)
-    }
-
-    fn present_frame(
-        &mut self,
-        frame: FrameToken,
-        submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
-        let work = self.take_present_gpu_work(frame, submit_tv)?;
-        let finish = work.run()?;
-        self.finish_present(finish, submit_tv)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
@@ -1499,31 +1323,6 @@ impl GpuBackend for VulkanBackend {
             .get(&device_handle)
             .map(|ld| ld.compute_queues.len() as u32)
             .unwrap_or(0)
-    }
-
-    fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
-        let device_handle = self.context_device(ctx);
-        let completed = compute::ctx_completed_value(&self.state.submit_view(), ctx, device_handle);
-        // Per-context queue: resources whose lifetime is bounded by this context.
-        let ctx_batch: Vec<_> = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .get(&ctx)
-            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
-            .unwrap_or_default();
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            let completed_values =
-                types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
-            let device_batch = ld.drain_deletion_queue_ready(&completed_values);
-            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            let mut registry = descriptors_arc.lock().unwrap();
-            for r in ctx_batch.into_iter().chain(device_batch) {
-                types::destroy_pending_deletion(ld, &mut registry, r);
-            }
-            registry.drain_ready_slot_reclamations(&completed_values);
-        }
     }
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {

@@ -2,6 +2,7 @@
 //!
 //! Provides named observation points with structured context data.
 //! Zero-cost when the `instrumentation` feature is disabled.
+#![allow(dead_code)]
 //!
 //! # Observation Points
 //!

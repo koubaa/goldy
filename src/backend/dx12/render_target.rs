@@ -18,17 +18,6 @@ use windows::{
     },
 };
 
-/// Create a render target without depth buffer.
-pub(super) fn create(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-) -> Result<RenderTargetHandle> {
-    create_with_depth(state, device_handle, width, height, format, None)
-}
-
 /// Create a render target with optional depth buffer.
 #[allow(clippy::too_many_lines)]
 pub(super) fn create_with_depth(
@@ -181,15 +170,12 @@ pub(super) fn create_with_depth(
             device_handle,
             width,
             height,
-            format: color_format,
             texture,
             rtv_offset,
             depth_format,
             depth_texture,
             dsv_offset,
-            staging_buffer: None,
             command_list,
-            has_rendered: false,
         },
     );
 
@@ -204,17 +190,6 @@ pub(super) fn create_with_depth(
 }
 
 /// Destroy a render target.
-pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
-    if let Some(rt) = state.render_targets.write().unwrap().entries.remove(&target) {
-        state.free_rtv_offsets.push(rt.rtv_offset);
-        if let Some(dsv_off) = rt.dsv_offset {
-            state.free_dsv_offsets.push(dsv_off);
-        }
-    }
-}
-
-/// Record an offscreen render pass into an existing command list without closing/executing.
-///
 /// Records COMMON -> RENDER_TARGET barriers, clear, viewport/scissor, descriptor heap
 /// binding, draw commands, and RENDER_TARGET -> COPY_SOURCE barrier into `cmd_list`.
 /// Does NOT close/execute/signal.
@@ -460,173 +435,6 @@ pub(super) fn render(
     // Blocking wait — required so the shared command_allocator can be safely
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;
-
-    {
-        let mut render_targets_write = state.render_targets.write().unwrap();
-        if let Some(rt) = render_targets_write.entries.get_mut(&target) {
-            rt.has_rendered = true;
-        }
-    }
-
-    Ok(())
-}
-
-/// Read render target contents to CPU memory.
-#[allow(clippy::too_many_lines)]
-pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-    let (width, height, format, device_handle, needs_staging) = {
-        let render_targets_read = state.render_targets.read().unwrap();
-        let render_target = render_targets_read
-            .entries
-            .get(&target)
-            .context("Invalid render target handle")?;
-
-        if !render_target.has_rendered {
-            anyhow::bail!("Cannot read from render target that hasn't been rendered to");
-        }
-
-        (
-            render_target.width,
-            render_target.height,
-            render_target.format,
-            render_target.device_handle,
-            render_target.staging_buffer.is_none(),
-        )
-    };
-
-    let expected_size = (width * height * format.bytes_per_pixel()) as usize;
-
-    if output.len() < expected_size {
-        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
-    }
-
-    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-    // Ensure staging buffer exists
-    if needs_staging {
-        let row_pitch = ((width * format.bytes_per_pixel() + 255) & !255) as u64; // 256-byte aligned
-        let staging_size = row_pitch * height as u64;
-
-        let heap_properties = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_READBACK,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 0,
-            VisibleNodeMask: 0,
-        };
-
-        let resource_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: staging_size,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_NONE,
-        };
-
-        let mut staging_buffer: Option<ID3D12Resource> = None;
-        unsafe {
-            logical_device.device.CreateCommittedResource(
-                &heap_properties,
-                D3D12_HEAP_FLAG_NONE,
-                &resource_desc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                None,
-                &mut staging_buffer,
-            )
-        }
-        .context("Failed to create staging buffer")?;
-        let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
-
-        // Store staging buffer in render target
-        {
-            let mut render_targets_write = state.render_targets.write().unwrap();
-            if let Some(rt) = render_targets_write.entries.get_mut(&target) {
-                rt.staging_buffer = Some(staging_buffer);
-            }
-        }
-    }
-
-    // Get render target again (borrow checker)
-    let render_targets_read = state.render_targets.read().unwrap();
-    let render_target = render_targets_read
-        .entries
-        .get(&target)
-        .context("Invalid render target handle")?;
-
-    let staging_buffer = render_target
-        .staging_buffer
-        .as_ref()
-        .context("Staging buffer not available")?;
-
-    // Copy texture to staging buffer
-    let cmd = &render_target.command_list;
-    unsafe { cmd.Reset(&logical_device.command_allocator, None) }.context("Failed to reset command list")?;
-
-    let row_pitch = ((width * format.bytes_per_pixel() + 255) & !255) as u64;
-    let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&render_target.texture) },
-        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
-    };
-
-    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(staging_buffer) },
-        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: 0,
-                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: format_to_dxgi(format),
-                    Width: width,
-                    Height: height,
-                    Depth: 1,
-                    RowPitch: row_pitch as u32,
-                },
-            },
-        },
-    };
-
-    unsafe { cmd.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
-    unsafe { cmd.Close() }.context("Failed to close command list")?;
-
-    let cmd_list: ID3D12CommandList = cmd.cast().context("Failed to cast command list")?;
-    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
-    // Wait for copy to complete
-    wait_for_fence(&logical_device.fence, fence_value)?;
-
-    // Map and copy data
-    let mut mapped_data: *mut u8 = std::ptr::null_mut();
-    unsafe { staging_buffer.Map(0, None, Some(&mut mapped_data as *mut *mut u8 as *mut *mut _)) }
-        .context("Failed to map staging buffer")?;
-
-    // Copy row by row if there's padding
-    let bytes_per_row = width * format.bytes_per_pixel();
-    if row_pitch == bytes_per_row as u64 {
-        // No padding, copy entire buffer
-        unsafe {
-            std::ptr::copy_nonoverlapping(mapped_data, output.as_mut_ptr(), expected_size);
-        }
-    } else {
-        // Copy row by row
-        for y in 0..height {
-            let src_offset = (y as u64 * row_pitch) as usize;
-            let dst_offset = (y * bytes_per_row) as usize;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    mapped_data.add(src_offset),
-                    output.as_mut_ptr().add(dst_offset),
-                    bytes_per_row as usize,
-                );
-            }
-        }
-    }
-
-    unsafe { staging_buffer.Unmap(0, None) };
 
     Ok(())
 }

@@ -18,7 +18,7 @@ use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Maximum number of descriptors per resource type in the global bindless set
@@ -822,7 +822,7 @@ pub(crate) struct SubmissionContext {
     ///
     /// Holds resources whose GPU lifetime is bounded exclusively by **this**
     /// context's timeline semaphore (e.g. submit-internal temporaries).  Drained
-    /// on each submit using `ctx_completed_value` — never via `device_retired` —
+    /// on each submit using the context timeline semaphore — never via `device_retired` —
     /// so no other context's progress can block reclaim here.
     ///
     /// Dispatch-batch arg buffers and other resources whose lifetime is bounded by
@@ -1244,12 +1244,11 @@ pub(crate) struct ComputePipelineState {
     pub shader_debug_name: String,
 }
 
-/// GPU render target state with optional staging for CPU readback.
+/// GPU render target state.
 pub(crate) struct RenderTargetState {
     pub device_handle: DeviceHandle,
     pub width: u32,
     pub height: u32,
-    pub format: TextureFormat,
     /// GPU-only render target image
     pub image: vk::Image,
     pub image_memory: vk::DeviceMemory,
@@ -1259,13 +1258,8 @@ pub(crate) struct RenderTargetState {
     pub depth_image: Option<vk::Image>,
     pub depth_memory: Option<vk::DeviceMemory>,
     pub depth_view: Option<vk::ImageView>,
-    /// Staging buffer for CPU readback (lazy-created on first read)
-    pub staging_buffer: Option<vk::Buffer>,
-    pub staging_memory: Option<vk::DeviceMemory>,
     /// Command buffer for rendering
     pub command_buffer: vk::CommandBuffer,
-    /// Track if we've rendered (for readback validation)
-    pub has_rendered: AtomicBool,
 }
 
 /// GPU texture state.
@@ -1440,7 +1434,7 @@ pub(crate) struct SurfaceState {
     /// Handle of the scratch texture for the current frame slot — what compute
     /// shaders write to.  Cleared at present; the underlying slot persists.
     pub current_texture_handle: Option<super::TextureHandle>,
-    /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`](crate::backend::GpuBackend::record_gpu_work)).
+    /// Compute commands accumulated for the active frame during surface submit.
     pub frame_pending_gpu_commands: Vec<super::GpuCommand>,
     /// Drawables acquired or presented but not yet returned to the swapchain pool.
     pub pending_acquire_count: u32,

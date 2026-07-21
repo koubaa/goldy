@@ -129,7 +129,7 @@ assert!(!borrowed.is_owned());
 
 ## Depth Textures
 
-Depth textures are created through `SurfaceConfig` or `RenderTarget`, not directly via `Texture::new`. Available depth formats:
+Depth textures are created through `SurfaceConfig` or [`Scheme::lease_render_target`], not directly via `Texture::new`. Available depth formats:
 
 | Format | Bits | Stencil |
 |--------|------|---------|
@@ -140,10 +140,15 @@ Depth textures are created through `SurfaceConfig` or `RenderTarget`, not direct
 | `Depth32FloatStencil8` | 32 + 8 | Yes |
 
 ```rust
-let surface = Surface::new_with_config(&device, &window, SurfaceConfig {
-    depth_format: Some(DepthFormat::Depth32Float),
-    ..Default::default()
-})?;
+let surface = SurfaceExchange::new_with_depth(
+    &ctx,
+    &window,
+    3,
+    SurfaceConfig {
+        depth_format: Some(DepthFormat::Depth32Float),
+        ..Default::default()
+    },
+)?;
 ```
 
 ## Texture as Render Target

@@ -1,42 +1,8 @@
-//! Shared Digital Clock rendering logic.
-//!
-//! This module provides the core rendering components for the digital clock demo:
-//! - Slang shader source
-//! - Vertex data structures
-//! - Digit pattern generation
-//! - Time formatting
+//! Shared digital-clock rendering helpers for the `digital_clock` example.
 
-use crate::buffer::StructuredBufferElement;
-use crate::types::{Color, VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
-
-/// Slang shader for the digital clock.
-///
-/// Uses standard vertex coloring with position and color attributes.
-pub const SHADER_SOURCE: &str = r#"
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
-}
-"#;
+use goldy::buffer::StructuredBufferElement;
+use goldy::types::Color;
 
 /// Vertex with 2D position and RGBA color.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -53,14 +19,6 @@ impl ClockVertex {
             position: [x, y],
             color: [color.r, color.g, color.b, color.a],
         }
-    }
-
-    /// Get the vertex buffer layout for this vertex type.
-    pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout::from_formats::<Self>(&[
-            VertexFormat::Float32x2, // position
-            VertexFormat::Float32x4, // color
-        ])
     }
 }
 
@@ -80,59 +38,57 @@ pub const SEGMENT_PATTERNS: [[bool; 7]; 11] = [
     [false, false, false, false, false, false, false], // 10 = blank (for colon position)
 ];
 
-/// Color palette for the clock.
 pub const COLORS: [Color; 8] = [
     Color {
         r: 0.2,
         g: 1.0,
         b: 0.3,
         a: 1.0,
-    }, // Green (default)
+    },
     Color {
         r: 1.0,
         g: 0.3,
         b: 0.2,
         a: 1.0,
-    }, // Red
+    },
     Color {
         r: 1.0,
         g: 0.6,
         b: 0.0,
         a: 1.0,
-    }, // Orange
+    },
     Color {
         r: 1.0,
         g: 1.0,
         b: 0.2,
         a: 1.0,
-    }, // Yellow
+    },
     Color {
         r: 0.2,
         g: 1.0,
         b: 1.0,
         a: 1.0,
-    }, // Cyan
+    },
     Color {
         r: 0.4,
         g: 0.6,
         b: 1.0,
         a: 1.0,
-    }, // Blue
+    },
     Color {
         r: 0.8,
         g: 0.3,
         b: 1.0,
         a: 1.0,
-    }, // Purple
+    },
     Color {
         r: 1.0,
         g: 0.4,
         b: 0.8,
         a: 1.0,
-    }, // Pink
+    },
 ];
 
-/// Generate vertices for a filled quad.
 pub fn quad_vertices(x: f32, y: f32, w: f32, h: f32, color: Color) -> [ClockVertex; 6] {
     [
         ClockVertex::new(x, y, color),
@@ -144,14 +100,12 @@ pub fn quad_vertices(x: f32, y: f32, w: f32, h: f32, color: Color) -> [ClockVert
     ]
 }
 
-/// Convert pixel coordinates to normalized device coordinates.
 pub fn pixel_to_ndc(px: f32, py: f32, width: f32, height: f32) -> (f32, f32) {
     let x = (px / width) * 2.0 - 1.0;
     let y = 1.0 - (py / height) * 2.0;
     (x, y)
 }
 
-/// Generate vertices for a single digit (or colon).
 pub fn digit_vertices(
     digit: u8,
     cx: f32,
@@ -168,7 +122,6 @@ pub fn digit_vertices(
     let dig_h = 120.0 * scale;
     let gap = 4.0 * scale;
 
-    // Colon (digit 10)
     if digit == 10 {
         let dot_size = seg_h * 1.5;
         let dot_spacing = dig_h * 0.5;
@@ -191,7 +144,6 @@ pub fn digit_vertices(
         vertices.extend_from_slice(&quad_vertices(x, y, w, -h, color));
     };
 
-    // Segment indices: 0=top, 1=top-left, 2=top-right, 3=middle, 4=bottom-left, 5=bottom-right, 6=bottom
     if pattern[0] {
         add_segment(cx - seg_w / 2.0, cy - dig_h, seg_w, seg_h);
     }
@@ -227,7 +179,6 @@ pub fn digit_vertices(
     vertices
 }
 
-/// Time data for rendering.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimeData {
     pub hours: u8,
@@ -236,7 +187,6 @@ pub struct TimeData {
 }
 
 impl TimeData {
-    /// Create from elapsed seconds (timer mode).
     pub fn from_elapsed_secs(elapsed: u64) -> Self {
         Self {
             hours: ((elapsed / 3600) % 100) as u8,
@@ -245,22 +195,20 @@ impl TimeData {
         }
     }
 
-    /// Convert to digit array: [h1, h2, colon, m1, m2, colon, s1, s2]
     pub fn to_digits(&self) -> [u8; 8] {
         [
             self.hours / 10,
             self.hours % 10,
-            10, // colon
+            10,
             self.minutes / 10,
             self.minutes % 10,
-            10, // colon
+            10,
             self.seconds / 10,
             self.seconds % 10,
         ]
     }
 }
 
-/// Generate all vertices for the clock display.
 pub fn generate_clock_vertices(time: TimeData, color: Color, width: u32, height: u32) -> Vec<ClockVertex> {
     let digits = time.to_digits();
 
@@ -286,7 +234,7 @@ pub fn generate_clock_vertices(time: TimeData, color: Color, width: u32, height:
     all_vertices
 }
 
-/// Clock state for pause/resume functionality.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ClockState {
     pub color_index: usize,
@@ -294,11 +242,10 @@ pub struct ClockState {
     pub accumulated_secs: u64,
 }
 
+#[allow(dead_code)]
 impl ClockState {
-    /// Get the current display color.
     pub fn color(&self) -> Color {
         let mut color = COLORS[self.color_index];
-        // Dim when paused
         if self.paused {
             color.r *= 0.5;
             color.g *= 0.5;
@@ -307,7 +254,6 @@ impl ClockState {
         color
     }
 
-    /// Get background color.
     pub fn background_color(&self) -> Color {
         let bg = if self.paused { 0.06 } else { 0.02 };
         Color {
@@ -318,52 +264,16 @@ impl ClockState {
         }
     }
 
-    /// Cycle to next color.
     pub fn next_color(&mut self) {
         self.color_index = (self.color_index + 1) % COLORS.len();
     }
 
-    /// Toggle pause state.
-    /// Returns the elapsed seconds that should be preserved.
     pub fn toggle_pause(&mut self, current_elapsed: u64) {
         if self.paused {
-            // Resuming - accumulated_secs stays the same
             self.paused = false;
         } else {
-            // Pausing - save current elapsed
             self.accumulated_secs = current_elapsed;
             self.paused = true;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_time_data_from_elapsed() {
-        let time = TimeData::from_elapsed_secs(3661); // 1h 1m 1s
-        assert_eq!(time.hours, 1);
-        assert_eq!(time.minutes, 1);
-        assert_eq!(time.seconds, 1);
-    }
-
-    #[test]
-    fn test_time_data_to_digits() {
-        let time = TimeData {
-            hours: 12,
-            minutes: 34,
-            seconds: 56,
-        };
-        let digits = time.to_digits();
-        assert_eq!(digits, [1, 2, 10, 3, 4, 10, 5, 6]);
-    }
-
-    #[test]
-    fn test_vertex_generation() {
-        let time = TimeData::from_elapsed_secs(0);
-        let vertices = generate_clock_vertices(time, Color::GREEN, 800, 600);
-        assert!(!vertices.is_empty());
     }
 }

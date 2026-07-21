@@ -198,8 +198,8 @@ Dropping a `BufferView` unregisters its descriptor but does not free the parent 
 
 ## StructuredBufferElement
 
-The `StructuredBufferElement` trait marks types safe for `RetainedPool::acquire_buffer_with_data`
-and `BufferPool::alloc_with_data`. It is implemented for common multi-byte primitives (`u16`, `u32`, `f32`, `f64`, etc.), fixed-size arrays of those types, and `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
+The `StructuredBufferElement` trait marks types safe for `RetainedPool::acquire_buffer_with_data`.
+It is implemented for common multi-byte primitives (`u16`, `u32`, `f32`, `f64`, etc.), fixed-size arrays of those types, and `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 
 **Not implemented for `u8`/`i8`** — passing `&[u8]` would set stride to 1, which almost never matches the shader's expected struct stride. Use `RetainedPool::acquire_buffer` with an explicit element stride for raw bytes.
 

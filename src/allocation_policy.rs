@@ -10,7 +10,6 @@
 //! module).
 
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -20,7 +19,7 @@ use crate::vram_allocator::{bytesize, ParcelType};
 
 /// Request about to be handed to the backend allocator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AllocRequest {
+pub(crate) struct AllocRequest {
     pub reserved_estimate: u64,
     pub committed_estimate: u64,
     pub kind: ParcelType,
@@ -28,7 +27,7 @@ pub struct AllocRequest {
 
 /// Successful allocation (actual reserved / committed sizes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AllocCommit {
+pub(crate) struct AllocCommit {
     pub reserved: u64,
     pub committed: u64,
     pub kind: ParcelType,
@@ -55,14 +54,14 @@ impl AllocCommit {
 
 /// Free notification when a deed-holding parcel is dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AllocFreeEvent {
+pub(crate) struct AllocFreeEvent {
     pub reserved: u64,
     pub committed: u64,
     pub kind: ParcelType,
 }
 
 /// Policy hook for [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
-pub trait AllocationPolicy: Send + Sync {
+pub(crate) trait AllocationPolicy: Send + Sync {
     /// Called before backend allocation. May return `Err` to block the alloc.
     fn before_alloc(&self, req: &AllocRequest) -> Result<()>;
 
@@ -77,11 +76,6 @@ pub trait AllocationPolicy: Send + Sync {
         0
     }
 
-    /// Optional byte budget enforced by [`Self::before_alloc`].
-    fn budget(&self) -> Option<u64> {
-        None
-    }
-
     /// `true` when this is the default no-op policy ([`NoPolicy`]).
     ///
     /// Used by [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator) to
@@ -92,7 +86,7 @@ pub trait AllocationPolicy: Send + Sync {
 }
 
 /// No-op policy installed by default. Zero overhead on the hot path.
-pub struct NoPolicy;
+pub(crate) struct NoPolicy;
 
 impl AllocationPolicy for NoPolicy {
     fn before_alloc(&self, _: &AllocRequest) -> Result<()> {
@@ -174,18 +168,6 @@ impl AllocationPolicy for BudgetPolicy {
     fn allocated_bytes(&self) -> u64 {
         BudgetPolicy::allocated_bytes(self)
     }
-
-    fn budget(&self) -> Option<u64> {
-        self.budget_bytes
-    }
-}
-
-/// Install `policy` on `allocator` when it is a [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
-pub fn set_on_default(
-    allocator: &Arc<dyn crate::vram_allocator::VramAllocator>,
-    policy: Arc<dyn AllocationPolicy>,
-) -> Result<()> {
-    allocator.set_allocation_policy(policy)
 }
 
 #[cfg(test)]

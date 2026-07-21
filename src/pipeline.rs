@@ -11,22 +11,19 @@ use std::sync::{Arc, Mutex};
 ///
 /// # Format Matching
 ///
-/// **Important**: `target_format` must match the format of the render target or surface
+/// **Important**: `target_format` must match the format of the render target
 /// you will render to. Mismatched formats cause undefined behavior or errors.
 ///
-/// - For `Surface`: use `surface.format()`
-/// - For `RenderTarget`: use the format passed to `RenderTarget::new()`
+/// - For scheme-leased render targets: use the format passed to [`crate::Scheme::lease_render_target`]
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// # use goldy::{RenderPipelineDesc, Surface, TextureFormat};
-/// # fn example(surface: &Surface) {
+/// # use goldy::{RenderPipelineDesc, TextureFormat};
 /// let desc = RenderPipelineDesc {
-///     target_format: surface.format(), // Always match the target!
+///     target_format: TextureFormat::Rgba8Unorm,
 ///     ..Default::default()
 /// };
-/// # }
 /// ```
 #[derive(Clone, Default, Debug)]
 pub struct RenderPipelineDesc {
@@ -36,8 +33,8 @@ pub struct RenderPipelineDesc {
     pub topology: PrimitiveTopology,
     /// Target texture format.
     ///
-    /// **Must match** the format of the Surface or RenderTarget you render to.
-    /// Use `surface.format()` or the format you passed to `RenderTarget::new()`.
+    /// **Must match** the format of the swapchain or scheme-leased render target you render to.
+    /// Use the format passed to [`crate::Scheme::lease_render_target`].
     pub target_format: TextureFormat,
     /// Depth/stencil state (optional, None = no depth testing).
     pub depth_stencil: Option<DepthStencilState>,

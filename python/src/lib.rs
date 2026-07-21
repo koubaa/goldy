@@ -19,11 +19,9 @@ mod instance;
 mod parcel;
 mod pipeline;
 mod pyutil;
-mod render_target;
 mod retained_pool;
 mod scheme;
 mod shader;
-mod surface;
 mod surface_exchange;
 mod texture;
 mod types;
@@ -78,17 +76,12 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
-    m.add_class::<render_target::PyRenderTarget>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
-
-    // Surface (windowed rendering)
-    m.add_class::<surface::PySurface>()?;
-    m.add_class::<surface::PySurfaceFrame>()?;
 
     Ok(())
 }
