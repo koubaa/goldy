@@ -77,7 +77,7 @@ pub(super) const MAX_HEAP_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 ///
 /// Uses a long-lived primary heap that is right-sized between frames, plus
 /// ephemeral overflow heaps created on demand when the primary fills up.
-/// Fragmentation is not a concern within a frame because ekrano's allocation
+/// Fragmentation is not a concern within a frame because transient allocation
 /// pattern is strictly monotonic (all frees are deferred until after recording).
 pub(crate) struct HeapAllocator {
     device: MTLDevice,
@@ -849,7 +849,7 @@ impl ResourceRegistry {
     /// returned slot would silently bleed into the next category's
     /// argument-buffer region (uniform buffers at 64-127). The shader's
     /// `goldy_buf_ro<T>(slot)` would then read undefined / zero bytes
-    /// from a wrong heap entry — observed in ekrano as binning's
+    /// from a wrong heap entry — observed as binning's
     /// `config.lines_size == 0` and a spurious `STAGE_FLATTEN` overflow.
     /// Reserve low storage-buffer slots (frame-table selector + device table).
     pub fn ensure_storage_start(&mut self, min: u32) {
@@ -1598,7 +1598,7 @@ impl MetalState {
 mod tests {
     use super::*;
 
-    /// Regression test for the ekrano "black screen after ~540 frames" bug.
+    /// Regression test for the "black screen after ~540 frames" bug.
     ///
     /// Before the free-list fix, `register_storage_buffer` bumped a monotonic
     /// counter with every call and `unregister_buffer` merely deleted the
@@ -1621,7 +1621,7 @@ mod tests {
             let idx = reg.register_storage_buffer(handle);
             all_indices.push(idx);
             // defer=false: simulate the "GPU idle when destroy fires" case,
-            // e.g. ekrano's end-of-frame deferred_free_buffers after flush.
+            // e.g. end-of-frame deferred_free_buffers after flush.
             reg.unregister_buffer(handle, None, false);
         }
 

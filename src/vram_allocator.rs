@@ -26,7 +26,7 @@
 //!
 //! ```text
 //! ┌───────────────────────────────────────────────────┐
-//! │  Consumers (ekrano, user code)                    │
+//! │  Consumers (user code)                            │
 //! │  ┌──────────────┐  ┌──────────────┐  ┌─────────┐ │
 //! │  │TransientAlloc│  │Device::alloc_│  │Retained /│ │
 //! │  │ (recycling)  │  │buffer()      │  │Transient │ │

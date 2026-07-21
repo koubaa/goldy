@@ -650,7 +650,7 @@ pub(super) fn cpu_writable_flat_slice(
 /// `copy_nonoverlapping` on `contents()` is **not** queue-ordered with subsequent compute
 /// dispatches, so we pair it with a queue-ordered blit copy (from a transient staging
 /// buffer) so the next command buffer submitted to this device queue is guaranteed to
-/// observe the written bytes. The observable symptom in ekrano/velato was the `config`
+/// observe the written bytes. The observable symptom was the `config`
 /// uniform buffer returning stale `config.lines_size` to the binning shader, which then
 /// flagged `STAGE_FLATTEN` overflow even when the actual flatten output was tiny — only
 /// visible around scene transitions where the previous frame's config had happened to be
@@ -779,7 +779,7 @@ pub(super) fn read_to_cpu(
 ///   pre-clear contents. Even if the caller has just waited on prior GPU
 ///   work, that wait establishes GPU→CPU ordering, not the reverse.
 ///
-/// The observable symptom we hit in ekrano/velato was a `bump_buf` that had
+/// The observable symptom was a `bump_buf` that had
 /// just been memset to zero still appearing non-zero to the flatten shader,
 /// which then flagged `STAGE_FLATTEN` overflow (`bump.lines >
 /// config.lines_size`) and triggered an endless retry cascade.

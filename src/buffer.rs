@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_padded_size_multiple_allocations() {
-        // Simulates goldy-doom: static_vb, static_ib, sky_vb, sky_ib, decor_vb, decor_ib
+        // Multiple mesh buffers: static_vb, static_ib, sky_vb, sky_ib, decor_vb, decor_ib.
         // With varying strides, alignment padding is inserted between allocs
         let size = scattered_suballoc_padded_size(&[
             (100, size_of::<u32>()), // 400 bytes

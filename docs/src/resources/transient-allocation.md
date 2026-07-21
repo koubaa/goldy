@@ -36,6 +36,6 @@ See also [Pooling and Sub-Allocation](./pooling.md).
 
 The former public `TransientAllocator` strategies (`BumpReset`, `Heap`) and the
 internal scattered bump arena (`BufferPool`) were deleted: they had no in-tree
-consumers once ekrano and goldy-doom moved to `RetainedPool` / `TransientPool`.
+consumers once in-tree callers moved to `RetainedPool` / `TransientPool`.
 Whole-object epoch-gated recycle bins are the supported transient path; any
 future suballocation belongs behind that door, not as a parallel public API.

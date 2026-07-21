@@ -163,17 +163,6 @@ fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHe
     //   • A per-resource "written buffers" annotation that lets consecutive
     //     compute CBs skip the event wait when they share no written resources
     //
-    // All Goldy integration tests pass with that scheme, but Ekrano still
-    // regresses (~185 FPS vs ~200 FPS Tracked baseline) for two reasons:
-    //   1. Intra-graph partition waits: when barrier-cost compute splits are
-    //      enabled, large graphs become two CBs submitted back-to-back; the
-    //      second CB must wait for the first via MTLSharedEvent (MTLFence can't
-    //      cross CB boundaries), which serialises consecutive partitions.
-    //      Metal disables that heuristic via
-    //      `split_compute_partitions_on_barrier_cost = false`.
-    //   2. Encoder-split overhead: every ResourceBarrier forces end_encoding +
-    //      new_compute_command_encoder + use_heaps_for_compute, which is paid
-    //      once per wave rather than once per CB submission.
     //
     // The net result is that the synchronisation overhead for Untracked exceeds
     // the savings from bypassing implicit hazard tracking for this workload.

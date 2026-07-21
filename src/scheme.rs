@@ -5448,7 +5448,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let expected_stamp = tex.whole().stamp_handle();
 
         let mut scheme = Scheme::new(&ctx);
-        // Mirror ekrano scheme path: fine write then present copy on one Texture instance.
+        // Fine write then present copy on one Texture instance.
         scheme
             .node("fine_write", &pipeline)
             .with_parcel(&tex, NodeAccess::Write)
@@ -5552,7 +5552,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     /// The actual submit path (not just `compute_cross_submit_sync` planning) must
     /// emit a live queue-wait on frame 2 against the prior frame's present-read
-    /// epoch. Goldy `Scheme::submit` never touches ekrano's `FrameOrchestrator`;
+    /// epoch. Goldy `Scheme::submit` never touches `FrameOrchestrator`;
     /// this test isolates ledger enforcement from orchestrator slot stamping.
     #[test]
     fn present_war_ledger_live_wait_on_second_submit_path() {

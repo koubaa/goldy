@@ -1233,7 +1233,7 @@ impl Drop for DeviceInner {
         self.vram_allocator.drain();
         // The placement heap is owned per-`Context` and dropped in `ContextInner::drop`,
         // which runs before this (contexts hold a `Device` clone, so they outlive nothing
-        // but are dropped first by ekrano/users tearing down renderers before devices).
+        // but are dropped first by users tearing down renderers before devices).
         if self.owns_backend_device {
             let mut backend = self.backend.lock().unwrap();
             backend.destroy_device(self.handle);

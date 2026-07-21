@@ -56,10 +56,10 @@ GOLDY_VALIDATION=1 cargo run --example triangle
 
 ```bash
 # Warm up 120 submits, then write one .gputrace for Xcode Metal Debugger
-GOLDY_METAL_CAPTURE=/tmp/ekrano-tiger.gputrace,skip=120,frames=1 \
+GOLDY_METAL_CAPTURE=/tmp/capture-tiger.gputrace,skip=120,frames=1 \
   target/release/with_winit_bin --timeout-secs 12 --no-vsync
 
-# Open /tmp/ekrano-tiger.gputrace in Xcode → click Performance → select fine_area
+# Open /tmp/capture-tiger.gputrace in Xcode → click Performance → select fine_area
 ```
 
 ## Interop with System Variables

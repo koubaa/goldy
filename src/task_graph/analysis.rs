@@ -1905,7 +1905,7 @@ mod tests {
         let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
         // A bind-free copy must NOT receive a FrameTableStaging prefix.
         // Inserting one bumps the submission counter and silently overwrites
-        // the selector with zeros, corrupting every in-flight frame (goldy-doom bug).
+        // the selector with zeros, corrupting every in-flight frame.
         assert!(
             matches!(commands.as_slice(), [GpuCommand::CopyTexture { src: 1, dst: 99 }]),
             "bind-free CopyTexture must not get a FrameTableStaging prefix; got {commands:?}"
@@ -2739,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn waves_simulated_vello_pipeline_collapses_waves() {
+    fn waves_simulated_coarse_fine_pipeline_collapses_waves() {
         // 10 nodes: 5 pairs of (write_viewN, read_viewN) where each pair is independent
         // — result should be far fewer than 10 waves
         let mut nodes = Vec::new();

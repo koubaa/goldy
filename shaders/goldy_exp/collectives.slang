@@ -50,7 +50,7 @@ public T mapped_workgroup_reduce<T : IMonoid, S : IScannable<T>, let N : int>(
 ///
 /// NOTE: Slang #10641 — cross-module [ForceInline] functions with groupshared
 /// parameters may produce incorrect DXIL. Inline the scan loop at the call site
-/// as a workaround (see ekrano coarse.slang, goldy compute_integration tests).
+/// as a workaround (see goldy compute_integration tests).
 [ForceInline]
 public T workgroup_inclusive_scan<T : IMonoid, let N : int>(
     T val, uint local_ix, groupshared T scratch[N]

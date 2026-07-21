@@ -480,7 +480,7 @@ mod registry_tests {
         }
     }
 
-    /// Simulate the per-frame create/destroy churn that ekrano generates for transient
+    /// Simulate the per-frame create/destroy churn that transient pool consumers generate for transient
     /// pool-view storage buffers. The counter must stay bounded — well below
     /// MAX_BINDLESS_RESOURCES — even after far more iterations than the heap limit.
     #[test]

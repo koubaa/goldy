@@ -90,7 +90,7 @@ fn stage_tag(s: SlangStage) -> u8 {
 
 /// Hash all `*.slang` files in `search_paths` (sorted by filename) into `h`.
 ///
-/// Imported modules such as `ekrano_shared.slang` live on these paths; mixing this
+/// Imported modules on these paths; mixing this
 /// hash into [`compile_cache_key`] ensures edits there invalidate cached bytecode
 /// even when the entry-point translation unit is unchanged.
 fn hash_search_path_slang_sources(mut h: u64, search_paths: &[&str]) -> u64 {

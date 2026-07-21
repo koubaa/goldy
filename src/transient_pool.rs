@@ -50,7 +50,7 @@ struct TexturePendingEntry {
 /// Keying on size alone would allow an adopted non-Scattered buffer (from
 /// [`crate::retained_pool::RetainedPool::release_buffer`]) to be handed out to a
 /// [`TransientPool::acquire_buffer`] caller that expects a specific kind — which would produce
-/// wrong descriptor categories or silent garbage in the shader. Stride is included so ekrano
+/// wrong descriptor categories or silent garbage in the shader. Stride is included so
 /// scratch buffers with different structured strides never alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BufferKey {
