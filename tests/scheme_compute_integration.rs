@@ -3333,8 +3333,7 @@ mod imp {
             );
         }
 
-        let mut output = vec![0u8; texture.byte_size() as usize];
-        texture.read_to_cpu(&mut output).expect("read_to_cpu");
+        let output = read_texture_via_scheme_copy(&ctx, &texture);
         assert_eq!(output, pixels, "pitched retained upload must produce correct pixels");
     }
 
