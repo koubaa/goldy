@@ -2,21 +2,20 @@
 
 All GPU buffer and texture allocations route through the device's installed `VramAllocator`:
 
-1. **Transient sub-allocations** — `TransientAllocator` → `BufferPool` → `Device::alloc_buffer`
+1. **Pool parcels** — `RetainedPool` / `TransientPool` → `Device::alloc_buffer` / `alloc_texture`
 2. **Standalone buffers** — `Device::alloc_buffer` / `alloc_buffer_with_*`
-3. **Textures** — `RetainedPool` / `TransientPool` → `Device::alloc_texture`
 
-The `VramAllocator` trait sits **below** all three, providing a single customization point for where GPU memory comes from. The transient allocator controls *when* to reclaim; the VRAM allocator controls *how* to allocate.
+The `VramAllocator` trait sits **below** those paths, providing a single customization point for where GPU memory comes from. The pools control *when* to reclaim; the VRAM allocator controls *how* to allocate.
 
 ## Architecture
 
 ```text
 ┌────────────────────────────────────────────────┐
-│  Consumers (ekrano, user code)                 │
+│  Consumers
 │  ┌─────────────┐  ┌──────────┐  ┌───────────┐ │
-│  │ TransientAlloc│ │ Buffer   │  │ Texture   │ │
-│  │ (recycling)  │  │ alloc    │  │ alloc     │ │
-│  └──────┬───────┘  └────┬─────┘  └─────┬─────┘ │
+│  │ TransientPool│  │RetainedPool│ │ Direct   │ │
+│  │ (leases)     │  │ (deeds)    │ │ alloc_*  │ │
+│  └──────┬───────┘  └────┬───────┘ └────┬─────┘ │
 │         │               │              │       │
 │  ┌──────▼───────────────▼──────────────▼──────┐│
 │  │           VramAllocator trait               ││
@@ -40,7 +39,7 @@ let tex = device.alloc_texture(width, height, format, access, flags)?;
 
 Every `device.alloc_*` call attaches an allocator **deed** and calls `VramAllocator::notify_freed` on drop. Borrowing sub-parcels such as `BufferView` never account.
 
-Goldy's pooling paths (`RetainedPool`, `TransientPool`, `TransientAllocator` backing) all route through the device's allocator automatically.
+Goldy's pooling paths (`RetainedPool`, `TransientPool`) all route through the device's allocator automatically.
 
 ## Allocation Policy (Tracking and Budget)
 
@@ -135,14 +134,14 @@ impl VramAllocator for MyAllocator {
 
 All trait methods have default implementations that delegate to the standard constructors, so you only need to override the methods you care about. Parcels allocated via `Device::alloc_buffer` / `alloc_texture` notify your allocator automatically on drop when you install it with `with_vram_allocator`.
 
-## Relationship to TransientAllocator
+## Relationship to pools
 
-The two traits are complementary:
+The pools and the VRAM allocator are complementary:
 
-- **`TransientAllocator`** controls *recycling policy*: when to reclaim per-frame scratch memory, how many frames can overlap, how to handle epoch-based reclamation.
+- **`RetainedPool` / `TransientPool`** control *recycling policy*: when deeds and leases may be reissued after GPU retirement.
 - **`VramAllocator`** controls *allocation source*: where the backing memory comes from, budget enforcement, unified telemetry.
 
-`TransientAllocator` implementations create their backing `BufferPool` regions through the device's `VramAllocator`. This means a custom VRAM allocator automatically intercepts transient allocations too.
+Both pools allocate through `Device::alloc_*`, so a custom VRAM allocator automatically intercepts retained and transient parcels.
 
 ## Future Directions
 

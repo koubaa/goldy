@@ -5,9 +5,8 @@
 //! `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity` / `Device::alloc_texture`
 //! method passes through the installed allocator:
 //!
-//! - **Transient backing** — [`TransientAllocator`] → scattered bump arena → `Device::alloc_buffer`
+//! - **Pool parcels** — [`RetainedPool`] / [`TransientPool`] → `Device::alloc_buffer` / `Device::alloc_texture`
 //! - **Standalone named buffers** — `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity`
-//! - **Textures** — [`RetainedPool`] / [`TransientPool`] → `Device::alloc_texture`
 //!
 //! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
 //! a `Weak` back-reference to the allocator. When the backing buffer or texture is dropped,
@@ -54,7 +53,6 @@
 //! [`Device::set_allocation_policy`](crate::device::Device::set_allocation_policy) for byte
 //! tracking and budget enforcement.
 //!
-//! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`Texture`]: crate::Texture
 //! [`RetainedPool`]: crate::retained_pool::RetainedPool
 //! [`TransientPool`]: crate::transient_pool::TransientPool

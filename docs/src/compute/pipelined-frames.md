@@ -121,8 +121,8 @@ pub struct RetiredFrame<T> {
 
 ### Present path timeline is always deferred
 
-On the swapchain path the final scanout timeline may arrive only after `Claim::consume`. The orchestrator holds the slot in a `timeline: None` state until `note_presented` arrives. The `Heap` transient allocator documents the same invariant — `end_frame` may legally arrive after the next `begin_frame` (mid-frame frees are stamped in `end_frame`).
+On the swapchain path the final scanout timeline may arrive only after `Claim::consume`. The orchestrator holds the slot in a `timeline: None` state until `note_presented` arrives.
 
-### Relationship to `TransientAllocator`
+### Relationship to transient recycling
 
-`FrameOrchestrator` owns the frame-slot ring and retirement callbacks. `TransientAllocator` owns the per-frame bump region and advances its epoch via `begin_frame` / `end_frame`. They are independent: the orchestrator does not call into the allocator. Call `allocator.begin_frame()` before recording and `allocator.end_frame(tv)` in your retirement closure — or immediately after the standalone submit where `tv` is known synchronously.
+`FrameOrchestrator` owns the frame-slot ring and retirement callbacks. Transient buffer/texture recycling lives in the per-context [`TransientPool`](../resources/transient-allocation.md) (leases via `acquire_transient_*` / `return_transient_*`). They are independent: the orchestrator does not call into the pool.

@@ -70,11 +70,11 @@ pub(crate) struct TransientTextureSpec {
 /// # View semantics
 ///
 /// `BufferRange` represents a sub-range of a parent `Buffer` (e.g. a
-/// `BufferPool` allocation). Two `BufferRange`s with the same parent are
-/// **independent** unless their byte ranges overlap. This enables the
-/// scheduler to execute dispatches that touch non-overlapping pool views
-/// in the same wave, matching the behaviour of per-allocation tracking in
-/// wgpu and the GPU's own memory model.
+/// partitioned retained record field). Two `BufferRange`s with the same parent
+/// are **independent** unless their byte ranges overlap. This enables the
+/// scheduler to execute dispatches that touch non-overlapping views in the
+/// same wave, matching the behaviour of per-allocation tracking in wgpu and
+/// the GPU's own memory model.
 ///
 /// Backends never see `BufferRange` — barriers are always emitted against
 /// the parent handle via [`ResourceId::canonical_buffer_handle`].

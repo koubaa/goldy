@@ -57,7 +57,6 @@ pub mod scheme;
 pub mod signal;
 pub mod swapchain_pool;
 pub mod timeline;
-pub mod transient_allocator;
 pub mod transient_pool;
 pub mod vram_allocator;
 pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
@@ -101,9 +100,6 @@ pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, Struc
 pub use surface::{Frame, Surface};
 pub use task_graph::{GraphIR, NodeAccess};
 
-pub use transient_allocator::{
-    BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
-};
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};
 

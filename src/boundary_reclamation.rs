@@ -1,13 +1,13 @@
 //! U0 baseline characterization tests for the unified boundary event refactor.
 //!
-//! These four tests lock the current reclamation contract that later units (U1–U9)
+//! These tests lock the VRAM deferred-ring reclamation contract that later units
 //! must preserve. Each test exercises the recycle-after-epoch path (not just
 //! construction) and includes a negative assertion that fails if reclamation is
 //! skipped.
 //!
 //! Contract under test:
 //! 1. VRAM deferred ring empties after `submit + wait + flush`
-//! 2. `HeapTransientAllocator` returns freed ranges after epoch retirement
+//! 2. `poll_signals_and_service` / pull-path flush both reclaim correctly
 //!
 //! Run with: `cargo test -p goldy boundary_reclamation`
 
@@ -20,10 +20,6 @@ mod tests {
     use crate::device::Device;
     use crate::signal::Signal;
     use crate::test_support::scheme_advance_timeline;
-    use crate::transient_allocator::{
-        BumpResetAllocator, HeapTransientAllocator, TransientAllocator, TransientAllocatorConfig,
-    };
-    use crate::types::BufferFlags;
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
@@ -33,26 +29,10 @@ mod tests {
         device.create_context().unwrap()
     }
 
-    fn small_config() -> TransientAllocatorConfig {
-        TransientAllocatorConfig {
-            initial_size: 4 * 1024,
-            alignment: 256,
-            flags: BufferFlags::empty(),
-        }
-    }
-
     fn scheme_submit(ctx: &Context) -> crate::TimelineValue {
         let tv = scheme_advance_timeline(ctx);
         assert!(tv > 0, "scheme submit must advance timeline");
         tv
-    }
-
-    fn heap_config() -> TransientAllocatorConfig {
-        TransientAllocatorConfig {
-            initial_size: 64 * 1024,
-            alignment: 256,
-            flags: BufferFlags::empty(),
-        }
     }
 
     /// The VRAM deferred ring must drain after submit + wait + flush.
@@ -91,40 +71,6 @@ mod tests {
             "VRAM ring must be empty after submit + wait + flush"
         );
         assert!(weak.upgrade().is_none(), "payload must be dropped after flush");
-    }
-
-    /// HeapTransient freed ranges return to the free list once `gpu_progress >= epoch`.
-    #[test]
-    fn u0_heap_free_range_recycles_after_epoch() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut alloc = HeapTransientAllocator::new(&device, heap_config()).unwrap();
-
-        alloc.begin_frame(&device, 0).unwrap();
-        let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        let offset = v1.offset();
-        let tv = scheme_submit(&ctx);
-        let far_epoch = tv + 100;
-
-        alloc.free(offset, 1024, Some(far_epoch));
-        alloc.end_frame(&device, far_epoch);
-
-        alloc.begin_frame(&device, 0).unwrap();
-        let blocked = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_ne!(
-            blocked.offset(),
-            offset,
-            "freed range must not be reused before epoch retires"
-        );
-
-        ctx.wait_until(far_epoch).expect("wait");
-        alloc.begin_frame(&device, 0).unwrap();
-        let reused = alloc.alloc(&device, 1024, Some(4)).expect("alloc after reclaim");
-        assert_eq!(
-            reused.offset(),
-            offset,
-            "freed range should be reused after wait + begin_frame"
-        );
     }
 
     /// `poll_signals_and_service` routes `BoundaryCrossed` into `boundary_crossed(epoch)`.
@@ -236,46 +182,5 @@ mod tests {
         // Stale lower epoch must not panic or resurrect payloads.
         ctx.boundary_crossed(tv1);
         assert!(!ctx.has_deferred_payloads());
-    }
-
-    /// BumpReset must NOT reset the pool before the prior frame's epoch retires.
-    ///
-    /// `begin_frame` gates the reset on `gpu_progress() >= last_epoch`. If the epoch
-    /// has not retired, it must block via `wait_until`. This test uses a far epoch
-    /// that the mock backend has not reached and verifies that `begin_frame` calls
-    /// `wait_until` (advancing mock progress) before resetting.
-    #[test]
-    fn u6_bump_reset_waits_before_reset() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut alloc = BumpResetAllocator::new(&device, small_config()).expect("create");
-
-        alloc.begin_frame(&device, 0).expect("begin 1");
-        let v1 = alloc.alloc(&device, 512, Some(4)).expect("alloc");
-        let original_offset = v1.offset();
-        let tv = scheme_submit(&ctx);
-
-        // Retire to a far epoch the GPU has NOT reached.
-        let far_epoch = tv + 100;
-        alloc.end_frame(&device, far_epoch);
-
-        // begin_frame must wait on far_epoch (mock wait_until advances progress),
-        // then reset. If the wait were skipped, the pool would reset while the
-        // GPU is still using the buffer — a use-after-free.
-        alloc.begin_frame(&device, 0).expect("begin 2");
-
-        // After reset the bump pointer is at 0, so the next alloc should land at
-        // the same offset as the first (confirming reset happened).
-        let v2 = alloc.alloc(&device, 512, Some(4)).expect("alloc after reset");
-        assert_eq!(
-            v2.offset(),
-            original_offset,
-            "bump should reset to 0 after wait + begin_frame"
-        );
-        // Device-global retirement must reach far_epoch (begin_frame wait_until on allocator ctx).
-        assert!(
-            device.timeline_retired() >= far_epoch,
-            "begin_frame must have called wait_until to advance device retirement"
-        );
     }
 }

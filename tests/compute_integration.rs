@@ -15,8 +15,7 @@ mod imp {
     use goldy::{
         types::{BackendType, BufferFlags},
         Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, Instance, NodeAccess,
-        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TransientAllocatorConfig,
-        TransientAllocatorStrategy,
+        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
     };
     use std::sync::Arc;
 
@@ -426,57 +425,6 @@ mod imp {
         assert_eq!(ctx.deferred_deletion_pending_count(), 0);
     }
 
-    fn small_config() -> TransientAllocatorConfig {
-        TransientAllocatorConfig {
-            initial_size: 4 * 1024,
-            alignment: 256,
-            flags: BufferFlags::GPU_ONLY,
-        }
-    }
-
-    fn transient_allocator_smoke_all_strategies(device: &Device) {
-        let ctx = submission_context(device);
-        for strategy in [TransientAllocatorStrategy::BumpReset, TransientAllocatorStrategy::Heap] {
-            let mut a = strategy.create(device, small_config()).expect("create allocator");
-            a.begin_frame(device, 0).expect("begin");
-            let view = a.alloc(device, 256, Some(4)).expect("alloc");
-            let tv = scheme_submit_empty(&ctx);
-            drop(view);
-            a.end_frame(device, tv);
-            a.begin_frame(device, 0).expect("begin frame 2");
-            let _v2 = a.alloc(device, 256, Some(4)).expect("alloc frame 2");
-        }
-    }
-
-    fn transient_allocator_strategy_default_and_parse() {
-        assert_eq!(TransientAllocatorStrategy::default(), TransientAllocatorStrategy::Heap);
-        assert_eq!(
-            TransientAllocatorStrategy::parse("bump"),
-            Some(TransientAllocatorStrategy::BumpReset),
-        );
-        assert_eq!(TransientAllocatorStrategy::parse("epoch"), None);
-        assert_eq!(
-            TransientAllocatorStrategy::parse("heap"),
-            Some(TransientAllocatorStrategy::Heap),
-        );
-        assert_eq!(TransientAllocatorStrategy::parse("garbage"), None);
-    }
-
-    fn transient_allocator_clear_resets_state(device: &Device) {
-        let ctx = submission_context(device);
-        for strategy in [TransientAllocatorStrategy::BumpReset, TransientAllocatorStrategy::Heap] {
-            let mut a = strategy.create(device, small_config()).expect("create allocator");
-            a.begin_frame(device, 0).expect("begin");
-            let _v = a.alloc(device, 1024, Some(4)).expect("alloc");
-            let tv = scheme_submit_empty(&ctx);
-            a.end_frame(device, tv);
-            ctx.wait_until(tv).expect("wait");
-            a.clear();
-            assert_eq!(a.used_this_frame(), 0);
-            a.begin_frame(device, 0).expect("begin after clear");
-        }
-    }
-
     pub fn run() {
         let device = make_device();
 
@@ -507,9 +455,6 @@ mod imp {
         trial!(flush_deferred_deletions_reclaims_slots_after_gpu_idle);
         trial!(flush_deferred_deletions_respects_gpu_progress);
         trial!(flush_deferred_deletions_noop_on_idle_device);
-        trial!(transient_allocator_smoke_all_strategies);
-        trial0!(transient_allocator_strategy_default_and_parse);
-        trial!(transient_allocator_clear_resets_state);
         #[cfg(feature = "vulkan")]
         trial0!(vk_api_validation_timeline_semaphore);
         #[cfg(feature = "vulkan")]
