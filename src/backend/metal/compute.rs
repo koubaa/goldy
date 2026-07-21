@@ -29,9 +29,7 @@ fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
     commands.iter().any(|c| {
         !matches!(
             c,
-            GpuCommand::WriteBuffer { .. }
-                | GpuCommand::FrameTableStaging { .. }
-                | GpuCommand::ResourceBarrier { .. }
+            GpuCommand::WriteBuffer { .. } | GpuCommand::FrameTableStaging { .. } | GpuCommand::ResourceBarrier { .. }
         )
     })
 }

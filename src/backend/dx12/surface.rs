@@ -424,7 +424,6 @@ pub(super) fn acquire(
     Ok((image_index as SwapchainImageHandle, present_slot as u32))
 }
 
-
 pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<u64> {
     let device_handle = state
         .surfaces
@@ -461,8 +460,6 @@ pub(super) fn frame_texture(state: &Dx12State, surface_handle: SurfaceHandle) ->
         .get(&surface_handle)
         .and_then(|s| s.current_texture_handle)
 }
-
-
 
 pub(super) fn prepare_present_work(
     state: &mut Dx12State,
@@ -717,7 +714,6 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
         })
     }
 }
-
 
 /// Resize a surface.
 #[allow(clippy::too_many_lines)]
@@ -1022,4 +1018,3 @@ pub(super) fn set_present_mode(
     tracing::debug!(?mode, "DX12 present mode set");
     Ok(())
 }
-

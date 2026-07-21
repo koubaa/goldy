@@ -55,7 +55,7 @@ pub(crate) mod host_sidecar;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat, PresentMode,
+    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, IndexFormat, PresentMode,
     PrimitiveTopology, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
     VertexBufferLayout,
 };
@@ -348,9 +348,6 @@ where
     Ok(())
 }
 
-// Re-export raw_window_handle for surface creation (crate root re-exports for clients).
-pub(crate) use raw_window_handle;
-
 /// Opaque token tying surface work to an acquired swapchain frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FrameToken {
@@ -377,6 +374,7 @@ pub(crate) struct FrameToken {
 }
 
 /// Render command for command buffer recording.
+#[allow(dead_code)] // fields matched by GPU backends behind feature flags
 #[derive(Debug, Clone)]
 pub(crate) enum RenderCommand {
     /// Clear the color render target.
@@ -490,11 +488,13 @@ impl SubmitSync {
     ///
     /// Epoch-driven scheme/task-graph submits pass `Some(SubmitSync)` with a scoped
     /// prologue and/or cross-context waits; they must not also emit the blanket acquire.
+    #[cfg_attr(not(any(test, feature = "vulkan")), allow(dead_code))]
     pub fn use_legacy_acquire(&self) -> bool {
         false
     }
 
     /// Whether `sync` selects the legacy blanket acquire path.
+    #[cfg_attr(not(any(test, feature = "vulkan")), allow(dead_code))]
     pub fn use_legacy_acquire_from(sync: Option<&SubmitSync>) -> bool {
         match sync {
             None => true,

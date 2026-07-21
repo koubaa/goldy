@@ -842,7 +842,7 @@ impl GpuBackend for VulkanBackend {
         pipeline::destroy(&self.state.devices, &self.state.pipelines, pipeline_handle);
     }
 
-fn render_to_target(
+    fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,
         target: RenderTargetHandle,
@@ -1238,7 +1238,7 @@ fn render_to_target(
         }
     }
 
-fn submit_standalone(
+    fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],

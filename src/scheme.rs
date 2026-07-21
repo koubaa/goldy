@@ -2928,7 +2928,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     /// Declare push-constant slots in shader parameter order and register graph bindings.
     ///
-    /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
+    /// [`Self::set_pipeline`] emits typed bindless resource binds from these
     /// handles before each pipeline bind.
     pub fn with_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
         for slot in slots {

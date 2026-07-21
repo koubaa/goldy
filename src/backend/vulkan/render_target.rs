@@ -28,6 +28,7 @@ fn find_memory_type(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
     instance: &Instance,
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,

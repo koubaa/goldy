@@ -843,7 +843,7 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-fn submit_standalone(
+    fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],

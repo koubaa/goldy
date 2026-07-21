@@ -16,6 +16,14 @@ pub const FRAME_TABLE_SELECTOR_SLOT: u32 = 0;
 #[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
 /// First bindless slot available to program resources (low protocol slots reserved).
+#[cfg_attr(
+    not(any(
+        feature = "vulkan",
+        all(feature = "dx12", target_os = "windows"),
+        all(feature = "metal", target_os = "macos"),
+    )),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
 /// Maximum bindless indices routed through the table per submission row.
@@ -32,19 +40,39 @@ pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAM
 #[cfg_attr(not(all(feature = "metal", target_os = "macos")), allow(dead_code))]
 pub const FRAME_TABLE_TABLE_BYTES: u64 = (FRAME_TABLE_TABLE_U32S * 4) as u64;
 /// Per-row selector slots at the front of CPU upload staging.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_STAGING_SELECTOR_U32S: usize = FRAME_TABLE_MAX_ROWS as usize;
 /// Total `u32` elements in CPU upload staging (selectors + row payloads).
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_STAGING_U32S: usize = FRAME_TABLE_STAGING_SELECTOR_U32S + FRAME_TABLE_TABLE_U32S;
 /// Byte size of CPU upload staging (per-row selectors + row-strided table payloads).
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_STAGING_BYTES: u64 = (FRAME_TABLE_STAGING_U32S * 4) as u64;
 
 /// Byte offset of row `row`'s selector word in CPU staging.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 #[inline]
 pub fn staging_selector_byte_offset(row: u32) -> u64 {
     (row as u64) * 4
 }
 
 /// Byte offset of row `row`'s payload in CPU staging.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"),)),
+    allow(dead_code)
+)]
 #[inline]
 pub fn staging_row_payload_byte_offset(row: u32) -> u64 {
     (FRAME_TABLE_STAGING_SELECTOR_U32S as u64 + row as u64 * FRAME_TABLE_ROW_STRIDE as u64) * 4
@@ -147,6 +175,14 @@ pub fn lower_render_pass_commands(
 }
 
 /// Frame-table staging is built directly by the task-graph analyzer; kept for call-site stability.
+#[cfg_attr(
+    not(any(
+        feature = "vulkan",
+        all(feature = "dx12", target_os = "windows"),
+        all(feature = "metal", target_os = "macos"),
+    )),
+    allow(dead_code)
+)]
 pub fn lower_gpu_commands(_commands: &mut Vec<crate::backend::GpuCommand>) {}
 
 #[cfg(test)]

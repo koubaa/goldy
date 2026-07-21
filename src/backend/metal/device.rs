@@ -5,7 +5,8 @@ use super::types::{
     DeletionQueue, DescriptorRegistry, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
     TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
-use crate::backend::{AdapterInfo, BackendType, DeviceType};
+use crate::backend::{AdapterInfo, BackendType};
+use crate::types::DeviceType;
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use std::sync::atomic::AtomicU64;

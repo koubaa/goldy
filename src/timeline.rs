@@ -44,7 +44,7 @@ pub struct Epoch {
 /// Inline capacity before spilling to heap for [`SmallContextMap`].
 const SMALL_CONTEXT_INLINE_CAP: usize = 4;
 
-/// Inline storage for per-context maps keyed by [`ContextHandle`].
+/// Inline storage for per-context maps keyed by opaque context handle.
 ///
 /// Retained parcels and cross-submit sync typically touch 1–3 contexts; this avoids
 /// heap allocation and SipHash overhead of `HashMap` at that scale. Spills to a `Vec`

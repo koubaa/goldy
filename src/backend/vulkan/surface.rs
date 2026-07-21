@@ -878,7 +878,6 @@ pub(super) fn frame_texture(
     surfaces.get(&surface_handle).and_then(|s| s.current_texture_handle)
 }
 
-
 pub(super) fn submit_frame(
     state: &mut super::types::VulkanState,
     frame: &crate::backend::FrameToken,
@@ -904,7 +903,6 @@ pub(super) fn submit_frame(
     let ld = state.devices.get(&dh).context("Surface's device is invalid")?;
     Ok(ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
 }
-
 
 /// Resize the surface's swapchain.
 #[allow(clippy::too_many_arguments)]
@@ -1291,7 +1289,6 @@ fn pick_vk_present_mode(
     }
     Ok(vk_target)
 }
-
 
 /// Get the current size of the surface.
 pub(super) fn size(surfaces: &HashMap<SurfaceHandle, SurfaceState>, surface_handle: SurfaceHandle) -> (u32, u32) {

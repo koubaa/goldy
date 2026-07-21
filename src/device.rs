@@ -1107,7 +1107,7 @@ impl Device {
     /// Query the platform row-pitch and staging buffer layout for an UPLOAD from a 2-D texture region.
     ///
     /// On DX12 rows are padded to 256-byte alignment; on Vulkan and Metal rows are tight
-    /// (`width × bpp`).  Use the returned [`TextureCopyFootprint`] to allocate
+    /// (`width × bpp`).  Use the returned [`crate::TextureCopyFootprint`] to allocate
     /// a `CPU_WRITABLE` buffer of `staging_bytes` capacity and write each row at `row_pitch`
     /// stride starting from byte `footprint_offset` — then pass `row_pitch` as the
     /// `src_row_pitch` argument to [`crate::Scheme::copy_buffer_to_texture_parcel`] so the

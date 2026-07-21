@@ -18,7 +18,6 @@ use windows::{
     },
 };
 
-
 /// Create a render target with optional depth buffer.
 #[allow(clippy::too_many_lines)]
 pub(super) fn create_with_depth(

@@ -9,7 +9,6 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 
-
 /// Create a render target with optional depth buffer.
 pub(super) fn create_with_depth(
     state: &mut MetalState,

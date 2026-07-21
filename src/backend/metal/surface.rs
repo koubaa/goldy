@@ -325,7 +325,6 @@ pub(super) fn frame_texture(state: &MetalState, surface: SurfaceHandle) -> Optio
     state.surfaces.get(&surface).and_then(|s| s.current_texture_handle)
 }
 
-
 /// Clone present resources under the global backend lock for lock-free GPU enqueue.
 pub(super) fn prepare_present_work(
     state: &mut MetalState,

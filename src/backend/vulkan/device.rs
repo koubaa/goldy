@@ -2,7 +2,8 @@
 
 use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
-use crate::backend::{AdapterInfo, BackendType, DeviceType};
+use crate::backend::{AdapterInfo, BackendType};
+use crate::types::DeviceType;
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
