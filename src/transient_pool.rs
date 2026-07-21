@@ -2,7 +2,7 @@
 //!
 //! There is one transient pool per context; this type is the engine.
 //!
-//! Relinquished resources enter as [`StampedParcel`]s and are handed out again by lease
+//! Relinquished resources enter as stamped parcels and are handed out again by lease
 //! realization **only once every stamped epoch has retired**. Clients never compare
 //! timeline values; the pool consumes `ready_after` internally through
 //! `Context::parcel_ready`.

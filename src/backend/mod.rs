@@ -378,7 +378,7 @@ pub struct FrameToken {
     pub surface: SurfaceHandle,
     /// WSI swapchain image index (which drawable will be presented).
     pub image: SwapchainImageHandle,
-    /// Submission context that owns this frame's timeline (set by [`crate::surface::Frame`]).
+    /// Submission context that owns this frame's timeline (set when the surface frame is acquired).
     pub context: ContextHandle,
     /// In-flight slot index for the compute/scratch texture bound this frame.
     ///
@@ -1729,7 +1729,7 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
 
     /// Install a per-thread reclamation epoch for the next deferred-payload drop window.
     ///
-    /// Metal uses this so `Buffer::drop` during [`crate::Context::boundary_crossed`] queues heap
+    /// Metal uses this so `Buffer::drop` during context boundary crossing queues heap
     /// frees with the already-retired epoch instead of `timeline_scheduled_max`. Only the
     /// installing thread observes the override; other threads keep conservative barriers.
     fn set_reclamation_context(&mut self, _ctx: ContextHandle, _epoch: Option<crate::timeline::TimelineValue>) {}

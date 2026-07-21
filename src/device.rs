@@ -12,7 +12,7 @@
 //!   These operations are safe from any thread but serialize internally.
 //!
 //! - **Command Submission**: Submitting via [`crate::Scheme::submit`] or
-//!   [`crate::surface::Frame::present`] acquires the backend lock.
+//!   presenting a surface frame acquires the backend lock.
 //!
 //! ## Best Practices
 //!

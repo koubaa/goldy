@@ -1,6 +1,6 @@
 //! Shared graph IR, barrier analysis, and submit engine used by [`crate::Scheme`].
 //!
-//! Schemes record a [`GraphIR`], then submit through the IR submit path, which
+//! Schemes record a graph IR, then submit through the IR submit path, which
 //! schedules waves, inserts barriers, and drives backend `submit_graph` paths.
 
 pub(crate) mod analysis;
@@ -14,9 +14,10 @@ pub mod record;
 pub use graph::ShaderResourceSlot;
 pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, PartitionSubmitResult, ResolvedPresentSlot};
 pub use ir::NodeAccess;
-pub(crate) use ir::{
-    BarrierSet, BarrierUsage, GraphIR, NodeAccessUnion, SlotUsageSet, UsageKindFlags,
-};
+pub(crate) use ir::{BarrierSet, BarrierUsage, GraphIR};
+// Re-exported for backend barrier lowering (vulkan/dx12); unused with --no-default-features.
+#[allow(unused_imports)]
+pub(crate) use ir::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
 

@@ -79,9 +79,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 /// A type-erased bundle of GPU resources to be held alive until a GPU timeline epoch retires.
 ///
-/// Passed to [`VramAllocator::defer_release`] to register resources for deferred dropping.
-/// The allocator holds the payload until [`VramAllocator::boundary_crossed`] determines that the
-/// associated epoch has been reached, then drops all resources in the payload.
+/// Passed to the VRAM allocator's deferred-release path to register resources for
+/// deferred dropping. The allocator holds the payload until a context boundary
+/// crossing determines that the associated epoch has been reached, then drops all
+/// resources in the payload.
 pub struct DeferredPayload(pub(crate) Vec<Box<dyn Any + Send>>);
 
 impl DeferredPayload {

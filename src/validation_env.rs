@@ -20,8 +20,8 @@
 //!   no retention fingerprints, no backend CB store/resubmit, no retained-allocator
 //!   retire waits, no topology-dirty registration for replay. Each submit re-records
 //!   via ordinary `submit_graph` / `submit_standalone`. Also implied when
-//!   [`crate::gpu_profiler::gpu_profile_enabled`] is true, because timestamp queries
-//!   reference a per-submit query heap that must not outlive a retained list.
+//!   `GOLDY_GPU_PROFILE` is set, because timestamp queries reference a per-submit
+//!   query heap that must not outlive a retained list.
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct ParsedValidation {
@@ -141,7 +141,7 @@ pub fn clear_cb_reuse_override() {
 
 /// When true, disable the CB-retention facility entirely (not merely skip resubmit hits).
 ///
-/// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`), or enable [`crate::gpu_profiler::gpu_profile_enabled`].
+/// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`), or enable `GOLDY_GPU_PROFILE`.
 /// Goldy tears down any live replay ledger and routes retainable partitions through ordinary
 /// `submit_graph` — no fingerprints, backend CB storage, allocator retire waits, or replay
 /// topology registration.

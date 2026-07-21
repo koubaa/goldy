@@ -1,13 +1,13 @@
 //! Pipelined frame scheduling: in-flight timeline ring, depth cap, present stamp.
 //!
 //! [`FrameOrchestrator`] is a **client pacing** helper only. It does not own GPU
-//! bytes or run cleanup callbacks — recycle lives in [`crate::TransientPool`] /
+//! bytes or run cleanup callbacks — recycle lives in the transient pool /
 //! [`crate::RetainedPool`]. Use it to bound how far the CPU runs ahead of the GPU
 //! and to track open-frame / present-timeline bookkeeping.
 //!
 //! When cross-frame ordering is enforced elsewhere (scheme submit sidecars,
-//! present easement), close with [`Self::end_frame_externally_ordered`] so the
-//! ring stays empty and [`Self::begin_frame`] does not wait.
+//! present easement), close with [`FrameOrchestrator::end_frame_externally_ordered`]
+//! so the ring stays empty and [`FrameOrchestrator::begin_frame`] does not wait.
 
 use crate::context::Context;
 use crate::error::GoldyError;
@@ -139,7 +139,7 @@ impl FrameOrchestrator {
         Ok(timeline)
     }
 
-    /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
+    /// End a frame whose scanout is deferred to surface present or
     /// [`crate::Claim::consume`].
     ///
     /// Pushes a ring slot whose timeline is filled later via [`Self::note_presented`], and does
@@ -168,7 +168,7 @@ impl FrameOrchestrator {
         Ok(())
     }
 
-    /// After [`crate::surface::Frame::present`], stamp the most recent surface slot with the returned timeline.
+    /// After surface present, stamp the most recent surface slot with the returned timeline.
     pub fn note_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.ring.back_mut() {
             if back.timeline.is_none() {

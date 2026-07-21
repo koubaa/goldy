@@ -240,7 +240,7 @@ impl fmt::Debug for Transaction {
 /// Unique receipt returned by [`Scheme::submit`].
 ///
 /// Owns untaken exchange claims and read-grant staging cells. Clone the
-/// [`SubmissionHandle`] for timeline identity that must outlive claim extraction.
+/// submission handle for timeline identity that must outlive claim extraction.
 /// Dropping this receipt discards every claim that has not been taken.
 pub struct Submission {
     handle: SubmissionHandle,
