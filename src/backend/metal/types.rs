@@ -615,7 +615,7 @@ pub(crate) struct MetalSubmissionContext {
     /// Last device-global seq value submitted on this context.
     pub last_submitted_seq: u64,
     pub in_flight_command_buffers: VecDeque<(crate::timeline::TimelineValue, mtl::CommandBuffer)>,
-    /// Thread-scoped reclamation epoch from [`GpuBackend::set_reclamation_context`].
+    /// Thread-scoped reclamation epoch from [`ContextReclamationScope::set_epoch`].
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
     pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
@@ -1521,7 +1521,7 @@ pub(crate) struct SurfaceState {
     pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
-    /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).
+    /// Frame-scoped GPU commands submitted with the surface frame.
     pub frame_pending_gpu_commands: Vec<crate::backend::GpuCommand>,
     pub pending_acquire_count: u32,
     pub last_acquired_image_index: Option<u32>,

@@ -9,10 +9,11 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureCopyFootprint, TextureHandle};
+use crate::backend::{BufferHandle, GpuCommand, RenderCommand};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
+use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
@@ -25,6 +26,7 @@ use crate::task_graph::{
     DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
     PRESENT_LEASE_SLOT_PLACEHOLDER,
 };
+use crate::texture::TextureCopyFootprint;
 use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
 use crate::types::{
     BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
@@ -3225,8 +3227,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     #[cfg(not(feature = "metal"))]
     fn clean_resubmit_performs_no_cpu_wait() {
-        use crate::backend::GpuBackend;
-
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
@@ -3235,11 +3235,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.submit().unwrap();
 
         let backend = device.inner.backend.lock().unwrap();
-        assert_eq!(
-            backend.test_wait_until_count(),
-            0,
-            "clean scheme resubmits must not call wait_until on the submit path"
-        );
+        device.with_mock_backend(|mock| {
+            assert_eq!(
+                mock.wait_until_count, 0,
+                "clean scheme resubmits must not call wait_until on the submit path"
+            );
+        });
         assert!(
             !scheme.partition_last_tvs().is_empty(),
             "per-partition timelines are tracked after submit"

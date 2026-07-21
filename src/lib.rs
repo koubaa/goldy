@@ -12,7 +12,7 @@
 //! let device = adapter.request_device(&Default::default()).unwrap();
 //! ```
 
-pub mod backend;
+pub(crate) mod backend;
 pub mod buffer;
 pub mod compute;
 pub mod context;
@@ -20,6 +20,7 @@ pub mod device;
 pub mod error;
 pub mod frame_orchestrator;
 pub(crate) mod frame_table;
+pub(crate) mod handles;
 pub mod pipeline;
 pub(crate) mod render_target;
 pub mod sampler;
@@ -75,7 +76,8 @@ pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;
 pub use device::{
-    Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
+    Adapter, AdapterInfo, BufferHeapStats, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
+    RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
 };
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
@@ -86,16 +88,32 @@ pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use task_graph::NodeAccess;
+pub use texture::TextureCopyFootprint;
 pub use timeline::TimelineValue;
 
+pub use handles::{SamplerHandle, TextureHandle};
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};
+
+pub use raw_window_handle;
 
 #[cfg(test)]
 mod boundary_reclamation;
 
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub use backend::dx12::WARP_ADAPTER_ID;
+
+/// Whether the DX12 backend is running with the D3D12 debug layer enabled.
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub fn dx12_debug_mode() -> bool {
+    backend::dx12::is_debug_mode()
+}
+
+/// Whether the DX12 backend is running with the D3D12 debug layer enabled.
+#[cfg(not(all(feature = "dx12", target_os = "windows")))]
+pub fn dx12_debug_mode() -> bool {
+    false
+}
 
 /// Test helpers for `--lib` and integration tests.
 ///
@@ -115,8 +133,60 @@ pub mod test_support {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
+    #[allow(private_bounds)]
     pub fn with_mock<R>(device: &Device, f: impl FnOnce(&mut MockBackend) -> R) -> R {
         device.with_mock_backend(f)
+    }
+
+    pub fn mock_reset_tracking(device: &Device) {
+        with_mock(device, |m| m.reset_tracking());
+    }
+
+    pub fn mock_recorded_waits(device: &Device) -> Vec<Vec<crate::timeline::Epoch>> {
+        with_mock(device, |m| m.recorded_waits.clone())
+    }
+
+    pub fn mock_retained_resubmit_count(device: &Device) -> usize {
+        with_mock(device, |m| m.retained_resubmit_count)
+    }
+
+    pub fn mock_compute_dispatch_count(device: &Device) -> usize {
+        with_mock(device, |m| m.compute_dispatch_count)
+    }
+
+    pub fn mock_all_graph_syncs_some(device: &Device) -> bool {
+        with_mock(device, |m| m.recorded_graph_syncs.iter().all(|&s| s))
+    }
+
+    pub fn mock_recorded_graph_syncs(device: &Device) -> Vec<bool> {
+        with_mock(device, |m| m.recorded_graph_syncs.clone())
+    }
+
+    pub fn mock_has_nonempty_host_observed_waits(device: &Device) -> bool {
+        with_mock(device, |m| {
+            m.recorded_host_observed_waits.iter().any(|batch| !batch.is_empty())
+        })
+    }
+
+    pub fn mock_has_nonempty_deferred_host_writes(device: &Device) -> bool {
+        with_mock(device, |m| {
+            m.recorded_deferred_host_writes.iter().any(|batch| !batch.is_empty())
+        })
+    }
+
+    /// Count buffer entries in the first recorded `ResourceBarrier` on the mock backend.
+    pub fn mock_barrier_buffer_count(device: &Device) -> usize {
+        use crate::backend::GpuCommand;
+        with_mock(device, |m| {
+            m.recorded_compute_commands
+                .iter()
+                .flat_map(|batch| batch.iter())
+                .find_map(|cmd| match cmd {
+                    GpuCommand::ResourceBarrier { buffers, .. } => Some(buffers.len()),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        })
     }
 
     /// Headless surface exchange backed by mock window handles (mock backend only).

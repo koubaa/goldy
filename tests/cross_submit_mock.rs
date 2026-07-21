@@ -1,7 +1,10 @@
 //! Deterministic mock-backend integration tests for epoch-driven cross-scheme sync.
 
-use goldy::backend::GpuCommand;
-use goldy::test_support::{mock_device, with_mock};
+use goldy::test_support::{
+    mock_all_graph_syncs_some, mock_barrier_buffer_count, mock_compute_dispatch_count, mock_device,
+    mock_has_nonempty_deferred_host_writes, mock_has_nonempty_host_observed_waits, mock_recorded_graph_syncs,
+    mock_recorded_waits, mock_reset_tracking, mock_retained_resubmit_count,
+};
 use goldy::{
     BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RetainedPool,
     Scheme, ShaderModule, TextureFormat,
@@ -16,36 +19,27 @@ fn second_ctx(device: &Device) -> Context {
 }
 
 fn clear_mock(device: &Device) {
-    with_mock(device, |m| m.reset_tracking());
+    mock_reset_tracking(device);
 }
 
 fn recorded_waits(device: &Device) -> Vec<Vec<goldy::timeline::Epoch>> {
-    with_mock(device, |m| m.recorded_waits.clone())
+    mock_recorded_waits(device)
 }
 
 fn barrier_buffer_count(device: &Device) -> usize {
-    with_mock(device, |m| {
-        m.recorded_compute_commands
-            .iter()
-            .flat_map(|batch| batch.iter())
-            .find_map(|cmd| match cmd {
-                GpuCommand::ResourceBarrier { buffers, .. } => Some(buffers.len()),
-                _ => None,
-            })
-            .unwrap_or(0)
-    })
+    mock_barrier_buffer_count(device)
 }
 
 fn retained_resubmits(device: &Device) -> usize {
-    with_mock(device, |m| m.retained_resubmit_count)
+    mock_retained_resubmit_count(device)
 }
 
 fn compute_submits(device: &Device) -> usize {
-    with_mock(device, |m| m.compute_dispatch_count)
+    mock_compute_dispatch_count(device)
 }
 
 fn all_graph_syncs_some(device: &Device) -> bool {
-    with_mock(device, |m| m.recorded_graph_syncs.iter().all(|&s| s))
+    mock_all_graph_syncs_some(device)
 }
 
 const WRITE_SHADER: &str = r#"
@@ -322,7 +316,7 @@ fn war_retained_resubmit_against_scheduled_read_needs_no_live_wait() {
 }
 
 fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
-    with_mock(device, |m| m.recorded_graph_syncs.clone())
+    mock_recorded_graph_syncs(device)
 }
 
 /// A minimal render scheme that declares a read dependency on `parcel` via `with_parcel`.
@@ -672,14 +666,12 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
         "retained resubmit must carry reuse epoch in SubmitSync.waits: {waits:?}"
     );
 
-    let host_waits = with_mock(&device, |m| m.recorded_host_observed_waits.clone());
-    let host_writes = with_mock(&device, |m| m.recorded_deferred_host_writes.clone());
     assert!(
-        host_writes.iter().any(|batch| !batch.is_empty()),
-        "deferred host writes must reach the retained resubmit path: {host_writes:?}"
+        mock_has_nonempty_deferred_host_writes(&device),
+        "deferred host writes must reach the retained resubmit path"
     );
     assert!(
-        host_waits.iter().any(|batch| !batch.is_empty()) || host_writes.iter().any(|b| !b.is_empty()),
+        mock_has_nonempty_host_observed_waits(&device) || mock_has_nonempty_deferred_host_writes(&device),
         "host sidecar must be recorded on at least one partition"
     );
 

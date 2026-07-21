@@ -1440,7 +1440,7 @@ pub(crate) struct SurfaceState {
     /// Handle of the scratch texture for the current frame slot — what compute
     /// shaders write to.  Cleared at present; the underlying slot persists.
     pub current_texture_handle: Option<super::TextureHandle>,
-    /// Compute commands accumulated for the active frame ([`GpuBackend::record_gpu_work`](crate::backend::GpuBackend::record_gpu_work)).
+    /// Compute commands accumulated for the active frame during surface submit.
     pub frame_pending_gpu_commands: Vec<super::GpuCommand>,
     /// Drawables acquired or presented but not yet returned to the swapchain pool.
     pub pending_acquire_count: u32,

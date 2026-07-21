@@ -7,8 +7,10 @@ use crate::backend::{BufferHandle, ContextHandle};
 use crate::buffer::{Allocation, BufferSource, BufferView, StructuredBufferElement};
 use crate::context::Context;
 use crate::device::DeviceInner;
+use crate::handles::TextureHandle;
 use crate::task_graph::ResourceId;
 use crate::texture::TextureBacking;
+use crate::texture::TextureCopyFootprint;
 use crate::timeline::{
     PromiseState, ReferenceTable, ResourceSync, Settle, TimelinePromise, TimelineValue, WRITE_KINDS_TRANSFER,
 };
@@ -382,7 +384,7 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn texture_handle(&self) -> Option<crate::backend::TextureHandle> {
+    pub(crate) fn texture_handle(&self) -> Option<TextureHandle> {
         match &self.backing {
             ParcelBacking::Texture(t) => Some(t.gpu_handle()),
             _ => None,
@@ -885,7 +887,7 @@ impl Texture {
     ///
     /// Requires [`TextureFlags::COPY_SRC`]. Swapchain drawables and other non-copyable
     /// textures do not satisfy that requirement and this method panics.
-    pub fn copy_layout(&self) -> crate::backend::TextureCopyFootprint {
+    pub fn copy_layout(&self) -> TextureCopyFootprint {
         if !self.flags().contains(TextureFlags::COPY_SRC) {
             panic!(
                 "Texture::copy_layout requires TextureFlags::COPY_SRC; \
@@ -902,7 +904,7 @@ impl Texture {
             .unwrap_or_else(|e| panic!("Texture::copy_layout backend query failed: {e}"))
     }
 
-    pub fn gpu_handle(&self) -> crate::backend::TextureHandle {
+    pub fn gpu_handle(&self) -> TextureHandle {
         self.parcel.texture_handle().expect("texture parcel")
     }
 

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// Tracks resource creation/destruction and command recording
 /// without actually performing GPU operations.
-pub struct MockBackend {
+pub(crate) struct MockBackend {
     adapters: Vec<AdapterInfo>,
     devices: HashMap<DeviceHandle, MockDevice>,
     next_device_handle: DeviceHandle,
@@ -1103,11 +1103,6 @@ impl GpuBackend for MockBackend {
         self.surface_present_count
     }
 
-    #[cfg(test)]
-    fn test_wait_until_count(&self) -> usize {
-        self.wait_until_count
-    }
-
     fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         let buf = self
             .buffers
@@ -1414,15 +1409,6 @@ impl GpuBackend for MockBackend {
         ))
     }
 
-    fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        if !self.surfaces.contains_key(&frame.surface) {
-            anyhow::bail!("Invalid surface handle");
-        }
-
-        self.recorded_commands.push(commands.to_vec());
-        Ok(())
-    }
-
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         let surf = self
             .surfaces
@@ -1677,29 +1663,6 @@ impl GpuBackend for MockBackend {
         self.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
     }
 
-    fn wait_until_timeout(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-        timeout_ms: u32,
-    ) -> Result<bool> {
-        if self.gpu_progress(ctx) >= value {
-            return Ok(true);
-        }
-        let device = self.context_device(ctx);
-        if let Some(dev) = self.devices.get(&device) {
-            let horizon = self.mock_scheduled_horizon(device);
-            if !dev
-                .submission_worker
-                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
-            {
-                return Ok(false);
-            }
-        }
-        self.finish_timeline_wait(ctx, value)?;
-        Ok(true)
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
@@ -1812,15 +1775,6 @@ impl GpuBackend for MockBackend {
         };
         self.retained_resubmit_count += 1;
         self.submit_graph(ctx, &commands, sync).map(Some)
-    }
-
-    fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
-        let surf = self
-            .surfaces
-            .get_mut(&frame.surface)
-            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
-        surf.pending_frame_compute.extend_from_slice(commands);
-        Ok(())
     }
 
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {

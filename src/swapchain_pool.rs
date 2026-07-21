@@ -5,8 +5,8 @@
 //! (classic frame timing) or let [`crate::Scheme::submit`] defer acquire until
 //! the present partition is about to run.
 
-use crate::backend::TextureHandle;
 use crate::context::Context;
+use crate::handles::TextureHandle;
 use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
