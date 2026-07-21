@@ -73,8 +73,6 @@ pub use vram_allocator::DeferredPayload;
 // Re-export main types
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
-pub use signal::{OversubscribedReason, Signal};
-pub use timeline::TimelineValue;
 pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
@@ -85,8 +83,10 @@ pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
+pub use signal::{OversubscribedReason, Signal};
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use task_graph::NodeAccess;
+pub use timeline::TimelineValue;
 
 pub use types::*;
 pub use types::{PresentMode, SurfaceConfig};

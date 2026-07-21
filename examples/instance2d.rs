@@ -2,8 +2,8 @@
 //!
 //! Layout matches `QuadInstance` in `instancing_update.slang` / `instancing_render.slang`.
 
-use goldy::StructuredBufferElement;
 use bytemuck::{Pod, Zeroable};
+use goldy::StructuredBufferElement;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]

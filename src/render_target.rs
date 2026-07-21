@@ -93,8 +93,7 @@ mod tests {
     #[test]
     fn test_render_target_creation() {
         let device = create_test_device();
-        let target =
-            RenderTarget::new_with_depth(&device, 800, 600, TextureFormat::Rgba8Unorm, None).unwrap();
+        let target = RenderTarget::new_with_depth(&device, 800, 600, TextureFormat::Rgba8Unorm, None).unwrap();
 
         assert_eq!(target.width(), 800);
         assert_eq!(target.height(), 600);

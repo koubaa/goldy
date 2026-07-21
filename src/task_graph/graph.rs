@@ -2477,15 +2477,14 @@ mod slice_retention_tests {
         let ctx = device.create_context().unwrap();
 
         // Create a real mock render target so submit_graph's render path succeeds.
-        let rt =
-            crate::render_target::RenderTarget::new_with_depth(
-                &device,
-                4,
-                4,
-                crate::types::TextureFormat::Rgba8Unorm,
-                None,
-            )
-            .unwrap();
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {

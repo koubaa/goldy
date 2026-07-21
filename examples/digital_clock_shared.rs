@@ -1,8 +1,8 @@
 //! Shared digital-clock rendering helpers for the `digital_clock` example.
 
+use bytemuck::{Pod, Zeroable};
 use goldy::buffer::StructuredBufferElement;
 use goldy::types::{Color, VertexBufferLayout, VertexFormat};
-use bytemuck::{Pod, Zeroable};
 
 /// Slang shader for the digital clock.
 pub const SHADER_SOURCE: &str = r#"
@@ -48,10 +48,7 @@ impl ClockVertex {
     }
 
     pub fn layout() -> VertexBufferLayout {
-        VertexBufferLayout::from_formats::<Self>(&[
-            VertexFormat::Float32x2,
-            VertexFormat::Float32x4,
-        ])
+        VertexBufferLayout::from_formats::<Self>(&[VertexFormat::Float32x2, VertexFormat::Float32x4])
     }
 }
 

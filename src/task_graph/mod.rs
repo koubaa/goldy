@@ -16,9 +16,9 @@ pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, PartitionSubmitRes
 pub use ir::NodeAccess;
 pub(crate) use ir::{BarrierSet, BarrierUsage, GraphIR};
 // Re-exported for backend barrier lowering (vulkan/dx12); unused with --no-default-features.
+pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 #[allow(unused_imports)]
 pub(crate) use ir::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
-pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
 
 use crate::backend::{BufferHandle, TextureHandle};
