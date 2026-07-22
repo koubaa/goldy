@@ -137,6 +137,7 @@ pub enum GoldyNodeAccess {
     GOLDY_NODE_ACCESS_READ = 0,
     GOLDY_NODE_ACCESS_WRITE = 1,
     GOLDY_NODE_ACCESS_READ_WRITE = 2,
+    GOLDY_NODE_ACCESS_OVERWRITE = 3,
 }
 
 #[repr(C)]

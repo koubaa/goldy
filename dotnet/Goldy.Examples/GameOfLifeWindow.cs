@@ -31,7 +31,7 @@ static class GameOfLifeWindow
         {
             node
                 .WithParcel(read, NodeAccess.Read)
-                .WithParcel(write, NodeAccess.Write);
+                .WithParcel(write, NodeAccess.Overwrite);
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
         using var _ = scheme.Submit();

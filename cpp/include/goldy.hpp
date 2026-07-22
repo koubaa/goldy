@@ -187,6 +187,7 @@ enum class NodeAccess {
     Read = GOLDY_NODE_ACCESS_READ,
     Write = GOLDY_NODE_ACCESS_WRITE,
     ReadWrite = GOLDY_NODE_ACCESS_READ_WRITE,
+    Overwrite = GOLDY_NODE_ACCESS_OVERWRITE,
 };
 
 /**

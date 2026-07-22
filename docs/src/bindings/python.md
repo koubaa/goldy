@@ -252,7 +252,7 @@ Standard pipeline construction — see `python/examples/triangle_headless.py`.
 goldy.DeviceType.DISCRETE_GPU | INTEGRATED_GPU | CPU | OTHER
 goldy.TextureFormat.RGBA8_UNORM | RGBA8_UNORM_SRGB | BGRA8_UNORM
 goldy.BufferKind.SCATTERED | BROADCAST
-goldy.NodeAccess.READ | WRITE | READ_WRITE
+goldy.NodeAccess.READ | WRITE | READ_WRITE | OVERWRITE
 ```
 
 ### Exceptions

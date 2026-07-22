@@ -272,6 +272,7 @@ pub enum GoldyNodeAccess {
     Read = 0,
     Write = 1,
     ReadWrite = 2,
+    Overwrite = 3,
 }
 
 /// Shader resource binding access (SRV vs UAV).

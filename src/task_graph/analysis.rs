@@ -2042,6 +2042,55 @@ mod tests {
     }
 
     #[test]
+    fn write_to_overwrite_keeps_waw_edge() {
+        // Inaugural voids contents, not ordering — Write→Overwrite still edges.
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn overwrite_to_overwrite_keeps_waw_edge() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Overwrite)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn overwrite_to_read_keeps_raw_edge() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Overwrite)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn read_to_overwrite_keeps_war_edge() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Read)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
     fn diamond_dependency() {
         //   A (writes X)
         //  / \

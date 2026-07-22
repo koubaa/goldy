@@ -41,7 +41,7 @@ pass.clear_depth(1.0);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.set_index_buffer(&indices, IndexFormat::Uint16);
-pass.bind_resources(&[&uniforms, &textures]);
+// Shader resources: with_parcel / with_shader_resources (samplers) before set_pipeline
 ```
 
 ### Drawing

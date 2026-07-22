@@ -42,7 +42,9 @@ impl PendingRenderSlot {
             .flatten()
             .unwrap_or(match self.graph_access {
                 NodeAccess::Read => ResourceAccess::Read,
-                NodeAccess::Write | NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+                NodeAccess::Write | NodeAccess::Overwrite | NodeAccess::ReadWrite => {
+                    ResourceAccess::ReadWrite
+                }
             });
         match descriptor_access {
             ResourceAccess::Read => self.read_handle.or(self.uav_handle),
@@ -258,7 +260,7 @@ impl RenderPassRecord {
 fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     match access {
         NodeAccess::Read => ResourceAccess::Read,
-        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::Write | NodeAccess::Overwrite => ResourceAccess::Write,
         NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
     }
 }

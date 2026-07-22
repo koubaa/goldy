@@ -81,7 +81,7 @@ def main() -> int:
     node = scheme.node("game_of_life", compute_pipeline)
     (
         node.with_field(cells, "a", goldy.NodeAccess.READ)
-        .with_field(cells, "b", goldy.NodeAccess.WRITE)
+        .with_field(cells, "b", goldy.NodeAccess.OVERWRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
 

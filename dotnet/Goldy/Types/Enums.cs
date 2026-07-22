@@ -210,6 +210,7 @@ public enum NodeAccess
     Read = 0,
     Write = 1,
     ReadWrite = 2,
+    Overwrite = 3,
 }
 
 /// <summary>

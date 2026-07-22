@@ -173,6 +173,7 @@ pub enum PyNodeAccess {
     READ = 0,
     WRITE = 1,
     READ_WRITE = 2,
+    OVERWRITE = 3,
 }
 
 impl From<PyNodeAccess> for goldy::NodeAccess {
@@ -181,6 +182,7 @@ impl From<PyNodeAccess> for goldy::NodeAccess {
             PyNodeAccess::READ => goldy::NodeAccess::Read,
             PyNodeAccess::WRITE => goldy::NodeAccess::Write,
             PyNodeAccess::READ_WRITE => goldy::NodeAccess::ReadWrite,
+            PyNodeAccess::OVERWRITE => goldy::NodeAccess::Overwrite,
         }
     }
 }

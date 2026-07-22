@@ -10,7 +10,7 @@ use anyhow::Result;
 use goldy::{
     field, Buffer, Color, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
+    ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -37,7 +37,7 @@ fn run_compute_step(
     scheme
         .node("game_of_life", pipeline)
         .with_parcel(&cells[read_field], NodeAccess::Read)
-        .with_parcel(&cells[write_field], NodeAccess::Write)
+        .with_parcel(&cells[write_field], NodeAccess::Overwrite)
         .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     scheme.submit()?;
     Ok(())
@@ -53,11 +53,7 @@ fn record_display_scheme(
 ) -> anyhow::Result<Transaction> {
     let current = &cells[current_field];
     let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
-    // Bind before set_pipeline: Scattered<uint> needs a UAV slot, not the SRV from with_parcel(Read).
-    pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
-        parcel: current,
-        access: NodeAccess::ReadWrite,
-    }]);
+    pass.with_parcel(current, NodeAccess::Read);
     pass.clear(Color::BLACK);
     pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);

@@ -252,16 +252,21 @@ VSOutput vs_draw(BufRO<Particle> particles, InstanceId iid, VertexId vid) {
 
 ## Rust-Side Resource Binding
 
-Resources are bound in declaration order (left to right in the shader signature):
+Resources are bound in declaration order (left to right in the shader signature) via
+`with_parcel`. Graph access (`NodeAccess`) drives dependency analysis; the descriptor
+kind (SRV vs UAV) is chosen from pipeline reflection at `dispatch` / `set_pipeline`:
 
 ```rust
-pass.with_resource_slots(&[
-    cfg_buf.resource_index(ResourceAccess::Read).unwrap(),
-    particle_buf.resource_index(ResourceAccess::Write).unwrap(),
-]);
+scheme
+    .node("update", &pipeline)
+    .with_parcel(&cfg_buf, NodeAccess::Read)
+    .with_parcel(&particle_buf, NodeAccess::ReadWrite)
+    .dispatch(workgroups, 1, 1);
 ```
 
-Plain scalar parameters (`uint offset`) are also push-constant bindings — no wrapper struct needed.
+Use `NodeAccess::Overwrite` when a compute node fully replaces a parcel without reading
+prior contents (ping-pong write sides, clears). Plain scalar parameters (`uint offset`)
+are also push-constant bindings — no wrapper struct needed.
 
 ## `goldy_exp` Utility Modules
 

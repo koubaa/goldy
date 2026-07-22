@@ -74,7 +74,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     {
         let mut node = scheme.compute_node("game_of_life", &compute_pipeline);
         node.with_parcel(&read, NodeAccess::Read);
-        node.with_parcel(&write, NodeAccess::Write);
+        node.with_parcel(&write, NodeAccess::Overwrite);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 

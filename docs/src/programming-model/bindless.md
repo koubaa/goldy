@@ -71,7 +71,7 @@ Any user-defined struct type (e.g. `MyUniforms`) declared as a parameter is auto
 
 ## Dispatch-Time Type Checking
 
-When you call `with_parcel` on a compute or render pass builder, Goldy queues each parcel as a push-constant slot. At `dispatch` / `set_pipeline` time it consults the pipeline's reflected slot kinds to pick the correct SRV vs UAV (or CBV) handle and validates categories against the shader signature:
+When you call `with_parcel` on a compute or render pass builder, Goldy queues each parcel as a push-constant slot. At `dispatch` / `set_pipeline` time it consults the pipeline's reflected slot kinds to pick the correct SRV vs UAV (or CBV) handle and validates categories against the shader signature. `NodeAccess` is graph semantics only (including `Overwrite` for full replace without reading prior contents); descriptor access comes from reflection.
 
 ```rust
 scheme

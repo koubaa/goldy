@@ -3,7 +3,7 @@
 use goldy::{
     BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
-    ShaderResourceSlot, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 
@@ -252,13 +252,13 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             scheme
                 .node("gol_update", &compute_pipeline)
                 .with_parcel(&buffer_a, NodeAccess::Read)
-                .with_parcel(&buffer_b, NodeAccess::Write)
+                .with_parcel(&buffer_b, NodeAccess::Overwrite)
                 .dispatch(workgroups_x, workgroups_y, 1);
         } else {
             scheme
                 .node("gol_update", &compute_pipeline)
                 .with_parcel(&buffer_b, NodeAccess::Read)
-                .with_parcel(&buffer_a, NodeAccess::Write)
+                .with_parcel(&buffer_a, NodeAccess::Overwrite)
                 .dispatch(workgroups_x, workgroups_y, 1);
         }
         scheme.submit().expect("compute submit");
@@ -277,11 +277,7 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         "gol_render",
         |pass| {
             let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
-            // Scattered<uint> maps to a UAV slot; match TaskGraph bind_resources (ReadWrite), not SRV.
-            pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
-                parcel: cells,
-                access: NodeAccess::ReadWrite,
-            }]);
+            pass.with_parcel(cells, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.set_pipeline(&render_pipeline);
             pass.draw(0..3, 0..1);

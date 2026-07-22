@@ -193,7 +193,7 @@ void run_compute_step(
     {
         auto node = scheme.compute_node("game_of_life", pipeline);
         node.with_parcel(read, goldy::NodeAccess::Read);
-        node.with_parcel(write, goldy::NodeAccess::Write);
+        node.with_parcel(write, goldy::NodeAccess::Overwrite);
         node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
     }
     (void)scheme.submit();

@@ -106,7 +106,7 @@ def run_compute_step(
     node = scheme.node("game_of_life", pipeline)
     (
         node.with_field(cells, read_field, goldy.NodeAccess.READ)
-        .with_field(cells, write_field, goldy.NodeAccess.WRITE)
+        .with_field(cells, write_field, goldy.NodeAccess.OVERWRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
     scheme.submit()

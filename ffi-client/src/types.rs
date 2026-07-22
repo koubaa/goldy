@@ -182,6 +182,7 @@ pub enum NodeAccess {
     Read,
     Write,
     ReadWrite,
+    Overwrite,
 }
 
 impl From<NodeAccess> for GoldyNodeAccess {
@@ -190,6 +191,7 @@ impl From<NodeAccess> for GoldyNodeAccess {
             NodeAccess::Read => GoldyNodeAccess::GOLDY_NODE_ACCESS_READ,
             NodeAccess::Write => GoldyNodeAccess::GOLDY_NODE_ACCESS_WRITE,
             NodeAccess::ReadWrite => GoldyNodeAccess::GOLDY_NODE_ACCESS_READ_WRITE,
+            NodeAccess::Overwrite => GoldyNodeAccess::GOLDY_NODE_ACCESS_OVERWRITE,
         }
     }
 }
