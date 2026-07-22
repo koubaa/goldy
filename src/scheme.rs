@@ -3694,7 +3694,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .node("write_tex", &pipeline)
             .with_parcel(&tex2, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        scheme2.submit().expect("fresh scheme with re-acquired texture must submit");
+        scheme2
+            .submit()
+            .expect("fresh scheme with re-acquired texture must submit");
     }
 
     #[test]

@@ -1616,7 +1616,13 @@ impl IrSubmitState {
 
     pub fn register_stamp_parts(&mut self, resource_id: ResourceId, stamp: Arc<crate::parcel::ParcelStamp>) {
         if let Some(key) = ResourceKey::from_resource_id(resource_id) {
-            self.resource_stamps.insert(key, stamp);
+            // Rebinding the same resource identity replaces the map entry. Also drop any
+            // matching retired stamp from the legacy `stamp_targets` ledger so
+            // `all_stamps_alive` cannot keep failing after a correct re-record.
+            if let Some(old) = self.resource_stamps.insert(key, stamp) {
+                self.stamp_targets
+                    .retain(|s| !std::sync::Arc::ptr_eq(s, &old) && s.is_alive());
+            }
         } else {
             self.stamp_targets.push(stamp);
         }
