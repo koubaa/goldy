@@ -104,10 +104,7 @@ pub enum NodeAccess {
 
 impl NodeAccess {
     pub fn writes(self) -> bool {
-        matches!(
-            self,
-            NodeAccess::Write | NodeAccess::ReadWrite | NodeAccess::Overwrite
-        )
+        matches!(self, NodeAccess::Write | NodeAccess::ReadWrite | NodeAccess::Overwrite)
     }
 
     pub fn reads(self) -> bool {
@@ -246,9 +243,11 @@ pub enum NodeKind {
     ///
     /// Declare all buffers and textures read by draw commands via
     /// [`crate::scheme::SchemeRenderPassBuilder`] so barriers serialize correctly
-    /// against compute work.
+    /// against compute work. Color load is declared on the node (`color_load`), not
+    /// as a command-list clear.
     RenderPass {
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: Vec<crate::backend::RenderCommand>,
     },
     /// Read easement grant — recorded once, replayed with the scheme.

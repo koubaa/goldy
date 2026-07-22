@@ -2443,6 +2443,7 @@ pub(super) fn submit_graph_with_scope(
             },
             GraphCommand::Render {
                 target,
+                color_load,
                 commands: render_cmds,
             } => {
                 let _tz = tracy_zone!("vk.render_pass");
@@ -2508,6 +2509,7 @@ pub(super) fn submit_graph_with_scope(
                     view.render_targets,
                     device_handle,
                     *target,
+                    *color_load,
                     &lowered,
                     cmd,
                     |cb, cmds, ld, cur_pipe| {

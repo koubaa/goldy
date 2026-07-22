@@ -1545,11 +1545,13 @@ pub(crate) fn emit_graph_commands_for_waves(
                 }
                 NodeKind::RenderPass {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     let lowered = crate::frame_table::lower_render_pass_commands(&mut frame_table, render_cmds);
                     commands.push(GraphCommand::Render {
                         target: *target,
+                        color_load: *color_load,
                         commands: lowered,
                     });
                 }
@@ -1802,6 +1804,7 @@ mod tests {
                     bindings: vec![],
                     kind: NodeKind::RenderPass {
                         target: 10,
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                         commands: Vec::new(),
                     },
                 },

@@ -27,11 +27,10 @@ static class TriangleWindow
             Math.Max(surface.Width, 1u),
             Math.Max(surface.Height, 1u),
             surface.Format);
-        using (var pass = scheme.RenderPass("triangle", rt))
+        using (var pass = scheme.RenderPassClear("triangle", rt, bg))
         {
             pass
                 .WithParcel(vertexParcel, NodeAccess.Read)
-                .Clear(bg)
                 .SetPipeline(pipeline)
                 .SetVertexBuffer(0, vertexParcel)
                 .Draw(3);

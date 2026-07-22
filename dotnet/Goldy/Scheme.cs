@@ -51,15 +51,27 @@ public sealed class Scheme : IDisposable
     /// <summary>
     /// Begin recording an offscreen render pass. Finish with <see cref="SchemeRenderPassScope.Dispose"/>.
     /// </summary>
-    public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease)
+    public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease, TargetLoadKind load, Color clearColor = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(lease);
-        var result = NativeMethods.SchemeRenderPassBegin(Handle, label, lease.Handle);
+        var result = NativeMethods.SchemeRenderPassBegin(Handle, label, lease.Handle, load, clearColor);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme render_pass_begin");
         return new SchemeRenderPassScope(this);
     }
+
+    /// <summary>
+    /// Begin a render pass that clears the color target.
+    /// </summary>
+    public SchemeRenderPassScope RenderPassClear(string label, SchemeRenderTargetLease lease, Color clearColor) =>
+        RenderPass(label, lease, TargetLoadKind.Clear, clearColor);
+
+    /// <summary>
+    /// Begin a render pass that discards prior color contents.
+    /// </summary>
+    public SchemeRenderPassScope RenderPassDiscard(string label, SchemeRenderTargetLease lease) =>
+        RenderPass(label, lease, TargetLoadKind.Discard);
 
     /// <summary>
     /// Copy a scheme-held render target into a texture parcel (for grant readback).
@@ -244,16 +256,6 @@ public sealed class SchemeRenderPassScope : IDisposable
 
     public SchemeRenderPassScope WithBufferUnit(Buffer buffer, uint unit, NodeAccess access) =>
         WithField(buffer, unit, access);
-
-
-    public SchemeRenderPassScope Clear(Color color)
-    {
-        EnsureOpen();
-        var result = NativeMethods.SchemeRenderPassClear(_scheme.Handle, color);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme render_pass_clear");
-        return this;
-    }
 
     public SchemeRenderPassScope SetPipeline(RenderPipeline pipeline)
     {

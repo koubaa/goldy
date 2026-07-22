@@ -56,11 +56,10 @@ static class TriangleHeadless
 
         using var scheme = new Scheme(ctx);
         using var rt = scheme.LeaseRenderTarget(width, height, TextureFormat.Rgba8Unorm);
-        using (var pass = scheme.RenderPass("triangle", rt))
+        using (var pass = scheme.RenderPassClear("triangle", rt, new Color(0.1f, 0.1f, 0.2f, 1.0f)))
         {
             pass
                 .WithParcel(vertexParcel, NodeAccess.Read)
-                .Clear(new Color(0.1f, 0.1f, 0.2f, 1.0f))
                 .SetPipeline(pipeline)
                 .SetVertexBuffer(0, vertexParcel)
                 .Draw(3);

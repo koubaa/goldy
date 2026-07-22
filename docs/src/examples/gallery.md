@@ -83,9 +83,8 @@ More complex examples combining multiple Goldy features or demonstrating interac
 
 ```rust
 // Record once at init (and on resize):
-let mut pass = scheme.render_pass("main", &scene_rt);
+let mut pass = scheme.render_pass("main", &scene_rt, TargetLoad::Clear(background_color));
 pass.with_parcel(&vertices, NodeAccess::Read);
-pass.clear(background_color);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.draw(0..vertex_count, 0..1);

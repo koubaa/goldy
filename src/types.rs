@@ -13,6 +13,28 @@ pub struct Color {
     pub a: f32,
 }
 
+/// Color-target load declared on [`crate::Scheme::render_pass`], not in the command list.
+///
+/// - [`Self::Load`] — preserve prior contents (`NodeAccess::Write` on the RT).
+/// - [`Self::Clear`] — clear to a color, then draw (private-inaugural / `Overwrite`).
+/// - [`Self::Discard`] — prior contents irrelevant; fully overwritten by draws (`Overwrite`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TargetLoad {
+    /// Depend on prior color contents.
+    Load,
+    /// Clear the color target to this value at pass begin.
+    Clear(Color),
+    /// Discard prior color contents (private-inaugural).
+    Discard,
+}
+
+impl TargetLoad {
+    /// True when the pass does not depend on prior color contents.
+    pub fn overwrites(self) -> bool {
+        matches!(self, Self::Clear(_) | Self::Discard)
+    }
+}
+
 impl Color {
     pub const BLACK: Color = Color {
         r: 0.0,

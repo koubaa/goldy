@@ -7,7 +7,7 @@
 use goldy_ffi_client::{
     shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule,
-    SurfaceExchange, Transaction, Vertex2D,
+    SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -45,9 +45,8 @@ fn record_scheme(
     bg_color: Color,
 ) -> goldy_ffi_client::Result<Transaction> {
     {
-        let mut pass = scheme.render_pass("triangle", scene_rt);
+        let mut pass = scheme.render_pass("triangle", scene_rt, TargetLoad::Clear(bg_color));
         pass.with_buffer(vertex_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer);
         pass.draw(0..3, 0..1);

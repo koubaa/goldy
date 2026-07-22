@@ -2492,6 +2492,7 @@ mod slice_retention_tests {
             bindings: vec![],
             kind: NodeKind::RenderPass {
                 target: rt.backend_handle(),
+                color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                 commands: Vec::new(),
             },
         });
@@ -3057,6 +3058,7 @@ mod partitioning_tests {
             bindings: vec![],
             kind: NodeKind::RenderPass {
                 target,
+                color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                 commands: Vec::new(),
             },
         }
@@ -3321,6 +3323,7 @@ mod partitioning_tests {
                     }],
                     kind: NodeKind::RenderPass {
                         target: 10,
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                         commands: Vec::new(),
                     },
                 },

@@ -172,8 +172,8 @@ def test_render_clear_via_scheme(device):
 
     scheme = goldy.Scheme(ctx)
     rt = scheme.lease_render_target(width, height, goldy.TextureFormat.RGBA8_UNORM)
-    with scheme.render_pass("clear", rt) as rp:
-        rp.clear(goldy.Color.RED)
+    with scheme.render_pass("clear", rt, goldy.TargetLoad.clear(goldy.Color.RED)) as rp:
+        pass
 
     scheme.copy_to_texture(rt, readback)
     grant = scheme.grant_read_texture(readback)

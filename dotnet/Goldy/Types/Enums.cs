@@ -214,6 +214,16 @@ public enum NodeAccess
 }
 
 /// <summary>
+/// Color-target load for <see cref="Scheme.RenderPass"/>.
+/// </summary>
+public enum TargetLoadKind
+{
+    Load = 0,
+    Clear = 1,
+    Discard = 2,
+}
+
+/// <summary>
 /// Shader resource binding access (SRV vs UAV).
 /// </summary>
 public enum ResourceAccess

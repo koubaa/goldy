@@ -10,7 +10,7 @@ use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
 use crate::pipeline::RenderPipeline;
-use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle};
+use crate::types::{IndexFormat, ResourceAccess, ResourceHandle};
 use std::sync::Arc;
 
 /// Deferred push-constant slot for [`RenderPassRecord`].
@@ -42,9 +42,7 @@ impl PendingRenderSlot {
             .flatten()
             .unwrap_or(match self.graph_access {
                 NodeAccess::Read => ResourceAccess::Read,
-                NodeAccess::Write | NodeAccess::Overwrite | NodeAccess::ReadWrite => {
-                    ResourceAccess::ReadWrite
-                }
+                NodeAccess::Write | NodeAccess::Overwrite | NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
             });
         match descriptor_access {
             ResourceAccess::Read => self.read_handle.or(self.uav_handle),
@@ -63,6 +61,7 @@ impl PendingRenderSlot {
 pub struct RenderPassRecord {
     label: &'static str,
     target: crate::backend::RenderTargetHandle,
+    color_load: crate::types::TargetLoad,
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
     stamp_targets: Vec<Arc<ParcelStamp>>,
@@ -112,11 +111,6 @@ impl RenderPassRecord {
             },
             access,
         });
-        self
-    }
-
-    pub fn clear(&mut self, color: Color) -> &mut Self {
-        self.commands.push(RenderCommand::Clear(color));
         self
     }
 
@@ -230,14 +224,21 @@ impl RenderPassRecord {
         label: &'static str,
         scheme: &crate::Scheme,
         lease: &crate::Lease<crate::LeaseRenderTarget>,
+        color_load: crate::types::TargetLoad,
     ) -> Self {
         let handle = scheme.rt(lease).backend_handle();
+        let access = if color_load.overwrites() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         Self {
             label,
             target: handle,
+            color_load,
             bindings: vec![ResourceBinding {
                 resource: ResourceId::RenderTarget(handle),
-                access: NodeAccess::Write,
+                access,
             }],
             commands: Vec::new(),
             stamp_targets: Vec::new(),
@@ -250,6 +251,7 @@ impl RenderPassRecord {
         scheme.commit_render_pass(
             self.label,
             self.target,
+            self.color_load,
             self.bindings,
             self.commands,
             &self.stamp_targets,

@@ -6,8 +6,8 @@
 
 use goldy_ffi_client::{
     shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
-    TextureKind, Vertex2D,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, TextureFlags,
+    TextureFormat, TextureKind, Vertex2D,
 };
 
 fn main() -> goldy_ffi_client::Result<()> {
@@ -62,9 +62,8 @@ fn main() -> goldy_ffi_client::Result<()> {
     let mut scheme = Scheme::new(&ctx)?;
     let rt = scheme.lease_render_target(WIDTH, HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
     {
-        let mut pass = scheme.render_pass("triangle", &rt);
+        let mut pass = scheme.render_pass("triangle", &rt, TargetLoad::Clear(Color::BLACK));
         pass.with_buffer(&vertex_buffer, NodeAccess::Read);
-        pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
         pass.draw(0..3, 0..1);

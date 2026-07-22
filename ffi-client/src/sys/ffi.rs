@@ -48,11 +48,15 @@ pub type FnGoldySchemeLeaseRenderTarget = unsafe extern "C" fn(
     GoldyDepthFormat,
 ) -> *mut GoldySchemeRenderTargetLease;
 pub type FnGoldySchemeRenderTargetLeaseDestroy = unsafe extern "C" fn(*mut GoldySchemeRenderTargetLease);
-pub type FnGoldySchemeRenderPassBegin =
-    unsafe extern "C" fn(*mut GoldyScheme, *const c_char, *const GoldySchemeRenderTargetLease) -> GoldyResult;
+pub type FnGoldySchemeRenderPassBegin = unsafe extern "C" fn(
+    *mut GoldyScheme,
+    *const c_char,
+    *const GoldySchemeRenderTargetLease,
+    GoldyTargetLoad,
+    GoldyColor,
+) -> GoldyResult;
 pub type FnGoldySchemeRenderPassWithParcel =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyNodeAccess) -> GoldyResult;
-pub type FnGoldySchemeRenderPassClear = unsafe extern "C" fn(*mut GoldyScheme, GoldyColor) -> GoldyResult;
 pub type FnGoldySchemeRenderPassClearDepth = unsafe extern "C" fn(*mut GoldyScheme, f32) -> GoldyResult;
 pub type FnGoldySchemeRenderPassSetPipeline =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldyRenderPipeline) -> GoldyResult;

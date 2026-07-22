@@ -25,7 +25,7 @@ pub(super) fn record(
 
     for cmd in commands {
         match cmd {
-            RenderCommand::Clear(_) | RenderCommand::ClearDepth(_) => {}
+            RenderCommand::ClearDepth(_) => {}
             RenderCommand::SetPipeline(pipeline_handle) => {
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
                     encoder.set_render_pipeline_state(&pipeline.pipeline);
@@ -148,7 +148,7 @@ pub(super) fn record(
 pub(super) fn create_render_pass<'a>(
     texture: &mtl::TextureRef,
     depth_texture: Option<&mtl::TextureRef>,
-    clear_color: Option<crate::types::Color>,
+    color_load: crate::types::TargetLoad,
     clear_depth: Option<f32>,
 ) -> &'a mtl::RenderPassDescriptorRef {
     let descriptor = mtl::RenderPassDescriptor::new();
@@ -159,16 +159,22 @@ pub(super) fn create_render_pass<'a>(
         .expect("Metal render pass descriptor must have at least one color attachment");
     color_attachment.set_texture(Some(texture));
 
-    if let Some(color) = clear_color {
-        color_attachment.set_load_action(mtl::MTLLoadAction::Clear);
-        color_attachment.set_clear_color(mtl::MTLClearColor::new(
-            color.r as f64,
-            color.g as f64,
-            color.b as f64,
-            color.a as f64,
-        ));
-    } else {
-        color_attachment.set_load_action(mtl::MTLLoadAction::Load);
+    match color_load {
+        crate::types::TargetLoad::Clear(color) => {
+            color_attachment.set_load_action(mtl::MTLLoadAction::Clear);
+            color_attachment.set_clear_color(mtl::MTLClearColor::new(
+                color.r as f64,
+                color.g as f64,
+                color.b as f64,
+                color.a as f64,
+            ));
+        }
+        crate::types::TargetLoad::Load => {
+            color_attachment.set_load_action(mtl::MTLLoadAction::Load);
+        }
+        crate::types::TargetLoad::Discard => {
+            color_attachment.set_load_action(mtl::MTLLoadAction::DontCare);
+        }
     }
     color_attachment.set_store_action(mtl::MTLStoreAction::Store);
 

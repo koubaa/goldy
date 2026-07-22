@@ -120,10 +120,9 @@ def record_display_scheme(
     render_pipeline: goldy.RenderPipeline,
     scene_rt: goldy.SchemeRenderTargetLease,
 ) -> goldy.Transaction:
-    with scheme.render_pass("game_of_life_render", scene_rt) as rp:
+    with scheme.render_pass("game_of_life_render", scene_rt, goldy.TargetLoad.discard()) as rp:
         (
             rp.with_field(cells, current_field, goldy.NodeAccess.READ)
-            .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .draw_fullscreen()
         )

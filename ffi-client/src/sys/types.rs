@@ -142,6 +142,14 @@ pub enum GoldyNodeAccess {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyTargetLoad {
+    GOLDY_TARGET_LOAD_LOAD = 0,
+    GOLDY_TARGET_LOAD_CLEAR = 1,
+    GOLDY_TARGET_LOAD_DISCARD = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoldyResourceAccess {
     GOLDY_RESOURCE_ACCESS_READ = 0,
     GOLDY_RESOURCE_ACCESS_WRITE = 1,

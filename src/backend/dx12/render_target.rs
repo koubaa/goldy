@@ -8,7 +8,7 @@ use super::utils::{depth_format_to_dxgi, execute_command_lists_and_signal_device
 use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
 use crate::backend::ContextHandle;
 use crate::backend::RenderCommand;
-use crate::types::{Color, DepthFormat, TextureFormat};
+use crate::types::{DepthFormat, TargetLoad, TextureFormat};
 use anyhow::{Context, Result};
 use windows::{
     core::Interface,
@@ -194,11 +194,13 @@ pub(super) fn create_with_depth(
 /// binding, draw commands, and RENDER_TARGET -> COPY_SOURCE barrier into `cmd_list`.
 /// Does NOT close/execute/signal.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_render_pass_to_list_with_record(
     record: &super::submit_session::Dx12RecordState<'_>,
     device_handle: DeviceHandle,
     recording_ctx: Option<ContextHandle>,
     target: RenderTargetHandle,
+    color_load: TargetLoad,
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
@@ -225,13 +227,6 @@ pub(super) fn record_render_pass_to_list_with_record(
         handle
     };
 
-    let clear_color = commands
-        .iter()
-        .find_map(|c| match c {
-            RenderCommand::Clear(color) => Some(*color),
-            _ => None,
-        })
-        .unwrap_or(Color::BLACK);
     let clear_depth = commands
         .iter()
         .find_map(|c| match c {
@@ -266,12 +261,18 @@ pub(super) fn record_render_pass_to_list_with_record(
         barriers::barrier_textures(cmd_list, &initial_tex_barriers);
     }
 
-    unsafe {
-        cmd_gfx.ClearRenderTargetView(
-            rtv_handle,
-            &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
-            None,
-        );
+    match color_load {
+        TargetLoad::Clear(clear_color) => unsafe {
+            cmd_gfx.ClearRenderTargetView(
+                rtv_handle,
+                &[clear_color.r, clear_color.g, clear_color.b, clear_color.a],
+                None,
+            );
+        },
+        TargetLoad::Discard => unsafe {
+            cmd_gfx.DiscardResource(&render_target.texture, None);
+        },
+        TargetLoad::Load => {}
     }
 
     if let Some(dsv_off) = render_target.dsv_offset {
@@ -365,6 +366,7 @@ pub(super) fn record_render_pass_to_list(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
+    color_load: TargetLoad,
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
@@ -375,6 +377,7 @@ pub(super) fn record_render_pass_to_list(
         device_handle,
         None,
         target,
+        color_load,
         commands,
         cmd_list,
         frame_table_prologue_already_recorded,
@@ -387,6 +390,7 @@ pub(super) fn render(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
+    color_load: TargetLoad,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -418,7 +422,8 @@ pub(super) fn render(
 
     let ft = super::frame_table::ensure_legacy_frame_table(state, device_handle)?;
     let mut row_guard = super::frame_table::RowReservation::new(&ft);
-    let (_, prologue_row) = record_render_pass_to_list(state, device_handle, target, commands, &cmd, false)?;
+    let (_, prologue_row) =
+        record_render_pass_to_list(state, device_handle, target, color_load, commands, &cmd, false)?;
     if let Some(row) = prologue_row {
         row_guard.set(row);
     }

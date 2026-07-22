@@ -191,6 +191,33 @@ enum class NodeAccess {
 };
 
 /**
+ * @brief Color-target load for Scheme::render_pass.
+ */
+enum class TargetLoadKind {
+    Load = GOLDY_TARGET_LOAD_LOAD,
+    Clear = GOLDY_TARGET_LOAD_CLEAR,
+    Discard = GOLDY_TARGET_LOAD_DISCARD,
+};
+
+/**
+ * @brief Color-target load with optional clear color.
+ */
+struct TargetLoad {
+    TargetLoadKind kind;
+    Color clear_color;
+
+    static TargetLoad load() {
+        return TargetLoad{TargetLoadKind::Load, Color::black()};
+    }
+    static TargetLoad clear(const Color& color) {
+        return TargetLoad{TargetLoadKind::Clear, color};
+    }
+    static TargetLoad discard() {
+        return TargetLoad{TargetLoadKind::Discard, Color::black()};
+    }
+};
+
+/**
  * @brief Texture flags for copy and render operations.
  */
 namespace TextureFlags {
@@ -1293,7 +1320,8 @@ public:
 
     [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);
 
-    [[nodiscard]] RenderPass render_pass(const char* label, const SchemeRenderTargetLease& target);
+    [[nodiscard]] RenderPass render_pass(const char* label, const SchemeRenderTargetLease& target,
+                                         TargetLoad load);
 
     GoldyScheme* get() const { return ptr_.get(); }
 
@@ -1375,10 +1403,11 @@ inline Scheme::ComputeNode Scheme::compute_node(const char* label, const Compute
  */
 class Scheme::RenderPass {
 public:
-    RenderPass(Scheme& scheme, const char* label, const SchemeRenderTargetLease& target)
+    RenderPass(Scheme& scheme, const char* label, const SchemeRenderTargetLease& target, TargetLoad load)
         : scheme_(scheme) {
         detail::throw_on_result(goldy_scheme_render_pass_begin(
-            scheme_.ptr_.get(), label, target.get()));
+            scheme_.ptr_.get(), label, target.get(),
+            static_cast<GoldyTargetLoad>(load.kind), load.clear_color));
         active_ = true;
     }
 
@@ -1412,11 +1441,6 @@ public:
 
     RenderPass& set_index_buffer(const Buffer& buffer, GoldyIndexFormat format, uint32_t unit = 0) {
         return set_index_buffer(buffer.field(unit), format);
-    }
-
-    RenderPass& clear(const Color& color) {
-        detail::throw_on_result(goldy_scheme_render_pass_clear(scheme_.ptr_.get(), color));
-        return *this;
     }
 
     RenderPass& clear_depth(float depth = 1.0f) {
@@ -1474,8 +1498,9 @@ private:
     bool active_ = false;
 };
 
-inline Scheme::RenderPass Scheme::render_pass(const char* label, const SchemeRenderTargetLease& target) {
-    return RenderPass(*this, label, target);
+inline Scheme::RenderPass Scheme::render_pass(const char* label, const SchemeRenderTargetLease& target,
+                                              TargetLoad load) {
+    return RenderPass(*this, label, target, load);
 }
 
 

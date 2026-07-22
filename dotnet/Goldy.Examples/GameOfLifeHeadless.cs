@@ -70,11 +70,11 @@ static class GameOfLifeHeadless
 
         var rt = scheme.LeaseRenderTarget(GridWidth, GridHeight, TextureFormat.Rgba8Unorm);
         using (var current = cells.Field(1))
-        using (var pass = scheme.RenderPass("game_of_life_render", rt))
+        using (var pass = scheme.RenderPassDiscard("game_of_life_render", rt))
         {
             pass
                 .WithParcel(current, NodeAccess.Read)
-                .Clear(Color.Black)
+
                 .SetPipeline(renderPipeline)
                 .DrawFullscreen();
         }

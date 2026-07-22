@@ -6,7 +6,7 @@ use super::types::{LogicalDevice, RenderTargetState, SharedRenderTargetTable};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk, with_image_sharing};
 use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::RenderCommand;
-use crate::types::{Color, TextureFormat};
+use crate::types::{Color, TargetLoad, TextureFormat};
 use anyhow::{Context, Result};
 use ash::{vk, Instance};
 use std::collections::HashMap;
@@ -204,11 +204,13 @@ pub(super) fn create_with_depth(
 /// dynamic rendering, draw commands, and the post-render barrier
 /// (COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL) into `cmd`.
 /// Does NOT begin/end the command buffer and does NOT submit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_render_pass_to_buffer<F>(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &SharedRenderTargetTable,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
+    color_load: TargetLoad,
     commands: &[RenderCommand],
     cmd: vk::CommandBuffer,
     record_commands_fn: F,
@@ -235,14 +237,6 @@ where
     let depth_view = render_target.depth_view;
     let depth_format = render_target.depth_format;
 
-    let clear_color = commands
-        .iter()
-        .find_map(|c| match c {
-            RenderCommand::Clear(color) => Some(*color),
-            _ => None,
-        })
-        .unwrap_or(Color::BLACK);
-
     let clear_depth = commands
         .iter()
         .find_map(|c| match c {
@@ -251,13 +245,27 @@ where
         })
         .unwrap_or(1.0);
 
+    let (color_load_op, clear_color, color_old_layout) = match color_load {
+        TargetLoad::Load => (
+            vk::AttachmentLoadOp::LOAD,
+            Color::BLACK,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        ),
+        TargetLoad::Clear(color) => (vk::AttachmentLoadOp::CLEAR, color, vk::ImageLayout::UNDEFINED),
+        TargetLoad::Discard => (
+            vk::AttachmentLoadOp::DONT_CARE,
+            Color::BLACK,
+            vk::ImageLayout::UNDEFINED,
+        ),
+    };
+
     // Transition image to color attachment
     let color_barrier = vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
         .src_access_mask(vk::AccessFlags2::NONE)
         .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-        .old_layout(vk::ImageLayout::UNDEFINED)
+        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::COLOR_ATTACHMENT_READ)
+        .old_layout(color_old_layout)
         .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .image(image)
         .subresource_range(vk::ImageSubresourceRange {
@@ -300,7 +308,7 @@ where
     let color_attachment = vk::RenderingAttachmentInfo::default()
         .image_view(image_view)
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .load_op(color_load_op)
         .store_op(vk::AttachmentStoreOp::STORE)
         .clear_value(vk::ClearValue {
             color: vk::ClearColorValue {
@@ -400,6 +408,7 @@ pub(super) fn render_to<F>(
     render_targets: &SharedRenderTargetTable,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
+    color_load: TargetLoad,
     commands: &[RenderCommand],
     record_commands_fn: F,
 ) -> Result<()>
@@ -440,6 +449,7 @@ where
         render_targets,
         device_handle,
         target,
+        color_load,
         &lowered,
         cmd,
         record_commands_fn,

@@ -40,6 +40,7 @@ pub fn scheme_record_readback(
     depth_format: Option<DepthFormat>,
     readback: &Parcel,
     label: &'static str,
+    color_load: goldy::TargetLoad,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> (Scheme, ReadGrant<GrantTexture>) {
     let mut scheme = Scheme::new(ctx);
@@ -47,7 +48,7 @@ pub fn scheme_record_readback(
         .lease_render_target(width, height, format, depth_format)
         .expect("render target lease");
     {
-        let mut pass = scheme.render_pass(label, &rt);
+        let mut pass = scheme.render_pass(label, &rt, color_load);
         record(&mut pass);
         pass.finish();
     }
@@ -65,9 +66,20 @@ pub fn scheme_render_and_readback(
     depth_format: Option<DepthFormat>,
     readback: &Parcel,
     label: &'static str,
+    color_load: goldy::TargetLoad,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> Vec<u8> {
-    let (mut scheme, grant) = scheme_record_readback(ctx, width, height, format, depth_format, readback, label, record);
+    let (mut scheme, grant) = scheme_record_readback(
+        ctx,
+        width,
+        height,
+        format,
+        depth_format,
+        readback,
+        label,
+        color_load,
+        record,
+    );
     let frame = scheme.submit().expect("submit");
     read_grant_texture(&grant, &frame)
 }

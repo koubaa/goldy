@@ -1222,6 +1222,7 @@ mod tests {
                 }],
                 kind: NodeKind::RenderPass {
                     target: 1,
+                    color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                     commands: vec![],
                 },
             }],

@@ -4,9 +4,12 @@ use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
 use crate::scheme::{GoldyReadGrant, GoldyScheme, ReadGrantInner};
-use crate::types::{GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTextureFormat};
+use crate::types::{
+    GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTargetLoad, GoldyTextureFormat,
+};
 use goldy::scheme::{Lease, LeaseRenderTarget};
 use goldy::task_graph::{NodeAccess, RenderPassRecord};
+use goldy::types::TargetLoad;
 use std::ffi::CStr;
 
 /// Opaque handle to a scheme-held render-target lease.
@@ -32,6 +35,14 @@ fn map_node_access(access: GoldyNodeAccess) -> NodeAccess {
         GoldyNodeAccess::Write => NodeAccess::Write,
         GoldyNodeAccess::ReadWrite => NodeAccess::ReadWrite,
         GoldyNodeAccess::Overwrite => NodeAccess::Overwrite,
+    }
+}
+
+fn map_target_load(load: GoldyTargetLoad, clear_color: GoldyColor) -> TargetLoad {
+    match load {
+        GoldyTargetLoad::Load => TargetLoad::Load,
+        GoldyTargetLoad::Clear => TargetLoad::Clear(clear_color.into()),
+        GoldyTargetLoad::Discard => TargetLoad::Discard,
     }
 }
 
@@ -97,6 +108,8 @@ pub unsafe extern "C" fn goldy_scheme_render_target_lease_destroy(lease: *mut Go
 
 /// Begin recording an offscreen render pass on a scheme-held lease.
 ///
+/// `clear_color` is used only when `load == GoldyTargetLoad::Clear`.
+///
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
@@ -104,6 +117,8 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_begin(
     scheme: *mut GoldyScheme,
     label: *const libc::c_char,
     lease: *const GoldySchemeRenderTargetLease,
+    load: GoldyTargetLoad,
+    clear_color: GoldyColor,
 ) -> GoldyResult {
     if scheme.is_null() || lease.is_null() {
         return GoldyResult::NullPointer;
@@ -120,6 +135,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_begin(
         label,
         &(*scheme).inner,
         &(*lease).lease,
+        map_target_load(load, clear_color),
     ));
     GoldyResult::Ok
 }
@@ -176,23 +192,6 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_with_parcel(
         Err(e) => return e,
     };
     pass.with_parcel(&(*parcel).inner, map_node_access(access));
-    GoldyResult::Ok
-}
-
-/// Clear the color attachment in the active render pass.
-///
-/// # Safety
-/// `scheme` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_clear(scheme: *mut GoldyScheme, color: GoldyColor) -> GoldyResult {
-    if scheme.is_null() {
-        return GoldyResult::NullPointer;
-    }
-    let pass = match active_render_pass_mut(&mut *scheme) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    pass.clear(color.into());
     GoldyResult::Ok
 }
 

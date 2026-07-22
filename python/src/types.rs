@@ -187,6 +187,37 @@ impl From<PyNodeAccess> for goldy::NodeAccess {
     }
 }
 
+/// Color-target load for `Scheme.render_pass`.
+#[pyclass(name = "TargetLoad", module = "goldy")]
+#[derive(Clone, Copy)]
+pub struct PyTargetLoad {
+    pub(crate) inner: goldy::TargetLoad,
+}
+
+#[pymethods]
+impl PyTargetLoad {
+    #[staticmethod]
+    fn load() -> Self {
+        Self {
+            inner: goldy::TargetLoad::Load,
+        }
+    }
+
+    #[staticmethod]
+    fn clear(color: PyColor) -> Self {
+        Self {
+            inner: goldy::TargetLoad::Clear(color.inner),
+        }
+    }
+
+    #[staticmethod]
+    fn discard() -> Self {
+        Self {
+            inner: goldy::TargetLoad::Discard,
+        }
+    }
+}
+
 /// Shader resource binding access (SRV vs UAV).
 #[pyclass(name = "ResourceAccess", module = "goldy", eq, eq_int)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]

@@ -33,11 +33,8 @@ fn record_with_tables(
     let mut current_pipeline_handle: Option<super::PipelineHandle> = None;
     for command in commands {
         match command {
-            RenderCommand::Clear(_) => {
-                // Already handled by caller
-            }
             RenderCommand::ClearDepth(_) => {
-                // TODO: Implement depth clear
+                // Depth clear is applied at pass begin.
             }
             RenderCommand::SetPipeline(pipeline_handle) => {
                 let pipelines_read = record.pipelines.read().unwrap();

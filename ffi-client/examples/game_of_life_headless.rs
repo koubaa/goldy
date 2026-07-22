@@ -7,8 +7,8 @@
 
 use goldy_ffi_client::{
     Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
-    TextureKind,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, TextureFlags,
+    TextureFormat, TextureKind,
 };
 
 const GRID_WIDTH: u32 = 128;
@@ -81,9 +81,8 @@ fn main() -> goldy_ffi_client::Result<()> {
     let rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
     {
         let current = cells.field(1)?;
-        let mut pass = scheme.render_pass("game_of_life_render", &rt);
+        let mut pass = scheme.render_pass("game_of_life_render", &rt, TargetLoad::Discard);
         pass.with_parcel(&current, NodeAccess::Read);
-        pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
         pass.draw_fullscreen();
         pass.finish_recorded();

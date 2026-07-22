@@ -2562,6 +2562,7 @@ pub(super) fn submit_graph_with_scope(
                 }
                 GraphCommand::Render {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     let _tz = tracy_zone!("dx12.render_pass");
@@ -2591,6 +2592,7 @@ pub(super) fn submit_graph_with_scope(
                         device_handle,
                         Some(ctx),
                         *target,
+                        *color_load,
                         render_cmds,
                         &command_list7,
                         frame_table_prologue_in_cb,

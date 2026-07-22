@@ -9,13 +9,13 @@ use goldy_ffi::{
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_retained_pool_acquire_buffer,
     goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read_texture,
-    goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_clear,
-    goldy_scheme_render_pass_draw, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
+    goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_draw,
+    goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
     goldy_scheme_render_pass_set_vertex_buffer_parcel, goldy_scheme_render_pass_with_parcel,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
     goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy,
     GoldyBufferKind, GoldyColor, GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult,
-    GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind, GoldyVertexAttribute, GoldyVertexFormat,
+    GoldyTargetLoad, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind, GoldyVertexAttribute, GoldyVertexFormat,
 };
 use std::ffi::CString;
 use std::mem::size_of;
@@ -130,19 +130,13 @@ fn scheme_triangle_readback_center_pixel_lit() {
 
         let label = CString::new("triangle").unwrap();
         assert_eq!(
-            goldy_scheme_render_pass_begin(scheme, label.as_ptr(), rt),
+            goldy_scheme_render_pass_begin(scheme, label.as_ptr(), rt, GoldyTargetLoad::Clear, clear),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
             goldy_scheme_render_pass_with_parcel(scheme, vertex_parcel, GoldyNodeAccess::Read),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
-        assert_eq!(
-            goldy_scheme_render_pass_clear(scheme, clear),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

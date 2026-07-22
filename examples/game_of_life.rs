@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, Color, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
+    field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -52,9 +52,8 @@ fn record_display_scheme(
     scene_rt: &Lease<LeaseRenderTarget>,
 ) -> anyhow::Result<Transaction> {
     let current = &cells[current_field];
-    let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
+    let mut pass = scheme.render_pass("game_of_life_render", scene_rt, TargetLoad::Discard);
     pass.with_parcel(current, NodeAccess::Read);
-    pass.clear(Color::BLACK);
     pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();

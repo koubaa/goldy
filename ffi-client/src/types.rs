@@ -1,8 +1,8 @@
 //! Rust-friendly types mirroring the native Goldy API.
 
 use crate::sys::{
-    self, GoldyBufferKind, GoldyCompareFunction, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess,
-    GoldyPrimitiveTopology, GoldyTextureFormat, GoldyVertexFormat,
+    self, GoldyBufferKind, GoldyColor, GoldyCompareFunction, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess,
+    GoldyPrimitiveTopology, GoldyTargetLoad, GoldyTextureFormat, GoldyVertexFormat,
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -192,6 +192,24 @@ impl From<NodeAccess> for GoldyNodeAccess {
             NodeAccess::Write => GoldyNodeAccess::GOLDY_NODE_ACCESS_WRITE,
             NodeAccess::ReadWrite => GoldyNodeAccess::GOLDY_NODE_ACCESS_READ_WRITE,
             NodeAccess::Overwrite => GoldyNodeAccess::GOLDY_NODE_ACCESS_OVERWRITE,
+        }
+    }
+}
+
+/// Color-target load for [`crate::Scheme::render_pass`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TargetLoad {
+    Load,
+    Clear(Color),
+    Discard,
+}
+
+impl TargetLoad {
+    pub(crate) fn to_ffi(self) -> (GoldyTargetLoad, GoldyColor) {
+        match self {
+            TargetLoad::Load => (GoldyTargetLoad::GOLDY_TARGET_LOAD_LOAD, Color::BLACK.into()),
+            TargetLoad::Clear(c) => (GoldyTargetLoad::GOLDY_TARGET_LOAD_CLEAR, c.into()),
+            TargetLoad::Discard => (GoldyTargetLoad::GOLDY_TARGET_LOAD_DISCARD, Color::BLACK.into()),
         }
     }
 }

@@ -29,8 +29,8 @@ use crate::task_graph::{
 use crate::texture::TextureCopyFootprint;
 use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
 use crate::types::{
-    BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
-    TextureFormat, TextureKind,
+    BufferFlags, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use crate::validation_env;
 use crate::Buffer;
@@ -1358,6 +1358,7 @@ impl Scheme {
         &mut self,
         label: &'static str,
         target: crate::backend::RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         bindings: Vec<ResourceBinding>,
         commands: Vec<RenderCommand>,
         stamp_targets: &[std::sync::Arc<crate::parcel::ParcelStamp>],
@@ -1367,7 +1368,11 @@ impl Scheme {
         self.ir.nodes.push(TaskNode {
             label,
             bindings,
-            kind: NodeKind::RenderPass { target, commands },
+            kind: NodeKind::RenderPass {
+                target,
+                color_load,
+                commands,
+            },
         });
     }
 
@@ -2175,16 +2180,23 @@ impl Scheme {
         &'a mut self,
         label: &'static str,
         rt: &Lease<LeaseRenderTarget>,
+        color_load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
         self.dirty = true;
         let handle = self.rt_leases[rt.id.0 as usize].backend_handle();
+        let access = if color_load.overwrites() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         SchemeRenderPassBuilder {
             scheme: self,
             label,
             target: handle,
+            color_load,
             bindings: vec![ResourceBinding {
                 resource: ResourceId::RenderTarget(handle),
-                access: NodeAccess::Write,
+                access,
             }],
             commands: Vec::new(),
             pending_push_constants: Vec::new(),
@@ -2920,6 +2932,7 @@ pub struct SchemeRenderPassBuilder<'a> {
     scheme: &'a mut Scheme,
     label: &'static str,
     target: crate::backend::RenderTargetHandle,
+    color_load: crate::types::TargetLoad,
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
     pending_push_constants: Vec<PendingPushConstant>,
@@ -2981,11 +2994,6 @@ impl<'a> SchemeRenderPassBuilder<'a> {
                 }
             }
         }
-        self
-    }
-
-    pub fn clear(&mut self, color: Color) -> &mut Self {
-        self.commands.push(RenderCommand::Clear(color));
         self
     }
 
@@ -3061,6 +3069,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             scheme,
             label,
             target,
+            color_load,
             bindings,
             commands,
             pending_push_constants: _,
@@ -3068,7 +3077,11 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         scheme.ir.nodes.push(TaskNode {
             label,
             bindings,
-            kind: NodeKind::RenderPass { target, commands },
+            kind: NodeKind::RenderPass {
+                target,
+                color_load,
+                commands,
+            },
         });
     }
 }
@@ -4114,7 +4127,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let err = scheme.submit().expect_err("first present touch must be Write");
         assert!(
-            err.to_string().contains("first PresentLease access must be Write or Overwrite"),
+            err.to_string()
+                .contains("first PresentLease access must be Write or Overwrite"),
             "unexpected error: {err}"
         );
     }
@@ -5188,7 +5202,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let rt = scheme
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let mut pass = scheme.render_pass("render", &rt);
+        let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();
         pass.finish();
@@ -5319,7 +5333,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         let rt_handle = scheme.rt(&rt).backend_handle();
-        let mut pass = scheme.render_pass("render", &rt);
+        let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();
         pass.finish();

@@ -12,11 +12,11 @@ use goldy_ffi::{
     goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch,
     goldy_scheme_compute_node_with_field, goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy,
     goldy_scheme_grant_read_texture, goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin,
-    goldy_scheme_render_pass_clear, goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish,
-    goldy_scheme_render_pass_set_pipeline, goldy_scheme_render_pass_with_field,
-    goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
-    goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy, GoldyColor, GoldyDepthFormat, GoldyNodeAccess,
-    GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
+    goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
+    goldy_scheme_render_pass_with_field, goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy,
+    goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy, GoldyColor,
+    GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult, GoldyTargetLoad, GoldyTextureFlags,
+    GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
 
@@ -164,27 +164,24 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
 
         let render_label = CString::new("game_of_life_render").unwrap();
         assert_eq!(
-            goldy_scheme_render_pass_begin(scheme, render_label.as_ptr(), rt),
+            goldy_scheme_render_pass_begin(
+                scheme,
+                render_label.as_ptr(),
+                rt,
+                GoldyTargetLoad::Discard,
+                GoldyColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
             goldy_scheme_render_pass_with_field(scheme, cells, SLOT_B, GoldyNodeAccess::Read),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
-        assert_eq!(
-            goldy_scheme_render_pass_clear(
-                scheme,
-                GoldyColor {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 1.0,
-                }
-            ),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

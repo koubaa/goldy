@@ -46,11 +46,11 @@ static class GameOfLifeWindow
         SchemeRenderTargetLease sceneRt)
     {
         using var current = cells.Field(FieldUnit(currentField));
-        using (var pass = scheme.RenderPass("game_of_life_render", sceneRt))
+        using (var pass = scheme.RenderPassDiscard("game_of_life_render", sceneRt))
         {
             pass
                 .WithParcel(current, NodeAccess.Read)
-                .Clear(Color.Black)
+
                 .SetPipeline(renderPipeline)
                 .DrawFullscreen();
         }

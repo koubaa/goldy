@@ -55,9 +55,8 @@ pub(crate) mod host_sidecar;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, IndexFormat, PresentMode,
-    PrimitiveTopology, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
-    VertexBufferLayout,
+    BackendType, BufferFlags, BufferKind, DepthFormat, DepthStencilState, IndexFormat, PresentMode, PrimitiveTopology,
+    ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -377,8 +376,6 @@ pub(crate) struct FrameToken {
 #[allow(dead_code)] // fields matched by GPU backends behind feature flags
 #[derive(Debug, Clone)]
 pub(crate) enum RenderCommand {
-    /// Clear the color render target.
-    Clear(Color),
     /// Clear the depth buffer.
     ClearDepth(f32),
     /// Set the active pipeline.
@@ -678,6 +675,7 @@ pub(crate) enum GraphCommand {
     /// Graphics work recorded against a [`RenderTargetHandle`] (offscreen render target).
     Render {
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: Vec<RenderCommand>,
     },
 }
@@ -1249,6 +1247,7 @@ pub(crate) trait GpuBackend:
         &mut self,
         device: DeviceHandle,
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: &[RenderCommand],
     ) -> Result<()>;
 
@@ -1405,6 +1404,7 @@ pub(crate) trait GpuBackend:
                 GraphCommand::Compute(c) => batch.push(c.clone()),
                 GraphCommand::Render {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
@@ -1413,7 +1413,7 @@ pub(crate) trait GpuBackend:
                         batch.clear();
                     }
                     let device = self.context_device(ctx);
-                    self.render_to_target(device, *target, render_cmds)?;
+                    self.render_to_target(device, *target, *color_load, render_cmds)?;
                     last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }

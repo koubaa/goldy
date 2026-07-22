@@ -7,7 +7,7 @@ use crate::parcel::PyParcel;
 use crate::pipeline::PyRenderPipeline;
 use crate::pyutil::parse_index_range;
 use crate::texture::PyTexture;
-use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyTextureFormat};
+use crate::types::{PyDepthFormat, PyNodeAccess, PyTargetLoad, PyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget, ReadGrant};
 use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
@@ -179,6 +179,7 @@ impl PyScheme {
         py: Python<'_>,
         label: String,
         lease: &PySchemeRenderTargetLease,
+        load: PyTargetLoad,
     ) -> PyResult<PySchemeRenderPass> {
         {
             let scheme = slf.borrow_mut(py);
@@ -188,7 +189,8 @@ impl PyScheme {
                 ));
             }
             let static_label = scheme.intern_label(&label)?;
-            let pass = RenderPassRecord::new_for_scheme_lease(static_label, &scheme.inner.borrow(), &lease.inner);
+            let pass =
+                RenderPassRecord::new_for_scheme_lease(static_label, &scheme.inner.borrow(), &lease.inner, load.inner);
             *scheme.active_render_pass.borrow_mut() = Some(pass);
         }
         Ok(PySchemeRenderPass { scheme: slf })
@@ -500,13 +502,6 @@ impl PySchemeRenderPass {
         };
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
             pass.with_parcel(unsafe { &*parcel_ptr }, access.into());
-        })?;
-        Ok(slf)
-    }
-
-    fn clear<'py>(slf: PyRef<'py, Self>, py: Python<'py>, color: &PyColor) -> PyResult<PyRef<'py, Self>> {
-        slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.clear(color.inner);
         })?;
         Ok(slf)
     }

@@ -9,7 +9,7 @@
 use goldy_ffi_client::{
     Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease,
-    ShaderModule, SurfaceExchange, Transaction,
+    ShaderModule, SurfaceExchange, TargetLoad, Transaction,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -156,9 +156,8 @@ fn record_display_scheme(
     let unit = field_unit(current_field);
     let current = cells.field(unit)?;
     {
-        let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
+        let mut pass = scheme.render_pass("game_of_life_render", scene_rt, TargetLoad::Discard);
         pass.with_parcel(&current, NodeAccess::Read);
-        pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
         pass.draw_fullscreen();
         pass.finish_recorded();

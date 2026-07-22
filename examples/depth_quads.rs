@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor,
     Instance, Lease, LeaseRenderTarget, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexAttribute,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexAttribute,
     VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
@@ -134,10 +134,9 @@ impl App {
         cool_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass("depth_quads", scene_rt);
+        let mut pass = scheme.render_pass("depth_quads", scene_rt, TargetLoad::Clear(Color::BLACK));
         pass.with_parcel(warm_parcel, NodeAccess::Read);
         pass.with_parcel(cool_parcel, NodeAccess::Read);
-        pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, warm_parcel);

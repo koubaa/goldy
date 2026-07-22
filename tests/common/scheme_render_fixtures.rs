@@ -2,7 +2,7 @@
 
 use goldy::{
     BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad,
     TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
@@ -31,9 +31,8 @@ pub fn scheme_render_clear(device: &Device, width: u32, height: u32, color: Colo
         None,
         &readback,
         "clear",
-        |pass| {
-            pass.clear(color);
-        },
+        TargetLoad::Clear(color),
+        |_pass| {},
     )
 }
 
@@ -99,9 +98,9 @@ pub fn scheme_render_triangle(
         None,
         &readback,
         "triangle",
+        TargetLoad::Clear(clear_color),
         |pass| {
             pass.with_parcel(&vertex_buffer, NodeAccess::Read);
-            pass.clear(clear_color);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..3, 0..1);
@@ -195,10 +194,10 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
         Some(DepthFormat::Depth32Float),
         &readback,
         "depth_occlusion",
+        TargetLoad::Clear(Color::BLACK),
         |pass| {
             pass.with_parcel(&red_vb, NodeAccess::Read);
             pass.with_parcel(&green_vb, NodeAccess::Read);
-            pass.clear(Color::BLACK);
             pass.clear_depth(1.0);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &red_vb);
@@ -275,10 +274,10 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         None,
         &readback,
         "gol_render",
+        TargetLoad::Clear(Color::BLACK),
         |pass| {
             let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
             pass.with_parcel(cells, NodeAccess::Read);
-            pass.clear(Color::BLACK);
             pass.set_pipeline(&render_pipeline);
             pass.draw(0..3, 0..1);
         },

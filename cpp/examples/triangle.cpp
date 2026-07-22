@@ -82,7 +82,7 @@ goldy::SurfaceExchange create_surface_exchange(const goldy::Context& ctx, GLFWwi
     void* surface = glfwGetWaylandWindow(window);
     if (!display || !surface) {
         throw std::runtime_error(
-            "Wayland handles unavailable â€” run under a Wayland session (Vulkan backend requires Wayland on Linux)");
+            "Wayland handles unavailable — run under a Wayland session (Vulkan backend requires Wayland on Linux)");
     }
     return goldy::SurfaceExchange(ctx, display, surface);
 #endif
@@ -96,9 +96,8 @@ goldy::Transaction record_scheme(
     const goldy::SchemeRenderTargetLease& scene_rt,
     const goldy::Color& bg_color) {
     {
-        auto pass = scheme.render_pass("triangle", scene_rt);
+        auto pass = scheme.render_pass("triangle", scene_rt, goldy::TargetLoad::clear(bg_color));
         pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read)
-            .clear(bg_color)
             .set_pipeline(pipeline)
             .set_vertex_buffer(0, vertex_buffer)
             .draw(0, 3);

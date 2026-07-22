@@ -662,9 +662,10 @@ impl GpuBackend for MetalBackend {
         &mut self,
         device: DeviceHandle,
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: &[RenderCommand],
     ) -> Result<()> {
-        render_target::render_to(&mut self.state, device, target, commands)
+        render_target::render_to(&mut self.state, device, target, color_load, commands)
     }
 
     fn create_texture(

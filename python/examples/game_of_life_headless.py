@@ -86,10 +86,9 @@ def main() -> int:
     )
 
     rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
-    with scheme.render_pass("game_of_life_render", rt) as rp:
+    with scheme.render_pass("game_of_life_render", rt, goldy.TargetLoad.discard()) as rp:
         (
             rp.with_field(cells, "b", goldy.NodeAccess.READ)
-            .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .draw_fullscreen()
         )

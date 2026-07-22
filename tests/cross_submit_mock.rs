@@ -329,7 +329,7 @@ fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline)
     let rt = s
         .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
         .expect("render target lease");
-    let mut pass = s.render_pass("render_read", &rt);
+    let mut pass = s.render_pass("render_read", &rt, goldy::TargetLoad::Discard);
     pass.with_parcel(parcel, NodeAccess::Read);
     pass.set_pipeline(pipeline);
     pass.draw(0..3, 0..1);

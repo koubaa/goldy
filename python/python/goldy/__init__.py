@@ -13,8 +13,8 @@ Example:
     >>> ctx = goldy.Context(device)
     >>> scheme = goldy.Scheme(ctx)
     >>> rt = scheme.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
-    >>> with scheme.render_pass("clear", rt) as rp:
-    ...     rp.clear(goldy.Color.CORNFLOWER_BLUE)
+    >>> with scheme.render_pass("clear", rt, goldy.TargetLoad.clear(goldy.Color.CORNFLOWER_BLUE)) as rp:
+    ...     pass
     >>> submission = scheme.submit()
 """
 
