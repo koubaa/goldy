@@ -3932,6 +3932,46 @@ mod imp {
         assert_eq!(worker.replay_stats().topology_records, 1);
     }
 
+    /// Returning a transient texture that a scheme still binds must fail subsequent submit.
+    ///
+    /// This is the GPU counterpart of the mock unit test
+    /// `return_transient_texture_invalidates_bound_scheme` in `scheme.rs`.
+    ///
+    /// Covered on every enabled backend feature (`metal`, `vulkan`, `dx12`). Locally we
+    /// typically only have Metal; run with `--features vulkan` / `--features dx12` on a
+    /// machine that has those drivers to confirm stamp retirement on those paths.
+    fn scheme_return_transient_texture_invalidates_retained_scheme(device: &Device) {
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("texture pipeline");
+
+        let tex = ctx
+            .acquire_transient_texture(
+                8,
+                8,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::empty(),
+            )
+            .expect("transient texture");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.submit().expect("first submit");
+
+        // Expected scratch lifecycle: return after the frame that used it.
+        ctx.return_transient_texture(tex);
+
+        assert!(
+            matches!(scheme.submit(), Err(goldy::GoldyError::StaleResource)),
+            "retained resubmit after return_transient_texture must return StaleResource \
+             (Metal/Vulkan/DX12); returning a bound transient ends its deed"
+        );
+    }
+
     pub fn run() {
         let device = make_device();
 
@@ -4037,6 +4077,7 @@ mod imp {
         trial!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
         trial!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
         trial!(cross_scheme_texture_readback_retained_loop_records_twice);
+        trial!(scheme_return_transient_texture_invalidates_retained_scheme);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);

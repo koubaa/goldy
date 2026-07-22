@@ -28,10 +28,12 @@ pub enum GoldyError {
     #[error("GPU submit timed out")]
     SubmitTimeout,
 
-    /// A [`Scheme`](crate::Scheme) still references a retained-pool resource that was dropped.
+    /// A [`Scheme`](crate::Scheme) still references a resource whose deed has ended.
     ///
-    /// Retained-pool resources outrank schemes: dropping a buffer/texture invalidates every
-    /// scheme that bound it. Re-record the scheme without the dead resource, or drop the scheme.
+    /// Retained-pool drop and transient-pool return both end a deed: the resource's stamp
+    /// is marked dead so every scheme that bound it fails submit. Re-record without the
+    /// dead resource, or drop the scheme. Re-acquiring from a pool mints a fresh stamp
+    /// (new deed) even when the same GPU allocation is reused.
     #[error("scheme references a dropped retained resource")]
     StaleResource,
 
