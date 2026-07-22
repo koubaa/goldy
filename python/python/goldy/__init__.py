@@ -53,6 +53,7 @@ from goldy._goldy import (
     IndexFormat,
     DepthFormat,
     CompareFunction,
+    TargetLoad,
     # Types
     Color,
     VertexAttribute,
@@ -101,6 +102,7 @@ __all__ = [
     "IndexFormat",
     "DepthFormat",
     "CompareFunction",
+    "TargetLoad",
     # Types
     "Color",
     "VertexAttribute",

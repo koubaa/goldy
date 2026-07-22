@@ -65,9 +65,11 @@ def main():
 
     scheme = goldy.Scheme(ctx)
     rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
-    with scheme.render_pass("triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.1, 0.1, 0.2, 1.0)) as rp:
+    with scheme.render_pass(
+        "triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
+    ) as rp:
         (
-            rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ))
+            rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .set_pipeline(pipeline)
             .set_vertex_buffer_parcel(0, vertex_parcel)
             .draw(range(3))

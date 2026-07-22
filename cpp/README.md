@@ -66,8 +66,8 @@ int main() {
         goldy::SchemeRenderTargetLease rt = scheme.lease_render_target(
             800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM, nullptr);
         {
-            auto pass = scheme.render_pass("triangle", rt, goldy::TargetLoad::clear(goldy::Color::cornflower_blue());
-            pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read))
+            auto pass = scheme.render_pass("triangle", rt, goldy::TargetLoad::clear(goldy::Color::cornflower_blue()));
+            pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read)
                 .set_pipeline(pipeline)
                 .set_vertex_buffer(0, vertex_buffer)
                 .draw(0, 3);
