@@ -24,6 +24,14 @@ use std::sync::Arc;
 /// each frame-boundary [`Context::boundary_crossed`] → [`Self::drain_ready`] call.
 const MAX_BUFFER_BIN_READY_SPARES: usize = 1;
 
+/// Maximum number of ready (epoch-retired) entries to keep per texture bin.
+///
+/// Same policy as [`MAX_BUFFER_BIN_READY_SPARES`]. Dropping *all* ready textures on
+/// every `drain_ready` (the old behavior) forced a fresh `alloc_texture` on the next
+/// frame whenever the GPU had already retired the prior scratch — common on Metal
+/// for small filter frames — and broke filter-scratch plateau tests.
+const MAX_TEXTURE_BIN_READY_SPARES: usize = 1;
+
 /// Recycle-bin key: parcels are interchangeable iff their allocation descriptors match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TextureKey {
@@ -36,10 +44,9 @@ struct TextureKey {
 
 /// A parked texture resource awaiting epoch retirement.
 ///
-/// Reuse and drain currently happen as soon as [`Context::parcel_ready`] is true.
-/// A future optimization could keep entries warm for a heuristic number of frames
-/// past readiness before reissuing or dropping them, reducing allocation churn on
-/// intermittent resize or ping-pong flip patterns.
+/// Ready entries are kept as warm spares up to [`MAX_TEXTURE_BIN_READY_SPARES`] and
+/// reissued by [`TransientPool::acquire_texture`]; excess ready entries are trimmed on
+/// [`Self::drain_ready`].
 struct TexturePendingEntry {
     parcel: Parcel,
     ready_after: ReferenceTable,
@@ -312,22 +319,35 @@ impl TransientPool {
     }
 
     pub fn drain_ready(&mut self, ctx: &Context) -> usize {
-        let pending = &self.pending;
-        let mut released = 0;
-        for bin in self.texture_bins.values_mut() {
-            bin.retain(|e| {
-                if ctx.parcel_ready(&e.ready_after) {
-                    pending.subtract(ParcelType::Texture, e.parcel.byte_size());
-                    released += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        self.texture_bins.retain(|_, bin| !bin.is_empty());
+        let mut released = self.trim_texture_bins(ctx);
         released += self.trim_buffer_bins(ctx);
         released
+    }
+
+    /// Drop excess epoch-retired texture bin entries beyond [`MAX_TEXTURE_BIN_READY_SPARES`].
+    ///
+    /// In-flight (not-ready) entries are never dropped — only ready spares above the cap.
+    fn trim_texture_bins(&mut self, ctx: &Context) -> usize {
+        let mut trimmed = 0;
+        for bin in self.texture_bins.values_mut() {
+            let mut ready_indices: Vec<usize> = bin
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| ctx.parcel_ready(&e.ready_after))
+                .map(|(i, _)| i)
+                .collect();
+            ready_indices.sort_unstable();
+
+            let excess = ready_indices.len().saturating_sub(MAX_TEXTURE_BIN_READY_SPARES);
+            let to_drop = ready_indices.split_off(ready_indices.len().saturating_sub(excess));
+            for idx in to_drop.into_iter().rev() {
+                let entry = bin.swap_remove(idx);
+                self.pending.subtract(ParcelType::Texture, entry.parcel.byte_size());
+                trimmed += 1;
+            }
+        }
+        self.texture_bins.retain(|_, bin| !bin.is_empty());
+        trimmed
     }
 
     /// Drop excess epoch-retired buffer bin entries beyond [`MAX_BUFFER_BIN_READY_SPARES`].
@@ -433,6 +453,54 @@ mod tests {
             .expect("alloc");
         let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
         ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ready_after));
+    }
+
+    fn park_ready_texture(ctx: &Context) {
+        let (fmt, acc, flags) = rgba_interpolated();
+        let tex = ctx.device().alloc_texture(8, 8, fmt, acc, flags).expect("alloc");
+        let home = Arc::downgrade(&ctx.device().inner);
+        let mut parcel = Parcel::from_texture(tex, home);
+        parcel.retire_stamp_for_pool_return();
+        ctx.with_transient_pool(|pool| {
+            let bytes = parcel.byte_size();
+            pool.pending.add(ParcelType::Texture, bytes);
+            let key = TextureKey {
+                width: 8,
+                height: 8,
+                format: fmt,
+                access: acc,
+                flags,
+            };
+            pool.texture_bins.entry(key).or_default().push(TexturePendingEntry {
+                parcel,
+                ready_after: ReferenceTable::new(),
+            });
+        });
+    }
+
+    fn park_not_ready_texture(ctx: &Context) {
+        let (fmt, acc, flags) = rgba_interpolated();
+        let tex = ctx.device().alloc_texture(8, 8, fmt, acc, flags).expect("alloc");
+        let home = Arc::downgrade(&ctx.device().inner);
+        let mut parcel = Parcel::from_texture(tex, home);
+        let mut ready_after = ReferenceTable::new();
+        crate::timeline::mark_reference(&mut ready_after, ctx.test_backend_handle(), u64::MAX);
+        parcel.retire_stamp_for_pool_return();
+        ctx.with_transient_pool(|pool| {
+            let bytes = parcel.byte_size();
+            pool.pending.add(ParcelType::Texture, bytes);
+            let key = TextureKey {
+                width: 8,
+                height: 8,
+                format: fmt,
+                access: acc,
+                flags,
+            };
+            pool.texture_bins
+                .entry(key)
+                .or_default()
+                .push(TexturePendingEntry { parcel, ready_after });
+        });
     }
 
     #[test]
@@ -632,6 +700,69 @@ mod tests {
             ctx.with_transient_pool(|t| t.pending_count()),
             3,
             "2 not-ready + 1 ready spare; 2 excess ready entries dropped"
+        );
+    }
+
+    #[test]
+    fn texture_bin_trim_keeps_one_ready_spare() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+
+        for _ in 0..=MAX_TEXTURE_BIN_READY_SPARES {
+            park_ready_texture(&ctx);
+        }
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            MAX_TEXTURE_BIN_READY_SPARES + 1
+        );
+
+        ctx.with_transient_pool(|pool| pool.drain_ready(&ctx));
+
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            MAX_TEXTURE_BIN_READY_SPARES,
+            "ready texture spares must survive drain_ready (same policy as buffers)"
+        );
+    }
+
+    #[test]
+    fn texture_bin_trim_preserves_not_ready_entries() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+
+        park_not_ready_texture(&ctx);
+        park_not_ready_texture(&ctx);
+        park_ready_texture(&ctx);
+
+        ctx.with_transient_pool(|pool| pool.drain_ready(&ctx));
+
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            3,
+            "in-flight texture entries and one ready spare must survive trim"
+        );
+    }
+
+    #[test]
+    fn return_transient_texture_survives_flush_and_reissues() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        let (fmt, acc, flags) = rgba_interpolated();
+
+        let tex = ctx.acquire_transient_texture(8, 8, fmt, acc, flags).expect("texture");
+        let handle = tex.texture_handle();
+        let allocs_after_first = ctx.transient_texture_alloc_count();
+        ctx.return_transient_texture(tex);
+
+        // Simulate end-of-frame reclamation that used to drop all ready textures.
+        ctx.flush_deferred_deletions();
+
+        let tex2 = ctx.acquire_transient_texture(8, 8, fmt, acc, flags).expect("reacquire");
+        assert_eq!(tex2.texture_handle(), handle, "warm spare must reissue after flush");
+        assert_eq!(
+            ctx.transient_texture_alloc_count(),
+            allocs_after_first,
+            "reissue must not fresh-alloc"
         );
     }
 }
