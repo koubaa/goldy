@@ -947,8 +947,6 @@ impl ResourceRegistry {
 
     /// Register a storage image (Direct / RWTexture2D) — returns a LOCAL index.
     /// Use `storage_image_global_index()` to get the argument buffer encoding offset.
-    ///
-    /// Reuses a freed slot if available (see `release_storage_image_slot`).
     pub fn register_storage_image(&mut self, handle: TextureHandle) -> u32 {
         let local_index = self.storage_image.alloc();
         self.texture_indices.insert(handle, local_index);
@@ -960,7 +958,7 @@ impl ResourceRegistry {
     /// Used for transient bindless slots that outlive any single `TextureHandle`
     /// but belong to a long-lived owner (e.g. a `Surface` that re-encodes a
     /// fresh drawable into the same slot every frame). The owner must release
-    /// the slot via [`Self::release_storage_image_slot`] when destroyed.
+    /// the slot via [`DescriptorRegistry::release_storage_image_slot`] when destroyed.
     pub fn reserve_storage_image_slot(&mut self) -> u32 {
         self.storage_image.alloc()
     }
@@ -970,21 +968,6 @@ impl ResourceRegistry {
     /// resolves to the right slot. Does not bump any counters.
     pub fn bind_storage_image_slot(&mut self, handle: TextureHandle, local_index: u32) {
         self.texture_indices.insert(handle, local_index);
-    }
-
-    /// Return a storage-image LOCAL index to the free list so it can be
-    /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
-    ///
-    /// See [`Self::release_texture_slot`] for the `barrier` semantics.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
-        release_slot(
-            local_index,
-            barrier,
-            slot_pinned,
-            &mut self.pending_free_storage_image_slots,
-            &mut self.storage_image,
-        );
     }
 
     /// Returns the global argument buffer index for a storage image.
@@ -1345,7 +1328,7 @@ impl DescriptorRegistry {
         self.resource_registry.unregister_texture(handle);
     }
 
-    #[allow(dead_code)] // kept for symmetry with release_storage_image_slot
+    #[allow(dead_code)]
     pub(crate) fn release_texture_slot(&mut self, local_index: u32) {
         self.reclaim_texture_slot(MetalSlotKey::Texture(local_index));
     }

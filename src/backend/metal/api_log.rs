@@ -210,15 +210,6 @@ pub(super) fn log_dispatch_batch(label: Option<&str>, count: u32) {
     ));
 }
 
-/// `barrier` — `memoryBarrierWithScope` (global barrier).
-pub(super) fn log_barrier() {
-    emit(format!(
-        r#"{{"t_us":{:.3},"tid":"{}","op":"barrier"}}"#,
-        t_us(),
-        tid_name()
-    ));
-}
-
 /// `resource_barrier` — `memoryBarrierWithResources`.
 pub(super) fn log_resource_barrier(buf_count: usize, tex_count: usize) {
     emit(format!(

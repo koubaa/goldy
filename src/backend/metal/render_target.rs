@@ -7,7 +7,7 @@ use super::utils::format_to_mtl;
 use crate::types::{DepthFormat, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+use mtl::{MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 
 /// Create a render target with optional depth buffer.
 pub(super) fn create_with_depth(
