@@ -1,5 +1,5 @@
 /**
- * Game of Life â€” hybrid Scheme in a window (compute + render + present).
+ * Game of Life — hybrid Scheme in a window (compute + render + present).
  *
  * Ping-pong cell grids live in one retained record buffer (fields "a" / "b").
  * Each simulation step runs an ephemeral compute scheme; the display scheme is
@@ -175,7 +175,7 @@ goldy::SurfaceExchange create_surface_exchange(const goldy::Context& ctx, GLFWwi
     void* surface = glfwGetWaylandWindow(window);
     if (!display || !surface) {
         throw std::runtime_error(
-            "Wayland handles unavailable â€” run under a Wayland session (Vulkan backend requires Wayland on Linux)");
+            "Wayland handles unavailable — run under a Wayland session (Vulkan backend requires Wayland on Linux)");
     }
     return goldy::SurfaceExchange(ctx, display, surface);
 #endif
@@ -193,7 +193,7 @@ void run_compute_step(
     {
         auto node = scheme.compute_node("game_of_life", pipeline);
         node.with_parcel(read, goldy::NodeAccess::Read);
-        node.with_parcel(write, goldy::NodeAccess::Write);
+        node.with_parcel(write, goldy::NodeAccess::Overwrite);
         node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
     }
     (void)scheme.submit();
@@ -209,9 +209,8 @@ goldy::Transaction record_display_scheme(
     const uint32_t unit = field_unit(current_field);
     goldy::Parcel current = cells.field(unit);
     {
-        auto pass = scheme.render_pass("game_of_life_render", scene_rt);
+        auto pass = scheme.render_pass("game_of_life_render", scene_rt, goldy::TargetLoad::discard());
         pass.with_parcel(current, goldy::NodeAccess::Read)
-            .clear(goldy::Color::black())
             .set_pipeline(render_pipeline)
             .draw_fullscreen();
     }

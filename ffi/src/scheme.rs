@@ -99,6 +99,7 @@ fn map_node_access(access: GoldyNodeAccess) -> NodeAccess {
         GoldyNodeAccess::Read => NodeAccess::Read,
         GoldyNodeAccess::Write => NodeAccess::Write,
         GoldyNodeAccess::ReadWrite => NodeAccess::ReadWrite,
+        GoldyNodeAccess::Overwrite => NodeAccess::Overwrite,
     }
 }
 

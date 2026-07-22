@@ -94,15 +94,26 @@ pub enum NodeAccess {
     Write,
     /// Node reads and writes — requires exclusive access.
     ReadWrite,
+    /// Node fully replaces prior contents without reading them (private-inaugural).
+    ///
+    /// Still exclusive and still participates in WAW ordering against prior writers on
+    /// the same parcel identity — inaugural voids the **contents** contract, not the
+    /// ordering edge (retained-scheme design §2.2).
+    Overwrite,
 }
 
 impl NodeAccess {
     pub fn writes(self) -> bool {
-        matches!(self, NodeAccess::Write | NodeAccess::ReadWrite)
+        matches!(self, NodeAccess::Write | NodeAccess::ReadWrite | NodeAccess::Overwrite)
     }
 
     pub fn reads(self) -> bool {
         matches!(self, NodeAccess::Read | NodeAccess::ReadWrite)
+    }
+
+    /// True when the node declares it does not depend on prior contents.
+    pub fn overwrites(self) -> bool {
+        matches!(self, NodeAccess::Overwrite)
     }
 }
 
@@ -232,9 +243,11 @@ pub enum NodeKind {
     ///
     /// Declare all buffers and textures read by draw commands via
     /// [`crate::scheme::SchemeRenderPassBuilder`] so barriers serialize correctly
-    /// against compute work.
+    /// against compute work. Color load is declared on the node (`color_load`), not
+    /// as a command-list clear.
     RenderPass {
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: Vec<crate::backend::RenderCommand>,
     },
     /// Read easement grant — recorded once, replayed with the scheme.

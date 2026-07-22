@@ -8,7 +8,7 @@ use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
     Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess, Parcel,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
-    ShaderResourceSlot, SurfaceConfig, SurfaceExchange, Texture, Transaction, Vertex2DUv,
+    ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -157,15 +157,19 @@ impl App {
             ShaderResourceSlot::Sampler(sampler),
         ];
 
-        let mut pass = scheme.render_pass("textured_quad", scene_rt);
+        let mut pass = scheme.render_pass(
+            "textured_quad",
+            scene_rt,
+            TargetLoad::Clear(Color {
+                r: 0.1,
+                g: 0.1,
+                b: 0.15,
+                a: 1.0,
+            }),
+        );
         pass.with_shader_resources(&shader_resources);
         pass.with_parcel(vertex_buffer, NodeAccess::Read);
-        pass.clear(Color {
-            r: 0.1,
-            g: 0.1,
-            b: 0.15,
-            a: 1.0,
-        });
+
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer);
         pass.draw(0..6, 0..1);

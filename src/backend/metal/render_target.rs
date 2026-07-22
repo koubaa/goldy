@@ -7,7 +7,7 @@ use super::utils::format_to_mtl;
 use crate::types::{DepthFormat, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+use mtl::{MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 
 /// Create a render target with optional depth buffer.
 pub(super) fn create_with_depth(
@@ -68,6 +68,7 @@ pub(super) fn render_to(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
+    color_load: crate::types::TargetLoad,
     commands: &[super::super::RenderCommand],
 ) -> Result<()> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -90,20 +91,15 @@ pub(super) fn render_to(
 
     let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
-    let mut clear_color = None;
-    let mut clear_depth = None;
-    for cmd in commands {
-        match cmd {
-            super::super::RenderCommand::Clear(color) => clear_color = Some(*color),
-            super::super::RenderCommand::ClearDepth(depth) => clear_depth = Some(*depth),
-            _ => {}
-        }
-    }
+    let clear_depth = commands.iter().find_map(|cmd| match cmd {
+        super::super::RenderCommand::ClearDepth(depth) => Some(*depth),
+        _ => None,
+    });
 
     let render_pass = create_render_pass(
         &render_target.texture,
         render_target.depth_texture.as_deref(),
-        clear_color,
+        color_load,
         clear_depth,
     );
 

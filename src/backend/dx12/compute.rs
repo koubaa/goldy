@@ -2562,6 +2562,7 @@ pub(super) fn submit_graph_with_scope(
                 }
                 GraphCommand::Render {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     let _tz = tracy_zone!("dx12.render_pass");
@@ -2591,6 +2592,7 @@ pub(super) fn submit_graph_with_scope(
                         device_handle,
                         Some(ctx),
                         *target,
+                        *color_load,
                         render_cmds,
                         &command_list7,
                         frame_table_prologue_in_cb,
@@ -3050,11 +3052,11 @@ mod barrier_lowering_tests {
         mask.0 & bit.0 != 0
     }
 
-    // --- The regression that crashed goldy-doom (ID 1332) -------------------
+    // --- Regression: D3D12 debug layer ID 1332 on non-storage buffers --------
 
     /// A non-storage (upload/uniform) buffer must NEVER carry UAV or COPY_DEST
     /// access bits — the D3D12 debug layer rejects (ID 1332) such barriers and
-    /// `Close()` fails. This is the exact case that only Doom exercised.
+    /// `Close()` fails. This is the exact case that real workloads exposed.
     #[test]
     fn non_storage_buffer_never_emits_uav_or_copy_dest() {
         // Compute write recorded against a non-storage buffer (e.g. a uniform
@@ -3074,7 +3076,7 @@ mod barrier_lowering_tests {
             "non-storage buffer must not get COPY_DEST"
         );
 
-        // The combined producer set that doom actually generated.
+        // The combined producer set from a real workload.
         let mut combined = SlotUsageSet::default();
         combined.merge(NodeAccess::Write, UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER);
         let access = slot_usage_to_dx12_access_for_buffer(&combined, false);

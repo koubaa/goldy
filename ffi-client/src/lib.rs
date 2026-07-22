@@ -44,7 +44,7 @@ pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
     NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
-    ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
+    ResourceCategory, ResourceHandle, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
     VertexBufferLayout, VertexFormat,
 };
 

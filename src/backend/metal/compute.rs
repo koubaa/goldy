@@ -1711,6 +1711,7 @@ pub(super) fn submit_graph(
                 }
                 GraphCommand::Render {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     // Flush any pending compute work first.
@@ -1758,6 +1759,7 @@ pub(super) fn submit_graph(
                         ld,
                         device_handle,
                         *target,
+                        *color_load,
                         &lowered_render,
                         prologue_row,
                     )?;
@@ -1916,25 +1918,21 @@ fn record_render_pass_to_buffer(
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
     target: super::super::RenderTargetHandle,
+    color_load: crate::types::TargetLoad,
     commands: &[super::super::RenderCommand],
     prologue_row: Option<u32>,
 ) -> Result<()> {
     let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
-    let mut clear_color = None;
-    let mut clear_depth = None;
-    for cmd in commands {
-        match cmd {
-            super::super::RenderCommand::Clear(color) => clear_color = Some(*color),
-            super::super::RenderCommand::ClearDepth(depth) => clear_depth = Some(*depth),
-            _ => {}
-        }
-    }
+    let clear_depth = commands.iter().find_map(|cmd| match cmd {
+        super::super::RenderCommand::ClearDepth(depth) => Some(*depth),
+        _ => None,
+    });
 
     let render_pass = super::render_commands::create_render_pass(
         &render_target.texture,
         render_target.depth_texture.as_deref(),
-        clear_color,
+        color_load,
         clear_depth,
     );
 

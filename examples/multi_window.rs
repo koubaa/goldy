@@ -7,7 +7,7 @@
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
+    SurfaceExchange, TargetLoad, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
 
@@ -266,9 +266,8 @@ impl WindowState {
         scene_rt: &Lease<LeaseRenderTarget>,
         label: &'static str,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass(label, scene_rt);
+        let mut pass = scheme.render_pass(label, scene_rt, TargetLoad::Clear(Color::BLACK));
         pass.with_parcel(vertex_parcel, NodeAccess::Read);
-        pass.clear(Color::BLACK);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..6, 0..1);

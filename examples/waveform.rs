@@ -7,7 +7,7 @@
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, Transaction, Vertex2D,
+    SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -121,16 +121,20 @@ impl App {
         channel_parcels: &[Buffer; NUM_CHANNELS],
         scene_rt: &Lease<LeaseRenderTarget>,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass("waveform", scene_rt);
+        let mut pass = scheme.render_pass(
+            "waveform",
+            scene_rt,
+            TargetLoad::Clear(Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.08,
+                a: 1.0,
+            }),
+        );
         for parcel in channel_parcels {
             pass.with_parcel(parcel, NodeAccess::Read);
         }
-        pass.clear(Color {
-            r: 0.02,
-            g: 0.02,
-            b: 0.08,
-            a: 1.0,
-        });
+
         pass.set_pipeline(pipeline);
         for parcel in channel_parcels {
             pass.set_vertex_buffer(0, parcel);

@@ -13,7 +13,7 @@
 //!
 //! Example:
 //! ```bash
-//! GOLDY_METAL_CAPTURE=/tmp/ekrano.gputrace,skip=120,frames=1 \
+//! GOLDY_METAL_CAPTURE=/tmp/capture.gputrace,skip=120,frames=1 \
 //!   target/release/with_winit_bin --no-vsync
 //! ```
 

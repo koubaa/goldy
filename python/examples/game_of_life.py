@@ -106,7 +106,7 @@ def run_compute_step(
     node = scheme.node("game_of_life", pipeline)
     (
         node.with_field(cells, read_field, goldy.NodeAccess.READ)
-        .with_field(cells, write_field, goldy.NodeAccess.WRITE)
+        .with_field(cells, write_field, goldy.NodeAccess.OVERWRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
     scheme.submit()
@@ -120,10 +120,9 @@ def record_display_scheme(
     render_pipeline: goldy.RenderPipeline,
     scene_rt: goldy.SchemeRenderTargetLease,
 ) -> goldy.Transaction:
-    with scheme.render_pass("game_of_life_render", scene_rt) as rp:
+    with scheme.render_pass("game_of_life_render", scene_rt, goldy.TargetLoad.discard()) as rp:
         (
             rp.with_field(cells, current_field, goldy.NodeAccess.READ)
-            .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .draw_fullscreen()
         )

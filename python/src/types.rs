@@ -173,6 +173,7 @@ pub enum PyNodeAccess {
     READ = 0,
     WRITE = 1,
     READ_WRITE = 2,
+    OVERWRITE = 3,
 }
 
 impl From<PyNodeAccess> for goldy::NodeAccess {
@@ -181,6 +182,38 @@ impl From<PyNodeAccess> for goldy::NodeAccess {
             PyNodeAccess::READ => goldy::NodeAccess::Read,
             PyNodeAccess::WRITE => goldy::NodeAccess::Write,
             PyNodeAccess::READ_WRITE => goldy::NodeAccess::ReadWrite,
+            PyNodeAccess::OVERWRITE => goldy::NodeAccess::Overwrite,
+        }
+    }
+}
+
+/// Color-target load for `Scheme.render_pass`.
+#[pyclass(name = "TargetLoad", module = "goldy")]
+#[derive(Clone, Copy)]
+pub struct PyTargetLoad {
+    pub(crate) inner: goldy::TargetLoad,
+}
+
+#[pymethods]
+impl PyTargetLoad {
+    #[staticmethod]
+    fn load() -> Self {
+        Self {
+            inner: goldy::TargetLoad::Load,
+        }
+    }
+
+    #[staticmethod]
+    fn clear(color: PyColor) -> Self {
+        Self {
+            inner: goldy::TargetLoad::Clear(color.inner),
+        }
+    }
+
+    #[staticmethod]
+    fn discard() -> Self {
+        Self {
+            inner: goldy::TargetLoad::Discard,
         }
     }
 }

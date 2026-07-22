@@ -8,7 +8,7 @@ use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -131,10 +131,9 @@ impl RenderState {
             .with_parcel(params_buffer, NodeAccess::Read)
             .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
 
-        let mut pass = scheme.render_pass("particles", scene_rt);
+        let mut pass = scheme.render_pass("particles", scene_rt, TargetLoad::Clear(bg_color));
         pass.with_parcel(particle_buffer, NodeAccess::Read);
         pass.with_parcel(params_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish();

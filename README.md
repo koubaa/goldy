@@ -11,7 +11,7 @@ A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets 
 ## Quick Example
 
 ```rust
-use goldy::{Color, DeviceDescriptor, Instance, RequestAdapterOptions, Scheme, TextureFormat};
+use goldy::{Color, DeviceDescriptor, Instance, RequestAdapterOptions, Scheme, TargetLoad, TextureFormat};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
@@ -22,8 +22,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut scheme = Scheme::new(&ctx);
     let rt = scheme.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
-    let mut pass = scheme.render_pass("clear", &rt);
-    pass.clear(Color::CORNFLOWER_BLUE);
+    let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::CORNFLOWER_BLUE));
     pass.finish();
     scheme.submit()?;
 

@@ -923,9 +923,10 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         device_handle: DeviceHandle,
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: &[RenderCommand],
     ) -> Result<()> {
-        render_target::render(&mut self.state, device_handle, target, commands)
+        render_target::render(&mut self.state, device_handle, target, color_load, commands)
     }
     fn create_surface(
         &mut self,

@@ -7,7 +7,7 @@
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, IndexFormat, Instance, Lease, LeaseRenderTarget,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, Vertex2D,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -187,15 +187,19 @@ impl App {
         index_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass("solid_cube", scene_rt);
+        let mut pass = scheme.render_pass(
+            "solid_cube",
+            scene_rt,
+            TargetLoad::Clear(Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.05,
+                a: 1.0,
+            }),
+        );
         pass.with_parcel(vertex_parcel, NodeAccess::Read);
         pass.with_parcel(index_parcel, NodeAccess::Read);
-        pass.clear(Color {
-            r: 0.02,
-            g: 0.02,
-            b: 0.05,
-            a: 1.0,
-        });
+
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);
         pass.set_index_buffer(index_parcel, IndexFormat::Uint16);

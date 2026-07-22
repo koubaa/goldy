@@ -179,7 +179,8 @@ internal static partial class NativeMethods
     internal static partial GoldyResult SchemeCopyToTexture(nint scheme, nint srcLease, nint dstTexture);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_begin", StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial GoldyResult SchemeRenderPassBegin(nint scheme, string label, nint lease);
+    internal static partial GoldyResult SchemeRenderPassBegin(
+        nint scheme, string label, nint lease, TargetLoadKind load, Color clearColor);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_parcel")]
     internal static partial GoldyResult SchemeRenderPassWithParcel(nint scheme, nint parcel, NodeAccess access);
@@ -191,10 +192,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_buffer_unit")]
     internal static partial GoldyResult SchemeRenderPassWithBufferUnit(
         nint scheme, nint buffer, uint unit, NodeAccess access);
-
-
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_clear")]
-    internal static partial GoldyResult SchemeRenderPassClear(nint scheme, Color color);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_set_pipeline")]
     internal static partial GoldyResult SchemeRenderPassSetPipeline(nint scheme, nint pipeline);

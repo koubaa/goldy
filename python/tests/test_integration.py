@@ -172,8 +172,8 @@ def test_render_clear_via_scheme(device):
 
     scheme = goldy.Scheme(ctx)
     rt = scheme.lease_render_target(width, height, goldy.TextureFormat.RGBA8_UNORM)
-    with scheme.render_pass("clear", rt) as rp:
-        rp.clear(goldy.Color.RED)
+    with scheme.render_pass("clear", rt, goldy.TargetLoad.clear(goldy.Color.RED)) as rp:
+        pass
 
     scheme.copy_to_texture(rt, readback)
     grant = scheme.grant_read_texture(readback)
@@ -271,10 +271,11 @@ def test_triangle_via_scheme(device):
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
     rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
-    with scheme.render_pass("triangle", rt) as rp:
+    with scheme.render_pass(
+        "triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
+    ) as rp:
         (
             rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
-            .clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
             .set_pipeline(pipeline)
             .set_vertex_buffer_parcel(0, vertex_parcel)
             .draw(range(3))

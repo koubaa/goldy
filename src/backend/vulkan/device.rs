@@ -172,7 +172,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .shader_storage_buffer_array_non_uniform_indexing(true)
         .shader_sampled_image_array_non_uniform_indexing(true)
         .shader_uniform_buffer_array_non_uniform_indexing(true)
-        // Required for SPIR-V Float16 capability used by ekrano shaders.
+        // Required for SPIR-V Float16 capability used by compute shaders.
         .shader_float16(true)
         // Required for SPIR-V Int8 capability (enabled alongside float16 in Vulkan 1.2).
         .shader_int8(true);

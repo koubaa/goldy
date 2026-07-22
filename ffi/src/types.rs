@@ -272,6 +272,16 @@ pub enum GoldyNodeAccess {
     Read = 0,
     Write = 1,
     ReadWrite = 2,
+    Overwrite = 3,
+}
+
+/// Color-target load declared on [`goldy_scheme_render_pass_begin`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyTargetLoad {
+    Load = 0,
+    Clear = 1,
+    Discard = 2,
 }
 
 /// Shader resource binding access (SRV vs UAV).

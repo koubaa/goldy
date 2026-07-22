@@ -175,7 +175,7 @@ Graphics and compute both go through `Scheme`.
 public enum DeviceType   { DiscreteGpu, IntegratedGpu, Cpu, Other }
 public enum BackendType  { Vulkan, Metal, Dx12 }
 public enum BufferKind   { Scattered, Broadcast }
-public enum NodeAccess   { Read, Write, ReadWrite }
+public enum NodeAccess   { Read, Write, ReadWrite, Overwrite }
 ```
 
 ### Headless vs windowed submission

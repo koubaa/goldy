@@ -7,7 +7,7 @@
 use goldy::{
     shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Transaction, Vertex2D,
+    SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -80,9 +80,8 @@ impl App {
         scene_rt: &Lease<LeaseRenderTarget>,
         bg_color: Color,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass("triangle", scene_rt);
+        let mut pass = scheme.render_pass("triangle", scene_rt, TargetLoad::Clear(bg_color));
         pass.with_parcel(vertex_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer);
         pass.draw(0..3, 0..1);

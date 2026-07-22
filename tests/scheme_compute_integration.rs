@@ -3488,8 +3488,8 @@ mod imp {
     }
 
     /// A topology-visible foreign reader (`copy_buffer_parcel` of the shared parcel) forces
-    /// exactly one worker topology record, then the worker resubmits (mirrors the ekrano
-    /// worker + `copy_texture` readback path that produces `records == 2`).
+    /// exactly one worker topology record, then the worker resubmits (mirrors a
+    /// worker + texture readback path that produces `records == 2`).
     fn cross_scheme_copy_reader_forces_one_topology_record(device: &Device) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
@@ -3898,7 +3898,7 @@ mod imp {
     /// driver could not legally consume on the retained resubmit. Storage textures now
     /// settle to `GENERAL` (see `texture.rs::settled_shader_read_layout`). This test guards
     /// against a regression of that crash and pins the cross-scheme record behavior for the
-    /// texture-copy reader (mirrors ekrano `render_to_buffer`).
+    /// texture-copy reader (mirrors a `render_to_buffer` readback path).
     fn cross_scheme_texture_readback_retained_loop_records_twice(device: &Device) {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");

@@ -22,11 +22,8 @@ pub(super) fn record(
 ) -> anyhow::Result<()> {
     for command in commands {
         match command {
-            RenderCommand::Clear(_) => {
-                // Already handled via load op
-            }
             RenderCommand::ClearDepth(_) => {
-                // TODO: Implement depth clear when depth buffer is supported
+                // Depth clear is applied as attachment load at pass begin.
             }
             RenderCommand::SetPipeline(pipeline_handle) => {
                 *current_pipeline = Some(*pipeline_handle);

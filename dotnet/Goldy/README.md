@@ -26,8 +26,7 @@ using var readback = retainedPool.AcquireTexture(
 
 using var scheme = new Scheme(ctx);
 using var rt = scheme.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
-using (var pass = scheme.RenderPass("clear", rt))
-    pass.Clear(Color.CornflowerBlue);
+using (var pass = scheme.RenderPassClear("clear", rt, Color.CornflowerBlue)) { }
 
 scheme.CopyToTexture(rt, readback);
 using var grant = scheme.GrantReadTexture(readback);

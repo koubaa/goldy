@@ -1030,7 +1030,7 @@ mod tests {
     /// Regression: the producer-side barrier must reflect the *actual* recorded
     /// write kind, not a hardcoded `COMPUTE | TRANSFER`. A buffer last written by
     /// a transfer (copy) only must NOT produce a COMPUTE barrier source — that is
-    /// what made non-storage buffers get illegal UAV access bits on DX12 (doom).
+    /// what made non-storage buffers get illegal UAV access bits on DX12.
     #[test]
     fn raw_barrier_src_uses_recorded_write_kinds_transfer_only() {
         let ctx = 1;
@@ -1222,6 +1222,7 @@ mod tests {
                 }],
                 kind: NodeKind::RenderPass {
                     target: 1,
+                    color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                     commands: vec![],
                 },
             }],

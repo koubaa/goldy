@@ -9,7 +9,7 @@ use crate::sys::{
     GoldySchemeSubmission,
 };
 use crate::texture::Texture;
-use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, TextureFormat};
+use crate::types::{DepthFormat, IndexFormat, NodeAccess, TextureFormat};
 use std::ffi::CString;
 use std::ops::Range;
 
@@ -200,9 +200,13 @@ impl Scheme {
         &'a mut self,
         label: &'static str,
         target: &SchemeRenderTargetLease,
+        load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
         let label = CString::new(label).expect("render pass label contains interior null byte");
-        expect_ok(unsafe { sys::goldy_scheme_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr()) });
+        let (load_kind, clear_color) = load.to_ffi();
+        expect_ok(unsafe {
+            sys::goldy_scheme_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr(), load_kind, clear_color)
+        });
         SchemeRenderPassBuilder {
             scheme: self,
             active: true,
@@ -287,11 +291,6 @@ impl SchemeRenderPassBuilder<'_> {
 
     pub fn with_buffer(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
         self.with_buffer_unit(buffer, 0, access)
-    }
-
-    pub fn clear(&mut self, color: Color) -> &mut Self {
-        expect_ok(unsafe { sys::goldy_scheme_render_pass_clear(self.scheme.ptr, color.into()) });
-        self
     }
 
     pub fn clear_depth(&mut self, depth: f32) -> &mut Self {

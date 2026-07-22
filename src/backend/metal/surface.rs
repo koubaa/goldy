@@ -566,15 +566,6 @@ pub(super) fn set_present_mode(state: &mut MetalState, surface: SurfaceHandle, m
     Ok(())
 }
 
-/// Get the current present mode.
-pub(super) fn present_mode(state: &MetalState, surface: SurfaceHandle) -> PresentMode {
-    state
-        .surfaces
-        .get(&surface)
-        .map(|s| s.present_mode)
-        .unwrap_or(PresentMode::Auto)
-}
-
 /// Resize the surface.
 pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
     let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;

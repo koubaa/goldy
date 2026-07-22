@@ -10,7 +10,7 @@ use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, Tim
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Transaction, VertexBufferLayout, VertexFormat,
+    SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -128,9 +128,8 @@ impl App {
         bg_color: Color,
         scene_rt: &Lease<LeaseRenderTarget>,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass("digital_clock", scene_rt);
+        let mut pass = scheme.render_pass("digital_clock", scene_rt, TargetLoad::Clear(bg_color));
         pass.with_parcel(vertex_parcel, NodeAccess::Read);
-        pass.clear(bg_color);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..vertex_count, 0..1);

@@ -803,7 +803,7 @@ mod heap_tests {
     }
 
     // ===========================================================================
-    // Deferred release + rapid reuse pattern (ekrano's OwnedShared lifecycle)
+    // Deferred release + rapid reuse pattern (owned-shared lifecycle)
     // ===========================================================================
 
     #[test]
@@ -814,7 +814,7 @@ mod heap_tests {
         let ctx = submission_context(&device);
         let pending: Arc<Mutex<Vec<Allocation>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Simulate ekrano's DeferredOwnedAllocationsToken pattern.
+        // Simulate a deferred-owned-allocations token pattern.
         struct Token {
             pending: Arc<Mutex<Vec<Allocation>>>,
             buffers: Vec<Allocation>,

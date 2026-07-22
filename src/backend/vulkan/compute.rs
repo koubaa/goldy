@@ -588,7 +588,7 @@ fn enqueue_vulkan_compute_with_housekeeping(
 /// Reap fences that have already signaled from the compute fence pool.
 ///
 /// Without this, every `submit_graph` that doesn't have a paired `wait_fence`
-/// (the common ekrano pattern: only the *last* timeline value in a recording is
+/// (a common pattern: only the *last* timeline value in a recording is
 /// waited on; the intermediate ones are silently dropped) leaks a `VkFence` +
 /// `VkCommandBuffer` into the pool. Over a few thousand frames the pool grows
 /// large enough that the driver's command-pool / fence-pool internal arenas
@@ -729,7 +729,7 @@ pub(super) fn submit_with_scope(
     let has_write_buffer = commands.iter().any(|c| matches!(c, GpuCommand::WriteBuffer { .. }));
 
     // Reap any previously-submitted fences that have already signaled. Keeps
-    // the pool bounded when callers (ekrano) don't wait on every intermediate submit.
+    // the pool bounded when callers don't wait on every intermediate submit.
     // Belt before reap: need live VkFence handles to poll completion.
     //
     // For timeline-keyed staging chunks (standalone-submit path) we also need the
@@ -2443,6 +2443,7 @@ pub(super) fn submit_graph_with_scope(
             },
             GraphCommand::Render {
                 target,
+                color_load,
                 commands: render_cmds,
             } => {
                 let _tz = tracy_zone!("vk.render_pass");
@@ -2508,6 +2509,7 @@ pub(super) fn submit_graph_with_scope(
                     view.render_targets,
                     device_handle,
                     *target,
+                    *color_load,
                     &lowered,
                     cmd,
                     |cb, cmds, ld, cur_pipe| {

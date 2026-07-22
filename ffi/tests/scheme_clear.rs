@@ -8,9 +8,9 @@ use goldy_ffi::{
     goldy_read_grant_byte_size, goldy_read_grant_consume, goldy_read_grant_destroy,
     goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read_texture,
-    goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_clear,
-    goldy_scheme_render_pass_finish, goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy,
-    goldy_scheme_submit, goldy_texture_destroy, GoldyColor, GoldyDepthFormat, GoldyResult, GoldyTextureFlags,
+    goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_finish,
+    goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
+    goldy_texture_destroy, GoldyColor, GoldyDepthFormat, GoldyResult, GoldyTargetLoad, GoldyTextureFlags,
     GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
@@ -54,12 +54,6 @@ fn scheme_clear_render_target_readback_is_red() {
         assert!(!rt.is_null(), "{}", last_ffi_message());
 
         let label = CString::new("clear_red").unwrap();
-        assert_eq!(
-            goldy_scheme_render_pass_begin(scheme, label.as_ptr(), rt),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
         let red = GoldyColor {
             r: 1.0,
             g: 0.0,
@@ -67,7 +61,7 @@ fn scheme_clear_render_target_readback_is_red() {
             a: 1.0,
         };
         assert_eq!(
-            goldy_scheme_render_pass_clear(scheme, red),
+            goldy_scheme_render_pass_begin(scheme, label.as_ptr(), rt, GoldyTargetLoad::Clear, red),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

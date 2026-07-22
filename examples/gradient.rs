@@ -10,7 +10,7 @@
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, LayoutCheckable, Lease,
     LeaseRenderTarget, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -91,9 +91,8 @@ impl App {
         uniform: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
     ) -> anyhow::Result<Transaction> {
-        let mut pass = scheme.render_pass("gradient", scene_rt);
+        let mut pass = scheme.render_pass("gradient", scene_rt, TargetLoad::Clear(Color::BLACK));
         pass.with_parcel(uniform, NodeAccess::Read);
-        pass.clear(Color::BLACK);
         pass.set_pipeline(pipeline);
         pass.draw_fullscreen();
         pass.finish();

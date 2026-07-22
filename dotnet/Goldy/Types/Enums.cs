@@ -210,6 +210,17 @@ public enum NodeAccess
     Read = 0,
     Write = 1,
     ReadWrite = 2,
+    Overwrite = 3,
+}
+
+/// <summary>
+/// Color-target load for <see cref="Scheme.RenderPass"/>.
+/// </summary>
+public enum TargetLoadKind
+{
+    Load = 0,
+    Clear = 1,
+    Discard = 2,
 }
 
 /// <summary>

@@ -1545,11 +1545,13 @@ pub(crate) fn emit_graph_commands_for_waves(
                 }
                 NodeKind::RenderPass {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     let lowered = crate::frame_table::lower_render_pass_commands(&mut frame_table, render_cmds);
                     commands.push(GraphCommand::Render {
                         target: *target,
+                        color_load: *color_load,
                         commands: lowered,
                     });
                 }
@@ -1802,6 +1804,7 @@ mod tests {
                     bindings: vec![],
                     kind: NodeKind::RenderPass {
                         target: 10,
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
                         commands: Vec::new(),
                     },
                 },
@@ -1905,7 +1908,7 @@ mod tests {
         let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
         // A bind-free copy must NOT receive a FrameTableStaging prefix.
         // Inserting one bumps the submission counter and silently overwrites
-        // the selector with zeros, corrupting every in-flight frame (goldy-doom bug).
+        // the selector with zeros, corrupting every in-flight frame.
         assert!(
             matches!(commands.as_slice(), [GpuCommand::CopyTexture { src: 1, dst: 99 }]),
             "bind-free CopyTexture must not get a FrameTableStaging prefix; got {commands:?}"
@@ -2039,6 +2042,55 @@ mod tests {
 
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 2);
+    }
+
+    #[test]
+    fn write_to_overwrite_keeps_waw_edge() {
+        // Inaugural voids contents, not ordering — Write→Overwrite still edges.
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn overwrite_to_overwrite_keeps_waw_edge() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Overwrite)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn overwrite_to_read_keeps_raw_edge() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Overwrite)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn read_to_overwrite_keeps_war_edge() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Read)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
     }
 
     #[test]
@@ -2739,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn waves_simulated_vello_pipeline_collapses_waves() {
+    fn waves_simulated_coarse_fine_pipeline_collapses_waves() {
         // 10 nodes: 5 pairs of (write_viewN, read_viewN) where each pair is independent
         // — result should be far fewer than 10 waves
         let mut nodes = Vec::new();

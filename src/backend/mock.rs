@@ -1211,6 +1211,7 @@ impl GpuBackend for MockBackend {
         &mut self,
         device: DeviceHandle,
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: &[RenderCommand],
     ) -> Result<()> {
         if !self.devices.contains_key(&device) {
@@ -1229,28 +1230,23 @@ impl GpuBackend for MockBackend {
         // Record commands
         self.recorded_commands.push(commands.to_vec());
 
-        // Simulate rendering by filling with a pattern based on clear color
-        let clear_color = commands
-            .iter()
-            .find_map(|c| match c {
-                RenderCommand::Clear(color) => Some(*color),
-                _ => None,
-            })
-            .unwrap_or(Color::BLACK);
+        match color_load {
+            crate::types::TargetLoad::Clear(clear_color) => {
+                let r = (clear_color.r * 255.0) as u8;
+                let g = (clear_color.g * 255.0) as u8;
+                let b = (clear_color.b * 255.0) as u8;
+                let a = (clear_color.a * 255.0) as u8;
 
-        // Fill with the clear color
-        let r = (clear_color.r * 255.0) as u8;
-        let g = (clear_color.g * 255.0) as u8;
-        let b = (clear_color.b * 255.0) as u8;
-        let a = (clear_color.a * 255.0) as u8;
-
-        for i in (0..render_target.data.len()).step_by(4) {
-            if i + 3 < render_target.data.len() {
-                render_target.data[i] = r;
-                render_target.data[i + 1] = g;
-                render_target.data[i + 2] = b;
-                render_target.data[i + 3] = a;
+                for i in (0..render_target.data.len()).step_by(4) {
+                    if i + 3 < render_target.data.len() {
+                        render_target.data[i] = r;
+                        render_target.data[i + 1] = g;
+                        render_target.data[i + 2] = b;
+                        render_target.data[i + 3] = a;
+                    }
+                }
             }
+            crate::types::TargetLoad::Load | crate::types::TargetLoad::Discard => {}
         }
 
         Ok(())
@@ -1666,6 +1662,7 @@ impl GpuBackend for MockBackend {
                 GraphCommand::Compute(c) => batch.push(c.clone()),
                 GraphCommand::Render {
                     target,
+                    color_load,
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
@@ -1675,7 +1672,7 @@ impl GpuBackend for MockBackend {
                         }
                         batch.clear();
                     }
-                    self.render_to_target(device, *target, render_cmds)?;
+                    self.render_to_target(device, *target, *color_load, render_cmds)?;
                     last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }
@@ -1818,8 +1815,10 @@ mod tests {
             .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
-        let commands = vec![RenderCommand::Clear(Color::RED)];
-        backend.render_to_target(device, target, &commands).unwrap();
+        let commands: Vec<RenderCommand> = vec![];
+        backend
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::RED), &commands)
+            .unwrap();
 
         // Commands should be recorded
         assert_eq!(backend.recorded_commands.len(), 1);
@@ -1835,13 +1834,13 @@ mod tests {
 
         // Render multiple times to the same target
         backend
-            .render_to_target(device, target, &[RenderCommand::Clear(Color::RED)])
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::RED), &[])
             .unwrap();
         backend
-            .render_to_target(device, target, &[RenderCommand::Clear(Color::GREEN)])
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::GREEN), &[])
             .unwrap();
         backend
-            .render_to_target(device, target, &[RenderCommand::Clear(Color::BLUE)])
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::BLUE), &[])
             .unwrap();
 
         assert_eq!(backend.recorded_commands.len(), 3);
@@ -1873,7 +1872,6 @@ mod tests {
 
         // Record indexed drawing commands
         let commands = vec![
-            RenderCommand::Clear(Color::BLACK),
             RenderCommand::SetIndexBuffer {
                 buffer: index_buffer,
                 offset: 0,
@@ -1888,14 +1886,16 @@ mod tests {
             },
         ];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::BLACK), &commands)
+            .unwrap();
 
         // Verify commands were recorded
         assert_eq!(backend.recorded_commands.len(), 1);
-        assert_eq!(backend.recorded_commands[0].len(), 3);
+        assert_eq!(backend.recorded_commands[0].len(), 2);
 
         // Check SetIndexBuffer was recorded correctly
-        match &backend.recorded_commands[0][1] {
+        match &backend.recorded_commands[0][0] {
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 assert_eq!(*buffer, index_buffer);
                 assert_eq!(*offset, 0);
@@ -1905,7 +1905,7 @@ mod tests {
         }
 
         // Check DrawIndexed was recorded correctly
-        match &backend.recorded_commands[0][2] {
+        match &backend.recorded_commands[0][1] {
             RenderCommand::DrawIndexed {
                 index_count,
                 instance_count,
@@ -1952,7 +1952,9 @@ mod tests {
             },
         ];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::BLACK), &commands)
+            .unwrap();
 
         // Verify the offset and base_vertex were preserved
         match &backend.recorded_commands[0][0] {
@@ -2212,19 +2214,18 @@ mod tests {
             .create_buffer(device, 128, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
-        let commands = vec![
-            RenderCommand::Clear(Color::BLACK),
-            RenderCommand::BindResources {
-                buffers: vec![buffer1, buffer2],
-            },
-        ];
+        let commands = vec![RenderCommand::BindResources {
+            buffers: vec![buffer1, buffer2],
+        }];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::BLACK), &commands)
+            .unwrap();
 
         assert_eq!(backend.recorded_commands.len(), 1);
-        assert_eq!(backend.recorded_commands[0].len(), 2);
+        assert_eq!(backend.recorded_commands[0].len(), 1);
 
-        match &backend.recorded_commands[0][1] {
+        match &backend.recorded_commands[0][0] {
             RenderCommand::BindResources { buffers } => {
                 assert_eq!(buffers.len(), 2);
                 assert_eq!(buffers[0], buffer1);
@@ -2242,21 +2243,20 @@ mod tests {
             .create_render_target_with_depth(device, 100, 100, TextureFormat::Rgba8Unorm, None)
             .unwrap();
 
-        let commands = vec![
-            RenderCommand::Clear(Color::BLACK),
-            RenderCommand::BindResourcesRaw {
-                indices: vec![0, 1, 2, 3],
-                user: vec![],
-                frame_table_base: 0,
-            },
-        ];
+        let commands = vec![RenderCommand::BindResourcesRaw {
+            indices: vec![0, 1, 2, 3],
+            user: vec![],
+            frame_table_base: 0,
+        }];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend
+            .render_to_target(device, target, crate::types::TargetLoad::Clear(Color::BLACK), &commands)
+            .unwrap();
 
         assert_eq!(backend.recorded_commands.len(), 1);
-        assert_eq!(backend.recorded_commands[0].len(), 2);
+        assert_eq!(backend.recorded_commands[0].len(), 1);
 
-        match &backend.recorded_commands[0][1] {
+        match &backend.recorded_commands[0][0] {
             RenderCommand::BindResourcesRaw { indices, .. } => {
                 assert_eq!(*indices, vec![0, 1, 2, 3]);
             }
@@ -2325,7 +2325,8 @@ mod tests {
             }),
             GraphCommand::Render {
                 target,
-                commands: vec![RenderCommand::Clear(Color::RED)],
+                color_load: crate::types::TargetLoad::Clear(Color::RED),
+                commands: vec![],
             },
             GraphCommand::Compute(GpuCommand::SetPipeline(0)),
             GraphCommand::Compute(GpuCommand::Dispatch {

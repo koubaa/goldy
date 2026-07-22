@@ -334,8 +334,10 @@ pub unsafe fn goldy_scheme_render_pass_begin(
     scheme: *mut GoldyScheme,
     label: *const std::ffi::c_char,
     lease: *const GoldySchemeRenderTargetLease,
+    load: GoldyTargetLoad,
+    clear_color: GoldyColor,
 ) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_begin)(scheme, label, lease)
+    (lib().goldy_scheme_render_pass_begin)(scheme, label, lease, load, clear_color)
 }
 
 pub unsafe fn goldy_scheme_render_pass_with_buffer_unit(
@@ -353,10 +355,6 @@ pub unsafe fn goldy_scheme_render_pass_with_parcel(
     access: GoldyNodeAccess,
 ) -> GoldyResult {
     (lib().goldy_scheme_render_pass_with_parcel)(scheme, parcel, access)
-}
-
-pub unsafe fn goldy_scheme_render_pass_clear(scheme: *mut GoldyScheme, color: GoldyColor) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_clear)(scheme, color)
 }
 
 pub unsafe fn goldy_scheme_render_pass_clear_depth(scheme: *mut GoldyScheme, depth: f32) -> GoldyResult {

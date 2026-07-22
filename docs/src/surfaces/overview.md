@@ -72,9 +72,8 @@ let current = surface.present_mode();
 Record once at init (and on resize), submit each frame:
 
 ```rust
-let mut pass = scheme.render_pass("main", &scene_rt);
-pass.with_parcel(&vertices, NodeAccess::Read);
-pass.clear(Color::CORNFLOWER_BLUE);
+let mut pass = scheme.render_pass("main", &scene_rt, TargetLoad::Clear(Color::CORNFLOWER_BLUE));
+pass.with_parcel(&vertex_buffer, NodeAccess::Read);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.draw(0..3, 0..1);

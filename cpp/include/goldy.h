@@ -153,7 +153,15 @@ typedef enum GoldyNodeAccess {
     GOLDY_NODE_ACCESS_READ = 0,
     GOLDY_NODE_ACCESS_WRITE = 1,
     GOLDY_NODE_ACCESS_READ_WRITE = 2,
+    GOLDY_NODE_ACCESS_OVERWRITE = 3,
 } GoldyNodeAccess;
+
+// Color-target load declared on [`goldy_scheme_render_pass_begin`].
+typedef enum GoldyTargetLoad {
+    GOLDY_TARGET_LOAD_LOAD = 0,
+    GOLDY_TARGET_LOAD_CLEAR = 1,
+    GOLDY_TARGET_LOAD_DISCARD = 2,
+} GoldyTargetLoad;
 
 // Index format.
 typedef enum GoldyIndexFormat {
@@ -699,18 +707,15 @@ uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
 
 // Begin recording an offscreen render pass on a scheme-held lease.
 //
+// `clear_color` is used only when `load == GoldyTargetLoad::Clear`.
+//
 // # Safety
 // All pointers must be valid.
 enum GoldyResult goldy_scheme_render_pass_begin(struct GoldyScheme *scheme,
                                                 const char *label,
-                                                const struct GoldySchemeRenderTargetLease *lease);
-
-// Clear the color attachment in the active render pass.
-//
-// # Safety
-// `scheme` must be valid.
-enum GoldyResult goldy_scheme_render_pass_clear(struct GoldyScheme *scheme,
-                                                struct GoldyColor color);
+                                                const struct GoldySchemeRenderTargetLease *lease,
+                                                enum GoldyTargetLoad load,
+                                                struct GoldyColor clear_color);
 
 // Clear the depth attachment in the active render pass.
 //

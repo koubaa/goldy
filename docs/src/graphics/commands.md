@@ -7,12 +7,11 @@ Windowed apps render to an offscreen leased target, then present via [`SurfaceEx
 ## Per-Frame Loop (windowed)
 
 ```rust
-use goldy::{Color, NodeAccess, Scheme, SurfaceExchange};
+use goldy::{Color, NodeAccess, Scheme, SurfaceExchange, TargetLoad};
 
 // Record once at init (and on resize):
-let mut pass = scheme.render_pass("main", &scene_rt);
+let mut pass = scheme.render_pass("main", &scene_rt, TargetLoad::Clear(Color::CORNFLOWER_BLUE));
 pass.with_parcel(&vertex_buffer, NodeAccess::Read);
-pass.clear(Color::CORNFLOWER_BLUE);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertex_buffer);
 pass.draw(0..3, 0..1);
@@ -26,12 +25,15 @@ present.claim(&mut submission)?.consume()?;
 
 ## Render Pass Builder
 
-`render_pass(label, target)` returns a builder that records draw commands for one offscreen leased target.
+`render_pass(label, target, color_load)` returns a builder that records draw commands for one offscreen leased target. Color load is declared on the pass, not as a command-list clear:
 
-### Clearing
+- `TargetLoad::Load` — preserve prior color contents
+- `TargetLoad::Clear(color)` — clear to a color at pass begin (private-inaugural)
+- `TargetLoad::Discard` — prior color contents irrelevant; draws fully overwrite
+
+### Depth clear
 
 ```rust
-pass.clear(Color::BLACK);
 pass.clear_depth(1.0);
 ```
 
@@ -41,7 +43,7 @@ pass.clear_depth(1.0);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
 pass.set_index_buffer(&indices, IndexFormat::Uint16);
-pass.bind_resources(&[&uniforms, &textures]);
+// Shader resources: with_parcel / with_shader_resources (samplers) before set_pipeline
 ```
 
 ### Drawing
@@ -71,8 +73,7 @@ For headless rendering without a window, record a scheme, copy to a readback tex
 ```rust
 let mut scheme = Scheme::new(&ctx);
 let rt = scheme.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
-let mut pass = scheme.render_pass("clear", &rt);
-pass.clear(Color::RED);
+let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::RED));
 pass.finish();
 scheme.copy_to_texture(&rt, &readback_texture);
 let grant = scheme.grant_read_texture(&readback_texture);
@@ -89,7 +90,7 @@ scheme.commit_write_parcel(&staging, 0, data)?;
 scheme.node("sim", &compute_pipeline)
     .with_parcel(&state_buf, NodeAccess::ReadWrite)
     .dispatch(wg, 1, 1);
-let mut pass = scheme.render_pass("draw", &scene_rt);
+let mut pass = scheme.render_pass("draw", &scene_rt, TargetLoad::Discard);
 // ...
 let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 let mut submission = scheme.submit()?;
@@ -98,5 +99,4 @@ present.claim(&mut submission)?.consume()?;
 
 ## Notes
 
-- Depth buffers live on leased render targets (`lease_render_target(..., Some(DepthFormat::...))`), not on the swapchain surface.
-- Compute-only swapchain output (no raster) uses `with_present` on a compute node — see [Compute to Surface](../compute/compute-to-surface.md).
+Render-pass recording is scheme-owned: builders must call `finish()` (Rust) or drop/RAII finish (FFI bindings) before submitting.

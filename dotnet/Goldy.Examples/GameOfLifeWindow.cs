@@ -31,7 +31,7 @@ static class GameOfLifeWindow
         {
             node
                 .WithParcel(read, NodeAccess.Read)
-                .WithParcel(write, NodeAccess.Write);
+                .WithParcel(write, NodeAccess.Overwrite);
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
         using var _ = scheme.Submit();
@@ -46,11 +46,11 @@ static class GameOfLifeWindow
         SchemeRenderTargetLease sceneRt)
     {
         using var current = cells.Field(FieldUnit(currentField));
-        using (var pass = scheme.RenderPass("game_of_life_render", sceneRt))
+        using (var pass = scheme.RenderPassDiscard("game_of_life_render", sceneRt))
         {
             pass
                 .WithParcel(current, NodeAccess.Read)
-                .Clear(Color.Black)
+
                 .SetPipeline(renderPipeline)
                 .DrawFullscreen();
         }

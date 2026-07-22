@@ -27,7 +27,7 @@ pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
 pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
 /// Maximum bindless indices routed through the table per submission row.
-/// Ekrano's coarse/fine pipeline can exceed 256 indices in a single submission
+/// A coarse/fine pipeline can exceed 256 indices in a single submission
 /// (longpathdash peaks at ~269); keep shader and Rust constants in sync.
 pub const FRAME_TABLE_ROW_STRIDE: u32 = 512;
 /// Pipeline depth — number of row-groups in the staging/table buffers.
@@ -233,7 +233,7 @@ mod tests {
     }
 
     /// `alloc_dispatch` must never return a base that, combined with slot_count,
-    /// exceeds ROW_STRIDE.  Previously this overflowed when the ekrano pipeline
+    /// exceeds ROW_STRIDE.  Previously this overflowed when a pipeline
     /// allocated ~269 slots with a 256-stride, causing garbage index reads.
     #[test]
     fn alloc_dispatch_does_not_overflow_row_stride() {

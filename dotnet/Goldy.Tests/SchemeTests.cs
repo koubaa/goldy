@@ -124,8 +124,8 @@ public class SchemeTests
 
             using var scheme = new Scheme(ctx);
             using var rt = scheme.LeaseRenderTarget(2, 2, TextureFormat.Rgba8Unorm);
-            using (var pass = scheme.RenderPass("clear", rt))
-                pass.Clear(Color.Red);
+            using (var pass = scheme.RenderPassClear("clear", rt, Color.Red))
+            { }
 
             scheme.CopyToTexture(rt, readback);
             using var grant = scheme.GrantReadTexture(readback);
@@ -186,11 +186,10 @@ public class SchemeTests
 
             using var scheme = new Scheme(ctx);
             using var rt = scheme.LeaseRenderTarget(64, 64, TextureFormat.Rgba8Unorm);
-            using (var pass = scheme.RenderPass("triangle", rt))
+            using (var pass = scheme.RenderPassClear("triangle", rt, Color.Black))
             {
                 pass
                     .WithParcel(vertexParcel, NodeAccess.Read)
-                    .Clear(Color.Black)
                     .SetPipeline(pipeline)
                     .SetVertexBuffer(0, vertexParcel)
                     .Draw(3);

@@ -29,8 +29,8 @@ use crate::task_graph::{
 use crate::texture::TextureCopyFootprint;
 use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
 use crate::types::{
-    BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
-    TextureFormat, TextureKind,
+    BufferFlags, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use crate::validation_env;
 use crate::Buffer;
@@ -434,15 +434,15 @@ fn validate_present_exchange_bindings(
         }
         if !has_write.contains(&tx.binding_id) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "present exchange binding {} has no Write/ReadWrite access to its PresentLease",
+                "present exchange binding {} has no Write/Overwrite/ReadWrite access to its PresentLease",
                 tx.binding_id
             )));
         }
         match first_access.get(&tx.binding_id) {
-            Some(NodeAccess::Write) => {}
+            Some(NodeAccess::Write | NodeAccess::Overwrite) => {}
             Some(other) => {
                 return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "present exchange binding {}: first PresentLease access must be Write, got {:?}",
+                    "present exchange binding {}: first PresentLease access must be Write or Overwrite, got {:?}",
                     tx.binding_id,
                     other
                 )));
@@ -895,12 +895,14 @@ impl Scheme {
         self.dirty = true;
         let (buffer, resource) = parcel.write_buffer_target().map_err(|e| self.ctx.classify(e))?;
         self.submit_state.register_parcel_stamp(parcel);
+        let access = if offset == 0 && data.len() as u64 == parcel.byte_size() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         self.ir.nodes.push(TaskNode {
             label: "write_parcel",
-            bindings: vec![ResourceBinding {
-                resource,
-                access: NodeAccess::Write,
-            }],
+            bindings: vec![ResourceBinding { resource, access }],
             kind: NodeKind::WriteBuffer {
                 buffer,
                 offset,
@@ -934,6 +936,11 @@ impl Scheme {
         }
         self.submit_state.register_parcel_stamp(src);
         self.submit_state.register_parcel_stamp(dst);
+        let dst_access = if dst_offset == 0 && size == dst.byte_size() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         self.ir.nodes.push(TaskNode {
             label: "copy_buffer_parcel",
             bindings: vec![
@@ -943,7 +950,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: dst_resource,
-                    access: NodeAccess::Write,
+                    access: dst_access,
                 },
             ],
             kind: NodeKind::CopyBuffer {
@@ -1019,6 +1026,11 @@ impl Scheme {
         }
         self.submit_state.register_parcel_stamp(dst);
         let src_resource = ResourceId::UploadBuffer(src.id.0);
+        let dst_access = if dst_offset == 0 && size == dst.byte_size() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         self.ir.nodes.push(TaskNode {
             label: "copy_upload_buffer",
             bindings: vec![
@@ -1028,7 +1040,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: dst_resource,
-                    access: NodeAccess::Write,
+                    access: dst_access,
                 },
             ],
             kind: NodeKind::CopyBuffer {
@@ -1091,6 +1103,11 @@ impl Scheme {
         }
         let th = dst.gpu_handle();
         let src_resource = ResourceId::UploadBuffer(src.id.0);
+        let dst_access = if x == 0 && y == 0 && width == dst.width() && height == dst.height() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         self.ir.nodes.push(TaskNode {
             label: "copy_upload_buffer_to_texture",
             bindings: vec![
@@ -1100,7 +1117,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: ResourceId::Texture(th),
-                    access: NodeAccess::Write,
+                    access: dst_access,
                 },
             ],
             kind: NodeKind::CopyBufferToTexture {
@@ -1165,6 +1182,11 @@ impl Scheme {
         }
         let th = dst.gpu_handle();
         self.submit_state.register_parcel_stamp(src);
+        let dst_access = if x == 0 && y == 0 && width == dst.width() && height == dst.height() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         self.ir.nodes.push(TaskNode {
             label: "copy_buffer_to_texture",
             bindings: vec![
@@ -1174,7 +1196,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: ResourceId::Texture(th),
-                    access: NodeAccess::Write,
+                    access: dst_access,
                 },
             ],
             kind: NodeKind::CopyBufferToTexture {
@@ -1213,7 +1235,7 @@ impl Scheme {
             label: "clear_parcel",
             bindings: vec![ResourceBinding {
                 resource: parcel.resource_id(),
-                access: NodeAccess::Write,
+                access: NodeAccess::Overwrite,
             }],
             kind: NodeKind::ClearBuffer {
                 buffer,
@@ -1242,7 +1264,7 @@ impl Scheme {
             label: "write_texture",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(th),
-                access: NodeAccess::Write,
+                access: NodeAccess::Overwrite,
             }],
             kind: NodeKind::WriteTexture {
                 texture: th,
@@ -1285,11 +1307,16 @@ impl Scheme {
         }
         self.dirty = true;
         let th = texture.gpu_handle();
+        let full_replace = x == 0 && y == 0 && width == texture.width() && height == texture.height();
         self.ir.nodes.push(TaskNode {
             label: "write_texture_region",
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(th),
-                access: NodeAccess::Write,
+                access: if full_replace {
+                    NodeAccess::Overwrite
+                } else {
+                    NodeAccess::Write
+                },
             }],
             kind: NodeKind::WriteTextureRegion {
                 texture: th,
@@ -1331,6 +1358,7 @@ impl Scheme {
         &mut self,
         label: &'static str,
         target: crate::backend::RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         bindings: Vec<ResourceBinding>,
         commands: Vec<RenderCommand>,
         stamp_targets: &[std::sync::Arc<crate::parcel::ParcelStamp>],
@@ -1340,7 +1368,11 @@ impl Scheme {
         self.ir.nodes.push(TaskNode {
             label,
             bindings,
-            kind: NodeKind::RenderPass { target, commands },
+            kind: NodeKind::RenderPass {
+                target,
+                color_load,
+                commands,
+            },
         });
     }
 
@@ -1376,7 +1408,7 @@ impl Scheme {
     ///
     /// The pool may reissue a previously-used buffer parcel whose epoch has retired.
     /// The recycled bytes are **not** cleared. The first node that accesses this lease
-    /// must declare [`NodeAccess::Write`] (or `ReadWrite`), never pure `Read` — otherwise
+    /// must declare [`NodeAccess::Write`], [`NodeAccess::Overwrite`], or `ReadWrite`, never pure `Read` — otherwise
     /// the shader observes the previous tenant's data.
     ///
     /// A full inaugural-write shape check (unique-minimal-write scheme validation per
@@ -2033,7 +2065,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: ResourceId::PresentLease(binding_id),
-                    access: NodeAccess::Write,
+                    access: NodeAccess::Overwrite,
                 },
             ],
             kind: NodeKind::CopyRenderTarget {
@@ -2067,7 +2099,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: ResourceId::PresentLease(binding_id),
-                    access: NodeAccess::Write,
+                    access: NodeAccess::Overwrite,
                 },
             ],
             kind: NodeKind::CopyTexture {
@@ -2132,7 +2164,7 @@ impl Scheme {
                 },
                 ResourceBinding {
                     resource: dst_resource,
-                    access: NodeAccess::Write,
+                    access: NodeAccess::Overwrite,
                 },
             ],
             kind: NodeKind::CopyRenderTarget {
@@ -2148,16 +2180,23 @@ impl Scheme {
         &'a mut self,
         label: &'static str,
         rt: &Lease<LeaseRenderTarget>,
+        color_load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
         self.dirty = true;
         let handle = self.rt_leases[rt.id.0 as usize].backend_handle();
+        let access = if color_load.overwrites() {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
         SchemeRenderPassBuilder {
             scheme: self,
             label,
             target: handle,
+            color_load,
             bindings: vec![ResourceBinding {
                 resource: ResourceId::RenderTarget(handle),
-                access: NodeAccess::Write,
+                access,
             }],
             commands: Vec::new(),
             pending_push_constants: Vec::new(),
@@ -2529,7 +2568,7 @@ impl Scheme {
 pub(crate) fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     match access {
         NodeAccess::Read => ResourceAccess::Read,
-        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::Write | NodeAccess::Overwrite => ResourceAccess::Write,
         NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
     }
 }
@@ -2615,9 +2654,9 @@ impl SchemeBindable for crate::buffer::Allocation {
 impl<T> SchemeBindable for Lease<T> {
     fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = &scheme.leases[self.id.0 as usize];
-        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
-        // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
-        // from a previous submission; a Read-only first access would observe stale data.
+        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write,
+        // Overwrite, or ReadWrite — never pure Read. The pool may recycle a buffer whose bytes
+        // come from a previous submission; a Read-only first access would observe stale data.
         // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
         // the unique-minimal-write shape-check lands (design §8).
         (
@@ -2893,6 +2932,7 @@ pub struct SchemeRenderPassBuilder<'a> {
     scheme: &'a mut Scheme,
     label: &'static str,
     target: crate::backend::RenderTargetHandle,
+    color_load: crate::types::TargetLoad,
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
     pending_push_constants: Vec<PendingPushConstant>,
@@ -2954,11 +2994,6 @@ impl<'a> SchemeRenderPassBuilder<'a> {
                 }
             }
         }
-        self
-    }
-
-    pub fn clear(&mut self, color: Color) -> &mut Self {
-        self.commands.push(RenderCommand::Clear(color));
         self
     }
 
@@ -3034,6 +3069,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             scheme,
             label,
             target,
+            color_load,
             bindings,
             commands,
             pending_push_constants: _,
@@ -3041,7 +3077,11 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         scheme.ir.nodes.push(TaskNode {
             label,
             bindings,
-            kind: NodeKind::RenderPass { target, commands },
+            kind: NodeKind::RenderPass {
+                target,
+                color_load,
+                commands,
+            },
         });
     }
 }
@@ -3204,6 +3244,33 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
 
         (scheme, lease, cb)
+    }
+
+    #[test]
+    fn clear_and_full_write_parcel_bind_as_overwrite() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let buffer = retained_buffer(&mut pool);
+        let parcel = &*buffer;
+
+        let mut clear_scheme = Scheme::new(&ctx);
+        clear_scheme
+            .commit_clear_parcel(parcel, 0, parcel.byte_size())
+            .expect("clear");
+        assert_eq!(clear_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
+
+        let mut write_scheme = Scheme::new(&ctx);
+        write_scheme
+            .commit_write_parcel(parcel, 0, vec![0u8; parcel.byte_size() as usize])
+            .expect("full write");
+        assert_eq!(write_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
+
+        let mut partial_scheme = Scheme::new(&ctx);
+        partial_scheme
+            .commit_write_parcel(parcel, 4, vec![1, 2, 3, 4])
+            .expect("partial write");
+        assert_eq!(partial_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Write);
     }
 
     #[test]
@@ -4060,7 +4127,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let err = scheme.submit().expect_err("first present touch must be Write");
         assert!(
-            err.to_string().contains("first PresentLease access must be Write"),
+            err.to_string()
+                .contains("first PresentLease access must be Write or Overwrite"),
             "unexpected error: {err}"
         );
     }
@@ -5134,7 +5202,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let rt = scheme
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let mut pass = scheme.render_pass("render", &rt);
+        let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();
         pass.finish();
@@ -5265,7 +5333,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         let rt_handle = scheme.rt(&rt).backend_handle();
-        let mut pass = scheme.render_pass("render", &rt);
+        let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();
         pass.finish();
@@ -5448,7 +5516,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let expected_stamp = tex.whole().stamp_handle();
 
         let mut scheme = Scheme::new(&ctx);
-        // Mirror ekrano scheme path: fine write then present copy on one Texture instance.
+        // Fine write then present copy on one Texture instance.
         scheme
             .node("fine_write", &pipeline)
             .with_parcel(&tex, NodeAccess::Write)
@@ -5552,7 +5620,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     /// The actual submit path (not just `compute_cross_submit_sync` planning) must
     /// emit a live queue-wait on frame 2 against the prior frame's present-read
-    /// epoch. Goldy `Scheme::submit` never touches ekrano's `FrameOrchestrator`;
+    /// epoch. Goldy `Scheme::submit` never touches `FrameOrchestrator`;
     /// this test isolates ledger enforcement from orchestrator slot stamping.
     #[test]
     fn present_war_ledger_live_wait_on_second_submit_path() {

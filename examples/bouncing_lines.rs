@@ -8,7 +8,7 @@ use anyhow::Result;
 use goldy::{
     Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, Transaction, VertexBufferLayout,
+    SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -117,9 +117,8 @@ impl RenderState {
             a: 1.0,
         };
 
-        let mut pass = scheme.render_pass("bouncing_lines", scene_rt);
+        let mut pass = scheme.render_pass("bouncing_lines", scene_rt, TargetLoad::Clear(bg_color));
         pass.with_parcel(line_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
         pass.draw(0..2, 0..NUM_LINES);
         pass.finish();

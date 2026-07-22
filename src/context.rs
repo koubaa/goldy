@@ -396,11 +396,10 @@ impl Context {
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
             // `RetainedPool::release` parks parcels here for epoch-gated reuse (leases,
-            // future scheme-held transients). Until ekrano migrates off its own VRAM
-            // machinery (`DeferredPayload` returns, pipeline cache) and
-            // acquires through the transient pool, those parked buffers are not re-issued
+            // future scheme-held transients). When callers park buffers here but do not
+            // acquire through the transient pool, those parked buffers are not re-issued
             // — only dropped once `ready_after` retires. Without this drain at every frame
-            // boundary, `release` leaks GPU heap (velato: Metal buffer heaps exhausted).
+            // boundary, `release` leaks GPU heap (e.g. Metal buffer heaps exhausted).
             self.with_transient_pool(|pool| pool.drain_ready(self));
         }
         {

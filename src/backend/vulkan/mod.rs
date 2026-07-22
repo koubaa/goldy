@@ -846,6 +846,7 @@ impl GpuBackend for VulkanBackend {
         &mut self,
         device_handle: DeviceHandle,
         target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
         commands: &[RenderCommand],
     ) -> Result<()> {
         let instance = self.state.instance.clone();
@@ -861,6 +862,7 @@ impl GpuBackend for VulkanBackend {
             &self.state.render_targets,
             device_handle,
             target,
+            color_load,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
                 let pipelines_read = self.state.pipelines.read().unwrap();
