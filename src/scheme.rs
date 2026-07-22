@@ -3605,6 +3605,125 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(loan1.len(), 32);
     }
 
+    /// Returning a bound transient to the pool must invalidate the scheme — same as drop.
+    ///
+    /// Runs on the mock backend (all host platforms). GPU coverage for Metal/Vulkan/DX12
+    /// is `scheme_return_transient_texture_invalidates_retained_scheme` in
+    /// `tests/scheme_compute_integration.rs` (Vulkan/DX12 need a machine with those backends).
+    #[test]
+    fn return_transient_texture_invalidates_bound_scheme() {
+        let device = mock_device();
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let tex = ctx
+            .acquire_transient_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("transient texture");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.submit().expect("first submit");
+
+        ctx.return_transient_texture(tex);
+
+        assert!(
+            matches!(scheme.submit(), Err(GoldyError::StaleResource)),
+            "resubmit after return_transient_texture must fail (stamp retired on pool return)"
+        );
+    }
+
+    /// After stamp retirement, a re-acquired transient is a new deed and can bind a new scheme.
+    #[test]
+    fn return_transient_texture_reacquire_binds_fresh_scheme() {
+        let device = mock_device();
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let tex = ctx
+            .acquire_transient_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("transient texture");
+        let handle = tex.texture_handle();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.submit().expect("first submit");
+        ctx.return_transient_texture(tex);
+        assert!(matches!(scheme.submit(), Err(GoldyError::StaleResource)));
+
+        // Epoch-gate: mock may need progress for ready_after; wait on high water.
+        let hw = ctx.high_water_timeline();
+        if hw > 0 {
+            let _ = ctx.wait_until(hw);
+        }
+
+        let tex2 = ctx
+            .acquire_transient_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("reacquire");
+        assert_eq!(tex2.texture_handle(), handle, "pool should reuse GPU texture");
+
+        let mut scheme2 = Scheme::new(&ctx);
+        scheme2
+            .node("write_tex", &pipeline)
+            .with_parcel(&tex2, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme2.submit().expect("fresh scheme with re-acquired texture must submit");
+    }
+
+    #[test]
+    fn return_transient_buffer_invalidates_bound_scheme() {
+        let device = mock_device();
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let buf = ctx
+            .acquire_transient_buffer(64, BufferKind::Scattered, BufferFlags::empty(), None)
+            .expect("transient buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("a", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.submit().expect("first submit");
+
+        ctx.return_transient_buffer(buf);
+
+        assert!(
+            matches!(scheme.submit(), Err(GoldyError::StaleResource)),
+            "resubmit after return_transient_buffer must fail"
+        );
+    }
+
     #[test]
     fn grant_read_concurrent_frames_succeed() {
         let device = mock_device();

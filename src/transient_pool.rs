@@ -216,7 +216,12 @@ impl TransientPool {
     ///
     /// Called from [`crate::Scheme::drop`] for each buffer-backed lease. The parcel's
     /// bookkeeping must already be released by the caller.
-    pub(crate) fn return_buffer_parcel(&mut self, parcel: Parcel, ready_after: ReferenceTable) {
+    ///
+    /// Retires the parcel stamp before parking: schemes that still bind the returned
+    /// deed fail subsequent submit with [`crate::GoldyError::StaleResource`]. The parked
+    /// entry gets a fresh stamp for the next acquire.
+    pub(crate) fn return_buffer_parcel(&mut self, mut parcel: Parcel, ready_after: ReferenceTable) {
+        parcel.retire_stamp_for_pool_return();
         let bytes = parcel.byte_size();
         let key = BufferKey::from_parcel(&parcel);
         self.pending.add(ParcelType::Buffer, bytes);
@@ -230,9 +235,14 @@ impl TransientPool {
     ///
     /// Called when filter-scratch (or other one-shot) textures are done for the frame.
     /// The texture's bookkeeping must still be attached; this method releases it.
+    ///
+    /// Retires the texture stamp before parking (same contract as
+    /// [`Self::return_buffer_parcel`]): returning a bound transient must invalidate
+    /// schemes that still reference it, on every backend.
     pub(crate) fn return_texture(&mut self, mut texture: Texture, ready_after: ReferenceTable) {
         texture.release_bookkeeping();
-        let parcel = texture.into_parcel();
+        let mut parcel = texture.into_parcel();
+        parcel.retire_stamp_for_pool_return();
         let bytes = parcel.byte_size();
         let (width, height, format, access, flags) = parcel.texture_descriptor().expect("texture descriptor");
         let key = TextureKey {
@@ -269,18 +279,12 @@ impl TransientPool {
                 let byte_size = buffer.byte_size();
                 match buffer.into_transient_parcel() {
                     Ok(parcel) => {
-                        let bytes = parcel.byte_size();
-                        let key = BufferKey::from_parcel(&parcel);
-                        self.pending.add(ParcelType::Buffer, bytes);
-                        self.buffer_bins
-                            .entry(key)
-                            .or_default()
-                            .push(BufferBinEntry { parcel, ready_after });
+                        // Stamp retirement happens inside return_buffer_parcel.
+                        self.return_buffer_parcel(parcel, ready_after);
                     }
                     Err(_) => {
                         // Partitioned buffer — not binneable for reuse; drop it.
-                        // `Buffer::drop` queues deferred Vulkan deletion at the
-                        // current timeline epoch, so GPU retirement is still respected.
+                        // `Buffer::drop` marks stamps dead and queues deferred destruction.
                         tracing::trace!(
                             byte_size,
                             "transient_pool: dropping partitioned buffer — \

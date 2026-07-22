@@ -352,6 +352,17 @@ impl Parcel {
         self.stamp.mark_dead();
     }
 
+    /// End the current deed when returning this parcel to a pool.
+    ///
+    /// Marks the live stamp dead so any scheme that still binds it fails submit with
+    /// [`crate::GoldyError::StaleResource`], then mints a fresh stamp so a later
+    /// re-acquire is a new live deed (same GPU resource, new identity).
+    pub(crate) fn retire_stamp_for_pool_return(&mut self) {
+        let home = self.stamp.home_device.clone();
+        self.stamp.mark_dead();
+        self.stamp = ParcelStamp::new(home);
+    }
+
     pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
         &self.stamp.home_device
     }
