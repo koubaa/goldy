@@ -249,7 +249,7 @@ impl App {
         let ctx = self.ctx.as_ref().unwrap();
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
         let mut upload = Scheme::new(ctx);
-        upload.commit_write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
+        upload.write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

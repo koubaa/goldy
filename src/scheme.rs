@@ -891,7 +891,7 @@ impl Scheme {
     ///
     /// Marks the scheme dirty. Pair with [`Self::submit`] for a property-only upload
     /// dispatch, or retain the scheme and refresh the payload each submission.
-    pub fn commit_write_parcel(&mut self, parcel: &Parcel, offset: u64, data: Vec<u8>) -> Result<(), GoldyError> {
+    pub fn write_parcel(&mut self, parcel: &Parcel, offset: u64, data: Vec<u8>) -> Result<(), GoldyError> {
         self.dirty = true;
         let (buffer, resource) = parcel.write_buffer_target().map_err(|e| self.ctx.classify(e))?;
         self.submit_state.register_parcel_stamp(parcel);
@@ -1216,11 +1216,11 @@ impl Scheme {
     /// Append a zero-fill node for `parcel[offset..offset+size]`.
     ///
     /// Zero-fill a buffer region via an upload micro-scheme.
-    pub fn commit_clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
+    pub fn clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
         self.dirty = true;
         let buffer = parcel
             .buffer_handle()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_clear_parcel: requires a buffer parcel")))?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("clear_parcel: requires a buffer parcel")))?;
         let abs_offset = match parcel.resource_id() {
             ResourceId::BufferRange { offset: base, .. } => base + offset,
             _ => offset,
@@ -1249,11 +1249,11 @@ impl Scheme {
     /// Append a CPU→GPU full-texture upload node.
     ///
     /// Upload a full texture via an upload micro-scheme.
-    pub fn commit_write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
+    pub fn write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
         let expected = texture.byte_size();
         if data.len() != expected as usize {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "commit_write_texture: expected {} bytes, got {}",
+                "write_texture: expected {} bytes, got {}",
                 expected,
                 data.len()
             )));
@@ -1279,7 +1279,7 @@ impl Scheme {
     /// Append a CPU→GPU partial-texture upload node for a rectangular sub-region.
     ///
     /// Upload a texture subregion via an upload micro-scheme.
-    pub fn commit_write_texture_region(
+    pub fn write_texture_region(
         &mut self,
         texture: &crate::Texture,
         x: u32,
@@ -1290,13 +1290,13 @@ impl Scheme {
     ) -> Result<(), GoldyError> {
         let x_end = x
             .checked_add(width)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: x+width overflow")))?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("write_texture_region: x+width overflow")))?;
         let y_end = y
             .checked_add(height)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: y+height overflow")))?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("write_texture_region: y+height overflow")))?;
         if x_end > texture.width() || y_end > texture.height() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "commit_write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
+                "write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
                 width,
                 height,
                 x,
@@ -3255,20 +3255,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let parcel = &*buffer;
 
         let mut clear_scheme = Scheme::new(&ctx);
-        clear_scheme
-            .commit_clear_parcel(parcel, 0, parcel.byte_size())
-            .expect("clear");
+        clear_scheme.clear_parcel(parcel, 0, parcel.byte_size()).expect("clear");
         assert_eq!(clear_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
 
         let mut write_scheme = Scheme::new(&ctx);
         write_scheme
-            .commit_write_parcel(parcel, 0, vec![0u8; parcel.byte_size() as usize])
+            .write_parcel(parcel, 0, vec![0u8; parcel.byte_size() as usize])
             .expect("full write");
         assert_eq!(write_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
 
         let mut partial_scheme = Scheme::new(&ctx);
         partial_scheme
-            .commit_write_parcel(parcel, 4, vec![1, 2, 3, 4])
+            .write_parcel(parcel, 4, vec![1, 2, 3, 4])
             .expect("partial write");
         assert_eq!(partial_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Write);
     }

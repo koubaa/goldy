@@ -22,7 +22,7 @@ let uniform_buf = pool.acquire_buffer(
     Some(&raw_bytes),
 )?;
 
-// Uninitialized buffer (rewrite each frame with commit_write_parcel):
+// Uninitialized buffer (rewrite each frame with write_parcel):
 let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
 // Texture parcel:
@@ -39,7 +39,7 @@ let cells = pool.acquire_record([
 
 ```rust
 let mut upload = Scheme::new(&ctx);
-upload.commit_write_parcel(&*uniform, 0, bytemuck::bytes_of(&data).to_vec())?;
+upload.write_parcel(&*uniform, 0, bytemuck::bytes_of(&data).to_vec())?;
 upload.submit()?;
 
 let mut pass = scheme.render_pass("draw", &rt);

@@ -110,7 +110,7 @@ class TestRetainedPool:
         )
         ctx = device.create_context()
         upload = goldy.Scheme(ctx)
-        upload.commit_write_parcel(buffer[0], np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
+        upload.write_parcel(buffer[0], np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
         frame = upload.submit()
         frame.wait(ctx)
 

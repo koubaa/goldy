@@ -86,7 +86,7 @@ let pixels = grant.consume(&submission)?;
 Put compute `node` dispatches and `render_pass` nodes in the **same** scheme, then submit once:
 
 ```rust
-scheme.commit_write_parcel(&staging, 0, data)?;
+scheme.write_parcel(&staging, 0, data)?;
 scheme.node("sim", &compute_pipeline)
     .with_parcel(&state_buf, NodeAccess::ReadWrite)
     .dispatch(wg, 1, 1);

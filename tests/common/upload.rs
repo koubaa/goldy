@@ -7,7 +7,7 @@ use goldy::{Context, GoldyError, Parcel, Scheme, Submission};
 /// Reusing one upload scheme avoids topology churn that dirties unrelated retained
 /// reader/worker schemes when each upload would otherwise register a new foreign edge.
 pub fn upload_parcel(upload: &mut Scheme, parcel: &Parcel, data: &[u8]) -> Result<Submission, GoldyError> {
-    upload.commit_write_parcel(parcel, 0, data.to_vec())?;
+    upload.write_parcel(parcel, 0, data.to_vec())?;
     upload.submit()
 }
 

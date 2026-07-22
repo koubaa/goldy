@@ -91,7 +91,7 @@ def test_parcel_write(device):
     )
     ctx = device.create_context()
     upload = goldy.Scheme(ctx)
-    upload.commit_write_parcel(buffer[0], np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
+    upload.write_parcel(buffer[0], np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
     frame = upload.submit()
     frame.wait(ctx)
 

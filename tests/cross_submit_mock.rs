@@ -124,9 +124,7 @@ fn upload_then_consumer_emits_raw_barrier() {
         .expect("parcel");
 
     let mut upload = Scheme::new(&ctx);
-    upload
-        .commit_write_parcel(&parcel, 0, vec![1, 0, 0, 0])
-        .expect("upload");
+    upload.write_parcel(&parcel, 0, vec![1, 0, 0, 0]).expect("upload");
     upload.submit().expect("upload submit");
 
     clear_mock(&device);
@@ -419,8 +417,7 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
 
 fn upload_write_scheme(ctx: &Context, parcel: &Parcel) -> Scheme {
     let mut s = Scheme::new(ctx);
-    s.commit_write_parcel(parcel, 0, vec![42, 0, 0, 0])
-        .expect("upload write");
+    s.write_parcel(parcel, 0, vec![42, 0, 0, 0]).expect("upload write");
     s
 }
 

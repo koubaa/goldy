@@ -119,7 +119,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     };
 
     let mut upload = Scheme::new(&state.ctx);
-    upload.commit_write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+    upload.write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
     upload.submit()?;
 
     let mut submission = state.scheme.submit()?;
@@ -130,7 +130,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
 
 ### Step by Step
 
-**Update uniforms** — `Scheme::commit_write_parcel` on a short-lived upload scheme stages the new time/size values before the main submit.
+**Update uniforms** — `Scheme::write_parcel` on a short-lived upload scheme stages the new time/size values before the main submit.
 
 **Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 

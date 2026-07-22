@@ -389,7 +389,7 @@ impl WindowState {
 
         let vertices = create_quad(self.current_time());
         let mut upload = Scheme::new(ctx);
-        upload.commit_write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
+        upload.write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
         upload.submit()?;
 
         let mut submission = self.scheme.submit()?;

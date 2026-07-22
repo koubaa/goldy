@@ -233,7 +233,7 @@ pub mod test_support {
             .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");
         let mut scheme = Scheme::new(ctx);
-        scheme.commit_clear_parcel(&buf, 0, 256).expect("clear");
+        scheme.clear_parcel(&buf, 0, 256).expect("clear");
         scheme.submit().expect("submit").timeline_value()
     }
 

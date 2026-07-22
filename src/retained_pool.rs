@@ -65,7 +65,7 @@ impl RetainedPool {
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// For in-place per-frame CPU rewrites, use [`crate::Scheme::commit_write_parcel`] on the
+    /// For in-place per-frame CPU rewrites, use [`crate::Scheme::write_parcel`] on the
     /// buffer's whole parcel (`&*buffer` or `buffer.whole()`).
     pub fn acquire_buffer(
         &mut self,
@@ -375,7 +375,7 @@ mod tests {
             .unwrap();
         let mut scheme = crate::Scheme::new(&ctx);
         assert!(scheme
-            .commit_write_parcel(&*buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
+            .write_parcel(&*buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
             .is_ok());
         scheme.submit().unwrap();
     }
