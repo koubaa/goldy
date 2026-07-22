@@ -250,7 +250,7 @@ impl RenderState {
         };
 
         let mut upload = Scheme::new(&self.ctx);
-        upload.commit_write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
+        upload.write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
         upload.submit()?;
 
         let mut submission = self.scheme.submit()?;

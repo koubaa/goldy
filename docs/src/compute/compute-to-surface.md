@@ -134,7 +134,7 @@ scheme
 
 // --- Render loop ---
 let mut upload = Scheme::new(&ctx);
-upload.commit_write_parcel(
+upload.write_parcel(
     &uniform_buffer,
     0,
     bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }).to_vec(),

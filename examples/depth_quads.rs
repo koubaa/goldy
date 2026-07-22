@@ -212,12 +212,12 @@ impl App {
 
         let ctx = self.ctx.as_ref().unwrap();
         let mut upload = Scheme::new(ctx);
-        upload.commit_write_parcel(
+        upload.write_parcel(
             self.warm_parcel.as_ref().unwrap(),
             0,
             bytemuck::cast_slice(&warm_verts).to_vec(),
         )?;
-        upload.commit_write_parcel(
+        upload.write_parcel(
             self.cool_parcel.as_ref().unwrap(),
             0,
             bytemuck::cast_slice(&cool_verts).to_vec(),

@@ -306,7 +306,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     };
 
     let mut upload = Scheme::new(&state.ctx);
-    upload.commit_write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+    upload.write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
     upload.submit()?;
 
     let mut submission = state.scheme.submit()?;

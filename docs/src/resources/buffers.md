@@ -4,7 +4,7 @@
 
 ## Creating buffers (recommended)
 
-For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, `commit_write_parcel`). All Rust, Python, FFI, and .NET examples use this path.
+For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, `write_parcel`). All Rust, Python, FFI, and .NET examples use this path.
 
 ```rust
 use goldy::{BufferFlags, BufferKind, RetainedPool};
@@ -13,7 +13,7 @@ let mut pool = RetainedPool::new(device.clone());
 let vertices = [/* Vertex2D ... */];
 let vertex_parcel = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-// Uninitialized storage (e.g. a uniform updated each frame via commit_write_parcel):
+// Uninitialized storage (e.g. a uniform updated each frame via write_parcel):
 let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 ```
 

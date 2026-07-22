@@ -1888,7 +1888,7 @@ mod imp {
     /// the **same** parcel then copy it to a distinct output.
     ///
     /// This is the Scheme-API migration of `test_write_buffer_reuse_across_submissions`.
-    /// Each scheme uses [`Scheme::commit_write_parcel`] so the write node is part of
+    /// Each scheme uses [`Scheme::write_parcel`] so the write node is part of
     /// the same GPU submission as the compute node that reads it.  Both schemes are
     /// submitted without any CPU-side wait between them; correctness relies entirely
     /// on the staging belt handing out independent staging regions for the two uploads
@@ -1939,7 +1939,7 @@ mod imp {
 
         // Scheme 1: write data_a into mid, copy mid → out_a, then read out_a back.
         let mut s1 = Scheme::new(&ctx);
-        s1.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_a).to_vec())
+        s1.write_parcel(&mid, 0, bytemuck::cast_slice(&data_a).to_vec())
             .expect("commit write a");
         s1.node("copy_a", &pipeline)
             .with_parcel(&mid, NodeAccess::Read)
@@ -1951,7 +1951,7 @@ mod imp {
         // Scheme 2: submitted immediately, without waiting for sub1.
         // The staging belt must not recycle the staging region used by s1.
         let mut s2 = Scheme::new(&ctx);
-        s2.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_b).to_vec())
+        s2.write_parcel(&mid, 0, bytemuck::cast_slice(&data_b).to_vec())
             .expect("commit write b");
         s2.node("copy_b", &pipeline)
             .with_parcel(&mid, NodeAccess::Read)
@@ -2444,7 +2444,7 @@ mod imp {
 
     /// Migrated from `stress_alternating_write_dispatch` in `task_graph_integration.rs`.
     ///
-    /// Two `commit_write_parcel` calls on the same buffer, each followed by a dispatch
+    /// Two `write_parcel` calls on the same buffer, each followed by a dispatch
     /// that reads it, all within one `Scheme` submission.  This exercises the
     /// write → dispatch → write → dispatch (WAW + RAW) barrier sequence and confirms
     /// that the upload remap table correctly tracks both write nodes despite them
@@ -2477,14 +2477,14 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         // Phase 1: write data1 into buf, copy to out1.
-        scheme.commit_write_parcel(&buf, 0, bytes1).expect("commit write 1");
+        scheme.write_parcel(&buf, 0, bytes1).expect("commit write 1");
         scheme
             .node("copy1", &copy_pipe)
             .with_parcel(&buf, NodeAccess::Read)
             .with_parcel(&out1, NodeAccess::Write)
             .dispatch((N / 64) as u32, 1, 1);
         // Phase 2: overwrite buf with data2 (WAW), copy to out2.
-        scheme.commit_write_parcel(&buf, 0, bytes2).expect("commit write 2");
+        scheme.write_parcel(&buf, 0, bytes2).expect("commit write 2");
         scheme
             .node("copy2", &copy_pipe)
             .with_parcel(&buf, NodeAccess::Read)
@@ -2505,9 +2505,9 @@ mod imp {
         }
     }
 
-    // ─── commit_clear_parcel ─────────────────────────────────────────────────────
+    // ─── clear_parcel ─────────────────────────────────────────────────────
 
-    fn scheme_commit_clear_parcel_full(device: &Device) {
+    fn scheme_clear_parcel_full(device: &Device) {
         let ctx = submission_context(&device);
 
         const N: usize = 64;
@@ -2518,9 +2518,7 @@ mod imp {
             .expect("buf");
 
         let mut scheme = Scheme::new(&ctx);
-        scheme
-            .commit_clear_parcel(&buf, 0, byte_size)
-            .expect("commit_clear_parcel");
+        scheme.clear_parcel(&buf, 0, byte_size).expect("clear_parcel");
         let grant = scheme.grant_read(&buf).expect("grant_read");
         let frame = scheme.submit().expect("submit");
 
@@ -2530,7 +2528,7 @@ mod imp {
         }
     }
 
-    fn scheme_commit_clear_parcel_partial_preserves_edges(device: &Device) {
+    fn scheme_clear_parcel_partial_preserves_edges(device: &Device) {
         let ctx = submission_context(&device);
 
         // 64 u32s: indices [0..16] = 0xAAAA, [16..48] = 0xBBBB (to be cleared), [48..64] = 0xCCCC
@@ -2553,9 +2551,7 @@ mod imp {
 
         // Clear elements [16..48] → bytes 64..192, size = 32 * 4 = 128.
         let mut scheme = Scheme::new(&ctx);
-        scheme
-            .commit_clear_parcel(&buf, 16 * 4, 32 * 4)
-            .expect("commit_clear_parcel");
+        scheme.clear_parcel(&buf, 16 * 4, 32 * 4).expect("clear_parcel");
         let grant = scheme.grant_read(&buf).expect("grant_read");
         let frame = scheme.submit().expect("submit");
 
@@ -2577,7 +2573,7 @@ mod imp {
         }
     }
 
-    fn scheme_commit_clear_parcel_size_zero_fills_to_end(device: &Device) {
+    fn scheme_clear_parcel_size_zero_fills_to_end(device: &Device) {
         let ctx = submission_context(&device);
 
         // 64 u32s: first 16 stay, rest cleared via size=0 (fill-to-end).
@@ -2591,9 +2587,7 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         // offset = 16 elements in, size = 0 → fill from byte 64 to end
-        scheme
-            .commit_clear_parcel(&buf, 16 * 4, 0)
-            .expect("commit_clear_parcel size=0");
+        scheme.clear_parcel(&buf, 16 * 4, 0).expect("clear_parcel size=0");
         let grant = scheme.grant_read(&buf).expect("grant_read");
         let frame = scheme.submit().expect("submit");
 
@@ -2609,7 +2603,7 @@ mod imp {
         }
     }
 
-    fn scheme_commit_clear_parcel_requires_buffer_parcel(device: &Device) {
+    fn scheme_clear_parcel_requires_buffer_parcel(device: &Device) {
         let ctx = submission_context(&device);
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -2625,8 +2619,8 @@ mod imp {
             .expect("tex_parcel");
 
         let mut scheme = Scheme::new(&ctx);
-        let result = scheme.commit_clear_parcel(&tex_parcel, 0, 64);
-        assert!(result.is_err(), "commit_clear_parcel should reject texture parcels");
+        let result = scheme.clear_parcel(&tex_parcel, 0, 64);
+        assert!(result.is_err(), "clear_parcel should reject texture parcels");
     }
 
     // ─── copy_buffer_parcel ───────────────────────────────────────────────────────
@@ -2875,9 +2869,9 @@ mod imp {
         assert_eq!(scheme.replay_stats().resubmit_hits, 1, "frame2 must be a retention hit");
     }
 
-    // ─── commit_write_texture ─────────────────────────────────────────────────────
+    // ─── write_texture ─────────────────────────────────────────────────────
 
-    fn scheme_commit_write_texture_round_trip(device: &Device) {
+    fn scheme_write_texture_round_trip(device: &Device) {
         let ctx = submission_context(&device);
 
         const W: u32 = 8;
@@ -2900,22 +2894,17 @@ mod imp {
         );
 
         let mut scheme = Scheme::new(&ctx);
-        scheme
-            .commit_write_texture(&texture, pixels.clone())
-            .expect("commit_write_texture");
+        scheme.write_texture(&texture, pixels.clone()).expect("write_texture");
         let frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
         let mut output = vec![0u8; texture.byte_size() as usize];
         texture.read_to_cpu(&mut output).expect("read_to_cpu");
 
-        assert_eq!(
-            output, pixels,
-            "commit_write_texture: readback does not match uploaded data"
-        );
+        assert_eq!(output, pixels, "write_texture: readback does not match uploaded data");
     }
 
-    fn scheme_commit_write_texture_wrong_size_returns_error(device: &Device) {
+    fn scheme_write_texture_wrong_size_returns_error(device: &Device) {
         let ctx = submission_context(&device);
         let texture = test_alloc_texture(
             &device,
@@ -2929,14 +2918,14 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         // Too few bytes — must error.
-        let result = scheme.commit_write_texture(&texture, vec![0u8; 10]);
-        assert!(result.is_err(), "commit_write_texture should reject wrong-size data");
+        let result = scheme.write_texture(&texture, vec![0u8; 10]);
+        assert!(result.is_err(), "write_texture should reject wrong-size data");
         // Too many bytes — must also error.
-        let result2 = scheme.commit_write_texture(&texture, vec![0u8; 8 * 8 * 4 + 4]);
-        assert!(result2.is_err(), "commit_write_texture should reject oversized data");
+        let result2 = scheme.write_texture(&texture, vec![0u8; 8 * 8 * 4 + 4]);
+        assert!(result2.is_err(), "write_texture should reject oversized data");
     }
 
-    fn scheme_commit_write_texture_marks_scheme_dirty(device: &Device) {
+    fn scheme_write_texture_marks_scheme_dirty(device: &Device) {
         let ctx = submission_context(&device);
         let texture = test_alloc_texture(
             &device,
@@ -2951,21 +2940,21 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
         // Add a no-op submit to make it clean.
-        // We can't easily make a no-op scheme, so we just verify that each commit_write_texture re-marks dirty.
+        // We can't easily make a no-op scheme, so we just verify that each write_texture re-marks dirty.
         scheme
-            .commit_write_texture(&texture, vec![0u8; 4 * 4 * 4])
+            .write_texture(&texture, vec![0u8; 4 * 4 * 4])
             .expect("first write");
-        assert!(scheme.is_dirty(), "scheme must be dirty after commit_write_texture");
+        assert!(scheme.is_dirty(), "scheme must be dirty after write_texture");
         // Second write: scheme is already dirty, but adding another node keeps it dirty.
         scheme
-            .commit_write_texture(&texture, vec![0u8; 4 * 4 * 4])
+            .write_texture(&texture, vec![0u8; 4 * 4 * 4])
             .expect("second write");
         assert!(scheme.is_dirty(), "scheme must still be dirty after second write");
     }
 
-    // ─── commit_write_texture_region ─────────────────────────────────────────────
+    // ─── write_texture_region ─────────────────────────────────────────────
 
-    fn scheme_commit_write_texture_region_round_trip(device: &Device) {
+    fn scheme_write_texture_region_round_trip(device: &Device) {
         let ctx = submission_context(&device);
 
         const W: u32 = 8;
@@ -2990,8 +2979,8 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         scheme
-            .commit_write_texture_region(&texture, RX, RY, RW, RH, region_pixels.clone())
-            .expect("commit_write_texture_region");
+            .write_texture_region(&texture, RX, RY, RW, RH, region_pixels.clone())
+            .expect("write_texture_region");
         let frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
@@ -3019,7 +3008,7 @@ mod imp {
         }
     }
 
-    fn scheme_commit_write_texture_region_oob_returns_error(device: &Device) {
+    fn scheme_write_texture_region_oob_returns_error(device: &Device) {
         let ctx = submission_context(&device);
         let texture = test_alloc_texture(
             &device,
@@ -3033,14 +3022,14 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         // Region extends beyond texture width.
-        let result = scheme.commit_write_texture_region(&texture, 6, 0, 4, 4, vec![0u8; 4 * 4 * 4]);
+        let result = scheme.write_texture_region(&texture, 6, 0, 4, 4, vec![0u8; 4 * 4 * 4]);
         assert!(result.is_err(), "x+width exceeds texture width → error");
         // Region extends beyond texture height.
-        let result2 = scheme.commit_write_texture_region(&texture, 0, 6, 4, 4, vec![0u8; 4 * 4 * 4]);
+        let result2 = scheme.write_texture_region(&texture, 0, 6, 4, 4, vec![0u8; 4 * 4 * 4]);
         assert!(result2.is_err(), "y+height exceeds texture height → error");
     }
 
-    fn scheme_commit_write_texture_region_multiple_non_overlapping(device: &Device) {
+    fn scheme_write_texture_region_multiple_non_overlapping(device: &Device) {
         let ctx = submission_context(&device);
 
         const W: u32 = 8;
@@ -3061,10 +3050,10 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         scheme
-            .commit_write_texture_region(&texture, 0, 0, 4, 4, red)
+            .write_texture_region(&texture, 0, 0, 4, 4, red)
             .expect("write red region");
         scheme
-            .commit_write_texture_region(&texture, 4, 4, 4, 4, blue)
+            .write_texture_region(&texture, 4, 4, 4, 4, blue)
             .expect("write blue region");
         let frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
@@ -4041,10 +4030,10 @@ mod imp {
         trial!(scheme_dispatch_indirect_wrong_type_rejected);
         trial!(scheme_stress_zeros_then_indirect_dispatch);
         trial!(scheme_stress_alternating_write_dispatch);
-        trial!(scheme_commit_clear_parcel_full);
-        trial!(scheme_commit_clear_parcel_partial_preserves_edges);
-        trial!(scheme_commit_clear_parcel_size_zero_fills_to_end);
-        trial!(scheme_commit_clear_parcel_requires_buffer_parcel);
+        trial!(scheme_clear_parcel_full);
+        trial!(scheme_clear_parcel_partial_preserves_edges);
+        trial!(scheme_clear_parcel_size_zero_fills_to_end);
+        trial!(scheme_clear_parcel_requires_buffer_parcel);
         trial!(scheme_copy_buffer_parcel_basic);
         trial!(scheme_copy_buffer_parcel_partial_with_offsets);
         trial!(scheme_copy_buffer_parcel_rejects_texture_src);
@@ -4052,12 +4041,12 @@ mod imp {
         trial!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
         trial!(scheme_cpu_writable_staging_write_then_copy);
         trial!(scheme_cpu_writable_staging_update_each_frame);
-        trial!(scheme_commit_write_texture_round_trip);
-        trial!(scheme_commit_write_texture_wrong_size_returns_error);
-        trial!(scheme_commit_write_texture_marks_scheme_dirty);
-        trial!(scheme_commit_write_texture_region_round_trip);
-        trial!(scheme_commit_write_texture_region_oob_returns_error);
-        trial!(scheme_commit_write_texture_region_multiple_non_overlapping);
+        trial!(scheme_write_texture_round_trip);
+        trial!(scheme_write_texture_wrong_size_returns_error);
+        trial!(scheme_write_texture_marks_scheme_dirty);
+        trial!(scheme_write_texture_region_round_trip);
+        trial!(scheme_write_texture_region_oob_returns_error);
+        trial!(scheme_write_texture_region_multiple_non_overlapping);
         trial!(scheme_copy_buffer_to_texture_parcel_full_texture);
         trial!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
         trial!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);

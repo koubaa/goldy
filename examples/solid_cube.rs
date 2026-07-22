@@ -312,12 +312,12 @@ impl App {
 
         let ctx = self.ctx.as_ref().unwrap();
         let mut upload = Scheme::new(ctx);
-        upload.commit_write_parcel(
+        upload.write_parcel(
             self.vertex_parcel.as_ref().unwrap(),
             0,
             bytemuck::cast_slice(&vertices).to_vec(),
         )?;
-        upload.commit_write_parcel(
+        upload.write_parcel(
             self.index_parcel.as_ref().unwrap(),
             0,
             bytemuck::cast_slice(&sorted_indices).to_vec(),

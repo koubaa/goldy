@@ -230,7 +230,7 @@ impl RenderState {
         self.last_frame_time = std::time::Instant::now();
 
         let mut upload = Scheme::new(&self.ctx);
-        upload.commit_write_parcel(
+        upload.write_parcel(
             &self.params_buffer,
             0,
             bytemuck::bytes_of(&SimParams { delta_time: dt }).to_vec(),

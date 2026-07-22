@@ -154,7 +154,7 @@ impl App {
             _padding: 0.0,
         };
         let mut upload = Scheme::new(ctx);
-        upload.commit_write_parcel(uniform, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+        upload.write_parcel(uniform, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
         upload.submit()?;
 
         let present = self.present.as_ref().unwrap();

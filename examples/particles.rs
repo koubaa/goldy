@@ -275,7 +275,7 @@ impl RenderState {
 
         let particles = Self::create_particles(self.is_snow);
         let mut upload = Scheme::new(&self.ctx);
-        upload.commit_write_parcel(&self.particle_buffer, 0, bytemuck::cast_slice(&particles).to_vec())?;
+        upload.write_parcel(&self.particle_buffer, 0, bytemuck::cast_slice(&particles).to_vec())?;
         upload.submit()?;
 
         self.window.set_title(&format!(
@@ -298,7 +298,7 @@ impl RenderState {
         };
 
         let mut upload = Scheme::new(&self.ctx);
-        upload.commit_write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
+        upload.write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
         upload.submit()?;
 
         let mut submission = self.scheme.submit()?;
