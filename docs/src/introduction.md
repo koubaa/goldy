@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/goldy-ring.png" alt="Goldy Logo" width="600">
+  <img src="assets/goldy-ring.png" alt="Goldy Logo" width="240">
 </p>
 
 # Goldy: Modern GPU Library
