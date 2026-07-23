@@ -6,8 +6,9 @@ Goldy reads several environment variables at runtime for backend selection, vali
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `GOLDY_BACKEND` | `vulkan`, `vk`, `dx12`, `d3d12`, `directx`, `metal`, `mtl` | Platform default (macOS → Metal, Windows → DX12, Linux → Vulkan) | Override backend selection at runtime. |
+| `GOLDY_BACKEND` | `vulkan`, `vk`, `dx12`, `d3d12`, `directx`, `metal`, `mtl`, `cuda`, `webgpu`, `wgpu` | Platform default (macOS → Metal, Windows → DX12, Linux → Vulkan) | Override backend selection at runtime. Shipped: Vulkan, DX12, Metal. In progress: CUDA, WebGPU. |
 | `GOLDY_SLANG_PATH` | File path | *(not set)* | Override the path to the Slang shared library (`slang.dll` / `libslang.dylib` / `libslang.so`). Bypasses the default search order (vendored next to executable → extracted from embedded). |
+| `GOLDY_FFI_PATH` | File path | *(not set)* | Full path to the `goldy_ffi` shared library (`goldy_ffi.dll` / `libgoldy_ffi.so` / `libgoldy_ffi.dylib`). Used by `goldy-ffi-client` for runtime library loading. |
 
 ## Validation
 

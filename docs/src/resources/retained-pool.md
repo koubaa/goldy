@@ -71,4 +71,4 @@ Call `pool.release(&ctx, hold)` when resizing or tearing down. While held, buffe
 | C# | `RetainedPool`, `Buffer`, `Parcel`, `RecordBuilder` | `AcquireBuffer`, `Record()`, `AcquireTexture` |
 | C / ffi-client | `GoldyRetainedPool`, `GoldyBuffer`, `GoldyParcel` | `goldy_retained_pool_acquire_buffer`, `goldy_record_builder_*` |
 
-All examples under `goldy/examples/`, `python/examples/`, `dotnet/Goldy.Examples/`, and `ffi-client/examples/` use this API.
+All examples under `goldy/examples/`, `python/examples/`, `dotnet/Goldy.Examples/`, `cpp/examples/`, and `ffi-client/examples/` use this API. See the [bindings](../bindings/python.md) section for language-specific guides.

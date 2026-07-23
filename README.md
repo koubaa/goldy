@@ -1,43 +1,100 @@
 <p align="center">
-  <img src="assets/goldy-ring.png" alt="Goldy Logo" width="240">
+  <img src="assets/goldy.png" alt="Goldy Logo" width="240">
 </p>
 
-# Goldy: Modern GPU Library
+# Goldy: GPU runtime for the Fondaco Machine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets only modern GPU APIs (Vulkan 1.4+, DX12, Metal Tier2+) and can therefore be significantly simpler than libraries that must maintain backward compatibility.
+**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](docs/src/fondaco/specification.md) on modern hardware. Merchants describe **parcels** (data) and **schemes** (computation with ownership-derived ordering); Goldy manages the physical medium, schedules dispatches, and mediates all foreign interaction through **exchanges**.
 
-## Quick Example
+> **Maturity**: Goldy **0.1.x** is pre-0.2. Breaking API changes are expected. Python bindings are alpha; Rust is the primary surface.
+
+## Why Fondaco?
+
+Traditional GPU APIs expose descriptors, barriers, render passes, and swapchain plumbing. The Fondaco model is different.
+
+Goldy makes that model practical on 2020+ GPUs:
+
+| Fondaco concept | Goldy realization |
+|-----------------|-------------------|
+| Scheme | [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html) — retained dependency graph, resubmitted each frame |
+| Parcel | [`Parcel`](https://docs.rs/goldy/latest/goldy/struct.Parcel.html) / [`Buffer`](https://docs.rs/goldy/latest/goldy/struct.Buffer.html) / [`Texture`](https://docs.rs/goldy/latest/goldy/struct.Texture.html) — stable handles |
+| Dispatch | Compute, render, copy, and present nodes inside a scheme |
+| Exchange | [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html), [`MemoryExchange`](https://docs.rs/goldy/latest/goldy/struct.MemoryExchange.html) |
+| Settlement | [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) → [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html) → `consume()` / `discard()` |
+
+## What Goldy ships today
+
+- **Scheme-first API** — record once, submit every frame; barriers and transient aliasing derived automatically
+- **Typed bindless shaders** — Slang with `[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]` and `goldy_exp` access patterns (`Scattered`, `Broadcast`, `Interpolated`, …)
+- **Compute-to-surface** — compute shaders write swapchain drawables directly; no raster pass required
+- **Native backends** — Vulkan 1.4+ (Windows, Linux), DX12 (Windows), Metal Tier 2+ (macOS); no MoltenVK
+- **Multi-language bindings** — Rust (primary), [Python](https://pypi.org/project/goldy/), [.NET](dotnet/Goldy/README.md), [C++](cpp/README.md)
+- **21 Rust examples** — triangle, compute particles, Game of Life, plasma, multi-window, and more
+
+Not yet shipped (see [runtime mapping](docs/src/fondaco/goldy-runtime.md) for status): yielding scripts, `$yield` petitions, scheme fusion/splitting, defragmentation, WASI host integration.
+
+## Quick example: compute-to-surface
 
 ```rust
-use goldy::{Color, DeviceDescriptor, Instance, RequestAdapterOptions, Scheme, TargetLoad, TextureFormat};
+use goldy::{
+    Buffer, BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance,
+    NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    SurfaceConfig, SurfaceExchange, Transaction,
+};
 
-fn main() -> anyhow::Result<()> {
-    let instance = Instance::new()?;
-    let device = instance
-        .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?;
-    let ctx = device.create_context()?;
+let instance = Instance::new()?;
+let device = instance
+    .request_adapter(&RequestAdapterOptions::default())?
+    .request_device(&DeviceDescriptor::default())?;
+let ctx = device.create_context()?;
+let pool = RetainedPool::new(&device)?;
+let surface = SurfaceExchange::new(&ctx, &window, SurfaceConfig::default())?;
 
-    let mut scheme = Scheme::new(&ctx);
-    let rt = scheme.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
-    let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::CORNFLOWER_BLUE));
-    pass.finish();
-    scheme.submit()?;
+let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
+let pipeline = ComputePipeline::new(&device, &shader)?;
+let uniforms = pool.alloc_buffer_with_data(&device, &uniforms_data, BufferKind::Broadcast)?;
 
-    Ok(())
-}
+let mut scheme = Scheme::new(&ctx);
+let present = surface.bind_destination(&mut scheme)?;
+scheme
+    .node("render", &pipeline)
+    .with_parcel(&uniforms, NodeAccess::Read)
+    .with_present(&present.0)
+    .dispatch(wg_x, wg_y, 1);
+
+// Each frame:
+let mut submission = scheme.submit()?;
+present.1.claim(&mut submission)?.consume()?;
 ```
 
-## Features
+Windowed examples require the `examples` feature:
 
-| Attribute | Description |
-|-----------|-------------|
-| **Rust-native** | Idiomatic Rust API, not a wrapper around C |
-| **Modern-only** | Vulkan 1.4+, DX12, Metal Tier 2 |
-| **Slang shaders** | Single shader language for all backends |
-| **Unified** | Graphics and compute in one API |
+```bash
+cargo run --features examples --example compute_to_surface --release
+cargo run --features examples --example triangle --release
+```
+
+## Architecture
+
+```
+Merchant (schemes + parcels)
+        │
+        ▼
+   Scheme / GraphIR  ←── wave & partition analysis, retention
+        │
+        ▼
+  RetainedPool / TransientPool / VramAllocator
+        │
+        ▼
+  Vulkan │ DX12 │ Metal   ←── Slang → SPIR-V / DXIL / MSL
+        │
+        ▼
+  Exchanges (present, readback)
+```
+
+Goldy abstracts **where bytes live** (Layer A: medium) but exposes **what access costs** (Layer B: coalescing, occupancy, residency). See the [design thesis](docs/src/fondaco/design-thesis.md).
 
 ## Installation
 
@@ -46,99 +103,42 @@ fn main() -> anyhow::Result<()> {
 goldy = "0.1"
 ```
 
-### Slang Compiler
+Slang is **embedded at build time** and extracted at runtime — application developers do not install Slang separately. Set `GOLDY_SLANG_PATH` only to override. Maintainer bump procedure: `slang/manifest.json` + `slang/download.sh`.
 
-Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The
-Rust `build.rs` downloads (if needed) and **embeds** the pinned Slang version at
-compile time; at runtime Goldy extracts and loads it automatically. Application
-developers do not install Slang separately.
+Release packaging: [PACKAGING.md](PACKAGING.md). Shader debugging: [DEBUGGING.md](DEBUGGING.md).
 
-- Set `GOLDY_SLANG_PATH` only to override with a custom Slang build
-- `slang/download.sh` is for **maintainers** bumping the pinned Slang version in
-  `slang/manifest.json`, not for normal project setup
+## Platforms
 
-Release packaging for Python wheels and FFI redistributions is described in
-[PACKAGING.md](PACKAGING.md). See [DEBUGGING.md](DEBUGGING.md) if shader
-compilation fails at runtime.
+| Platform | Backend | Window surfaces |
+|----------|---------|-----------------|
+| Windows | DX12 (default), Vulkan | Yes |
+| Linux | Vulkan | Wayland (X11 not supported) |
+| macOS | Metal | Yes |
 
-Optional **Rust vs Slang struct layout checks** at shader compile time: set `GOLDY_VALIDATE_LAYOUTS=1` and pass `LayoutCheck` data from `#[derive(LayoutCheckable)]` into `ShaderModule::from_slang_with_options` (see [DEBUGGING.md](DEBUGGING.md) and the `gradient` / `checkerboard` examples).
+Override backend: `GOLDY_BACKEND=vulkan|dx12|metal`.
+
+Minimum hardware: Vulkan 1.4+, DX12 with Enhanced Barriers, Metal Argument Buffers Tier 2+. See [Target Hardware](docs/src/design/hardware.md).
 
 ## Documentation
 
-📖 **[Full Documentation](https://koubaa.github.io/goldy/)**
-
-- [Getting Started](https://koubaa.github.io/goldy/getting-started/installation.html)
-- [Examples](https://koubaa.github.io/goldy/examples/overview.html)
-- [API Reference](https://koubaa.github.io/goldy/reference/api.html)
-- [Design Philosophy](https://koubaa.github.io/goldy/design/motivation.html)
-
-## Examples
-
-Run the interactive examples:
-
-```bash
-cargo run --example triangle --release      # Basic triangle
-cargo run --example digital_clock --release # 7-segment clock
-cargo run --example plasma --release        # Demoscene plasma
-cargo run --example mandelbrot --release    # Fractal explorer
-cargo run --example starfield --release     # 3D starfield
-cargo run --example particles --release     # Rain/snow
-```
-
-### Selecting a Backend
-
-By default, Goldy uses DX12 on Windows and Vulkan on Linux. Override with `GOLDY_BACKEND`:
-
-```bash
-# Run with Vulkan backend (on Windows)
-GOLDY_BACKEND=vulkan cargo run --example triangle --release
-
-# Run with DX12 backend
-GOLDY_BACKEND=dx12 cargo run --example triangle --release
-```
-
-See [all examples](https://koubaa.github.io/goldy/examples/overview.html).
-
-## Motivation
-
-Goldy is inspired by Sebastian Aaltonen's ["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api) vision of what's possible with modern GPU hardware. By targeting only modern GPUs (2018+), Goldy can:
-
-- Use dynamic rendering (no render pass objects)
-- Use bindless descriptors (no descriptor sets)
-- Assume coherent caches (simpler synchronization)
-- Provide a dramatically simpler API
-
-Goldy is also inspired by:
-- Wayland's compositor architecture
-- Ralph Levien's ["Requiem for piet-gpu-hal"](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)
-- Slang's vision for unified shader language
-- [WGPU](https://gfx-rs.github.io/2019/03/06/wgpu.html)
-- This paper on GPU abstractions: https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf
-
-Read more in [Design Philosophy](https://koubaa.github.io/goldy/design/motivation.html).
-
-## Target Hardware
-
-| Platform | Minimum |
-|----------|---------|
-| NVIDIA | RTX 2000 / GTX 1600 (2018+) |
-| AMD | RDNA 1 / RX 5000 (2019+) |
-| Intel | Xe / Alchemist (2022+) |
-| Apple | M1 / A14 (2020+) |
+- 📖 **[Documentation](docs/src/introduction.md)** — tutorials, programming model, backends, bindings
+- 📖 **[Fondaco Machine spec](docs/src/fondaco/specification.md)** — normative abstract machine
+- 📖 **[Goldy runtime mapping](docs/src/fondaco/goldy-runtime.md)** — what Goldy implements today vs designs in progress
+- 📖 **[API reference](https://docs.rs/goldy)** — Rust docs
 
 ## Development
-
-Before submitting a PR, run the CI checks locally:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy -- -D warnings
-cargo test
+GOLDY_VALIDATION=all cargo test
 ```
+
+Run all examples: `./run_all_examples.sh` (requires `--features examples`).
 
 ## License
 
-Goldy is licensed under the [MIT License](LICENSE). You may use, modify, and distribute Goldy in any project, including proprietary software, under the terms of the MIT License.
+MIT — see [LICENSE](LICENSE).
 
 ## Author
 

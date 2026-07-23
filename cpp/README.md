@@ -140,15 +140,15 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 
 - **C++20** compiler (MSVC 2019+, GCC 10+, Clang 12+)
 - **Rust** toolchain (for building from source)
-- **Vulkan SDK** with Slang compiler (slang.dll required at runtime)
+- Slang is **embedded** in the Goldy build — no separate SDK install for normal use
 
 ## Platform Support
 
 | Platform | Headless Scheme | Windowed Surface |
-|----------|-------------------|------------------|
-| Windows x64 | ✅ | ✅ |
-| Linux x64 | ✅ | ❌ (use headless or custom window + C API) |
-| macOS x64 / ARM64 | ✅ | ✅ |
+|----------|-----------------|------------------|
+| Windows x64 | Yes | Yes |
+| Linux x64 | Yes | Yes (Wayland; X11 not supported) |
+| macOS x64 / ARM64 | Yes | Yes |
 
 ## API Reference
 

@@ -4,11 +4,13 @@ Goldy uses [Slang](https://shader-slang.org/) as its single shader language acro
 
 ## Compilation Targets
 
-| Backend | Target Format | API Requirement |
-|---------|---------------|-----------------|
-| Vulkan | SPIR-V | Vulkan 1.4+ |
-| DirectX 12 | DXIL | Windows 10+ |
-| Metal | Metal IR | Metal Tier 2+ (Argument Buffers) |
+| Backend | Target Format | API Requirement | Status |
+|---------|---------------|-----------------|--------|
+| Vulkan | SPIR-V | Vulkan 1.4+ | Shipped |
+| DirectX 12 | DXIL | Windows 10+ | Shipped |
+| Metal | Metal IR | Metal Tier 2+ (Argument Buffers) | Shipped |
+| CUDA | PTX | NVIDIA CUDA | In progress |
+| WebGPU | WGSL | WebGPU (via wgpu) | In progress |
 
 Slang compiles through its native `slang.dll` / `libslang.dylib` — the same compiler used by NVIDIA, Khronos, and major game engines. Goldy links it directly; there is no intermediate translation step.
 

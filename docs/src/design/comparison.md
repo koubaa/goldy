@@ -85,7 +85,7 @@ Application → wgpu (WebGPU API) → wgpu-hal → Vulkan / Metal / DX12 / WebGP
 
 **Goldy:**
 ```
-Application → Goldy (native API) → Vulkan 1.4+ / Metal 2+ / DX12
+Application → Goldy (native API) → Vulkan 1.4+ / Metal 2+ / DX12 (shipped); CUDA / WebGPU (in progress); Tenstorrent (planned)
 ```
 
 wgpu implements the WebGPU specification faithfully, then maps it onto each backend through an internal HAL. Goldy talks to each backend directly using native idioms.

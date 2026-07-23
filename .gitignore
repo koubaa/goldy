@@ -5,8 +5,9 @@ Cargo.lock
 # Output files from examples (but not test reference screenshots)
 *.png
 !tests/screenshots/*.png
-!assets/goldy-ring.png
-!docs/src/assets/goldy-ring.png
+!assets/goldy.png
+!docs/src/assets/goldy.png
+!docs/src/favicon.png
 
 
 # no idea

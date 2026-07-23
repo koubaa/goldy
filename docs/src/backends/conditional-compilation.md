@@ -61,11 +61,11 @@ This can significantly reduce build times and binary size.
 |---------|-------------|-------|
 | `vulkan` | Windows, Linux (any platform with a Vulkan loader) | Broadest platform support |
 | `dx12` | Windows only | Gated by `#[cfg(target_os = "windows")]` — the feature is ignored on other platforms |
-| `metal` | macOS, iOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms |
+| `metal` | macOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms |
+| `cuda` | Any platform with CUDA toolkit | **In progress** — compute-only prototype |
+| `webgpu` | Cross-platform | **In progress** — via wgpu |
 
-On macOS, enabling both `vulkan` and `metal` is valid — the default
-backend will be Metal, but you can switch to Vulkan at runtime via
-`GOLDY_BACKEND=vulkan` if a Vulkan loader (e.g. MoltenVK) is present.
+On macOS, the default backend is native Metal. Goldy does not require MoltenVK.
 
 ## Default Features
 
@@ -91,7 +91,8 @@ cargo build --no-default-features --features metal
 ## FFI and Python Feature Passthrough
 
 The `goldy-ffi` and `goldy-py` crates propagate features to the core
-`goldy` crate, so you can control backend selection in downstream builds:
+`goldy` crate, so you can control backend selection in downstream builds.
+The same `goldy-ffi` build is consumed by C++, .NET, and `goldy-ffi-client`.
 
 ```bash
 # FFI bindings with only Vulkan backend

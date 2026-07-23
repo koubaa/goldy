@@ -1,16 +1,30 @@
 <p align="center">
-  <img src="assets/goldy-ring.png" alt="Goldy Logo" width="240">
+  <img src="assets/goldy.png" alt="Goldy Logo" width="240">
 </p>
 
-# Goldy: Modern GPU Library
+# Goldy: GPU runtime for the Fondaco Machine
 
-**Goldy** is a Rust GPU library built around a typed bindless programming model, a dependency-driven scheme, and first-class compute support — targeting Vulkan 1.4+, DX12, and Metal Tier 2+ with native backends (no translation layers).
+**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](./fondaco/specification.md).
 
-## Typed Bindless Programming
+> **Maturity**: Goldy 0.1.x is pre-0.2. Breaking changes are expected before 0.2.
 
-Shaders are written in Slang using `goldy_exp` virtual entry points (`[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]`). Resources are declared as typed parameters — the Goldy compiler resolves bindless slots automatically:
+## The Fondaco model in Goldy
 
-```c
+| Fondaco | Goldy |
+|---------|-------|
+| Scheme | [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html) — retained graph, resubmitted each frame |
+| Parcel | [`Parcel`](https://docs.rs/goldy/latest/goldy/struct.Parcel.html), [`Buffer`](https://docs.rs/goldy/latest/goldy/struct.Buffer.html), [`Texture`](https://docs.rs/goldy/latest/goldy/struct.Texture.html) |
+| Dispatch | Compute, render, copy, and present nodes inside a scheme |
+| Exchange | [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html), [`MemoryExchange`](https://docs.rs/goldy/latest/goldy/struct.MemoryExchange.html) |
+| Settlement | [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) → [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html) |
+
+Goldy abstracts **where bytes live** (descriptor slots, residency, relocation) but exposes **what access costs** (access patterns, resize cost, readback path). See the [design thesis](./fondaco/design-thesis.md).
+
+## Typed bindless shaders
+
+Shaders use Slang with `goldy_exp` virtual entry points. Resources are typed parameters — Goldy resolves bindless slots automatically:
+
+```slang
 import goldy_exp;
 
 [goldy_compute]
@@ -20,21 +34,17 @@ void cs_main(MyUniforms cfg, Scattered<uint> data, ThreadId id) {
 }
 ```
 
-| Type | Maps To | Use |
-|------|---------|-----|
-| `Scattered<T>` | `RWStructuredBuffer<T>` | Read/write storage |
-| `BufRO<T>` | `StructuredBuffer<T>` | Read-only storage |
-| `DirectSpatial<T>` | `RWTexture2D<T>` | Read/write texture |
-| `Interpolated<T>` | `Texture2D<T>` | Sampled texture |
-| `Filter` | `SamplerState` | Texture sampler |
-| `ThreadId` | `SV_DispatchThreadID` | Compute thread index |
-| `VertexId` | `SV_VertexID` | Vertex index |
-
-Struct parameters are automatically treated as broadcast (constant buffer) data.
+| Type | Use |
+|------|-----|
+| `Scattered<T>` | Read/write storage |
+| `BufRO<T>` | Read-only storage |
+| `DirectSpatial<T>` | Read/write texture |
+| `Interpolated<T>` | Sampled texture |
+| `Broadcast` (struct param) | Per-dispatch constants |
 
 ## Scheme
 
-[`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html) is Goldy's public recording API. You declare nodes, render passes, and resource dependencies once; the scheme is retained across submissions. Goldy inserts barriers, parallelizes independent work, and aliases transient resources:
+Record once, submit every frame. Goldy inserts barriers, parallelizes independent nodes, and aliases transient resources:
 
 ```rust
 let mut scheme = Scheme::new(&ctx);
@@ -45,43 +55,45 @@ scheme
 let submission = scheme.submit()?;
 ```
 
-## Compute-to-Surface
+## Compute-to-surface
 
-Compute shaders can write directly to swapchain drawables via [`SurfaceExchange::bind_destination`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html#method.bind_destination) — no graphics pipeline, no vertex buffers, no raster pass. Record once, submit each frame, claim and consume:
+Compute shaders can write swapchain drawables directly — no graphics pipeline or raster pass:
 
 ```rust
 let surface = SurfaceExchange::new(&ctx, &window, SurfaceConfig::default())?;
-
 let mut scheme = Scheme::new(&ctx);
 let (lease, present) = surface.bind_destination(&mut scheme)?;
 scheme
-    .node("compute", &compute_pipeline)
-    .with_parcel(&uniform_buffer, NodeAccess::Read)
+    .node("render", &compute_pipeline)
+    .with_parcel(&uniforms, NodeAccess::Read)
     .with_present(&lease)
     .dispatch(wg_x, wg_y, 1);
 
-// Each frame:
 let mut submission = scheme.submit()?;
 present.claim(&mut submission)?.consume()?;
 ```
 
-## Multi-Backend, Single Shader Language
-
-Goldy compiles Slang shaders to SPIR-V (Vulkan), DXIL (DX12), and Metal IR at runtime via the bundled Slang compiler. Each backend is a native implementation — Metal uses Metal idioms, not translated Vulkan.
+## Backends and bindings
 
 | Platform | Backend |
 |----------|---------|
-| Linux | Vulkan |
-| Windows | DX12 (Vulkan optional) |
+| Windows | DX12 (default), Vulkan |
+| Linux | Vulkan (Wayland surfaces) |
 | macOS | Metal |
 
-## Quick Links
+CUDA and WebGPU backends are **in progress**. A Tenstorrent backend (**Torus**) is **planned**. See [Backend Architecture](./backends/overview.md).
+
+Bindings: [Python](./bindings/python.md), [.NET](./bindings/dotnet.md), [C++](./bindings/cpp.md), [Rust FFI Client](./bindings/rust-ffi-client.md).
+
+## Quick links
 
 - [Installation](./tutorial/installation.md)
 - [Your First Triangle](./tutorial/first-triangle.md)
 - [Your First Compute Shader](./tutorial/first-compute.md)
-- [GitHub Repository](https://github.com/koubaa/goldy)
+- [Fondaco overview](./design/fondaco.md)
+- [Goldy runtime mapping](./fondaco/goldy-runtime.md)
+- [GitHub](https://github.com/koubaa/goldy)
 
 ## License
 
-Goldy is licensed under the **MIT License**. See [License](./license.md) for details.
+MIT — see [License](./license.md).
