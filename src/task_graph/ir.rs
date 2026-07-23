@@ -254,7 +254,7 @@ pub enum NodeKind {
     ///
     /// Emits no GPU commands in v1; exists so the analyzer can eventually
     /// choose host-visible backing vs an inserted device→host blit per backend.
-    GrantRead { grant_id: u32 },
+    WithdrawRead { withdraw_id: u32 },
 }
 
 /// A single node in the task graph.

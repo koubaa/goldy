@@ -8,12 +8,12 @@ use crate::pipeline::PyRenderPipeline;
 use crate::pyutil::parse_index_range;
 use crate::texture::PyTexture;
 use crate::types::{PyDepthFormat, PyNodeAccess, PyTargetLoad, PyTextureFormat};
-use goldy::scheme::{Lease, LeaseRenderTarget, ReadGrant};
+use goldy::scheme::{Lease, LeaseRenderTarget};
 use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
-use goldy::{Grant, GrantBuffer, GrantTexture, Scheme, Submission};
+use goldy::{Scheme, Submission};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes};
+use pyo3::types::PyAny;
 use std::cell::RefCell;
 
 /// GPU submission context — one per scheme.
@@ -47,50 +47,6 @@ impl PySchemeSubmission {
 
     fn __repr__(&self) -> String {
         format!("SchemeSubmission(timeline_value={})", self.inner.timeline_value())
-    }
-}
-
-pub(crate) enum PyReadGrantInner {
-    Buffer(ReadGrant<GrantBuffer>),
-    Texture(ReadGrant<GrantTexture>),
-}
-
-impl PyReadGrantInner {
-    fn byte_size(&self) -> u64 {
-        match self {
-            Self::Buffer(grant) => grant.byte_size(),
-            Self::Texture(grant) => grant.byte_size(),
-        }
-    }
-}
-
-/// Read easement grant recorded once via [`PyScheme::grant_read`] or [`PyScheme::grant_read_texture`].
-#[pyclass(name = "ReadGrant", module = "goldy", unsendable)]
-pub struct PyReadGrant {
-    pub(crate) inner: PyReadGrantInner,
-}
-
-#[pymethods]
-impl PyReadGrant {
-    fn byte_size(&self) -> u64 {
-        self.inner.byte_size()
-    }
-
-    fn consume<'py>(&self, py: Python<'py>, submission: &PySchemeSubmission) -> PyResult<Bound<'py, PyBytes>> {
-        match &self.inner {
-            PyReadGrantInner::Buffer(grant) => {
-                let loan = grant.consume(&submission.inner).into_py_result()?;
-                Ok(PyBytes::new(py, &loan))
-            }
-            PyReadGrantInner::Texture(grant) => {
-                let loan = grant.consume(&submission.inner).into_py_result()?;
-                Ok(PyBytes::new(py, &loan))
-            }
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!("ReadGrant(byte_size={})", self.inner.byte_size())
     }
 }
 
@@ -210,34 +166,10 @@ impl PyScheme {
         Ok(())
     }
 
-    fn grant_read(&self, parcel: &PyParcel) -> PyResult<PyReadGrant> {
-        self.ensure_no_active_recorder()?;
-        let grant = self
-            .inner
-            .borrow_mut()
-            .grant_read(parcel.inner.as_parcel())
-            .into_py_result()?;
-        Ok(PyReadGrant {
-            inner: PyReadGrantInner::Buffer(grant),
-        })
-    }
-
-    fn grant_read_texture(&self, texture: &PyTexture) -> PyResult<PyReadGrant> {
-        self.ensure_no_active_recorder()?;
-        let grant = self
-            .inner
-            .borrow_mut()
-            .grant_read_texture(&*texture.inner)
-            .into_py_result()?;
-        Ok(PyReadGrant {
-            inner: PyReadGrantInner::Texture(grant),
-        })
-    }
-
     /// Append a CPU→GPU write node for a retained buffer parcel.
     ///
-    /// Marks the scheme dirty. Use an ephemeral upload scheme for per-frame
-    /// uniform / vertex uploads and call `submit()` to dispatch.
+    /// Marks the scheme dirty. Prefer [`crate::memory_exchange::PyMemoryExchange`] deposits for
+    /// reusable upload topology; use an ephemeral scheme for one-shot writes.
     #[pyo3(signature = (parcel, data, offset=0))]
     fn write_parcel(&self, parcel: &PyParcel, data: &[u8], offset: u64) -> PyResult<()> {
         self.ensure_no_active_recorder()?;

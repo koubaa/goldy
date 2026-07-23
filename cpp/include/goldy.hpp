@@ -80,6 +80,11 @@ class PresentLease;
 class SurfaceExchange;
 class Transaction;
 class Claim;
+class MemoryExchange;
+class WithdrawTransaction;
+class WithdrawClaim;
+class WithdrawBytes;
+class DepositTransaction;
 class ComputePipeline;
 class Sampler;
 
@@ -285,10 +290,6 @@ struct SchemeSubmissionDeleter {
     void operator()(GoldySchemeSubmission* p) const { if (p) goldy_scheme_submission_destroy(p); }
 };
 
-struct ReadGrantDeleter {
-    void operator()(GoldyReadGrant* p) const { if (p) goldy_read_grant_destroy(p); }
-};
-
 struct SchemeRenderTargetLeaseDeleter {
     void operator()(GoldySchemeRenderTargetLease* p) const {
         if (p) goldy_scheme_render_target_lease_destroy(p);
@@ -309,6 +310,30 @@ struct TransactionDeleter {
 
 struct ClaimDeleter {
     void operator()(GoldyClaim* p) const { if (p) goldy_claim_destroy(p); }
+};
+
+struct MemoryExchangeDeleter {
+    void operator()(GoldyMemoryExchange* p) const { if (p) goldy_memory_exchange_destroy(p); }
+};
+
+struct WithdrawTransactionDeleter {
+    void operator()(GoldyWithdrawTransaction* p) const {
+        if (p) goldy_withdraw_transaction_destroy(p);
+    }
+};
+
+struct WithdrawClaimDeleter {
+    void operator()(GoldyWithdrawClaim* p) const { if (p) goldy_withdraw_claim_destroy(p); }
+};
+
+struct WithdrawBytesDeleter {
+    void operator()(GoldyWithdrawBytes* p) const { if (p) goldy_withdraw_bytes_destroy(p); }
+};
+
+struct DepositTransactionDeleter {
+    void operator()(GoldyDepositTransaction* p) const {
+        if (p) goldy_deposit_transaction_destroy(p);
+    }
 };
 
 struct ComputePipelineDeleter {
@@ -1038,34 +1063,172 @@ private:
 };
 
 /**
- * @brief Read easement grant recorded once via Scheme::grant_read().
+ * @brief CPU-readable bytes from a consumed withdraw claim.
  */
-class ReadGrant {
+class WithdrawBytes {
 public:
-    ReadGrant() = default;
+    WithdrawBytes() = default;
 
-    explicit ReadGrant(GoldyReadGrant* grant) : ptr_(grant) {}
+    explicit WithdrawBytes(GoldyWithdrawBytes* bytes) : ptr_(bytes) {}
 
-    ReadGrant(const ReadGrant&) = delete;
-    ReadGrant& operator=(const ReadGrant&) = delete;
-    ReadGrant(ReadGrant&&) = default;
-    ReadGrant& operator=(ReadGrant&&) = default;
+    WithdrawBytes(const WithdrawBytes&) = delete;
+    WithdrawBytes& operator=(const WithdrawBytes&) = delete;
+    WithdrawBytes(WithdrawBytes&&) = default;
+    WithdrawBytes& operator=(WithdrawBytes&&) = default;
 
-    [[nodiscard]] uint64_t byte_size() const {
-        return goldy_read_grant_byte_size(ptr_.get());
+    [[nodiscard]] uint64_t size() const {
+        return goldy_withdraw_bytes_len(ptr_.get());
     }
 
-    [[nodiscard]] std::vector<uint8_t> consume(const SchemeSubmission& submission) const {
-        std::vector<uint8_t> output(byte_size());
-        detail::throw_on_result(goldy_read_grant_consume(
-            ptr_.get(), submission.get(), output.data(), output.size()));
+    [[nodiscard]] const uint8_t* data() const {
+        return goldy_withdraw_bytes_data(ptr_.get());
+    }
+
+    [[nodiscard]] std::vector<uint8_t> to_vector() const {
+        std::vector<uint8_t> output(static_cast<size_t>(size()));
+        detail::throw_on_result(goldy_withdraw_bytes_copy(ptr_.get(), output.data(), output.size()));
         return output;
     }
 
-    GoldyReadGrant* get() const { return ptr_.get(); }
+    GoldyWithdrawBytes* get() const { return ptr_.get(); }
 
 private:
-    std::unique_ptr<GoldyReadGrant, detail::ReadGrantDeleter> ptr_;
+    std::unique_ptr<GoldyWithdrawBytes, detail::WithdrawBytesDeleter> ptr_;
+};
+
+/**
+ * @brief Linear claim for one submission's memory withdrawal.
+ */
+class WithdrawClaim {
+public:
+    WithdrawClaim() = default;
+
+    explicit WithdrawClaim(GoldyWithdrawClaim* claim) : ptr_(claim) {}
+
+    WithdrawClaim(const WithdrawClaim&) = delete;
+    WithdrawClaim& operator=(const WithdrawClaim&) = delete;
+    WithdrawClaim(WithdrawClaim&&) = default;
+    WithdrawClaim& operator=(WithdrawClaim&&) = default;
+
+    [[nodiscard]] WithdrawBytes consume() {
+        GoldyWithdrawClaim* raw = ptr_.release();
+        GoldyWithdrawBytes* bytes = goldy_withdraw_claim_consume(raw);
+        if (!bytes) {
+            throw Exception::from_last_error();
+        }
+        return WithdrawBytes{bytes};
+    }
+
+    void discard() {
+        GoldyWithdrawClaim* raw = ptr_.release();
+        detail::throw_on_result(goldy_withdraw_claim_discard(raw));
+    }
+
+    GoldyWithdrawClaim* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyWithdrawClaim, detail::WithdrawClaimDeleter> ptr_;
+};
+
+/**
+ * @brief Stable withdraw relationship recorded in one scheme.
+ */
+class WithdrawTransaction {
+public:
+    WithdrawTransaction() = default;
+
+    explicit WithdrawTransaction(GoldyWithdrawTransaction* transaction) : ptr_(transaction) {}
+
+    WithdrawTransaction(const WithdrawTransaction&) = delete;
+    WithdrawTransaction& operator=(const WithdrawTransaction&) = delete;
+    WithdrawTransaction(WithdrawTransaction&&) = default;
+    WithdrawTransaction& operator=(WithdrawTransaction&&) = default;
+
+    [[nodiscard]] uint64_t byte_size() const {
+        return goldy_withdraw_transaction_byte_size(ptr_.get());
+    }
+
+    [[nodiscard]] WithdrawClaim claim(SchemeSubmission& submission) const {
+        GoldyWithdrawClaim* claim = goldy_withdraw_transaction_claim(ptr_.get(), submission.get());
+        if (!claim) {
+            throw Exception::from_last_error();
+        }
+        return WithdrawClaim{claim};
+    }
+
+    GoldyWithdrawTransaction* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyWithdrawTransaction, detail::WithdrawTransactionDeleter> ptr_;
+};
+
+/**
+ * @brief Stable deposit relationship recorded in one scheme.
+ *
+ * Write staging bytes before submit; no claim afterward.
+ */
+class DepositTransaction {
+public:
+    DepositTransaction() = default;
+
+    explicit DepositTransaction(GoldyDepositTransaction* transaction) : ptr_(transaction) {}
+
+    DepositTransaction(const DepositTransaction&) = delete;
+    DepositTransaction& operator=(const DepositTransaction&) = delete;
+    DepositTransaction(DepositTransaction&&) = default;
+    DepositTransaction& operator=(DepositTransaction&&) = default;
+
+    [[nodiscard]] uint64_t capacity() const {
+        return goldy_deposit_transaction_capacity(ptr_.get());
+    }
+
+    [[nodiscard]] uint32_t id() const {
+        return goldy_deposit_transaction_id(ptr_.get());
+    }
+
+    // Defined after Scheme.
+    void write(Scheme& scheme, const uint8_t* data, size_t size, uint64_t offset = 0);
+    void write(Scheme& scheme, const std::vector<uint8_t>& data, uint64_t offset = 0);
+
+    GoldyDepositTransaction* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyDepositTransaction, detail::DepositTransactionDeleter> ptr_;
+};
+
+/**
+ * @brief CPU↔GPU memory exchange: withdrawals (readback) and deposits (upload).
+ */
+class MemoryExchange {
+public:
+    explicit MemoryExchange(const Context& ctx) {
+        GoldyMemoryExchange* ptr = goldy_memory_exchange_create(ctx.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    MemoryExchange(const MemoryExchange&) = delete;
+    MemoryExchange& operator=(const MemoryExchange&) = delete;
+    MemoryExchange(MemoryExchange&&) = default;
+    MemoryExchange& operator=(MemoryExchange&&) = default;
+
+    // Defined after Scheme.
+    [[nodiscard]] WithdrawTransaction bind_withdraw(Scheme& scheme, const Parcel& parcel);
+    [[nodiscard]] WithdrawTransaction bind_withdraw(Scheme& scheme, const Buffer& buffer, uint32_t unit = 0);
+    [[nodiscard]] WithdrawTransaction bind_withdraw_texture(Scheme& scheme, const Texture& texture);
+    [[nodiscard]] DepositTransaction bind_deposit_buffer(
+        Scheme& scheme, const Parcel& destination, uint64_t capacity);
+    [[nodiscard]] DepositTransaction bind_deposit_texture(
+        Scheme& scheme, const Texture& destination,
+        uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+        uint64_t capacity, uint32_t src_row_pitch = 0);
+
+    GoldyMemoryExchange* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyMemoryExchange, detail::MemoryExchangeDeleter> ptr_;
 };
 
 /**
@@ -1276,26 +1439,6 @@ public:
     uint32_t len() const { return goldy_scheme_len(ptr_.get()); }
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
-
-    [[nodiscard]] ReadGrant grant_read(const Parcel& parcel) {
-        GoldyReadGrant* grant = goldy_scheme_grant_read(ptr_.get(), parcel.get());
-        if (!grant) {
-            throw Exception::from_last_error();
-        }
-        return ReadGrant{grant};
-    }
-
-    [[nodiscard]] ReadGrant grant_read(const Buffer& buffer, uint32_t unit = 0) {
-        return grant_read(buffer.field(unit));
-    }
-
-    [[nodiscard]] ReadGrant grant_read_texture(const Texture& texture) {
-        GoldyReadGrant* grant = goldy_scheme_grant_read_texture(ptr_.get(), texture.get());
-        if (!grant) {
-            throw Exception::from_last_error();
-        }
-        return ReadGrant{grant};
-    }
 
     [[nodiscard]] SchemeRenderTargetLease lease_render_target(
         uint32_t width, uint32_t height, GoldyTextureFormat format,
@@ -1578,6 +1721,57 @@ inline SurfaceExchange::BindDestinationResult SurfaceExchange::bind_destination(
         throw Exception::from_last_error();
     }
     return BindDestinationResult{PresentLease{out.lease}, Transaction{out.transaction}};
+}
+
+inline void DepositTransaction::write(Scheme& scheme, const uint8_t* data, size_t size, uint64_t offset) {
+    detail::throw_on_result(goldy_deposit_transaction_write(ptr_.get(), scheme.get(), offset, data, size));
+}
+
+inline void DepositTransaction::write(Scheme& scheme, const std::vector<uint8_t>& data, uint64_t offset) {
+    write(scheme, data.data(), data.size(), offset);
+}
+
+inline WithdrawTransaction MemoryExchange::bind_withdraw(Scheme& scheme, const Parcel& parcel) {
+    GoldyWithdrawTransaction* tx = goldy_memory_exchange_bind_withdraw(ptr_.get(), scheme.get(), parcel.get());
+    if (!tx) {
+        throw Exception::from_last_error();
+    }
+    return WithdrawTransaction{tx};
+}
+
+inline WithdrawTransaction MemoryExchange::bind_withdraw(Scheme& scheme, const Buffer& buffer, uint32_t unit) {
+    return bind_withdraw(scheme, buffer.field(unit));
+}
+
+inline WithdrawTransaction MemoryExchange::bind_withdraw_texture(Scheme& scheme, const Texture& texture) {
+    GoldyWithdrawTransaction* tx =
+        goldy_memory_exchange_bind_withdraw_texture(ptr_.get(), scheme.get(), texture.get());
+    if (!tx) {
+        throw Exception::from_last_error();
+    }
+    return WithdrawTransaction{tx};
+}
+
+inline DepositTransaction MemoryExchange::bind_deposit_buffer(
+    Scheme& scheme, const Parcel& destination, uint64_t capacity) {
+    GoldyDepositTransaction* tx =
+        goldy_memory_exchange_bind_deposit_buffer(ptr_.get(), scheme.get(), destination.get(), capacity);
+    if (!tx) {
+        throw Exception::from_last_error();
+    }
+    return DepositTransaction{tx};
+}
+
+inline DepositTransaction MemoryExchange::bind_deposit_texture(
+    Scheme& scheme, const Texture& destination,
+    uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+    uint64_t capacity, uint32_t src_row_pitch) {
+    GoldyDepositTransaction* tx = goldy_memory_exchange_bind_deposit_texture(
+        ptr_.get(), scheme.get(), destination.get(), x, y, width, height, capacity, src_row_pitch);
+    if (!tx) {
+        throw Exception::from_last_error();
+    }
+    return DepositTransaction{tx};
 }
 
 // =============================================================================

@@ -74,7 +74,7 @@ public sealed class Scheme : IDisposable
         RenderPass(label, lease, TargetLoadKind.Discard);
 
     /// <summary>
-    /// Copy a scheme-held render target into a texture parcel (for grant readback).
+    /// Copy a scheme-held render target into a texture parcel (for withdraw readback).
     /// </summary>
     public void CopyToTexture(SchemeRenderTargetLease src, Texture dst)
     {
@@ -84,34 +84,6 @@ public sealed class Scheme : IDisposable
         var result = NativeMethods.SchemeCopyToTexture(Handle, src.Handle, dst.Handle);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme copy_to_texture");
-    }
-
-    /// <summary>
-    /// Record a read easement over a buffer parcel (once per scheme).
-    /// </summary>
-    public ReadGrant GrantRead(Parcel parcel)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(parcel);
-
-        var grant = NativeMethods.SchemeGrantRead(Handle, parcel.Handle);
-        if (grant == nint.Zero)
-            throw GoldyException.FromLastError("Scheme grant_read");
-        return new ReadGrant(grant);
-    }
-
-    /// <summary>
-    /// Record a read easement over a texture parcel (once per scheme).
-    /// </summary>
-    public ReadGrant GrantReadTexture(Texture texture)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(texture);
-
-        var grant = NativeMethods.SchemeGrantReadTexture(Handle, texture.Handle);
-        if (grant == nint.Zero)
-            throw GoldyException.FromLastError("Scheme grant_read_texture");
-        return new ReadGrant(grant);
     }
 
     /// <summary>

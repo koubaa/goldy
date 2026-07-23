@@ -16,6 +16,7 @@ mod device;
 mod error;
 mod exchange;
 mod instance;
+mod memory_exchange;
 mod parcel;
 mod pipeline;
 mod pyutil;
@@ -61,7 +62,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheme::PyContext>()?;
     m.add_class::<scheme::PyScheme>()?;
     m.add_class::<scheme::PySchemeSubmission>()?;
-    m.add_class::<scheme::PyReadGrant>()?;
     m.add_class::<scheme::PySchemeComputeNode>()?;
     m.add_class::<scheme::PySchemeRenderPass>()?;
     m.add_class::<scheme::PySchemeRenderTargetLease>()?;
@@ -69,6 +69,10 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<exchange::PyTransaction>()?;
     m.add_class::<exchange::PyClaim>()?;
     m.add_class::<surface_exchange::PySurfaceExchange>()?;
+    m.add_class::<memory_exchange::PyMemoryExchange>()?;
+    m.add_class::<memory_exchange::PyWithdrawTransaction>()?;
+    m.add_class::<memory_exchange::PyWithdrawClaim>()?;
+    m.add_class::<memory_exchange::PyDepositTransaction>()?;
     m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<texture::PyTexture>()?;

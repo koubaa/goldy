@@ -80,9 +80,11 @@ static class GameOfLifeHeadless
         }
 
         scheme.CopyToTexture(rt, readback);
-        var grant = scheme.GrantReadTexture(readback);
+        using var memory = new MemoryExchange(ctx);
+        using var withdraw = memory.BindWithdrawTexture(scheme, readback);
         using var submission = scheme.Submit();
-        var pixels = grant.Consume(submission);
+        using var claim = withdraw.Claim(submission);
+        using var pixels = claim.Consume();
 
         var cellsOut = MemoryMarshal.Cast<byte, uint>(cells.UnitReadToCpu(1, device));
         var live = 0;

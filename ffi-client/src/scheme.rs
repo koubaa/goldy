@@ -5,8 +5,7 @@ use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::pipeline::RenderPipeline;
 use crate::sys::{
-    self, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme, GoldySchemeRenderTargetLease,
-    GoldySchemeSubmission,
+    self, GoldyPresentLease, GoldyReplayStats, GoldyScheme, GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
 use crate::texture::Texture;
 use crate::types::{DepthFormat, IndexFormat, NodeAccess, TextureFormat};
@@ -36,33 +35,6 @@ impl Drop for SchemeSubmission {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe { sys::goldy_scheme_submission_destroy(self.ptr) };
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
-/// Read easement grant recorded once via [`Scheme::grant_read`] or [`Scheme::grant_read_texture`].
-pub struct ReadGrant {
-    ptr: *mut GoldyReadGrant,
-}
-
-impl ReadGrant {
-    pub fn byte_size(&self) -> u64 {
-        unsafe { sys::goldy_read_grant_byte_size(self.ptr) }
-    }
-
-    /// Consumable bytes for `submission`'s cell (full logical buffer size).
-    pub fn consume(&self, submission: &SchemeSubmission) -> Result<Vec<u8>> {
-        let mut output = vec![0u8; self.byte_size() as usize];
-        check(unsafe { sys::goldy_read_grant_consume(self.ptr, submission.ptr, output.as_mut_ptr(), output.len()) })?;
-        Ok(output)
-    }
-}
-
-impl Drop for ReadGrant {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { sys::goldy_read_grant_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }
@@ -163,18 +135,6 @@ impl Scheme {
             sys::goldy_scheme_lease_render_target(self.ptr, width, height, format.into(), has_depth, depth.into())
         });
         Ok(SchemeRenderTargetLease { ptr })
-    }
-
-    /// Record a read easement over a retained buffer (once per scheme).
-    pub fn grant_read(&mut self, buffer: &Buffer) -> Result<ReadGrant> {
-        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read(self.ptr, buffer.as_ptr()) });
-        Ok(ReadGrant { ptr })
-    }
-
-    /// Record a read easement over a texture parcel (once per scheme).
-    pub fn grant_read_texture(&mut self, texture: &Texture) -> Result<ReadGrant> {
-        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read_texture(self.ptr, texture.as_ptr()) });
-        Ok(ReadGrant { ptr })
     }
 
     pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Texture) -> Result<()> {

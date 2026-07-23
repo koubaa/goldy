@@ -14,7 +14,7 @@ mod imp {
     use crate::submission::submission_context;
     use goldy::{
         types::{BackendType, BufferFlags},
-        Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, Instance, NodeAccess,
+        Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
         RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
     };
     use std::sync::Arc;
@@ -230,9 +230,15 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(buf.whole()).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant consume");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, buf.whole())
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("grant consume");
         let result: &[f32] = bytemuck::cast_slice(&loan);
 
         let eps = 1e-5f32;
@@ -306,9 +312,15 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(buf.whole()).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant consume");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, buf.whole())
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("grant consume");
         let result: &[f32] = bytemuck::cast_slice(&loan);
 
         let eps = 1e-5f32;
@@ -372,9 +384,15 @@ mod imp {
             .with_parcel(&buffers[0], NodeAccess::Read)
             .with_parcel(&buffers[NUM_BUFFERS - 1], NodeAccess::Write)
             .dispatch(workgroups, 1, 1);
-        let grant = scheme.grant_read(buffers[NUM_BUFFERS - 1].whole()).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant consume");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, buffers[NUM_BUFFERS - 1].whole())
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("grant consume");
         let result: &[u32] = bytemuck::cast_slice(&loan);
         for i in (0..ELEM_COUNT).step_by(1024) {
             assert_eq!(

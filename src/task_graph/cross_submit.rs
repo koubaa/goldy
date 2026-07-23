@@ -67,10 +67,10 @@ impl ResourceKey {
             ResourceId::Texture(h) => Some(Self::Texture(h)),
             ResourceId::RenderTarget(h) => Some(Self::RenderTarget(h)),
             ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_) => None,
-            // SwapchainOutput, PresentLease, and UploadBuffer are owned by scheme/surface
+            // SwapchainOutput, PresentLease, and Deposit are owned by scheme/surface
             // infrastructure and not shared as ledger-tracked resources (upload parcels are
             // stamped directly after submit).
-            ResourceId::SwapchainOutput | ResourceId::PresentLease(_) | ResourceId::UploadBuffer(_) => None,
+            ResourceId::SwapchainOutput | ResourceId::PresentLease(_) | ResourceId::Deposit(_) => None,
         }
     }
 }
@@ -174,7 +174,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
+        NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
     }
 }
 
@@ -192,7 +192,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::TransientBuffer(_)
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
-            | ResourceId::UploadBuffer(_)
+            | ResourceId::Deposit(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE
@@ -228,7 +228,7 @@ pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> Resource
 }
 
 fn absorb_node_net_access(net: &mut ResourceKeyMap<NetAccess>, node: &super::ir::TaskNode) {
-    if matches!(node.kind, NodeKind::GrantRead { .. }) {
+    if matches!(node.kind, NodeKind::WithdrawRead { .. }) {
         return;
     }
     for binding in &node.bindings {

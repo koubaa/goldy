@@ -71,9 +71,10 @@ with scheme.render_pass("triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.1, 
     rp.draw(vertex_count=3)
 
 scheme.copy_to_texture(rt, readback)
-grant = scheme.grant_read_texture(readback)
+memory = goldy.MemoryExchange(ctx)
+withdraw = memory.bind_withdraw_texture(scheme, readback)
 submission = scheme.submit()
-pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(100, 100, 4)
+pixels = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.uint8).reshape(100, 100, 4)
 ```
 
 ## NumPy Integration
@@ -105,12 +106,13 @@ parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 
 ### Reading Results Back to NumPy
 
-Use `grant_read` / `grant_read_texture` on a scheme, then consume after submit:
+Use `MemoryExchange.bind_withdraw` / `bind_withdraw_texture`, then claim and consume after submit:
 
 ```python
-grant = scheme.grant_read(parcel)
+memory = goldy.MemoryExchange(ctx)
+withdraw = memory.bind_withdraw(scheme, parcel)
 submission = scheme.submit()
-output = np.frombuffer(grant.consume(submission), dtype=np.float32)
+output = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
 ```
 
 ### Performance Tips
@@ -154,9 +156,10 @@ scheme = goldy.Scheme(ctx)
 scheme.node("double", pipeline).with_parcel(
     parcel, goldy.NodeAccess.READ_WRITE
 ).dispatch(4, 1, 1)
-grant = scheme.grant_read(parcel)
+memory = goldy.MemoryExchange(ctx)
+withdraw = memory.bind_withdraw(scheme, parcel)
 submission = scheme.submit()
-output = np.frombuffer(grant.consume(submission), dtype=np.float32)
+output = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
 ```
 
 ### Ping-Pong Buffers

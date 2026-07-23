@@ -94,9 +94,9 @@ def main() -> int:
         )
 
     scheme.copy_to_texture(rt, readback)
-    grant = scheme.grant_read_texture(readback)
+    grant = goldy.MemoryExchange(ctx).bind_withdraw_texture(scheme, readback)
     submission = scheme.submit()
-    pixels = grant.consume(submission)
+    pixels = grant.claim(submission).consume()
 
     cells_out = np.frombuffer(cells.unit_read_to_cpu(1, device), dtype=np.uint32)
     assert cells_out.shape == (CELL_COUNT,)

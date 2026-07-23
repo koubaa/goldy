@@ -68,17 +68,18 @@ Call `finish()` when done recording commands for this pass node.
 
 ## Offscreen-Only (tests, readback)
 
-For headless rendering without a window, record a scheme, copy to a readback texture, and consume a read grant:
+For headless rendering without a window, record a scheme, copy to a readback texture, and withdraw via `MemoryExchange`:
 
 ```rust
+let memory = MemoryExchange::new(&ctx);
 let mut scheme = Scheme::new(&ctx);
 let rt = scheme.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
 let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::RED));
 pass.finish();
 scheme.copy_to_texture(&rt, &readback_texture);
-let grant = scheme.grant_read_texture(&readback_texture);
-let submission = scheme.submit()?;
-let pixels = grant.consume(&submission)?;
+let withdraw = memory.bind_withdraw(&mut scheme, &readback_texture)?;
+let mut submission = scheme.submit()?;
+let pixels = withdraw.claim(&mut submission)?.consume()?;
 ```
 
 ## Hybrid Compute + Graphics

@@ -1,9 +1,9 @@
-//! Scheme render-pass and easement FFI (`copy_to_texture`, `grant_read_texture`).
+//! Scheme render-pass FFI (`copy_to_texture`, render-pass recording).
 
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
-use crate::scheme::{GoldyReadGrant, GoldyScheme, ReadGrantInner};
+use crate::scheme::GoldyScheme;
 use crate::types::{
     GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTargetLoad, GoldyTextureFormat,
 };
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_finish(scheme: *mut GoldySchem
     GoldyResult::Ok
 }
 
-/// Copy a scheme-held render target into a texture parcel (for grant readback).
+/// Copy a scheme-held render target into a texture parcel (for memory withdraw readback).
 ///
 /// # Safety
 /// All pointers must be valid.
@@ -383,35 +383,6 @@ pub unsafe extern "C" fn goldy_scheme_copy_to_texture(
         Err(e) => {
             set_last_error(format!("{e}"));
             GoldyResult::GpuError
-        }
-    }
-}
-
-///
-/// Like [`goldy_scheme_grant_read`] but requires a texture parcel with [`TextureFlags::COPY_SRC`].
-///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_grant_read_texture(
-    scheme: *mut GoldyScheme,
-    texture: *const GoldyTexture,
-) -> *mut GoldyReadGrant {
-    if scheme.is_null() || texture.is_null() {
-        set_last_error("Scheme or texture pointer is null");
-        return std::ptr::null_mut();
-    }
-    if (*scheme).has_active_recorder() {
-        set_last_error("Cannot grant_read_texture while recording a node");
-        return std::ptr::null_mut();
-    }
-    match (*scheme).inner.grant_read_texture(&*(*texture).inner) {
-        Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
-            inner: ReadGrantInner::Texture(grant),
-        })),
-        Err(e) => {
-            set_last_error(format!("{e}"));
-            std::ptr::null_mut()
         }
     }
 }

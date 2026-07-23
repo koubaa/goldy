@@ -52,9 +52,11 @@ using (var pass = scheme.RenderPass("clear", rt))
     pass.Clear(Color.CornflowerBlue);
 
 scheme.CopyToTexture(rt, readback);
-using var grant = scheme.GrantReadTexture(readback);
+using var memory = new MemoryExchange(ctx);
+using var withdraw = memory.BindWithdrawTexture(scheme, readback);
 using var submission = scheme.Submit();
-byte[] pixels = grant.Consume(submission);
+using var claim = withdraw.Claim(submission);
+byte[] pixels = claim.Consume();
 ```
 
 See `Goldy.Examples/TriangleHeadless.cs` for a full triangle readback demo.
@@ -132,9 +134,26 @@ public sealed class Scheme : IDisposable
     public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease);
     public void CopyToTexture(SchemeRenderTargetLease src, Texture dst);
     public void CopyToPresent(SchemeRenderTargetLease src, PresentLease dst);
-    public ReadGrant GrantRead(Parcel parcel);
-    public ReadGrant GrantReadTexture(Texture texture);
     public SchemeSubmission Submit();
+}
+
+public sealed class MemoryExchange : IDisposable
+{
+    public MemoryExchange(Context ctx);
+    public WithdrawTransaction BindWithdraw(Scheme scheme, Parcel parcel);
+    public WithdrawTransaction BindWithdrawTexture(Scheme scheme, Texture texture);
+    public DepositTransaction BindDepositBuffer(Scheme scheme, Parcel destination, ulong capacity);
+}
+
+public sealed class WithdrawTransaction
+{
+    public WithdrawClaim Claim(SchemeSubmission submission);
+}
+
+public sealed class WithdrawClaim : IDisposable
+{
+    public byte[] Consume();
+    public void Discard();
 }
 ```
 
@@ -180,6 +199,6 @@ public enum NodeAccess   { Read, Write, ReadWrite, Overwrite }
 
 ### Headless vs windowed submission
 
-Headless: record a scheme, `GrantRead` or `GrantReadTexture`, `Submit()`, then `grant.Consume(submission)`.
+Headless: record a scheme, bind a `MemoryExchange` withdraw, `Submit()`, then `withdraw.Claim(submission).Consume()`.
 
 Windowed: record once with `SurfaceExchange.BindRenderTarget` (or `BindDestination` for compute-to-surface); each frame call `Submit()`, then `transaction.Claim(submission).Consume()`.

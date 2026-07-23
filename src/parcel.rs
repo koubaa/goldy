@@ -688,7 +688,7 @@ impl Buffer {
     /// is a data race on Metal/Vulkan; on DX12 the staged bytes apply at the next
     /// `CopyBuffer` instead.
     ///
-    /// Prefer [`crate::Scheme::stage_upload_buffer`] / epoch-gated staging pools, which
+    /// Prefer [`crate::MemoryExchange`] deposits / epoch-gated staging pools, which
     /// select settled or newly allocated parcels. GPU visibility of a staging write is
     /// covered by same-frame scheme copy tests (e.g. `scheme_cpu_writable_staging_write_then_copy`),
     /// not by CPU→CPU `read_to_cpu` roundtrips alone.

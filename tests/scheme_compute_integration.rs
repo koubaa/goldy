@@ -11,9 +11,9 @@ mod imp {
     use crate::upload::write_to_parcel;
     use goldy::{
         types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
-        BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
-        ReadGrant, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
-        Submission,
+        BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, Parcel,
+        RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
+        WithdrawTransaction,
     };
     use std::sync::Arc;
 
@@ -68,7 +68,7 @@ mod imp {
             .expect("host buffer");
         let mut scheme = Scheme::new(ctx);
         scheme.copy_texture(texture, &host_buf).expect("copy_texture");
-        let frame = scheme.submit().expect("submit");
+        let mut frame = scheme.submit().expect("submit");
         frame.wait(ctx).expect("wait");
         let mut padded = vec![0u8; layout.staging_bytes as usize];
         host_buf
@@ -85,8 +85,12 @@ mod imp {
         output
     }
 
-    fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
-        let loan = grant.consume(submission).expect("grant consume");
+    fn read_grant_u32(grant: &WithdrawTransaction, submission: &mut Submission, count: usize) -> Vec<u32> {
+        let loan = grant
+            .claim(submission)
+            .expect("claim")
+            .consume()
+            .expect("withdraw consume");
         assert_eq!(loan.len(), count * 4, "grant readback size");
         bytemuck::cast_slice(&loan).to_vec()
     }
@@ -94,9 +98,11 @@ mod imp {
     /// Read parcel bytes after an upload micro-scheme (grant-only verification scheme).
     fn read_uploaded_parcel_u32(ctx: &goldy::Context, parcel: &Parcel, count: usize) -> Vec<u32> {
         let mut scheme = Scheme::new(ctx);
-        let grant = scheme.grant_read(parcel).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        read_grant_u32(&grant, &frame, count)
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, parcel)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        read_grant_u32(&grant, &mut frame, count)
     }
 
     fn dispatch_u32_write_and_read(ctx: &goldy::Context, shader_src: &str, out: &Parcel, count: usize) -> Vec<u32> {
@@ -109,9 +115,11 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(out, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(out).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        read_grant_u32(&grant, &frame, count)
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        read_grant_u32(&grant, &mut frame, count)
     }
 
     fn write_zeros_to_parcel(ctx: &goldy::Context, parcel: &Parcel, byte_len: usize) {
@@ -270,9 +278,11 @@ mod imp {
             .with_parcel(&dst, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&dst).expect("grant_read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
         scheme.submit().unwrap();
-        let frame = scheme.submit().unwrap();
+        let mut frame = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1, "linear chain records once");
         #[cfg(not(feature = "metal"))]
         assert_eq!(
@@ -281,7 +291,7 @@ mod imp {
             "second submit must resubmit without re-record"
         );
 
-        let result = read_grant_u32(&grant, &frame, 64);
+        let result = read_grant_u32(&grant, &mut frame, 64);
         for (i, &val) in result.iter().enumerate() {
             let expected = (i as u32) * 2 + 10;
             assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
@@ -314,14 +324,18 @@ mod imp {
             .with_parcel(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant_a = scheme.grant_read(&buf_a).expect("grant_read");
-        let grant_b = scheme.grant_read(&buf_b).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant_a = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf_a)
+            .expect("withdraw");
+        let grant_b = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf_b)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
 
-        for &v in &read_grant_u32(&grant_a, &frame, 64) {
+        for &v in &read_grant_u32(&grant_a, &mut frame, 64) {
             assert_eq!(v, 42);
         }
-        for &v in &read_grant_u32(&grant_b, &frame, 64) {
+        for &v in &read_grant_u32(&grant_b, &mut frame, 64) {
             assert_eq!(v, 99);
         }
     }
@@ -374,11 +388,13 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1, "diamond records once");
 
-        let result = read_grant_u32(&grant, &frame, 64);
+        let result = read_grant_u32(&grant, &mut frame, 64);
         for (i, &val) in result.iter().enumerate() {
             let expected = (i as u32) * 4;
             assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
@@ -400,10 +416,12 @@ mod imp {
             .node("fill", &pipe)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&buf).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
 
-        for &v in &read_grant_u32(&grant, &frame, 64) {
+        for &v in &read_grant_u32(&grant, &mut frame, 64) {
             assert_eq!(v, 42);
         }
     }
@@ -431,10 +449,12 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
 
-        for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
             assert_eq!(val, 0, "element {i}: expected 0 after zero write, got {val}");
         }
     }
@@ -463,10 +483,12 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
 
-        for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
             assert_eq!(val, known_data[i], "element {i}");
         }
     }
@@ -495,10 +517,15 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .dispatch((N / 64) as u32, 1, 1);
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
 
-        let nonzero_count = read_grant_u32(&grant, &frame, N).iter().filter(|&&v| v != 0).count();
+        let nonzero_count = read_grant_u32(&grant, &mut frame, N)
+            .iter()
+            .filter(|&&v| v != 0)
+            .count();
         assert_eq!(nonzero_count, 0, "expected all zeros after zero write");
     }
 
@@ -540,12 +567,16 @@ mod imp {
 
         let mut grants = Vec::new();
         for out in &outs {
-            grants.push(scheme.grant_read(out).expect("grant_read"));
+            grants.push(
+                MemoryExchange::new(scheme.context())
+                    .bind_withdraw(&mut scheme, out)
+                    .expect("withdraw"),
+            );
         }
-        let frame = scheme.submit().unwrap();
+        let mut frame = scheme.submit().unwrap();
 
         for (i, grant) in grants.iter().enumerate() {
-            let nonzero_count = read_grant_u32(grant, &frame, N).iter().filter(|&&v| v != 0).count();
+            let nonzero_count = read_grant_u32(grant, &mut frame, N).iter().filter(|&&v| v != 0).count();
             assert_eq!(nonzero_count, 0, "buffer {i}: expected all zeros after zero write");
         }
     }
@@ -575,10 +606,12 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .dispatch((N / 64) as u32, 1, 1);
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().unwrap();
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().unwrap();
 
-        for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, N).iter().enumerate() {
             assert_eq!(val, known_data[i], "element {i}");
         }
     }
@@ -616,9 +649,11 @@ mod imp {
                 .node("add_ten", &add_pipe)
                 .with_parcel(&tmp, NodeAccess::ReadWrite)
                 .dispatch((N / 64) as u32, 1, 1);
-            let grant = scheme.grant_read(&tmp).expect("grant_read");
-            let frame = scheme.submit().unwrap();
-            read_grant_u32(&grant, &frame, N)
+            let grant = MemoryExchange::new(scheme.context())
+                .bind_withdraw(&mut scheme, &tmp)
+                .expect("withdraw");
+            let mut frame = scheme.submit().unwrap();
+            read_grant_u32(&grant, &mut frame, N)
         };
 
         for (i, &val) in result.iter().enumerate() {
@@ -645,13 +680,15 @@ mod imp {
             .with_parcel(&buf, NodeAccess::ReadWrite)
             .dispatch((N / 64) as u32, 1, 1);
 
-        let grant = scheme.grant_read(&buf).expect("grant_read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf)
+            .expect("withdraw");
         const ROUNDS: u32 = 20;
         let mut last_frame = None;
         for _ in 0..ROUNDS {
             last_frame = Some(scheme.submit().unwrap());
         }
-        let frame = last_frame.expect("submit");
+        let mut frame = last_frame.expect("submit");
 
         assert_eq!(scheme.replay_stats().records, 1, "rapid submissions record once");
         #[cfg(not(feature = "metal"))]
@@ -662,7 +699,7 @@ mod imp {
         );
 
         let expected = ROUNDS * 10;
-        for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, N).iter().enumerate() {
             assert_eq!(val, expected, "element {i}");
         }
     }
@@ -704,10 +741,12 @@ mod imp {
             .node("double", &pipe)
             .with_parcel(&buffer, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&buffer).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buffer)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
             assert_eq!(val, (i as u32) * 2, "element {i}");
         }
     }
@@ -731,10 +770,12 @@ mod imp {
             .node("double", &pipe)
             .with_parcel(&buffer, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&buffer).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buffer)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
             assert_eq!(val, (i as u32) * 2, "element {i}");
         }
     }
@@ -752,7 +793,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("input");
-        let output = pool
+        let mut output = pool
             .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -762,10 +803,12 @@ mod imp {
             .with_parcel(&input, NodeAccess::Read)
             .with_parcel(&output, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&output).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let output_vals = read_grant_u32(&grant, &frame, 64);
+        let output_vals = read_grant_u32(&grant, &mut frame, 64);
         let input_vals = read_uploaded_parcel_u32(&ctx, &input, 64);
         assert_eq!(output_vals, input_vals, "copy must reproduce input in output");
     }
@@ -843,7 +886,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("input");
-        let output = pool
+        let mut output = pool
             .acquire_buffer_with_data(&vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -855,10 +898,12 @@ mod imp {
             .with_parcel(&input, NodeAccess::Read)
             .with_parcel(&output, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&output).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
             assert_eq!(val, 0, "output[{i}] should be 0 (copied from zeroed input)");
         }
     }
@@ -883,7 +928,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&vec![42u32; 64], BufferKind::Scattered)
             .expect("input");
-        let output = pool
+        let mut output = pool
             .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -914,9 +959,11 @@ mod imp {
                 .node("inc", &inc_pipe)
                 .with_parcel(&output, NodeAccess::ReadWrite)
                 .dispatch(1, 1, 1);
-            let grant = inc_scheme.grant_read(&output).expect("grant_read");
-            let frame = inc_scheme.submit().expect("inc submit");
-            read_grant_u32(&grant, &frame, 64)
+            let grant = MemoryExchange::new(inc_scheme.context())
+                .bind_withdraw(&mut inc_scheme, &output)
+                .expect("withdraw");
+            let mut frame = inc_scheme.submit().expect("inc submit");
+            read_grant_u32(&grant, &mut frame, 64)
         };
 
         for (i, &val) in result.iter().enumerate() {
@@ -942,7 +989,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("input");
-        let output = pool
+        let mut output = pool
             .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -957,10 +1004,12 @@ mod imp {
             .with_parcel(&input, NodeAccess::Read)
             .with_parcel(&output, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&output).expect("grant_read");
-        let worker_frame = scheme.submit().expect("worker submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+        let mut worker_frame = scheme.submit().expect("worker submit");
 
-        for (i, &val) in read_grant_u32(&grant, &worker_frame, 64).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut worker_frame, 64).iter().enumerate() {
             assert_eq!(
                 val, PATTERN,
                 "output[{i}]: upload must be visible without waiting on upload frame"
@@ -1009,10 +1058,12 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, N).iter().enumerate() {
             assert_eq!(val, 15, "out[{i}] expected 15, got {val}");
         }
     }
@@ -1044,7 +1095,7 @@ mod imp {
                 None,
             )
             .expect("scratch");
-        let output = pool
+        let mut output = pool
             .acquire_buffer(
                 byte_size as u64,
                 BufferKind::Scattered,
@@ -1065,11 +1116,13 @@ mod imp {
             .with_parcel(&output, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&output).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
         let expected: Vec<u32> = (1..=N as u32).collect();
-        assert_eq!(read_grant_u32(&grant, &frame, N), expected);
+        assert_eq!(read_grant_u32(&grant, &mut frame, N), expected);
     }
 
     fn scheme_transient_buffer_write_then_copy(device: &Device) {
@@ -1090,7 +1143,7 @@ mod imp {
         let byte_size = (N * 4) as u64;
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
-        let output = pool
+        let mut output = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("output");
 
@@ -1107,11 +1160,13 @@ mod imp {
             .with_parcel(&output, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = scheme.grant_read(&output).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
         let expected: Vec<u32> = (1..=N as u32).collect();
-        assert_eq!(read_grant_u32(&grant, &frame, N), expected);
+        assert_eq!(read_grant_u32(&grant, &mut frame, N), expected);
     }
 
     const WRITE_SCALE_SHADER: &str = r#"
@@ -1180,9 +1235,11 @@ mod imp {
                 .with_parcel(&output_a, NodeAccess::Write)
                 .dispatch(1, 1, 1);
 
-            let grant = scheme.grant_read(&output_a).expect("grant_a");
-            let frame = scheme.submit().expect("submit_a");
-            assert_eq!(read_grant_u32(&grant, &frame, N), expected_iota);
+            let grant = MemoryExchange::new(scheme.context())
+                .bind_withdraw(&mut scheme, &output_a)
+                .expect("grant_a");
+            let mut frame = scheme.submit().expect("submit_a");
+            assert_eq!(read_grant_u32(&grant, &mut frame, N), expected_iota);
         }
         // scheme dropped here — backing parcel returned to pool with ready epoch
 
@@ -1218,9 +1275,11 @@ mod imp {
                 .with_parcel(&output_b, NodeAccess::Write)
                 .dispatch(1, 1, 1);
 
-            let grant = scheme.grant_read(&output_b).expect("grant_b");
-            let frame = scheme.submit().expect("submit_b");
-            assert_eq!(read_grant_u32(&grant, &frame, N), expected_scale);
+            let grant = MemoryExchange::new(scheme.context())
+                .bind_withdraw(&mut scheme, &output_b)
+                .expect("grant_b");
+            let mut frame = scheme.submit().expect("submit_b");
+            assert_eq!(read_grant_u32(&grant, &mut frame, N), expected_scale);
         }
     }
 
@@ -1519,10 +1578,12 @@ mod imp {
             .node("double", &pipeline)
             .with_parcel(&buffer, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&buffer).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buffer)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
+        for (i, &val) in read_grant_u32(&grant, &mut frame, N).iter().enumerate() {
             assert_eq!(val, (i as u32) * 2, "element {i}: expected {} got {val}", i * 2);
         }
     }
@@ -1566,7 +1627,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&input_data, BufferKind::Scattered)
             .expect("input");
-        let output = pool
+        let mut output = pool
             .acquire_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
             .expect("output");
 
@@ -1578,9 +1639,11 @@ mod imp {
             .with_parcel(&input, NodeAccess::Read)
             .with_parcel(&output, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&output).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
         let result: &[Pair] = bytemuck::cast_slice(&loan);
 
         for i in 0..8u32 {
@@ -1619,11 +1682,13 @@ mod imp {
             .node("write_tex", &pipeline)
             .with_parcel(&texture, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
-        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
 
-        let output = &*loan;
+        let mut output = &*loan;
         let nonzero = output.iter().filter(|&&b| b != 0).count();
         assert!(nonzero > 0, "texture readback all zeros");
         assert_eq!(output[0], 255, "R channel");
@@ -1661,10 +1726,10 @@ mod imp {
             .node("write_tex_raw", &pipeline)
             .with_parcel(&texture, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
-        let frame = scheme.submit().expect("submit");
+        let mut frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
-        let output = read_texture_via_scheme_copy(&ctx, &texture);
+        let mut output = read_texture_via_scheme_copy(&ctx, &texture);
 
         assert_eq!(output[0], 255, "R channel");
         assert_eq!(output[1], 0, "G channel");
@@ -1800,9 +1865,11 @@ mod imp {
             .with_parcel(&sampler, NodeAccess::Read)
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
         let result: &[u32] = bytemuck::cast_slice(&loan);
 
         for y in 0..H as usize {
@@ -1842,19 +1909,23 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf_a, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let grant_a = scheme_a.grant_read(&buf_a).expect("grant_read");
-        let frame_a = scheme_a.submit().expect("ctx_a submit");
+        let grant_a = MemoryExchange::new(scheme_a.context())
+            .bind_withdraw(&mut scheme_a, &buf_a)
+            .expect("withdraw");
+        let mut frame_a = scheme_a.submit().expect("ctx_a submit");
 
         let mut scheme_b = Scheme::new(&ctx_b);
         scheme_b
             .node("n0", &pipeline)
             .with_parcel(&buf_b, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let grant_b = scheme_b.grant_read(&buf_b).expect("grant_read");
-        let frame_b = scheme_b.submit().expect("ctx_b submit");
+        let grant_b = MemoryExchange::new(scheme_b.context())
+            .bind_withdraw(&mut scheme_b, &buf_b)
+            .expect("withdraw");
+        let mut frame_b = scheme_b.submit().expect("ctx_b submit");
 
-        let result_a = read_grant_u32(&grant_a, &frame_a, 64);
-        let result_b = read_grant_u32(&grant_b, &frame_b, 64);
+        let result_a = read_grant_u32(&grant_a, &mut frame_a, 64);
+        let result_b = read_grant_u32(&grant_b, &mut frame_b, 64);
         for i in 0..64 {
             assert_eq!(result_a[i], i as u32 * 2, "buf_a[{i}]");
             assert_eq!(result_b[i], (100 + i as u32) * 2, "buf_b[{i}]");
@@ -1871,7 +1942,7 @@ mod imp {
             .expect("buf");
 
         let mut scheme = Scheme::new(&ctx_a);
-        let frame_a = scheme.submit().expect("ctx_a submit");
+        let mut frame_a = scheme.submit().expect("ctx_a submit");
         drop(buf);
 
         frame_a.wait(&ctx_a).expect("ctx_a wait");
@@ -1945,8 +2016,10 @@ mod imp {
             .with_parcel(&mid, NodeAccess::Read)
             .with_parcel(&out_a, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant_a = s1.grant_read(&out_a).expect("grant_a");
-        let sub1 = s1.submit().expect("submit 1");
+        let grant_a = MemoryExchange::new(s1.context())
+            .bind_withdraw(&mut s1, &out_a)
+            .expect("grant_a");
+        let mut sub1 = s1.submit().expect("submit 1");
 
         // Scheme 2: submitted immediately, without waiting for sub1.
         // The staging belt must not recycle the staging region used by s1.
@@ -1957,11 +2030,13 @@ mod imp {
             .with_parcel(&mid, NodeAccess::Read)
             .with_parcel(&out_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant_b = s2.grant_read(&out_b).expect("grant_b");
-        let sub2 = s2.submit().expect("submit 2");
+        let grant_b = MemoryExchange::new(s2.context())
+            .bind_withdraw(&mut s2, &out_b)
+            .expect("grant_b");
+        let mut sub2 = s2.submit().expect("submit 2");
 
-        let got_a = read_grant_u32(&grant_a, &sub1, N);
-        let got_b = read_grant_u32(&grant_b, &sub2, N);
+        let got_a = read_grant_u32(&grant_a, &mut sub1, N);
+        let got_b = read_grant_u32(&grant_b, &mut sub2, N);
         assert_eq!(got_a, data_a, "output A corrupted (staging race?)");
         assert_eq!(got_b, data_b, "output B wrong");
     }
@@ -1995,9 +2070,11 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .with_param(EXPECTED)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant");
-        let submission = scheme.submit().expect("submit");
-        assert_eq!(read_grant_u32(&grant, &submission, 1)[0], EXPECTED);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("grant");
+        let mut submission = scheme.submit().expect("submit");
+        assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], EXPECTED);
     }
 
     fn scheme_uniform_param_uint_zero(device: &Device) {
@@ -2024,9 +2101,11 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .with_param(0u32)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant");
-        let submission = scheme.submit().expect("submit");
-        assert_eq!(read_grant_u32(&grant, &submission, 1)[0], 0);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("grant");
+        let mut submission = scheme.submit().expect("submit");
+        assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], 0);
     }
 
     fn scheme_uniform_param_uint_max(device: &Device) {
@@ -2053,9 +2132,11 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .with_param(u32::MAX)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant");
-        let submission = scheme.submit().expect("submit");
-        assert_eq!(read_grant_u32(&grant, &submission, 1)[0], u32::MAX);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("grant");
+        let mut submission = scheme.submit().expect("submit");
+        assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], u32::MAX);
     }
 
     fn scheme_uniform_param_float_reinterpret(device: &Device) {
@@ -2086,9 +2167,11 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .with_param(bits)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant");
-        let submission = scheme.submit().expect("submit");
-        assert_eq!(read_grant_u32(&grant, &submission, 1)[0], bits);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("grant");
+        let mut submission = scheme.submit().expect("submit");
+        assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], bits);
     }
 
     fn scheme_uniform_two_independent_scalar_params(device: &Device) {
@@ -2120,9 +2203,11 @@ mod imp {
             .with_param(A)
             .with_param(B)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant");
-        let submission = scheme.submit().expect("submit");
-        let result = read_grant_u32(&grant, &submission, 2);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("grant");
+        let mut submission = scheme.submit().expect("submit");
+        let result = read_grant_u32(&grant, &mut submission, 2);
         assert_eq!(result[0], A);
         assert_eq!(result[1], B);
     }
@@ -2160,9 +2245,11 @@ mod imp {
             .with_parcel(&out, NodeAccess::Write)
             .with_param(OFFSET)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&out).expect("grant");
-        let submission = scheme.submit().expect("submit");
-        let result = read_grant_u32(&grant, &submission, N);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("grant");
+        let mut submission = scheme.submit().expect("submit");
+        let result = read_grant_u32(&grant, &mut submission, N);
         let expected: Vec<u32> = input.iter().map(|v| v + OFFSET).collect();
         assert_eq!(result, expected);
     }
@@ -2201,10 +2288,12 @@ mod imp {
             .with_parcel(&cells[0], NodeAccess::ReadWrite)
             .with_parcel(&cells[1], NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = scheme.grant_read(&cells[1]).expect("grant_read");
-        let submission = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &cells[1])
+            .expect("withdraw");
+        let mut submission = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &submission, N);
+        let result = read_grant_u32(&grant, &mut submission, N);
         for (i, &val) in result.iter().enumerate() {
             assert_eq!(
                 val,
@@ -2246,17 +2335,21 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&cells[1], NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant_sentinel = scheme.grant_read(&cells[0]).expect("grant sentinel");
-        let grant_work = scheme.grant_read(&cells[1]).expect("grant work");
-        let submission = scheme.submit().expect("submit");
+        let grant_sentinel = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &cells[0])
+            .expect("grant sentinel");
+        let grant_work = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &cells[1])
+            .expect("grant work");
+        let mut submission = scheme.submit().expect("submit");
 
-        let sentinel_vals = read_grant_u32(&grant_sentinel, &submission, N);
+        let sentinel_vals = read_grant_u32(&grant_sentinel, &mut submission, N);
         assert!(
             sentinel_vals.iter().all(|&v| v == 100),
             "sentinel field must be untouched"
         );
 
-        let result = read_grant_u32(&grant_work, &submission, N);
+        let result = read_grant_u32(&grant_work, &mut submission, N);
         for (i, &val) in result.iter().enumerate() {
             let expected = ((i + 1) as u32) * 2;
             assert_eq!(
@@ -2320,9 +2413,11 @@ mod imp {
             .dispatch_shape_parcel(&*shape)
             .expect("indirect dispatch");
 
-        let grant = scheme.grant_read(&work).expect("grant_read");
-        let submission = scheme.submit().expect("submit");
-        let result = read_grant_u32(&grant, &submission, N);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &work)
+            .expect("withdraw");
+        let mut submission = scheme.submit().expect("submit");
+        let result = read_grant_u32(&grant, &mut submission, N);
         for (i, &val) in result.iter().enumerate() {
             assert_eq!(val, (i as u32) * 2, "element {i}: expected {}, got {val}", i * 2);
         }
@@ -2432,9 +2527,11 @@ mod imp {
             .dispatch_shape_parcel(&*shape)
             .expect("indirect dispatch");
 
-        let grant = scheme.grant_read(&out).expect("grant_read");
-        let submission = scheme.submit().expect("submit");
-        let result = read_grant_u32(&grant, &submission, N);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw");
+        let mut submission = scheme.submit().expect("submit");
+        let result = read_grant_u32(&grant, &mut submission, N);
         let nonzero_count = result.iter().filter(|&&v| v != 0).count();
         assert_eq!(
             nonzero_count, 0,
@@ -2491,15 +2588,19 @@ mod imp {
             .with_parcel(&out2, NodeAccess::Write)
             .dispatch((N / 64) as u32, 1, 1);
 
-        let grant1 = scheme.grant_read(&out1).expect("grant_read out1");
-        let grant2 = scheme.grant_read(&out2).expect("grant_read out2");
-        let submission = scheme.submit().expect("submit");
+        let grant1 = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out1)
+            .expect("grant_read out1");
+        let grant2 = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &out2)
+            .expect("grant_read out2");
+        let mut submission = scheme.submit().expect("submit");
 
-        let result1 = read_grant_u32(&grant1, &submission, N);
+        let result1 = read_grant_u32(&grant1, &mut submission, N);
         for (i, &val) in result1.iter().enumerate() {
             assert_eq!(val, data1[i], "out1[{i}]: expected {}, got {val}", data1[i]);
         }
-        let result2 = read_grant_u32(&grant2, &submission, N);
+        let result2 = read_grant_u32(&grant2, &mut submission, N);
         for (i, &val) in result2.iter().enumerate() {
             assert_eq!(val, data2[i], "out2[{i}]: expected {}, got {val}", data2[i]);
         }
@@ -2519,10 +2620,12 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 0, byte_size).expect("clear_parcel");
-        let grant = scheme.grant_read(&buf).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &frame, N);
+        let result = read_grant_u32(&grant, &mut frame, N);
         for (i, &val) in result.iter().enumerate() {
             assert_eq!(val, 0, "element {i} should be zero after full clear");
         }
@@ -2552,10 +2655,12 @@ mod imp {
         // Clear elements [16..48] → bytes 64..192, size = 32 * 4 = 128.
         let mut scheme = Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 16 * 4, 32 * 4).expect("clear_parcel");
-        let grant = scheme.grant_read(&buf).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &frame, N);
+        let result = read_grant_u32(&grant, &mut frame, N);
         for i in 0..16 {
             assert_eq!(
                 result[i], 0xAAAA_AAAAu32,
@@ -2588,10 +2693,12 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         // offset = 16 elements in, size = 0 → fill from byte 64 to end
         scheme.clear_parcel(&buf, 16 * 4, 0).expect("clear_parcel size=0");
-        let grant = scheme.grant_read(&buf).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buf)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &frame, N);
+        let result = read_grant_u32(&grant, &mut frame, N);
         for i in 0..16 {
             assert_eq!(result[i], init[i], "element {i} before offset should be unchanged");
         }
@@ -2642,10 +2749,12 @@ mod imp {
         scheme
             .copy_buffer_parcel(&src, 0, &dst, 0, byte_size)
             .expect("copy_buffer_parcel");
-        let grant = scheme.grant_read(&dst).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &frame, N);
+        let result = read_grant_u32(&grant, &mut frame, N);
         for (i, &val) in result.iter().enumerate() {
             assert_eq!(val, i as u32 + 1, "dst[{i}]: expected {}, got {val}", i + 1);
         }
@@ -2675,10 +2784,12 @@ mod imp {
         scheme
             .copy_buffer_parcel(&src, (16 * 4) as u64, &dst, 0, (N_DST * 4) as u64)
             .expect("copy_buffer_parcel");
-        let grant = scheme.grant_read(&dst).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &frame, N_DST);
+        let result = read_grant_u32(&grant, &mut frame, N_DST);
         for (i, &val) in result.iter().enumerate() {
             let expected = 16u32 + i as u32;
             assert_eq!(val, expected, "dst[{i}]: expected {expected}, got {val}");
@@ -2748,12 +2859,14 @@ mod imp {
         scheme
             .copy_buffer_parcel(&src, 0, &dst, 0, byte_size)
             .expect("copy_buffer_parcel");
-        let grant = scheme.grant_read(&dst).expect("grant_read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
 
         // First submit records.
-        let frame1 = scheme.submit().expect("first submit");
+        let mut frame1 = scheme.submit().expect("first submit");
         // Second submit should be a clean resubmit.
-        let frame2 = scheme.submit().expect("second submit");
+        let mut frame2 = scheme.submit().expect("second submit");
 
         assert_eq!(
             scheme.replay_stats().records,
@@ -2768,8 +2881,8 @@ mod imp {
         );
 
         // Data should be correct on both frames.
-        let result1 = read_grant_u32(&grant, &frame1, N);
-        let result2 = read_grant_u32(&grant, &frame2, N);
+        let result1 = read_grant_u32(&grant, &mut frame1, N);
+        let result2 = read_grant_u32(&grant, &mut frame2, N);
         for i in 0..N {
             assert_eq!(result1[i], i as u32, "frame1 dst[{i}]");
             assert_eq!(result2[i], i as u32, "frame2 dst[{i}]");
@@ -2807,10 +2920,12 @@ mod imp {
         scheme
             .copy_buffer_parcel(&staging, 0, &dst, 0, byte_size)
             .expect("copy_buffer_parcel");
-        let grant = scheme.grant_read(&dst).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let result = read_grant_u32(&grant, &frame, N);
+        let result = read_grant_u32(&grant, &mut frame, N);
         for (i, &val) in result.iter().enumerate() {
             assert_eq!(val, data[i], "dst[{i}]: expected {:08X}, got {:08X}", data[i], val);
         }
@@ -2841,11 +2956,13 @@ mod imp {
         scheme
             .copy_buffer_parcel(&staging, 0, &dst, 0, byte_size)
             .expect("copy_buffer_parcel");
-        let grant = scheme.grant_read(&dst).expect("grant_read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
 
         // Frame 1: staging has bytes1.
-        let frame1 = scheme.submit().expect("frame1 submit");
-        let result1 = read_grant_u32(&grant, &frame1, N);
+        let mut frame1 = scheme.submit().expect("frame1 submit");
+        let result1 = read_grant_u32(&grant, &mut frame1, N);
         for (i, &val) in result1.iter().enumerate() {
             assert_eq!(val, data1[i], "frame1 dst[{i}]");
         }
@@ -2854,8 +2971,8 @@ mod imp {
         staging.write(0, &bytes2).expect("write bytes2");
 
         // Frame 2: resubmit with new staging data; topology unchanged → no re-record.
-        let frame2 = scheme.submit().expect("frame2 submit");
-        let result2 = read_grant_u32(&grant, &frame2, N);
+        let mut frame2 = scheme.submit().expect("frame2 submit");
+        let result2 = read_grant_u32(&grant, &mut frame2, N);
         for (i, &val) in result2.iter().enumerate() {
             assert_eq!(val, data2[i], "frame2 dst[{i}]");
         }
@@ -2895,7 +3012,7 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         scheme.write_texture(&texture, pixels.clone()).expect("write_texture");
-        let frame = scheme.submit().expect("submit");
+        let mut frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
         let mut output = vec![0u8; texture.byte_size() as usize];
@@ -2981,7 +3098,7 @@ mod imp {
         scheme
             .write_texture_region(&texture, RX, RY, RW, RH, region_pixels.clone())
             .expect("write_texture_region");
-        let frame = scheme.submit().expect("submit");
+        let mut frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
         let mut output = vec![0u8; texture.byte_size() as usize];
@@ -3055,7 +3172,7 @@ mod imp {
         scheme
             .write_texture_region(&texture, 4, 4, 4, 4, blue)
             .expect("write blue region");
-        let frame = scheme.submit().expect("submit");
+        let mut frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
         let mut output = vec![0u8; texture.byte_size() as usize];
@@ -3122,7 +3239,7 @@ mod imp {
         scheme
             .copy_buffer_to_texture_parcel(&staging, 0, 0, &texture, 0, 0, W, H)
             .expect("copy_buffer_to_texture_parcel");
-        let frame = scheme.submit().expect("submit");
+        let mut frame = scheme.submit().expect("submit");
         frame.wait(&ctx).expect("wait");
 
         let mut output = vec![0u8; texture.byte_size() as usize];
@@ -3322,7 +3439,7 @@ mod imp {
             );
         }
 
-        let output = read_texture_via_scheme_copy(&ctx, &texture);
+        let mut output = read_texture_via_scheme_copy(&ctx, &texture);
         assert_eq!(output, pixels, "pitched retained upload must produce correct pixels");
     }
 
@@ -3368,21 +3485,27 @@ mod imp {
         worker
     }
 
-    fn cross_retention_buffer_reader(ctx: &goldy::Context, shared: &goldy::Buffer) -> (Scheme, ReadGrant<GrantBuffer>) {
+    fn cross_retention_buffer_reader(ctx: &goldy::Context, shared: &goldy::Buffer) -> (Scheme, WithdrawTransaction) {
         let mut reader = Scheme::new(ctx);
-        let grant = reader.grant_read(shared).expect("grant_read");
+        let grant = MemoryExchange::new(reader.context())
+            .bind_withdraw(&mut reader, shared)
+            .expect("withdraw");
         (reader, grant)
     }
 
     fn cross_retention_run_worker_then_reader(
         worker: &mut Scheme,
         reader: &mut Scheme,
-        grant: &ReadGrant<GrantBuffer>,
+        grant: &WithdrawTransaction,
         _ctx: &goldy::Context,
     ) {
         worker.submit().expect("worker submit");
-        let frame = reader.submit().expect("reader submit");
-        let _loan = grant.consume(&frame).expect("grant consume");
+        let mut frame = reader.submit().expect("reader submit");
+        let _loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("grant consume");
     }
 
     /// A *topology-visible* foreign reader: a scheme that reads the shared parcel with a
@@ -3502,12 +3625,18 @@ mod imp {
         let buffers = cross_retention_buffers(&device);
 
         let mut scheme = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
-        let grant = scheme.grant_read(&buffers.shared).expect("grant_read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &buffers.shared)
+            .expect("withdraw");
 
         const FRAMES: u32 = 4;
         for _ in 0..FRAMES {
-            let frame = scheme.submit().expect("submit");
-            let _loan = grant.consume(&frame).expect("grant consume");
+            let mut frame = scheme.submit().expect("submit");
+            let _loan = grant
+                .claim(&mut frame)
+                .expect("claim")
+                .consume()
+                .expect("grant consume");
         }
 
         assert_eq!(
@@ -3759,8 +3888,12 @@ mod imp {
         for _ in 0..3 {
             worker.submit().expect("worker submit");
             copy_reader.submit().expect("copy reader submit");
-            let frame = grant_reader.submit().expect("grant reader submit");
-            let _loan = grant.consume(&frame).expect("grant consume");
+            let mut frame = grant_reader.submit().expect("grant reader submit");
+            let _loan = grant
+                .claim(&mut frame)
+                .expect("claim")
+                .consume()
+                .expect("grant consume");
         }
         assert_eq!(
             worker.replay_stats().records,
@@ -3790,8 +3923,8 @@ mod imp {
         const FRAMES: u32 = 4;
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
-            let frame = reader.submit().expect("reader submit");
-            let values = read_grant_u32(&grant, &frame, CROSS_RETENTION_ELEMS);
+            let mut frame = reader.submit().expect("reader submit");
+            let values = read_grant_u32(&grant, &mut frame, CROSS_RETENTION_ELEMS);
             for (i, &v) in values.iter().enumerate() {
                 assert_eq!(
                     v, i as u32,
@@ -3900,7 +4033,7 @@ mod imp {
         const FRAMES: u32 = 4;
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
-            let frame = reader.submit().expect("reader submit");
+            let mut frame = reader.submit().expect("reader submit");
             frame.wait(&ctx).expect("wait readback");
         }
 
