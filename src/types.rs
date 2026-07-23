@@ -178,10 +178,9 @@ impl From<(u32, u32, u32)> for DispatchShape {
 
 /// Use-time access direction for a resource descriptor slot.
 ///
-/// Passed to [`crate::Parcel::resource_index`], [`crate::Texture::resource_index`],
-/// and related accessors to select the correct descriptor pool entry for how the
-/// resource will be used in the current dispatch — read-only, write-only, or
-/// read-write.
+/// Passed to [`crate::Parcel::handle`], [`crate::Texture::handle`], and related
+/// accessors to select the correct descriptor pool entry for how the resource
+/// will be used in the current dispatch — read-only, write-only, or read-write.
 ///
 /// This is distinct from [`crate::task_graph::NodeAccess`], which describes
 /// scheduling / SWMR hazards between graph nodes rather than shader binding slots.
@@ -330,37 +329,37 @@ impl From<TextureKind> for ResourceCategory {
             TextureKind::Direct => ResourceCategory::StorageImage,
             // Primary slot for DirectInterpolated is the storage (UAV) handle.
             // The secondary sampled (SRV) handle is obtained via
-            // `Texture::resource_index(ResourceAccess::Read)`.
+            // `Texture::handle(ResourceAccess::Read)`.
             TextureKind::DirectInterpolated => ResourceCategory::StorageImage,
         }
     }
 }
 
-/// A typed resource descriptor handle: `(category, index)`.
+/// Opaque typed resource descriptor identity: `(category, index)`.
 ///
 /// Goldy's resources (`Buffer`, `Texture`, `Sampler`) expose `handle(access)`
-/// which returns one of these. Push-constant setters that accept `ResourceHandle`
-/// can be validated against the shader's reflection: a
-/// [`ResourceCategory::Broadcast`] handle bound to a slot the shader reads
-/// through `goldy_buf_ro` (`Scattered`) is a type error caught at dispatch
-/// time rather than silently producing a garbage read.
+/// which returns one of these. Equality and hashing are stable for a live
+/// descriptor identity, so callers may compare handles (for example retained-
+/// scheme staleness checks) without observing the underlying heap slot.
 ///
-/// The raw u32 index is recoverable via [`ResourceHandle::index`] — the typed
-/// wrapper is zero-cost at runtime when validation is disabled.
+/// The raw descriptor index is crate-private (`index`) so backends may
+/// reinterpret slots without a public heap-index contract.
+/// Push-constant / bind paths that accept `ResourceHandle` validate the
+/// handle's [`ResourceCategory`] against shader reflection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceHandle {
-    pub category: ResourceCategory,
-    pub index: u32,
+    category: ResourceCategory,
+    index: u32,
 }
 
 impl ResourceHandle {
     /// Build a handle from a category and raw index.
-    pub const fn new(category: ResourceCategory, index: u32) -> Self {
+    pub(crate) const fn new(category: ResourceCategory, index: u32) -> Self {
         Self { category, index }
     }
 
-    /// Raw descriptor index for this handle.
-    pub const fn index(self) -> u32 {
+    /// Raw descriptor index for this handle (crate-internal bindless plumbing).
+    pub(crate) const fn index(self) -> u32 {
         self.index
     }
 
@@ -418,9 +417,9 @@ pub enum TextureKind {
     /// access on the same underlying texture resource.
     ///
     /// The primary resource handle (returned by
-    /// [`crate::Texture::resource_index`](ResourceAccess::Write)) is the storage slot;
+    /// [`crate::Texture::handle`](ResourceAccess::Write)) is the storage slot;
     /// the secondary sampled handle is returned by
-    /// [`crate::Texture::resource_index`](ResourceAccess::Read).
+    /// [`crate::Texture::handle`](ResourceAccess::Read).
     DirectInterpolated,
 }
 

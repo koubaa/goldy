@@ -109,14 +109,10 @@ texture.is_owned();   // true if dropping destroys the GPU resource
 
 ## Bindless Descriptors
 
-Textures are registered in the global bindless descriptor set. The category depends on the access pattern: `Interpolated` maps to `ResourceCategory::Texture`, `Direct` maps to `ResourceCategory::StorageImage`.
+Textures are registered in the global bindless descriptor set. The category depends on the access pattern: `Interpolated` maps to `ResourceCategory::Texture`, `Direct` maps to `ResourceCategory::StorageImage`. Schemes bind via `with_parcel`; the opaque handle is for identity checks:
 
 ```rust
-// Typed handle (preferred)
 let handle = texture.handle(ResourceAccess::Read).unwrap();
-
-// Raw index
-let index = texture.resource_index(ResourceAccess::Read).unwrap();
 ```
 
 ## Texture Borrowing
@@ -248,7 +244,6 @@ Samplers are registered under `ResourceCategory::Sampler`:
 
 ```rust
 let handle = sampler.handle(ResourceAccess::Read).unwrap();
-let index = sampler.resource_index(ResourceAccess::Read).unwrap();
 ```
 
 ## Binding Textures and Samplers in Shaders

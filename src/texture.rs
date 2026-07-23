@@ -271,7 +271,9 @@ impl TextureBacking {
     }
 
     /// Resource descriptor index for how this texture will be accessed in the current dispatch.
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+    ///
+    /// Crate-internal: the public binding path is [`Self::handle`] / scheme `with_parcel`.
+    pub(crate) fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match (self.access, access) {
             (TextureKind::Interpolated, ResourceAccess::Read) => self.bindless_storage,
             (TextureKind::Interpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
@@ -284,7 +286,7 @@ impl TextureBacking {
         }
     }
 
-    /// Typed resource descriptor handle for validation and dispatch wiring.
+    /// Opaque typed resource descriptor identity for validation and retention checks.
     pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         self.resource_index(access).map(|i| {
             let category = match (self.access, access) {

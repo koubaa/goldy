@@ -136,14 +136,16 @@ impl Sampler {
     }
 
     /// Resource descriptor index for how this sampler will be accessed in the current dispatch.
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+    ///
+    /// Crate-internal: the public binding path is [`Self::handle`] / scheme `with_parcel`.
+    pub(crate) fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match access {
             ResourceAccess::Read => self.bindless,
             ResourceAccess::Write | ResourceAccess::ReadWrite => None,
         }
     }
 
-    /// Typed resource descriptor handle for validation and dispatch wiring.
+    /// Opaque typed resource descriptor identity for validation and retention checks.
     pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         self.resource_index(access)
             .map(|i| ResourceHandle::new(ResourceCategory::Sampler, i))
