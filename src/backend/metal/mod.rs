@@ -825,17 +825,6 @@ impl GpuBackend for MetalBackend {
         crate::signal::drain_all_queued_signals(&sc2.signal_queue)
     }
 
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc_arc = self.state.contexts.get(&ctx)?;
-        let sc = sc_arc.lock().unwrap();
-        let progress = context::context_gpu_progress(&sc);
-        if progress < sc.last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,

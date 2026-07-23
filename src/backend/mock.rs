@@ -1552,15 +1552,6 @@ impl GpuBackend for MockBackend {
         crate::signal::drain_all_queued_signals(&self.context_state(ctx).signal_queue)
     }
 
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let state = self.context_state(ctx);
-        if state.completed < state.last_submitted_seq {
-            Some(state.completed.saturating_add(1))
-        } else {
-            None
-        }
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,

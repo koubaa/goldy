@@ -1357,9 +1357,6 @@ pub(crate) trait GpuBackend:
         progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::QueuedSignal>;
 
-    /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;
-
     fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         if let Some(wait) = self.take_timeline_blocking_wait(ctx, value)? {
             wait.block()?;

@@ -1200,20 +1200,6 @@ impl GpuBackend for VulkanBackend {
         crate::signal::drain_all_queued_signals(&signal_queue)
     }
 
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc_arc = {
-            let contexts = self.state.contexts.read().unwrap();
-            contexts.get(&ctx)?.clone()
-        };
-        let last_submitted_seq = sc_arc.lock().unwrap().last_submitted_seq;
-        let progress = self.gpu_progress(ctx);
-        if progress < last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
-    }
-
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,

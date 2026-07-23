@@ -108,10 +108,6 @@ impl<T: Copy + Default> SmallContextMap<T> {
         self.iter().map(|(ctx, _)| ctx)
     }
 
-    pub fn values(&self) -> impl Iterator<Item = T> + '_ {
-        self.iter().map(|(_, v)| v)
-    }
-
     fn find(&self, key: ContextHandle) -> Option<SlotLoc> {
         for i in 0..self.inline_len as usize {
             if self.inline[i].0 == key {
@@ -279,11 +275,6 @@ pub fn is_ready(table: &ReferenceTable, progress: &HashMap<ContextHandle, Timeli
     table
         .iter()
         .all(|(ctx, tv)| progress.get(&ctx).copied().unwrap_or(0) >= tv)
-}
-
-/// Fast single-context readiness check.
-pub fn is_ready_on(table: &ReferenceTable, ctx: ContextHandle, progress: TimelineValue) -> bool {
-    table.get(ctx).is_none_or(|tv| progress >= tv)
 }
 
 /// Collect `table` entries as [`Epoch`] values.

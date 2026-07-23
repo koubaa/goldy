@@ -354,7 +354,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        b.mark_referenced(ctx.backend_handle(), 42);
+        b.whole().mark_referenced(ctx.backend_handle(), 42);
         let stamped = pool.transfer_out_buffer(&ctx, b);
         assert_eq!(stamped.ready_after.get(ctx.backend_handle()), Some(42));
         assert_eq!(pool.bytes_by_kind().buffer, 0);

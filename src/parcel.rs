@@ -775,10 +775,6 @@ impl Buffer {
         Ok(())
     }
 
-    pub(crate) fn is_settled_on(&self, ctx: &Context) -> bool {
-        self.units.iter().all(|u| u.is_settled_on(ctx))
-    }
-
     /// CPU write into a single-unit buffer.
     ///
     /// For [`crate::types::BufferFlags::CPU_WRITABLE`] buffers, this is a host-mapped
@@ -812,11 +808,6 @@ impl Buffer {
                 anyhow::bail!("Buffer::clear requires a single-unit buffer; clear a specific parcel instead")
             }
         }
-    }
-
-    /// Record GPU reference on the whole-buffer parcel (single-unit buffers only).
-    pub(crate) fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        self.whole().mark_referenced(ctx, epoch);
     }
 
     pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
@@ -1031,14 +1022,6 @@ impl Texture {
 
     pub fn wait_until_settled(&self) -> Result<(), crate::error::GoldyError> {
         self.parcel.wait_until_settled()
-    }
-
-    pub(crate) fn is_settled_on(&self, ctx: &Context) -> bool {
-        self.parcel.is_settled_on(ctx)
-    }
-
-    pub(crate) fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        self.parcel.mark_referenced(ctx, epoch);
     }
 
     pub fn set_debug_name(&self, name: &str) {

@@ -1308,11 +1308,6 @@ impl Scheme {
         self.submit_state.record_reuse_epochs(&buffer.last_referenced());
     }
 
-    /// Crate-internal: reuse epochs from a raw reference table.
-    pub(crate) fn record_reuse_epochs(&mut self, refs: &crate::timeline::ReferenceTable) {
-        self.submit_state.record_reuse_epochs(refs);
-    }
-
     /// Defer a host-visible buffer write until the submission worker after prior uses of
     /// `ready_after` retire on the CPU.
     ///
@@ -1327,17 +1322,6 @@ impl Scheme {
     ) {
         self.submit_state
             .defer_host_write(&ready_after.last_referenced(), buffer, offset, data);
-    }
-
-    /// Crate-internal: defer host write gated on a raw reference table.
-    pub(crate) fn defer_host_write_refs(
-        &mut self,
-        refs: &crate::timeline::ReferenceTable,
-        buffer: &crate::Buffer,
-        offset: u64,
-        data: Box<[u8]>,
-    ) {
-        self.submit_state.defer_host_write(refs, buffer, offset, data);
     }
 
     /// Submit the scheme: resubmit the retained command list when clean, re-record when dirty.

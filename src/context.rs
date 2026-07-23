@@ -333,17 +333,6 @@ impl Context {
         self.wait_until(hw)
     }
 
-    /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
-    pub(crate) fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
-        self.inner
-            .device
-            .inner
-            .backend
-            .lock()
-            .unwrap()
-            .peek_oldest_in_flight(self.inner.handle)
-    }
-
     /// The largest [`TimelineValue`] ever returned by a scheme submit on this context.
     pub(crate) fn high_water_timeline(&self) -> TimelineValue {
         self.inner.high_water_timeline.load(Ordering::Relaxed)
@@ -446,11 +435,12 @@ impl Context {
         }
     }
 
-    /// Pull-side reclamation using [`gpu_progress`](Self::gpu_progress).
+    /// Pull-side reclamation using this context's current GPU progress.
     ///
-    /// Uses per-context fence progress for the VRAM ring (not [`Device::timeline_retired`]),
-    /// so device-queue work (e.g. texture upload on DIRECT) cannot advance reclamation past
-    /// in-flight compute submits on this context's queue.
+    /// Uses per-context fence progress for the VRAM ring (not the device-wide
+    /// retired timeline), so device-queue work (e.g. texture upload on DIRECT)
+    /// cannot advance reclamation past in-flight compute submits on this
+    /// context's queue.
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("context.flush_deferred_deletions");
         let progress = self.gpu_progress();
@@ -500,14 +490,6 @@ impl Context {
             progress.insert(ctx, p);
         }
         is_ready(refs, &progress)
-    }
-
-    /// Block until every context in `refs` has retired the stamped timeline values.
-    pub(crate) fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
-        for (ctx_handle, tv) in refs.iter() {
-            self.wait_until_context(ctx_handle, tv)?;
-        }
-        Ok(())
     }
 
     pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {
