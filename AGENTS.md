@@ -7,9 +7,11 @@ Legacy compatibility is not relevant before the 0.2 release. Make breaking chang
 There is churn happening now, it is important to keep certain architectural principles in mind.
 
 - A "parcel" is a unit of property, generic enough to span lifecycle (leased vs owned) and property type (buffers, textures, images, ...).
-- An "exchange" is the mediated relationship with an external subsystem. A "grant" is a
-  typed release handle used by exchange paths such as readback; surface handoff prefers
-  `SurfaceExchange` + `Transaction` + linear `Claim`.
+- An "exchange" is the mediated relationship with an external subsystem
+  (`SurfaceExchange`, `MemoryExchange`). Bind once into a scheme as a
+  `Transaction` / withdraw or deposit transaction; each submission may produce a
+  linear claim for externally settled handoffs (present, withdraw). Deposits
+  settle inside graph execution and do not publish claims.
 - All allocations and schemes are threaded through a "context".
 - There are two kinds of pools associated with a device: "retained" and "transient". These are shared across contexts.
 - We are refactoring in the direction of removing imperative APIs (like read_to_cpu) in favor of scheme submissions as the only way to affect property.

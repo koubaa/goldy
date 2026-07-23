@@ -1,9 +1,8 @@
-//! Retained scheme — the primary submission unit of the diwan machine.
+//! Retained scheme — goldy's primary submission unit.
 //!
-//! A [`Scheme`] is goldy's realization of the diwan scheme (spec §2): a set of dispatches
-//! and precedences, first-class, retained across submissions. Schemes persist across
-//! frames; structural mutation sets a COW dirty bit, and a clean scheme resubmits with
-//! zero recording cost.
+//! A [`Scheme`] is a set of dispatches and precedences, first-class, retained across
+//! submissions. Schemes persist across frames; structural mutation sets a COW dirty
+//! bit, and a clean scheme resubmits with zero recording cost.
 //!
 //! **Construction**: `Scheme::new(&ctx)` — bound to one context for its lifetime.
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
@@ -36,41 +35,40 @@ use crate::validation_env;
 use crate::Buffer;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Per-grant staging buffer pool with scheme-lifetime ownership.
+/// Per-withdraw staging buffer pool with scheme-lifetime ownership.
 ///
 /// Returned staging buffers are stamped with the submission timeline that must retire
 /// before reuse (`ready_after`). This matches transient-pool epoch gating: dropping a
 /// [`Submission`] without consuming does not require a CPU wait, but in-flight
 /// staging is not handed to a later submit until `gpu_progress` passes that stamp.
-enum GrantStagingAllocSpec {
+enum WithdrawStagingAllocSpec {
     Buffer { byte_size: u64 },
     Texture { layout: TextureCopyFootprint },
 }
 
-/// Staging buffer parked in a grant pool until its submission timeline retires.
+/// Staging buffer parked in a withdraw pool until its submission timeline retires.
 struct StampedStagingBuffer {
     handle: BufferHandle,
     ready_after: TimelineValue,
 }
 
-struct GrantStagingPool {
+pub(crate) struct WithdrawStagingPool {
     handles: Mutex<Vec<StampedStagingBuffer>>,
-    alloc_spec: GrantStagingAllocSpec,
+    alloc_spec: WithdrawStagingAllocSpec,
     ctx: Context,
     scheme_alive: AtomicBool,
 }
 
-impl GrantStagingPool {
+impl WithdrawStagingPool {
     fn new_buffer(ctx: &Context, byte_size: u64) -> Arc<Self> {
         Arc::new(Self {
             handles: Mutex::new(Vec::new()),
-            alloc_spec: GrantStagingAllocSpec::Buffer { byte_size },
+            alloc_spec: WithdrawStagingAllocSpec::Buffer { byte_size },
             ctx: ctx.clone(),
             scheme_alive: AtomicBool::new(true),
         })
@@ -79,7 +77,7 @@ impl GrantStagingPool {
     fn new_texture(ctx: &Context, layout: TextureCopyFootprint) -> Arc<Self> {
         Arc::new(Self {
             handles: Mutex::new(Vec::new()),
-            alloc_spec: GrantStagingAllocSpec::Texture { layout },
+            alloc_spec: WithdrawStagingAllocSpec::Texture { layout },
             ctx: ctx.clone(),
             scheme_alive: AtomicBool::new(true),
         })
@@ -99,13 +97,13 @@ impl GrantStagingPool {
                 .map(|pos| pool.swap_remove(pos).handle)
         };
         match self.alloc_spec {
-            GrantStagingAllocSpec::Buffer { byte_size } => {
+            WithdrawStagingAllocSpec::Buffer { byte_size } => {
                 if let Some(handle) = handle {
                     if validation_env::scheme_validation_enabled() {
                         let cap = backend.buffer_size(handle);
                         if cap < byte_size {
                             return Err(GoldyError::Backend(anyhow::anyhow!(
-                                "recycled grant staging buffer capacity {cap} is smaller than grant byte size {byte_size}"
+                                "recycled withdraw staging buffer capacity {cap} is smaller than withdraw byte size {byte_size}"
                             )));
                         }
                     }
@@ -116,13 +114,13 @@ impl GrantStagingPool {
                         .map_err(|e| self.ctx.classify(e))
                 }
             }
-            GrantStagingAllocSpec::Texture { layout } => {
+            WithdrawStagingAllocSpec::Texture { layout } => {
                 if let Some(handle) = handle {
                     if validation_env::scheme_validation_enabled() {
                         let cap = backend.buffer_size(handle);
                         if cap < layout.staging_bytes {
                             return Err(GoldyError::Backend(anyhow::anyhow!(
-                                "recycled texture grant staging capacity {cap} is smaller than required {}",
+                                "recycled texture withdraw staging capacity {cap} is smaller than required {}",
                                 layout.staging_bytes
                             )));
                         }
@@ -137,7 +135,7 @@ impl GrantStagingPool {
         }
     }
 
-    fn return_handle(&self, handle: BufferHandle, ready_after: TimelineValue) {
+    pub(crate) fn return_handle(&self, handle: BufferHandle, ready_after: TimelineValue) {
         if self.scheme_alive.load(Ordering::Acquire) {
             self.handles
                 .lock()
@@ -163,9 +161,9 @@ impl GrantStagingPool {
     }
 }
 
-impl fmt::Debug for GrantStagingPool {
+impl fmt::Debug for WithdrawStagingPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GrantStagingPool")
+        f.debug_struct("WithdrawStagingPool")
             .field("scheme_alive", &self.scheme_alive.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -206,13 +204,14 @@ impl From<SubmissionHandle> for TimelineValue {
     }
 }
 
-/// Dense index of a present/exchange claim slot on a [`Submission`].
+/// Dense index of an exchange claim slot on a [`Submission`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ClaimKey {
-    pub(crate) present_idx: u32,
+pub(crate) enum ClaimKey {
+    Present { present_idx: u32 },
+    Withdraw { withdraw_idx: u32 },
 }
 
-/// Stable erased relationship recorded in one [`Scheme`].
+/// Stable erased present relationship recorded in one [`Scheme`].
 ///
 /// Reusable across submissions. Extract each submission's product with [`Self::claim`].
 #[derive(Clone)]
@@ -241,32 +240,32 @@ impl fmt::Debug for Transaction {
 
 /// Unique receipt returned by [`Scheme::submit`].
 ///
-/// Owns untaken exchange claims and read-grant staging cells. Clone the
+/// Owns untaken exchange claims (present and withdraw). Clone the
 /// submission handle for timeline identity that must outlive claim extraction.
 /// Dropping this receipt discards every claim that has not been taken.
 pub struct Submission {
     handle: SubmissionHandle,
-    /// Per-grant staging buffer for this submission; taken by [`ReadGrant::consume`].
-    cells: Vec<Mutex<Option<BufferHandle>>>,
-    /// Per-grant pools; used to recycle or free unconsumed cells on drop.
-    staging_pools: Vec<Arc<GrantStagingPool>>,
-    /// Scheme-unique present binding id for each claim slot (parallel to [`Self::claims`]).
+    /// Present claim slots (parallel to [`Self::claim_bindings`] / generations).
+    present_claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
+    /// Scheme-unique present binding id for each present claim slot.
     claim_bindings: Vec<u32>,
-    /// Pool generation snapshotted when each claim's drawable was acquired.
+    /// Pool generation snapshotted when each present claim's drawable was acquired.
     claim_generations: Vec<u64>,
-    /// Erased exchange claims; taken by [`Transaction::claim`].
-    claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
+    /// Withdraw claim slots; taken by [`crate::exchange::WithdrawTransaction::claim`].
+    withdraw_claims: Vec<Mutex<Option<crate::exchange::WithdrawSlot>>>,
 }
 
 impl Drop for Submission {
     fn drop(&mut self) {
         let ready_after = self.handle.timeline_value();
-        for (cell, pool) in self.cells.iter().zip(self.staging_pools.iter()) {
-            if let Some(handle) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                pool.return_handle(handle, ready_after);
+        for claim_mutex in &self.withdraw_claims {
+            if let Ok(mut slot) = claim_mutex.lock() {
+                if let Some(withdraw) = slot.take() {
+                    withdraw.pool.return_handle(withdraw.staging, ready_after);
+                }
             }
         }
-        for claim_mutex in &self.claims {
+        for claim_mutex in &self.present_claims {
             if let Ok(mut slot) = claim_mutex.lock() {
                 if let Some(claim) = slot.take() {
                     claim.discard_best_effort();
@@ -281,9 +280,8 @@ impl fmt::Debug for Submission {
         f.debug_struct("Submission")
             .field("scheme_id", &self.handle.scheme_id())
             .field("timeline", &self.handle.timeline_value())
-            .field("cells", &self.cells.len())
-            .field("staging_pools", &self.staging_pools.len())
-            .field("claims", &self.claims.len())
+            .field("present_claims", &self.present_claims.len())
+            .field("withdraw_claims", &self.withdraw_claims.len())
             .finish()
     }
 }
@@ -305,7 +303,7 @@ impl Submission {
         self.handle.wait(ctx)
     }
 
-    pub(crate) fn take_claim(
+    pub(crate) fn take_present_claim(
         &mut self,
         scheme_id: u64,
         key: ClaimKey,
@@ -317,12 +315,17 @@ impl Submission {
                 "Transaction belongs to a different scheme than this submission"
             )));
         }
-        let idx = key.present_idx as usize;
+        let ClaimKey::Present { present_idx } = key else {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "present claim key required for surface transaction"
+            )));
+        };
+        let idx = present_idx as usize;
         let expected_binding = self.claim_bindings.get(idx).copied().ok_or_else(|| {
             GoldyError::Backend(anyhow::anyhow!(
                 "claim index {} out of range for submission ({} claims)",
                 idx,
-                self.claims.len()
+                self.present_claims.len()
             ))
         })?;
         if expected_binding != binding_id {
@@ -343,24 +346,52 @@ impl Submission {
                 "transaction generation {generation} is stale for claim published at generation {expected_generation}"
             )));
         }
-        let claim_mutex = self.claims.get(idx).ok_or_else(|| {
+        let claim_mutex = self.present_claims.get(idx).ok_or_else(|| {
             GoldyError::Backend(anyhow::anyhow!(
                 "claim index {} out of range for submission ({} claims)",
                 idx,
-                self.claims.len()
+                self.present_claims.len()
             ))
         })?;
         let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
         let implementation = slot
             .take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("claim already consumed for this submission")))?;
         Ok(crate::exchange::Claim::from_impl(implementation))
+    }
+
+    pub(crate) fn take_withdraw_claim(
+        &mut self,
+        scheme_id: u64,
+        key: ClaimKey,
+    ) -> Result<crate::exchange::WithdrawSlot, GoldyError> {
+        if self.handle.scheme_id() != scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "WithdrawTransaction belongs to a different scheme than this submission"
+            )));
+        }
+        let ClaimKey::Withdraw { withdraw_idx } = key else {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "withdraw claim key required for memory withdrawal"
+            )));
+        };
+        let idx = withdraw_idx as usize;
+        let claim_mutex = self.withdraw_claims.get(idx).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "withdraw index {} out of range for submission ({} withdrawals)",
+                idx,
+                self.withdraw_claims.len()
+            ))
+        })?;
+        let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        slot.take()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("withdraw claim already consumed for this submission")))
     }
 
     /// Submit timeline stamped on the acquired present frame, if still held.
     #[cfg(test)]
     pub(crate) fn present_frame_submit_timeline(&self, idx: usize) -> Option<TimelineValue> {
-        let claim_mutex = self.claims.get(idx)?;
+        let claim_mutex = self.present_claims.get(idx)?;
         let slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
         slot.as_ref()?.debug_submit_timeline()
     }
@@ -370,20 +401,6 @@ impl From<Submission> for TimelineValue {
     fn from(submission: Submission) -> Self {
         submission.timeline_value()
     }
-}
-
-/// A scheme easement — exclusive access to a resource recorded at topology time.
-///
-/// Call [`Grant::consume`] once per submission to revoke that submission's granted
-/// access and obtain the grant's product.
-pub trait Grant {
-    /// Product yielded when this grant's access is consumed for one submission.
-    type Output;
-    /// Consume the granted access for `submission`, yielding its product.
-    ///
-    /// `submission` must come from the same [`Scheme`] that recorded this grant.
-    /// Each submission may be consumed at most once per grant.
-    fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError>;
 }
 
 struct PresentBinding {
@@ -514,22 +531,7 @@ fn claim_present_easement_promises(
     resolvers
 }
 
-/// Stable index of a read-easement grant recorded in the scheme IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GrantId(pub(crate) u32);
-
-/// Marker type for buffer read grants.
-pub struct GrantBuffer;
-
-/// Marker type for texture read grants (v1: deed texture parcels, uncompressed formats).
-pub struct GrantTexture;
-
-enum GrantReadKind {
-    Buffer,
-    Texture(TextureCopyFootprint),
-}
-
-enum GrantSource {
+enum WithdrawSource {
     Buffer {
         source: BufferHandle,
         src_offset: u64,
@@ -545,115 +547,9 @@ enum GrantSource {
     },
 }
 
-struct GrantInfo {
-    source: GrantSource,
-    staging_pool: Arc<GrantStagingPool>,
-}
-
-/// CPU-readable bytes from a consumed read grant.
-///
-/// Dropping returns the staging buffer to the grant pool once the submission timeline retires.
-pub struct GrantBytes {
-    bytes: Vec<u8>,
-    handle: BufferHandle,
-    ready_after: TimelineValue,
-    return_pool: Arc<GrantStagingPool>,
-}
-
-impl fmt::Debug for GrantBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GrantBytes")
-            .field("len", &self.bytes.len())
-            .field("handle", &self.handle)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Deref for GrantBytes {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.bytes
-    }
-}
-
-impl Drop for GrantBytes {
-    fn drop(&mut self) {
-        self.return_pool.return_handle(self.handle, self.ready_after);
-    }
-}
-
-/// A read easement over a scheme parcel — recorded once via [`Scheme::grant_read`].
-///
-/// Obtain readable bytes for a submission by coordinating this handle with a
-/// [`Submission`] from the **same** [`Scheme`]: `grant.consume(&submission)`.
-pub struct ReadGrant<T> {
-    grant_id: GrantId,
-    scheme_id: u64,
-    ctx: Context,
-    byte_size: u64,
-    read_kind: GrantReadKind,
-    return_pool: Arc<GrantStagingPool>,
-    _marker: PhantomData<T>,
-}
-
-impl<T> ReadGrant<T> {
-    /// Logical byte size of readable data for this grant.
-    pub fn byte_size(&self) -> u64 {
-        self.byte_size
-    }
-}
-
-impl<T> Grant for ReadGrant<T> {
-    type Output = GrantBytes;
-
-    fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
-        if submission.handle.scheme_id() != self.scheme_id {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "ReadGrant belongs to a different scheme than this submission"
-            )));
-        }
-        submission.wait(&self.ctx)?;
-        let idx = self.grant_id.0 as usize;
-        if validation_env::scheme_validation_enabled() && idx >= submission.cells.len() {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "grant index {} out of range for submission ({} grants)",
-                idx,
-                submission.cells.len()
-            )));
-        }
-        let handle = submission
-            .cells
-            .get(idx)
-            .ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!(
-                    "grant index {} out of range for submission ({} grants)",
-                    idx,
-                    submission.cells.len()
-                ))
-            })?
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
-        let byte_size = usize::try_from(self.byte_size)
-            .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
-        let mut bytes = vec![0u8; byte_size];
-        let read_result = {
-            let backend = self.ctx.device().inner.backend.lock().unwrap();
-            match self.read_kind {
-                GrantReadKind::Buffer => backend.read_readback_buffer(handle, &mut bytes),
-                GrantReadKind::Texture(layout) => backend.read_texture_readback_staging(handle, layout, &mut bytes),
-            }
-        };
-        read_result.map_err(|e| self.ctx.classify(e))?;
-        Ok(GrantBytes {
-            bytes,
-            handle,
-            ready_after: submission.timeline_value(),
-            return_pool: Arc::clone(&self.return_pool),
-        })
-    }
+struct WithdrawInfo {
+    source: WithdrawSource,
+    staging_pool: Arc<WithdrawStagingPool>,
 }
 
 /// Stable index of a scheme-held lease declaration.
@@ -669,43 +565,16 @@ pub struct LeaseBuffer;
 /// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
 pub struct LeaseRenderTarget;
 
-/// Marker type for upload buffers declared via [`Scheme::declare_upload_buffer`].
-pub struct UploadBufferMarker;
-
-/// Stable index of a scheme-held upload-buffer declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UploadBufferId(pub(crate) u32);
-
-/// Logical CPU→GPU upload source owned by a [`Scheme`].
-///
-/// Record copy topology once with [`Scheme::copy_upload_buffer`] /
-/// [`Scheme::copy_upload_buffer_to_texture`]. Each frame, call
-/// [`Scheme::stage_upload_buffer`] to select a settled (or freshly allocated)
-/// `CPU_WRITABLE` parcel, write bytes immediately, and bind that parcel for the
-/// next [`Scheme::submit`]. Pool depth grows with GPU backlog — never waits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UploadBuffer {
-    pub(crate) id: UploadBufferId,
-    _marker: PhantomData<UploadBufferMarker>,
-}
-
-impl UploadBuffer {
-    /// Stable declaration index within the owning [`Scheme`].
-    pub fn id(&self) -> u32 {
-        self.id.0
-    }
-}
-
-/// Epoch-gated pool of physical staging parcels for one logical [`UploadBuffer`].
-struct UploadBufferPool {
+/// Epoch-gated pool of physical staging parcels for one logical deposit.
+struct DepositPool {
     size: u64,
     /// All physical parcels kept alive for retained CB variants.
     parcels: Vec<Parcel>,
-    /// Parcel selected for the next submit (`None` until [`Scheme::stage_upload_buffer`]).
+    /// Parcel selected for the next submit (`None` until [`DepositTransaction::write`](crate::exchange::DepositTransaction::write)).
     pending: Option<usize>,
 }
 
-impl UploadBufferPool {
+impl DepositPool {
     fn new(size: u64) -> Self {
         Self {
             size,
@@ -742,7 +611,7 @@ impl UploadBufferPool {
     fn stage(&mut self, ctx: &Context, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
         if offset.saturating_add(data.len() as u64) > self.size {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "stage_upload_buffer: write [{offset}..{}] exceeds declaration size {}",
+                "deposit write: [{offset}..{}] exceeds declaration size {}",
                 offset + data.len() as u64,
                 self.size
             )));
@@ -754,11 +623,11 @@ impl UploadBufferPool {
         Ok(())
     }
 
-    fn resolve_pending(&self) -> Option<crate::task_graph::ResolvedUploadBuffer> {
+    fn resolve_pending(&self) -> Option<crate::task_graph::ResolvedDeposit> {
         let idx = self.pending?;
         let parcel = &self.parcels[idx];
-        let parent = parcel.buffer_handle().expect("upload buffer parcels are whole buffers");
-        Some(crate::task_graph::ResolvedUploadBuffer {
+        let parent = parcel.buffer_handle().expect("deposit parcels are whole buffers");
+        Some(crate::task_graph::ResolvedDeposit {
             parent,
             offset: 0,
             len: parcel.byte_size(),
@@ -816,8 +685,8 @@ pub struct Scheme {
     leases: Vec<Parcel>,
     /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
     rt_leases: Vec<RenderTarget>,
-    /// Epoch-gated CPU-writable staging pools for [`UploadBuffer`] declarations.
-    upload_buffers: Vec<UploadBufferPool>,
+    /// Epoch-gated CPU-writable staging pools for deposit declarations.
+    deposits: Vec<DepositPool>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
@@ -825,11 +694,11 @@ pub struct Scheme {
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     stats: ReplayStats,
-    next_grant_id: u32,
-    /// Process-unique identity for cross-scheme [`Submission`] / [`ReadGrant`] pairing.
+    next_withdraw_id: u32,
+    /// Process-unique identity for cross-scheme [`Submission`] / withdraw pairing.
     scheme_id: u64,
-    /// Read-easement grants: N-backed staging per submission.
-    grants: Vec<GrantInfo>,
+    /// Memory withdrawals: N-backed staging per submission.
+    withdraws: Vec<WithdrawInfo>,
     /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
     present_bindings: Vec<PresentBinding>,
     /// Registered present exchanges: one claim slot per transaction, keyed by dense present_idx.
@@ -845,17 +714,22 @@ impl Scheme {
             ctx: ctx.clone(),
             leases: Vec::new(),
             rt_leases: Vec::new(),
-            upload_buffers: Vec::new(),
+            deposits: Vec::new(),
             dirty: true,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
-            next_grant_id: 0,
+            next_withdraw_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
-            grants: Vec::new(),
+            withdraws: Vec::new(),
             present_bindings: Vec::new(),
             present_transactions: Vec::new(),
         }
+    }
+
+    /// Context this scheme submits on.
+    pub fn context(&self) -> &Context {
+        &self.ctx
     }
 
     /// True when the next [`Self::submit`] must re-record.
@@ -964,75 +838,36 @@ impl Scheme {
         Ok(())
     }
 
-    /// Declare a logical upload buffer backed by an epoch-gated `CPU_WRITABLE` parcel pool.
-    ///
-    /// Structural mutation. Physical parcels are selected by [`Self::stage_upload_buffer`]
-    /// and rebound at submit; retained command buffers key variants by the selected handle.
-    pub fn declare_upload_buffer(&mut self, size: u64) -> Result<UploadBuffer, GoldyError> {
-        if size == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "declare_upload_buffer requires non-zero size"
-            )));
-        }
-        self.dirty = true;
-        let id = UploadBufferId(u32::try_from(self.upload_buffers.len()).expect("upload buffer id overflow"));
-        self.upload_buffers.push(UploadBufferPool::new(size));
-        Ok(UploadBuffer {
-            id,
-            _marker: PhantomData,
-        })
-    }
-
-    /// Write `data` into a settled (or newly allocated) physical staging parcel for `buf`.
-    ///
-    /// Never waits: if every prior parcel is still in flight, allocates another from the
-    /// context transient pool. Must be called before [`Self::submit`] for every upload
-    /// buffer referenced by the scheme's copy topology this frame.
-    pub fn stage_upload_buffer(&mut self, buf: &UploadBuffer, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
-        let pool = self
-            .upload_buffers
-            .get_mut(buf.id.0 as usize)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("stage_upload_buffer: unknown upload buffer")))?;
-        pool.stage(&self.ctx, offset, data)
-    }
-
-    /// Record a GPU copy from a logical [`UploadBuffer`] into a destination buffer parcel.
-    ///
-    /// Topology is retained; physical source handles rebind each submit from the parcel
-    /// selected by [`Self::stage_upload_buffer`].
-    pub fn copy_upload_buffer(
+    /// Register a destination-bound buffer deposit (called by [`crate::MemoryExchange`]).
+    pub(crate) fn register_deposit_buffer(
         &mut self,
-        src: &UploadBuffer,
-        src_offset: u64,
-        dst: &Parcel,
-        dst_offset: u64,
-        size: u64,
-    ) -> Result<(), GoldyError> {
-        self.dirty = true;
-        let pool = self
-            .upload_buffers
-            .get(src.id.0 as usize)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer: unknown upload buffer")))?;
-        if src_offset.saturating_add(size) > pool.size {
+        destination: &Parcel,
+        capacity: u64,
+    ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
+        if capacity == 0 {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_upload_buffer: copy range exceeds upload buffer size"
+                "bind_deposit_buffer requires non-zero capacity"
             )));
         }
-        let dst_resource = dst.resource_id();
+        self.dirty = true;
+        let dst_resource = destination.resource_id();
         if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_upload_buffer requires a buffer parcel destination"
+                "bind_deposit_buffer requires a buffer parcel destination"
             )));
         }
-        self.submit_state.register_parcel_stamp(dst);
-        let src_resource = ResourceId::UploadBuffer(src.id.0);
-        let dst_access = if dst_offset == 0 && size == dst.byte_size() {
+        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
+        self.deposits.push(DepositPool::new(capacity));
+        self.submit_state.register_parcel_stamp(destination);
+        let src_resource = ResourceId::Deposit(deposit_id);
+        let copy_size = capacity.min(destination.byte_size());
+        let dst_access = if destination.source_offset() == 0 && copy_size == destination.byte_size() {
             NodeAccess::Overwrite
         } else {
             NodeAccess::Write
         };
         self.ir.nodes.push(TaskNode {
-            label: "copy_upload_buffer",
+            label: "deposit_buffer",
             bindings: vec![
                 ResourceBinding {
                     resource: src_resource,
@@ -1045,50 +880,52 @@ impl Scheme {
             ],
             kind: NodeKind::CopyBuffer {
                 src: src_resource,
-                src_offset,
+                src_offset: 0,
                 dst: dst_resource,
-                dst_offset,
-                size,
+                dst_offset: destination.source_offset(),
+                size: copy_size,
             },
         });
-        Ok(())
+        Ok(crate::exchange::DepositTransaction {
+            scheme_id: self.scheme_id,
+            deposit_id,
+            capacity,
+        })
     }
 
-    /// Record a GPU copy from a logical [`UploadBuffer`] into a texture.
-    ///
-    /// Prefer a non-zero `src_row_pitch` (device footprint pitch) so the partition remains
-    /// retainable without backend repacking.
+    /// Register a destination-bound texture-region deposit (called by [`crate::MemoryExchange`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn copy_upload_buffer_to_texture(
+    pub(crate) fn register_deposit_texture(
         &mut self,
-        src: &UploadBuffer,
-        src_offset: u64,
-        src_row_pitch: u32,
-        dst: &crate::Texture,
+        destination: &crate::Texture,
         x: u32,
         y: u32,
         width: u32,
         height: u32,
-    ) -> Result<(), GoldyError> {
+        capacity: u64,
+        src_row_pitch: u32,
+    ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
+        if capacity == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "bind_deposit_texture requires non-zero capacity"
+            )));
+        }
         self.dirty = true;
-        let pool = self.upload_buffers.get(src.id.0 as usize).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: unknown upload buffer"))
-        })?;
         let x_end = x
             .checked_add(width)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: x+width overflow")))?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: x+width overflow")))?;
         let y_end = y
             .checked_add(height)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_upload_buffer_to_texture: y+height overflow")))?;
-        if x_end > dst.width() || y_end > dst.height() {
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: y+height overflow")))?;
+        if x_end > destination.width() || y_end > destination.height() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_upload_buffer_to_texture: {}x{} at ({},{}) exceeds {}x{} texture",
+                "bind_deposit_texture: {}x{} at ({},{}) exceeds {}x{} texture",
                 width,
                 height,
                 x,
                 y,
-                dst.width(),
-                dst.height()
+                destination.width(),
+                destination.height()
             )));
         }
         let min_bytes = if src_row_pitch == 0 {
@@ -1096,20 +933,22 @@ impl Scheme {
         } else {
             (src_row_pitch as u64) * (height as u64)
         };
-        if src_offset.saturating_add(min_bytes) > pool.size {
+        if min_bytes > capacity {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_upload_buffer_to_texture: copy range exceeds upload buffer size"
+                "bind_deposit_texture: copy range exceeds deposit capacity"
             )));
         }
-        let th = dst.gpu_handle();
-        let src_resource = ResourceId::UploadBuffer(src.id.0);
-        let dst_access = if x == 0 && y == 0 && width == dst.width() && height == dst.height() {
+        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
+        self.deposits.push(DepositPool::new(capacity));
+        let th = destination.gpu_handle();
+        let src_resource = ResourceId::Deposit(deposit_id);
+        let dst_access = if x == 0 && y == 0 && width == destination.width() && height == destination.height() {
             NodeAccess::Overwrite
         } else {
             NodeAccess::Write
         };
         self.ir.nodes.push(TaskNode {
-            label: "copy_upload_buffer_to_texture",
+            label: "deposit_texture",
             bindings: vec![
                 ResourceBinding {
                     resource: src_resource,
@@ -1122,7 +961,7 @@ impl Scheme {
             ],
             kind: NodeKind::CopyBufferToTexture {
                 src: src_resource,
-                src_offset,
+                src_offset: 0,
                 src_row_pitch,
                 dst: th,
                 x,
@@ -1131,7 +970,31 @@ impl Scheme {
                 height,
             },
         });
-        Ok(())
+        Ok(crate::exchange::DepositTransaction {
+            scheme_id: self.scheme_id,
+            deposit_id,
+            capacity,
+        })
+    }
+
+    /// Stage bytes for a deposit transaction (called by [`crate::exchange::DepositTransaction::write`]).
+    pub(crate) fn stage_deposit(
+        &mut self,
+        scheme_id: u64,
+        deposit_id: u32,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), GoldyError> {
+        if scheme_id != self.scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "DepositTransaction belongs to a different scheme"
+            )));
+        }
+        let pool = self
+            .deposits
+            .get_mut(deposit_id as usize)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("deposit write: unknown deposit {deposit_id}")))?;
+        pool.stage(&self.ctx, offset, data)
     }
 
     /// Append a CPU-writable buffer → texture copy node (identity only; no bytes in IR).
@@ -1647,7 +1510,7 @@ impl Scheme {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             let ir_clean = !structurally_dirty && !topo_dirty;
             let had_replay = self.submit_state.has_cb_replay();
-            let upload_resolutions = self.resolve_upload_buffers_for_submit()?;
+            let deposit_resolutions = self.resolve_deposits_for_submit()?;
             let mut partial = crate::task_graph::PartitionSubmitResult::default();
             let mut partial_tv = self.ctx.gpu_progress();
             let result = {
@@ -1686,7 +1549,7 @@ impl Scheme {
                     &self.ir,
                     &mut present_slots,
                     deferred,
-                    &upload_resolutions,
+                    &deposit_resolutions,
                     ir_clean,
                     &mut partial,
                     &mut partial_tv,
@@ -1713,11 +1576,11 @@ impl Scheme {
             }
         };
 
-        // Stamp selected upload parcels with the submit timeline so they cannot be
+        // Stamp selected deposit parcels with the submit timeline so they cannot be
         // reselected until the GPU copy retires.
         {
             let ctx_h = self.ctx.backend_handle();
-            for pool in &mut self.upload_buffers {
+            for pool in &mut self.deposits {
                 pool.stamp_pending(ctx_h, tv);
             }
         }
@@ -1871,17 +1734,17 @@ impl Scheme {
     ) -> Result<Submission, GoldyError> {
         // Resolve source WAR from the known copy/present-partition timeline immediately.
         // Claim consumption waits for presentation independently; it must not gate source reuse.
-        let mut claims = Vec::with_capacity(present_frames.len());
+        let mut present_claims = Vec::with_capacity(present_frames.len());
         let claim_bindings: Vec<u32> = self.present_transactions.iter().map(|g| g.binding_id).collect();
         debug_assert_eq!(
             claim_bindings.len(),
             present_frames.len(),
-            "present grant count must match acquired frames"
+            "present transaction count must match acquired frames"
         );
         debug_assert_eq!(
             claim_bindings.len(),
             claim_generations.len(),
-            "present grant count must match claim generations"
+            "present transaction count must match claim generations"
         );
         for (frame_mutex, resolver_mutex) in present_frames.into_iter().zip(present_resolvers) {
             let frame = frame_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -1895,10 +1758,10 @@ impl Scheme {
             }
             let claim = frame
                 .map(|f| Box::new(crate::exchange::SurfaceClaimImpl::new(f)) as Box<dyn crate::exchange::ClaimImpl>);
-            claims.push(Mutex::new(claim));
+            present_claims.push(Mutex::new(claim));
         }
 
-        if self.grants.is_empty() {
+        if self.withdraws.is_empty() {
             return Ok(Submission {
                 handle: SubmissionHandle {
                     core: Arc::new(SubmissionCore {
@@ -1906,34 +1769,32 @@ impl Scheme {
                         timeline: tv_dispatch,
                     }),
                 },
-                cells: Vec::new(),
-                staging_pools: Vec::new(),
+                present_claims,
                 claim_bindings,
                 claim_generations,
-                claims,
+                withdraw_claims: Vec::new(),
             });
         }
 
         let device = self.ctx.device().inner.handle;
-        let mut copy_cmds = Vec::with_capacity(self.grants.len());
-        let mut cells = Vec::with_capacity(self.grants.len());
-        let mut staging_pools = Vec::with_capacity(self.grants.len());
-        let mut staging_handles = Vec::with_capacity(self.grants.len());
+        let mut copy_cmds = Vec::with_capacity(self.withdraws.len());
+        let mut withdraw_claims = Vec::with_capacity(self.withdraws.len());
+        let mut staging_handles = Vec::with_capacity(self.withdraws.len());
 
         {
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
-            for grant in &self.grants {
-                let staging = grant.staging_pool.take_or_alloc(&mut **backend, device)?;
+            for withdraw in &self.withdraws {
+                let staging = withdraw.staging_pool.take_or_alloc(&mut **backend, device)?;
                 if validation_env::scheme_validation_enabled() {
                     if staging_handles.contains(&staging) {
                         return Err(GoldyError::Backend(anyhow::anyhow!(
-                            "duplicate grant staging buffer handle in one submission"
+                            "duplicate withdraw staging buffer handle in one submission"
                         )));
                     }
                     staging_handles.push(staging);
                 }
-                match &grant.source {
-                    GrantSource::Buffer {
+                match &withdraw.source {
+                    WithdrawSource::Buffer {
                         source,
                         src_offset,
                         byte_size,
@@ -1947,7 +1808,7 @@ impl Scheme {
                             size: *byte_size,
                         });
                     }
-                    GrantSource::Texture { source, layout, .. } => {
+                    WithdrawSource::Texture { source, layout, .. } => {
                         copy_cmds.push(GpuCommand::CopyTextureToReadback {
                             src: *source,
                             dst: staging,
@@ -1955,14 +1816,15 @@ impl Scheme {
                         });
                     }
                 }
-                cells.push(Mutex::new(Some(staging)));
-                staging_pools.push(Arc::clone(&grant.staging_pool));
+                withdraw_claims.push(Mutex::new(Some(crate::exchange::WithdrawSlot {
+                    staging,
+                    pool: Arc::clone(&withdraw.staging_pool),
+                })));
             }
         }
 
         if validation_env::scheme_validation_enabled() {
-            debug_assert_eq!(cells.len(), self.grants.len());
-            debug_assert_eq!(staging_pools.len(), self.grants.len());
+            debug_assert_eq!(withdraw_claims.len(), self.withdraws.len());
         }
 
         let tv_copy = {
@@ -1981,11 +1843,10 @@ impl Scheme {
                     timeline: tv_copy,
                 }),
             },
-            cells,
-            staging_pools,
+            present_claims,
             claim_bindings,
             claim_generations,
-            claims,
+            withdraw_claims,
         })
     }
 
@@ -2045,7 +1906,7 @@ impl Scheme {
         };
         Transaction {
             scheme_id: self.scheme_id,
-            key: ClaimKey { present_idx },
+            key: ClaimKey::Present { present_idx },
             binding_id,
             generation,
         }
@@ -2111,7 +1972,7 @@ impl Scheme {
     }
 
     /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
-    /// [`Self::grant_read_texture`]).
+    /// [`crate::MemoryExchange::bind_withdraw`]).
     ///
     /// The destination must be a texture parcel with [`TextureFlags::COPY_DST`], homed on
     /// this scheme's context, and matching the render target's width, height, and format.
@@ -2243,47 +2104,46 @@ impl Scheme {
         })
     }
 
-    /// Resolve pending upload-buffer stages into concrete handles for this submit.
-    fn resolve_upload_buffers_for_submit(
+    /// Resolve pending deposit stages into concrete handles for this submit.
+    fn resolve_deposits_for_submit(
         &self,
-    ) -> Result<std::collections::HashMap<u32, crate::task_graph::ResolvedUploadBuffer>, GoldyError> {
+    ) -> Result<std::collections::HashMap<u32, crate::task_graph::ResolvedDeposit>, GoldyError> {
         let mut out = std::collections::HashMap::new();
         let mut referenced = std::collections::HashSet::new();
         for node in &self.ir.nodes {
             for b in &node.bindings {
-                if let ResourceId::UploadBuffer(id) = b.resource {
+                if let ResourceId::Deposit(id) = b.resource {
                     referenced.insert(id);
                 }
             }
         }
         for id in referenced {
-            let pool = self.upload_buffers.get(id as usize).ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown UploadBuffer({id})"))
-            })?;
+            let pool = self
+                .deposits
+                .get(id as usize)
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
             let resolved = pool.resolve_pending().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!(
-                    "submit: UploadBuffer({id}) was not staged before submit"
-                ))
+                GoldyError::Backend(anyhow::anyhow!("submit: Deposit({id}) was not written before submit"))
             })?;
             out.insert(id, resolved);
         }
         Ok(out)
     }
 
-    /// Test/telemetry: number of physical parcels owned by upload buffer `id`.
+    /// Test/telemetry: number of physical parcels owned by deposit `id`.
     #[doc(hidden)]
-    pub fn upload_buffer_parcel_count(&self, buf: &UploadBuffer) -> usize {
-        self.upload_buffers
-            .get(buf.id.0 as usize)
+    pub fn deposit_parcel_count(&self, deposit: &crate::exchange::DepositTransaction) -> usize {
+        self.deposits
+            .get(deposit.deposit_id as usize)
             .map(|p| p.parcels.len())
             .unwrap_or(0)
     }
 
-    /// Test helper: mark the first physical upload parcel as still in flight at `tv`.
+    /// Test helper: mark the first physical deposit parcel as still in flight at `tv`.
     #[doc(hidden)]
-    pub fn test_mark_upload_inflight(&mut self, buf: &UploadBuffer, tv: TimelineValue) {
+    pub fn test_mark_deposit_inflight(&mut self, deposit: &crate::exchange::DepositTransaction, tv: TimelineValue) {
         let ctx = self.ctx.backend_handle();
-        let pool = &mut self.upload_buffers[buf.id.0 as usize];
+        let pool = &mut self.deposits[deposit.deposit_id as usize];
         pool.pending = None;
         if let Some(parcel) = pool.parcels.first() {
             parcel.mark_referenced(ctx, tv);
@@ -2305,8 +2165,8 @@ impl Scheme {
 
 impl Drop for Scheme {
     fn drop(&mut self) {
-        for grant in &self.grants {
-            grant.staging_pool.mark_scheme_dropped_and_drain();
+        for withdraw in &self.withdraws {
+            withdraw.staging_pool.mark_scheme_dropped_and_drain();
         }
 
         use crate::task_graph::cross_submit::clear_scheme_topology_registration;
@@ -2319,7 +2179,7 @@ impl Drop for Scheme {
         self.submit_state.release_backend_retained_graphs(&self.ctx);
 
         let ctx = self.ctx.clone();
-        for pool in std::mem::take(&mut self.upload_buffers) {
+        for pool in std::mem::take(&mut self.deposits) {
             pool.return_all(&ctx);
         }
         for mut parcel in self.leases.drain(..) {
@@ -2343,14 +2203,13 @@ impl Drop for Scheme {
 }
 
 impl Scheme {
-    /// Record a read easement grant over a buffer deed parcel.
+    /// Register a memory withdrawal over a buffer or texture deed parcel.
     ///
-    /// Returns a stable [`ReadGrant`] handle; call [`ReadGrant::consume`] with a
-    /// [`Submission`] from [`Self::submit`] to obtain that submission's bytes.
-    /// Record after the producing dispatch node(s). The parcel's backing buffer is
-    /// retained for the scheme's lifetime so resubmits remain valid after the
-    /// [`Parcel`] is dropped.
-    pub fn grant_read(&mut self, parcel: &Parcel) -> Result<ReadGrant<GrantBuffer>, GoldyError> {
+    /// Called by [`crate::MemoryExchange::bind_withdraw`].
+    pub(crate) fn register_withdraw(
+        &mut self,
+        parcel: &Parcel,
+    ) -> Result<crate::exchange::WithdrawTransaction, GoldyError> {
         self.dirty = true;
         self.submit_state.register_parcel_stamp(parcel);
         if !parcel.is_homed_on(&self.ctx) {
@@ -2358,124 +2217,102 @@ impl Scheme {
                 "parcel home device does not match scheme context"
             )));
         }
-        let source_backing = parcel.grant_buffer_keepalive().map_err(|e| self.ctx.classify(e))?;
-        let source = parcel
-            .buffer_handle()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read requires buffer parcel")))?;
-        let byte_size = parcel.byte_size();
-        if byte_size == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "grant_read requires non-zero buffer byte size"
-            )));
-        }
-        // `ir_grant_id` is unique within the IR for fingerprinting; `read_idx` is the
-        // dense index into `cells` built by iterating `grants` at submit time.
-        let ir_grant_id = self.next_grant_id;
-        self.next_grant_id += 1;
-        let read_idx = GrantId(self.grants.len() as u32);
-        let staging_pool = GrantStagingPool::new_buffer(&self.ctx, byte_size);
-        self.grants.push(GrantInfo {
-            source: GrantSource::Buffer {
-                source,
-                src_offset: parcel.source_offset(),
-                source_backing,
-                byte_size,
-            },
-            staging_pool: Arc::clone(&staging_pool),
-        });
-        let resource = parcel.resource_id();
-        self.ir.nodes.push(TaskNode {
-            label: "grant_read",
-            bindings: vec![ResourceBinding {
-                resource,
-                access: NodeAccess::Read,
-            }],
-            kind: NodeKind::GrantRead { grant_id: ir_grant_id },
-        });
-        Ok(ReadGrant {
-            grant_id: read_idx,
-            scheme_id: self.scheme_id,
-            ctx: self.ctx.clone(),
-            byte_size,
-            read_kind: GrantReadKind::Buffer,
-            return_pool: staging_pool,
-            _marker: PhantomData,
-        })
-    }
 
-    /// Record a read easement grant over a texture deed parcel.
-    ///
-    /// The texture must have been created with [`TextureFlags::COPY_SRC`].
-    /// v1 supports uncompressed 2D formats only.
-    pub fn grant_read_texture(&mut self, parcel: &Parcel) -> Result<ReadGrant<GrantTexture>, GoldyError> {
-        self.dirty = true;
-        self.submit_state.register_parcel_stamp(parcel);
-        if !parcel.is_homed_on(&self.ctx) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "parcel home device does not match scheme context"
-            )));
-        }
-        let source_backing = parcel.grant_texture_keepalive().map_err(|e| self.ctx.classify(e))?;
-        let source = parcel
-            .texture_handle()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read_texture requires texture parcel")))?;
-        let (width, height, format, access, flags) = parcel
-            .texture_descriptor()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read_texture requires texture parcel")))?;
-        if !flags.contains(TextureFlags::COPY_SRC) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "grant_read_texture requires TextureFlags::COPY_SRC"
-            )));
-        }
-        // v1: only storage-writable textures (Direct / DirectInterpolated) are valid sources;
-        // Interpolated (sampled-only) textures cannot be written by a compute shader.
-        if matches!(access, TextureKind::Interpolated) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "grant_read_texture requires a storage-writable texture (TextureKind::Direct or DirectInterpolated); \
-                 TextureKind::Interpolated is sampled-only and cannot be a compute output"
-            )));
-        }
-        if width == 0 || height == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "grant_read_texture requires non-zero texture dimensions"
-            )));
-        }
-        let layout = {
-            let query_result = {
-                let backend = self.ctx.device().inner.backend.lock().unwrap();
-                backend.query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
+        let (source, byte_size, read_kind, staging_pool) = if parcel.buffer_handle().is_some() {
+            let source_backing = parcel.grant_buffer_keepalive().map_err(|e| self.ctx.classify(e))?;
+            let source = parcel.buffer_handle().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("bind_withdraw requires buffer or texture parcel"))
+            })?;
+            let byte_size = parcel.byte_size();
+            if byte_size == 0 {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "bind_withdraw requires non-zero buffer byte size"
+                )));
+            }
+            let staging_pool = WithdrawStagingPool::new_buffer(&self.ctx, byte_size);
+            (
+                WithdrawSource::Buffer {
+                    source,
+                    src_offset: parcel.source_offset(),
+                    source_backing,
+                    byte_size,
+                },
+                byte_size,
+                crate::exchange::WithdrawReadKind::Buffer,
+                staging_pool,
+            )
+        } else if parcel.texture_handle().is_some() {
+            let source_backing = parcel.grant_texture_keepalive().map_err(|e| self.ctx.classify(e))?;
+            let source = parcel.texture_handle().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("bind_withdraw requires buffer or texture parcel"))
+            })?;
+            let (width, height, format, access, flags) = parcel.texture_descriptor().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("bind_withdraw requires buffer or texture parcel"))
+            })?;
+            if !flags.contains(TextureFlags::COPY_SRC) {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "bind_withdraw texture requires TextureFlags::COPY_SRC"
+                )));
+            }
+            if matches!(access, TextureKind::Interpolated) {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "bind_withdraw texture requires a storage-writable texture (TextureKind::Direct or DirectInterpolated); \
+                     TextureKind::Interpolated is sampled-only and cannot be a compute output"
+                )));
+            }
+            if width == 0 || height == 0 {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "bind_withdraw texture requires non-zero texture dimensions"
+                )));
+            }
+            let layout = {
+                let query_result = {
+                    let backend = self.ctx.device().inner.backend.lock().unwrap();
+                    backend.query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
+                };
+                query_result.map_err(|e| self.ctx.classify(e))?
             };
-            query_result.map_err(|e| self.ctx.classify(e))?
+            let staging_pool = WithdrawStagingPool::new_texture(&self.ctx, layout);
+            (
+                WithdrawSource::Texture {
+                    source,
+                    source_backing,
+                    layout,
+                },
+                layout.logical_bytes,
+                crate::exchange::WithdrawReadKind::Texture(layout),
+                staging_pool,
+            )
+        } else {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "bind_withdraw requires buffer or texture parcel"
+            )));
         };
-        let ir_grant_id = self.next_grant_id;
-        self.next_grant_id += 1;
-        let read_idx = GrantId(self.grants.len() as u32);
-        let staging_pool = GrantStagingPool::new_texture(&self.ctx, layout);
-        self.grants.push(GrantInfo {
-            source: GrantSource::Texture {
-                source,
-                source_backing,
-                layout,
-            },
+
+        let ir_withdraw_id = self.next_withdraw_id;
+        self.next_withdraw_id += 1;
+        let withdraw_idx = self.withdraws.len() as u32;
+        self.withdraws.push(WithdrawInfo {
+            source,
             staging_pool: Arc::clone(&staging_pool),
         });
         let resource = parcel.resource_id();
         self.ir.nodes.push(TaskNode {
-            label: "grant_read",
+            label: "withdraw",
             bindings: vec![ResourceBinding {
                 resource,
                 access: NodeAccess::Read,
             }],
-            kind: NodeKind::GrantRead { grant_id: ir_grant_id },
+            kind: NodeKind::WithdrawRead {
+                withdraw_id: ir_withdraw_id,
+            },
         });
-        Ok(ReadGrant {
-            grant_id: read_idx,
+        Ok(crate::exchange::WithdrawTransaction {
             scheme_id: self.scheme_id,
+            key: ClaimKey::Withdraw { withdraw_idx },
+            byte_size,
+            read_kind,
             ctx: self.ctx.clone(),
-            byte_size: layout.logical_bytes,
-            read_kind: GrantReadKind::Texture(layout),
-            return_pool: staging_pool,
-            _marker: PhantomData,
         })
     }
 
@@ -3098,6 +2935,7 @@ mod tests {
     use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
     use crate::BufferKind;
+    use crate::MemoryExchange;
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -3371,7 +3209,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
-        let frame = scheme.submit().unwrap();
+        let mut frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
         assert_eq!(TimelineValue::from(frame.handle()), tv);
@@ -3384,7 +3222,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
-        let frame = scheme.submit().unwrap();
+        let mut frame = scheme.submit().unwrap();
         frame.wait(&ctx).unwrap();
         assert!(ctx.gpu_progress() >= frame.timeline_value());
     }
@@ -3395,10 +3233,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
-        let frame = scheme.submit().unwrap();
+        let mut frame = scheme.submit().unwrap();
         assert!(frame.timeline_value() > 0, "submit must return a frame token");
         // Non-blocking: a second submit must succeed without waiting on the first frame.
-        let frame2 = scheme.submit().unwrap();
+        let mut frame2 = scheme.submit().unwrap();
         assert!(frame2.timeline_value() >= frame.timeline_value());
         frame2.wait(&ctx).unwrap();
     }
@@ -3418,13 +3256,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let frame1 = scheme.submit().unwrap();
+        let mut frame1 = scheme.submit().unwrap();
         assert_eq!(
             parcel.last_referenced_on(ctx.backend_handle()),
             Some(frame1.timeline_value())
         );
 
-        let frame2 = scheme.submit().unwrap();
+        let mut frame2 = scheme.submit().unwrap();
         assert!(
             frame2.timeline_value() >= frame1.timeline_value(),
             "timeline must be monotonic"
@@ -3460,13 +3298,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
-        let frame1 = scheme.submit().unwrap();
+        let mut frame1 = scheme.submit().unwrap();
         assert_eq!(
             scheme.leases[0].last_referenced_on(ctx.backend_handle()),
             Some(frame1.timeline_value())
         );
 
-        let frame2 = scheme.submit().unwrap();
+        let mut frame2 = scheme.submit().unwrap();
         assert!(frame2.timeline_value() >= frame1.timeline_value());
         assert_eq!(
             scheme.leases[0].last_referenced_on(ctx.backend_handle()),
@@ -3513,32 +3351,36 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_appends_ir_node() {
+    fn withdraw_appends_ir_node() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
         assert_eq!(scheme.ir_node_count(), 1);
 
-        let _grant = scheme.grant_read(&parcel).expect("grant_read");
+        let _grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
         assert_eq!(scheme.ir_node_count(), 2);
-        assert!(scheme.is_dirty(), "grant_read is structural");
+        assert!(scheme.is_dirty(), "withdraw is structural");
 
         match &scheme.ir.nodes[1].kind {
-            NodeKind::GrantRead { grant_id: 0 } => {}
+            NodeKind::WithdrawRead { withdraw_id: 0 } => {}
             other => panic!("expected GrantRead node, got {other:?}"),
         }
     }
 
     #[test]
-    fn grant_read_orders_after_writer() {
+    fn withdraw_orders_after_writer() {
         use crate::task_graph::analysis;
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-        let _grant = scheme.grant_read(&parcel).expect("grant_read");
+        let _grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
 
         let edges = analysis::build_edges(&scheme.ir);
         assert!(
@@ -3554,7 +3396,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-        let _grant = scheme.grant_read(&parcel).expect("grant_read");
+        let _grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
 
         scheme.submit().expect("first submit records");
         scheme.submit().expect("second submit resubmits");
@@ -3570,28 +3414,36 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_survives_parcel_drop() {
+    fn withdraw_survives_parcel_drop() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-        let grant = scheme.grant_read(&parcel).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
         drop(parcel);
         drop(pool);
 
-        let loan = grant.consume(&frame).expect("read after parcel drop");
+        let loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("read after parcel drop");
         assert_eq!(loan.len(), 32, "reads full logical buffer size");
     }
 
     #[test]
-    fn grant_read_resubmit_after_parcel_drop() {
+    fn withdraw_resubmit_after_parcel_drop() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-        let grant = scheme.grant_read(&parcel).expect("grant_read");
-        let frame1 = scheme.submit().expect("submit 1");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
+        let mut frame1 = scheme.submit().expect("submit 1");
         drop(parcel);
         drop(pool);
         // Retained ownership outranks the scheme: dropping the bound buffer kills its stamp.
@@ -3599,7 +3451,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             matches!(scheme.submit(), Err(GoldyError::StaleResource)),
             "resubmit after dropping a bound retained buffer must fail"
         );
-        let loan1 = grant.consume(&frame1).expect("read frame1 after parcel drop");
+        let loan1 = grant
+            .claim(&mut frame1)
+            .expect("claim")
+            .consume()
+            .expect("read frame1 after parcel drop");
         assert_eq!(loan1.len(), 32);
     }
 
@@ -3725,7 +3581,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_concurrent_frames_succeed() {
+    fn withdraw_concurrent_frames_succeed() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -3733,12 +3589,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer_with_data(&[7u32; 8], BufferKind::Scattered)
             .expect("parcel");
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read(&parcel).expect("grant_read");
-        let frame1 = scheme.submit().expect("first submit");
-        let frame2 = scheme.submit().expect("second submit without waiting on frame1");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
+        let mut frame1 = scheme.submit().expect("first submit");
+        let mut frame2 = scheme.submit().expect("second submit without waiting on frame1");
 
-        let loan1 = grant.consume(&frame1).expect("read frame1");
-        let loan2 = grant.consume(&frame2).expect("read frame2");
+        let loan1 = grant.claim(&mut frame1).expect("claim").consume().expect("read frame1");
+        let loan2 = grant.claim(&mut frame2).expect("claim").consume().expect("read frame2");
         assert_eq!(loan1.len(), 32);
         assert_eq!(loan2.len(), 32);
         for chunk in loan1.chunks_exact(4) {
@@ -3749,18 +3607,17 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_double_read_same_frame_errors() {
+    fn withdraw_double_read_same_frame_errors() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-        let grant = scheme.grant_read(&parcel).expect("grant_read");
-        let frame = scheme.submit().expect("submit");
-        let _loan = grant.consume(&frame).expect("first read");
-        let err = match grant.consume(&frame) {
-            Ok(_) => panic!("second read must fail"),
-            Err(e) => e,
-        };
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
+        let err = grant.claim(&mut frame).expect_err("second claim must fail");
         assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
     }
 
@@ -3773,22 +3630,28 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer_with_data(&[3u32; 8], BufferKind::Scattered)
             .expect("parcel");
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read(&parcel).expect("grant_read");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
 
-        let frame1 = scheme.submit().expect("submit 1");
+        let mut frame1 = scheme.submit().expect("submit 1");
         {
-            let loan = grant.consume(&frame1).expect("read frame1");
+            let loan = grant.claim(&mut frame1).expect("claim").consume().expect("read frame1");
             assert_eq!(loan.len(), 32);
         }
-        let frame2 = scheme.submit().expect("submit 2 after loan drop");
-        let loan2 = grant.consume(&frame2).expect("read frame2 after pool recycle");
+        let mut frame2 = scheme.submit().expect("submit 2 after loan drop");
+        let loan2 = grant
+            .claim(&mut frame2)
+            .expect("claim")
+            .consume()
+            .expect("read frame2 after pool recycle");
         assert_eq!(loan2.len(), 32);
         let (allocs, _) = mock_readback_counts(&device);
         assert_eq!(allocs, 1, "pool recycles staging buffer on loan drop");
     }
 
     #[test]
-    fn grant_read_rejects_foreign_device_parcel() {
+    fn withdraw_rejects_foreign_device_parcel() {
         let device_a = mock_device();
         let device_b = mock_device();
         let mut pool = RetainedPool::new(device_a.clone());
@@ -3796,7 +3659,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx_b = device_b.create_context().unwrap();
         let parcel = retained_buffer(&mut pool);
         let mut scheme = Scheme::new(&ctx_b);
-        let err = match scheme.grant_read(&parcel) {
+        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &parcel) {
             Ok(_) => panic!("cross-device grant must fail"),
             Err(e) => e,
         };
@@ -3805,28 +3668,29 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_rejects_cross_scheme_frame() {
+    fn withdraw_rejects_cross_scheme_frame() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let parcel = retained_buffer(&mut pool);
 
         let mut scheme_a = Scheme::new(&ctx);
-        let grant_a = scheme_a.grant_read(&parcel).expect("grant_a");
+        let grant_a = MemoryExchange::new(scheme_a.context())
+            .bind_withdraw(&mut scheme_a, &parcel)
+            .expect("grant_a");
 
         let mut scheme_b = Scheme::new(&ctx);
-        let _grant_b = scheme_b.grant_read(&parcel).expect("grant_b");
-        let frame_b = scheme_b.submit().expect("submit b");
+        let _grant_b = MemoryExchange::new(scheme_b.context())
+            .bind_withdraw(&mut scheme_b, &parcel)
+            .expect("grant_b");
+        let mut frame_b = scheme_b.submit().expect("submit b");
 
-        let err = match grant_a.consume(&frame_b) {
-            Ok(_) => panic!("cross-scheme read must fail"),
-            Err(e) => e,
-        };
+        let err = grant_a.claim(&mut frame_b).expect_err("cross-scheme claim must fail");
         assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
     }
 
     #[test]
-    fn grant_read_drop_scheme_with_outstanding_frame_frees_staging() {
+    fn withdraw_drop_scheme_with_outstanding_frame_frees_staging() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -3834,8 +3698,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
             .expect("parcel");
         let mut scheme = Scheme::new(&ctx);
-        let _grant = scheme.grant_read(&parcel).expect("grant");
-        let frame = scheme.submit().expect("submit");
+        let _grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("grant");
+        let mut frame = scheme.submit().expect("submit");
         let (allocs_after_submit, frees_before) = mock_readback_counts(&device);
         assert_eq!(allocs_after_submit, 1, "submit allocates one staging buffer");
         drop(scheme);
@@ -3846,7 +3712,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_rejects_zero_byte_buffer() {
+    fn withdraw_rejects_zero_byte_buffer() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -3857,7 +3723,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         }
         let parcel = parcel.unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let err = match scheme.grant_read(&parcel) {
+        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &parcel) {
             Ok(_) => panic!("zero-byte grant must fail"),
             Err(e) => e,
         };
@@ -3881,54 +3747,64 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_texture_basic_succeeds() {
+    fn withdraw_texture_basic_succeeds() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let loan = grant.consume(&frame).expect("read texture grant");
+        let loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("read texture grant");
         assert_eq!(loan.len(), 4 * 4 * 4, "Rgba8Unorm 4×4 = 64 bytes");
     }
 
     #[test]
-    fn grant_read_texture_appends_ir_node() {
+    fn withdraw_texture_appends_ir_node() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let _grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+        let _grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
 
-        assert!(scheme.is_dirty(), "grant_read_texture is structural");
+        assert!(scheme.is_dirty(), "withdraw is structural");
         assert_eq!(scheme.ir_node_count(), 1);
         match &scheme.ir.nodes[0].kind {
-            NodeKind::GrantRead { grant_id: 0 } => {}
+            NodeKind::WithdrawRead { withdraw_id: 0 } => {}
             other => panic!("expected GrantRead node, got {other:?}"),
         }
     }
 
     #[test]
-    fn grant_read_texture_staging_alloc_and_free() {
+    fn withdraw_texture_staging_alloc_and_free() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
         let (allocs_before, frees_before) = mock_readback_counts(&device);
         assert_eq!(allocs_before, 1, "one staging alloc per submit");
         assert_eq!(frees_before, 0, "not freed yet");
 
-        let loan = grant.consume(&frame).expect("read");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
         drop(loan);
 
         // After loan drop the handle returns to pool (scheme alive) — no free yet.
@@ -3936,10 +3812,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(frees_after_loan, 0, "pool recycles on loan drop");
 
         // Resubmit — pool recycles the same staging handle.
-        let frame2 = scheme.submit().expect("resubmit");
+        let mut frame2 = scheme.submit().expect("resubmit");
         let (allocs_after_resubmit, _) = mock_readback_counts(&device);
         assert_eq!(allocs_after_resubmit, 1, "recycled: no new alloc");
-        let _loan2 = grant.consume(&frame2).expect("read frame2");
+        let _loan2 = grant.claim(&mut frame2).expect("claim").consume().expect("read frame2");
 
         // Drop scheme — pool drains and frees all handles.
         drop(_loan2);
@@ -3951,35 +3827,39 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_texture_double_read_same_frame_errors() {
+    fn withdraw_texture_double_read_same_frame_errors() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
 
-        let _loan = grant.consume(&frame).expect("first read");
-        let err = grant.consume(&frame).expect_err("second read must fail");
+        let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
+        let err = grant.claim(&mut frame).expect_err("second claim must fail");
         assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
     }
 
     #[test]
-    fn grant_read_texture_concurrent_frames() {
+    fn withdraw_texture_concurrent_frames() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
-        let frame1 = scheme.submit().expect("first submit");
-        let frame2 = scheme.submit().expect("second submit without waiting on frame1");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame1 = scheme.submit().expect("first submit");
+        let mut frame2 = scheme.submit().expect("second submit without waiting on frame1");
 
-        let loan1 = grant.consume(&frame1).expect("read frame1");
-        let loan2 = grant.consume(&frame2).expect("read frame2");
+        let loan1 = grant.claim(&mut frame1).expect("claim").consume().expect("read frame1");
+        let loan2 = grant.claim(&mut frame2).expect("claim").consume().expect("read frame2");
         assert_eq!(loan1.len(), loan2.len());
 
         let (allocs, _) = mock_readback_counts(&device);
@@ -3987,7 +3867,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_texture_rejects_sampled_only_texture() {
+    fn withdraw_texture_rejects_sampled_only_texture() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -4003,7 +3883,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             )
             .expect("texture");
         let mut scheme = Scheme::new(&ctx);
-        let err = match scheme.grant_read_texture(&texture) {
+        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &texture) {
             Ok(_) => panic!("must reject Interpolated texture"),
             Err(e) => e,
         };
@@ -4014,7 +3894,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_texture_rejects_missing_copy_src_flag() {
+    fn withdraw_texture_rejects_missing_copy_src_flag() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -4030,7 +3910,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             )
             .expect("texture");
         let mut scheme = Scheme::new(&ctx);
-        let err = match scheme.grant_read_texture(&texture) {
+        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &texture) {
             Ok(_) => panic!("must reject missing COPY_SRC flag"),
             Err(e) => e,
         };
@@ -4038,7 +3918,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn grant_read_texture_rejects_cross_scheme_frame() {
+    fn withdraw_texture_rejects_cross_scheme_frame() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx_a = device.create_context().unwrap();
@@ -4047,31 +3927,41 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let texture = texture_parcel(&mut pool);
 
         let mut scheme_a = Scheme::new(&ctx_a);
-        let grant_a = scheme_a.grant_read_texture(&texture).expect("grant_a");
+        let grant_a = MemoryExchange::new(scheme_a.context())
+            .bind_withdraw(&mut scheme_a, &texture)
+            .expect("grant_a");
         let _frame_a = scheme_a.submit().expect("submit a");
 
         let mut scheme_b = Scheme::new(&ctx_b);
-        let _grant_b = scheme_b.grant_read_texture(&texture).expect("grant_b");
-        let frame_b = scheme_b.submit().expect("submit b");
+        let _grant_b = MemoryExchange::new(scheme_b.context())
+            .bind_withdraw(&mut scheme_b, &texture)
+            .expect("grant_b");
+        let mut frame_b = scheme_b.submit().expect("submit b");
 
-        let err = grant_a.consume(&frame_b).expect_err("cross-scheme read must fail");
+        let err = grant_a.claim(&mut frame_b).expect_err("cross-scheme claim must fail");
         assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
     }
 
     #[test]
-    fn grant_read_texture_survives_parcel_drop() {
+    fn withdraw_texture_survives_parcel_drop() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
-        let frame = scheme.submit().expect("submit");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
         drop(texture);
         drop(pool);
 
-        let loan = grant.consume(&frame).expect("read after parcel drop");
+        let loan = grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("read after parcel drop");
         assert_eq!(loan.len(), 4 * 4 * 4);
     }
 
@@ -4135,7 +4025,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let tx = scheme.register_present_exchange(&lease);
         assert_eq!(scheme.ir_node_count(), 0, "registration must not append IR nodes");
-        assert_eq!(tx.key.present_idx, 0);
+        assert_eq!(
+            match tx.key {
+                ClaimKey::Present { present_idx } => present_idx,
+                _ => panic!("expected present"),
+            },
+            0
+        );
     }
 
     #[test]
@@ -4768,7 +4664,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let _present = register_exchange_with_copy(&mut scheme, &lease);
         let before = mock_present_count(&device);
-        let submission = scheme.submit().expect("submit");
+        let mut submission = scheme.submit().expect("submit");
         drop(submission);
         assert_eq!(mock_present_count(&device), before, "discarded claim must not present");
     }
@@ -4800,8 +4696,20 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             left_grant.binding_id, right_grant.binding_id,
             "distinct pools must intern distinct scheme bindings"
         );
-        assert_eq!(left_grant.key.present_idx, 0);
-        assert_eq!(right_grant.key.present_idx, 1);
+        assert_eq!(
+            match left_grant.key {
+                ClaimKey::Present { present_idx } => present_idx,
+                _ => panic!("expected present"),
+            },
+            0
+        );
+        assert_eq!(
+            match right_grant.key {
+                ClaimKey::Present { present_idx } => present_idx,
+                _ => panic!("expected present"),
+            },
+            1
+        );
 
         let left_res = scheme.ir.nodes[0].bindings[1].resource;
         let right_res = scheme.ir.nodes[1].bindings[1].resource;
@@ -4819,7 +4727,16 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let first = scheme.register_present_exchange(&lease);
         let second = scheme.register_present_exchange(&lease);
-        assert_eq!(first.key.present_idx, second.key.present_idx);
+        assert_eq!(
+            match first.key {
+                ClaimKey::Present { present_idx } => present_idx,
+                _ => panic!("expected present"),
+            },
+            match second.key {
+                ClaimKey::Present { present_idx } => present_idx,
+                _ => panic!("expected present"),
+            }
+        );
         assert_eq!(first.binding_id, second.binding_id);
         assert_eq!(scheme.ir_node_count(), 0, "reuse must not append IR nodes");
     }
@@ -5182,12 +5099,17 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let present = register_exchange_with_copy(&mut scheme, &lease);
 
-        let submission = scheme.submit().expect("submit");
+        let mut submission = scheme.submit().expect("submit");
         // No read grants → finish_submit_frame keeps the present-partition tv as
         // the submission timeline; the acquired frame must carry the same stamp
         // so Present waits on that epoch rather than timeline_next-1.
         let stamped = submission
-            .present_frame_submit_timeline(present.key.present_idx as usize)
+            .present_frame_submit_timeline(
+                (match present.key {
+                    ClaimKey::Present { present_idx } => present_idx,
+                    _ => panic!("expected present"),
+                }) as usize,
+            )
             .expect("present frame must be stamped before consume");
         assert_eq!(
             stamped,
@@ -5413,7 +5335,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
 
         let key = ResourceKey::Texture(tex.gpu_handle());
-        let submission = scheme.submit().expect("submit");
+        let mut submission = scheme.submit().expect("submit");
         let resolved_tv = {
             let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
             assert_eq!(stamp.pending.lock().unwrap().len(), 1);
@@ -5465,7 +5387,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             "lease_render_target must register an RT stamp for present WAR"
         );
 
-        let submission = scheme.submit().expect("submit");
+        let mut submission = scheme.submit().expect("submit");
         let resolved_tv = {
             let stamp = scheme.submit_state.resource_stamps().get(&key).expect("rt stamp");
             assert_eq!(
@@ -5593,7 +5515,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
         let key = ResourceKey::Texture(tex.gpu_handle());
 
-        let submission = scheme.submit().expect("submit");
+        let mut submission = scheme.submit().expect("submit");
         let poll = {
             let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
             stamp.pending.lock().unwrap()[0].poll()
@@ -5799,7 +5721,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn upload_buffer_allocates_instead_of_waiting_while_in_flight() {
+    fn deposit_allocates_instead_of_waiting_while_in_flight() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(Arc::clone(&device));
@@ -5808,21 +5730,22 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
 
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(64).unwrap();
-        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 64).unwrap();
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_buffer(&mut scheme, dst.whole(), 64)
+            .unwrap();
 
         let payload_a = vec![1u8; 64];
-        scheme.stage_upload_buffer(&upload, 0, &payload_a).unwrap();
-        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 1);
+        upload.write(&mut scheme, 0, &payload_a).unwrap();
+        assert_eq!(scheme.deposit_parcel_count(&upload), 1);
         let _sub1 = scheme.submit().unwrap();
 
         // Mock completes submits immediately; force the physical parcel back in-flight.
-        scheme.test_mark_upload_inflight(&upload, 1_000_000);
+        scheme.test_mark_deposit_inflight(&upload, 1_000_000);
 
         let payload_b = vec![2u8; 64];
-        scheme.stage_upload_buffer(&upload, 0, &payload_b).unwrap();
+        upload.write(&mut scheme, 0, &payload_b).unwrap();
         assert_eq!(
-            scheme.upload_buffer_parcel_count(&upload),
+            scheme.deposit_parcel_count(&upload),
             2,
             "in-flight staging must grow the pool instead of waiting"
         );
@@ -5830,7 +5753,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn upload_buffer_reuses_settled_parcel() {
+    fn deposit_reuses_settled_parcel() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(Arc::clone(&device));
@@ -5838,14 +5761,15 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(32).unwrap();
-        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 32).unwrap();
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_buffer(&mut scheme, dst.whole(), 32)
+            .unwrap();
 
-        scheme.stage_upload_buffer(&upload, 0, &[7u8; 32]).unwrap();
+        upload.write(&mut scheme, 0, &[7u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
-        scheme.stage_upload_buffer(&upload, 0, &[8u8; 32]).unwrap();
+        upload.write(&mut scheme, 0, &[8u8; 32]).unwrap();
         assert_eq!(
-            scheme.upload_buffer_parcel_count(&upload),
+            scheme.deposit_parcel_count(&upload),
             1,
             "settled staging parcel must be reused"
         );
@@ -5853,7 +5777,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn upload_buffer_rejects_submit_without_stage() {
+    fn deposit_rejects_submit_without_stage() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(Arc::clone(&device));
@@ -5861,15 +5785,17 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(16).unwrap();
-        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 16).unwrap();
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .unwrap();
         let err = scheme.submit().expect_err("must require stage before submit");
         let msg = format!("{err}");
-        assert!(msg.contains("was not staged"), "unexpected error: {msg}");
+        assert!(msg.contains("was not written"), "unexpected error: {msg}");
+        let _ = upload; // binding kept for capacity/topology side effects
     }
 
     #[test]
-    fn upload_buffer_warms_slot_variants_per_physical_parcel() {
+    fn deposit_warms_slot_variants_per_physical_parcel() {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let device = mock_device();
         let ctx = device.create_context().unwrap();
@@ -5878,15 +5804,16 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(32).unwrap();
-        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 32).unwrap();
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_buffer(&mut scheme, dst.whole(), 32)
+            .unwrap();
 
-        scheme.stage_upload_buffer(&upload, 0, &[1u8; 32]).unwrap();
+        upload.write(&mut scheme, 0, &[1u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1);
         assert_eq!(scheme.test_retained_slot_variant_count(), 1);
 
-        scheme.stage_upload_buffer(&upload, 0, &[2u8; 32]).unwrap();
+        upload.write(&mut scheme, 0, &[2u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.test_retained_slot_variant_count(), 1);
         #[cfg(not(feature = "metal"))]
@@ -5896,9 +5823,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             "reusing the same physical parcel must hit the warmed variant"
         );
 
-        scheme.test_mark_upload_inflight(&upload, 1_000_000);
-        scheme.stage_upload_buffer(&upload, 0, &[3u8; 32]).unwrap();
-        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 2);
+        scheme.test_mark_deposit_inflight(&upload, 1_000_000);
+        upload.write(&mut scheme, 0, &[3u8; 32]).unwrap();
+        assert_eq!(scheme.deposit_parcel_count(&upload), 2);
         let _ = scheme.submit().unwrap();
         assert_eq!(
             scheme.test_retained_slot_variant_count(),
@@ -5910,7 +5837,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn upload_buffer_to_texture_resolves_at_submit() {
+    fn deposit_to_texture_resolves_at_submit() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(Arc::clone(&device));
@@ -5925,18 +5852,17 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             )
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(4).unwrap();
-        scheme
-            .copy_upload_buffer_to_texture(&upload, 0, 0, &tex, 0, 0, 1, 1)
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_texture(&mut scheme, &tex, 0, 0, 1, 1, 4, 0)
             .unwrap();
-        scheme.stage_upload_buffer(&upload, 0, &[9, 8, 7, 6]).unwrap();
+        upload.write(&mut scheme, 0, &[9, 8, 7, 6]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1);
-        assert!(scheme.upload_buffer_parcel_count(&upload) >= 1);
+        assert!(scheme.deposit_parcel_count(&upload) >= 1);
     }
 
     #[test]
-    fn upload_buffer_scheme_drop_returns_parcels() {
+    fn deposit_scheme_drop_returns_parcels() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(Arc::clone(&device));
@@ -5944,18 +5870,19 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(16).unwrap();
-        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 16).unwrap();
-        scheme.stage_upload_buffer(&upload, 0, &[4u8; 16]).unwrap();
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .unwrap();
+        upload.write(&mut scheme, 0, &[4u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
-        assert_eq!(scheme.upload_buffer_parcel_count(&upload), 1);
+        assert_eq!(scheme.deposit_parcel_count(&upload), 1);
         drop(scheme);
         // Drop must not panic and must release CB/parcel ownership back to the context.
         let _ = ctx.gpu_progress();
     }
 
     #[test]
-    fn upload_buffer_disable_cb_reuse_skips_replay_ledger() {
+    fn deposit_disable_cb_reuse_skips_replay_ledger() {
         let _cb = crate::test_support::CbReuseOverride::force_disabled();
 
         let device = mock_device();
@@ -5965,11 +5892,12 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let upload = scheme.declare_upload_buffer(16).unwrap();
-        scheme.copy_upload_buffer(&upload, 0, dst.whole(), 0, 16).unwrap();
-        scheme.stage_upload_buffer(&upload, 0, &[1u8; 16]).unwrap();
+        let upload = MemoryExchange::new(scheme.context())
+            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .unwrap();
+        upload.write(&mut scheme, 0, &[1u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
-        scheme.stage_upload_buffer(&upload, 0, &[2u8; 16]).unwrap();
+        upload.write(&mut scheme, 0, &[2u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
 
         assert!(

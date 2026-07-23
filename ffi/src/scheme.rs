@@ -10,9 +10,8 @@ use crate::context::GoldyContext;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
 use crate::types::GoldyNodeAccess;
-use goldy::scheme::{ReadGrant, Scheme};
+use goldy::scheme::Scheme;
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord};
-use goldy::{Grant, GrantBuffer, GrantTexture};
 use std::ffi::CStr;
 
 /// Opaque per-submission token returned by [`goldy_scheme_submit`].
@@ -20,41 +19,6 @@ use std::ffi::CStr;
 /// Heap-allocated; destroy with [`goldy_scheme_submission_destroy`].
 pub struct GoldySchemeSubmission {
     pub(crate) inner: goldy::Submission,
-}
-
-/// Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
-///
-/// Heap-allocated; destroy with [`goldy_read_grant_destroy`].
-pub struct GoldyReadGrant {
-    pub(crate) inner: ReadGrantInner,
-}
-
-pub(crate) enum ReadGrantInner {
-    Buffer(ReadGrant<GrantBuffer>),
-    Texture(ReadGrant<GrantTexture>),
-}
-
-impl ReadGrantInner {
-    fn byte_size(&self) -> u64 {
-        match self {
-            ReadGrantInner::Buffer(g) => g.byte_size(),
-            ReadGrantInner::Texture(g) => g.byte_size(),
-        }
-    }
-
-    fn consume_copy(&self, submission: &goldy::Submission, output: &mut [u8]) -> Result<(), goldy::GoldyError> {
-        match self {
-            ReadGrantInner::Buffer(g) => {
-                let loan = g.consume(submission)?;
-                output.copy_from_slice(&loan);
-            }
-            ReadGrantInner::Texture(g) => {
-                let loan = g.consume(submission)?;
-                output.copy_from_slice(&loan);
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Outcome counters for [`goldy_scheme_replay_stats`].
@@ -353,8 +317,8 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_dispatch(
 /// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 ///
 /// Does not block. The caller owns `*out_submission` and must call
-/// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded grant, use
-/// [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
+/// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded withdrawal, use
+/// [`crate::goldy_withdraw_transaction_claim`] then [`crate::goldy_withdraw_claim_consume`].
 ///
 /// # Safety
 /// `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
@@ -407,7 +371,7 @@ pub unsafe extern "C" fn goldy_scheme_submission_timeline_value(submission: *con
 
 /// Block until the GPU work for `submission` has completed.
 ///
-/// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
+/// Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
 ///
 /// # Safety
 /// `ctx` and `submission` must be valid.
@@ -420,97 +384,6 @@ pub unsafe extern "C" fn goldy_scheme_submission_wait(
         return GoldyResult::NullPointer;
     }
     match (*submission).inner.wait(&(*ctx).inner) {
-        Ok(()) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error(format!("{e}"));
-            GoldyResult::GpuError
-        }
-    }
-}
-
-/// Record a read-easement grant over a **buffer** parcel (once per scheme).
-///
-/// For texture parcels use [`goldy_scheme_grant_read_texture`].
-///
-/// Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
-/// Call after the producing dispatch node(s). Marks the scheme dirty.
-///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_grant_read(
-    scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
-) -> *mut GoldyReadGrant {
-    if scheme.is_null() || parcel.is_null() {
-        set_last_error("Scheme or parcel pointer is null");
-        return std::ptr::null_mut();
-    }
-    if (*scheme).has_active_recorder() {
-        set_last_error("Cannot grant_read while recording a compute node");
-        return std::ptr::null_mut();
-    }
-    match (*scheme).inner.grant_read(&(*parcel).inner) {
-        Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
-            inner: ReadGrantInner::Buffer(grant),
-        })),
-        Err(e) => {
-            set_last_error(format!("{e}"));
-            std::ptr::null_mut()
-        }
-    }
-}
-
-/// Destroy a read grant from [`goldy_scheme_grant_read`].
-///
-/// # Safety
-/// `grant` must be valid and not used after this call.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_read_grant_destroy(grant: *mut GoldyReadGrant) {
-    if !grant.is_null() {
-        drop(Box::from_raw(grant));
-    }
-}
-
-/// Logical byte size of readable data for this grant.
-///
-/// # Safety
-/// `grant` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_read_grant_byte_size(grant: *const GoldyReadGrant) -> u64 {
-    if grant.is_null() {
-        return 0;
-    }
-    (*grant).inner.byte_size()
-}
-
-/// Consume bytes for the `(grant × submission)` cell into `output`.
-///
-/// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
-/// Each submission may be consumed at most once per grant. Drop the submission when done if you
-/// rely on staging-buffer reuse.
-///
-/// # Safety
-/// All pointers must be valid. `output` must point to at least `output_size` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_read_grant_consume(
-    grant: *const GoldyReadGrant,
-    submission: *const GoldySchemeSubmission,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    if grant.is_null() || submission.is_null() || output.is_null() {
-        return GoldyResult::NullPointer;
-    }
-    let out = std::slice::from_raw_parts_mut(output, output_size);
-    if output_size as u64 != (*grant).inner.byte_size() {
-        set_last_error(format!(
-            "grant readback size mismatch: expected {output_size}, grant byte size is {}",
-            (*grant).inner.byte_size()
-        ));
-        return GoldyResult::InvalidArgument;
-    }
-    match (*grant).inner.consume_copy(&(*submission).inner, out) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));

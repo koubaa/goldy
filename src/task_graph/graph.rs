@@ -309,7 +309,7 @@ fn ensure_partition_retired_before_rerecord(context: &crate::Context, prev_tv: O
 fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
     waves.iter().flat_map(|w| &w.node_indices).any(|&ni| {
         let node = &ir.nodes[ni];
-        if matches!(node.kind, NodeKind::GrantRead { .. }) {
+        if matches!(node.kind, NodeKind::WithdrawRead { .. }) {
             return false;
         }
         node.bindings
@@ -444,9 +444,9 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 offset.hash(&mut h);
                 size.hash(&mut h);
             }
-            NodeKind::GrantRead { grant_id } => {
+            NodeKind::WithdrawRead { withdraw_id } => {
                 3u8.hash(&mut h);
-                grant_id.hash(&mut h);
+                withdraw_id.hash(&mut h);
             }
             NodeKind::CopyBufferToTexture {
                 src,
@@ -757,7 +757,7 @@ pub(crate) type DeferredPresentAcquire<'a> = dyn FnMut(&[u32], &mut Vec<Resolved
 /// (including earlier present partitions for other bindings) are submitted first so
 /// GPU work can overlap later acquires (Exchange option/exercise split).
 ///
-/// [`Self::upload_buffers`] maps logical [`super::ResourceId::UploadBuffer`] ids to
+/// [`Self::deposits`] maps logical [`super::ResourceId::Deposit`] ids to
 /// the physical staging parcels selected for this submission.
 ///
 /// [`Self::partial`] is updated after each successful partition so callers can
@@ -767,7 +767,7 @@ pub(crate) struct PresentSubmitOptions<'a> {
     /// Called per present partition for binding ids not yet resolved in `present_slots`.
     pub deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
     /// Scheme upload-buffer resolutions for this submission (may be empty).
-    pub upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
+    pub deposits: &'a std::collections::HashMap<u32, super::ResolvedDeposit>,
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
@@ -886,7 +886,7 @@ fn dynamic_partition_slot_key(
         .flat_map(|w| w.node_indices.iter().copied())
         .flat_map(|ni| ir.nodes[ni].bindings.iter())
         .filter_map(|b| match b.resource {
-            ResourceId::UploadBuffer(id) => Some(id),
+            ResourceId::Deposit(id) => Some(id),
             _ => None,
         })
         .collect();
@@ -895,9 +895,9 @@ fn dynamic_partition_slot_key(
     for id in upload_ids {
         id.hash(&mut h);
         let resolved = resolver
-            .upload_buffers
+            .deposits
             .get(&id)
-            .expect("dynamic_partition_slot_key: UploadBuffer missing from resolver");
+            .expect("dynamic_partition_slot_key: Deposit missing from resolver");
         resolved.parent.hash(&mut h);
         resolved.offset.hash(&mut h);
         resolved.len.hash(&mut h);
@@ -907,11 +907,11 @@ fn dynamic_partition_slot_key(
 
 fn seed_upload_resolver(
     resolver: &mut super::SlotResolver,
-    upload_buffers: &std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
+    deposits: &std::collections::HashMap<u32, super::ResolvedDeposit>,
 ) {
-    resolver.upload_buffers.clear();
-    for (&id, resolved) in upload_buffers {
-        resolver.upload_buffers.insert(id, *resolved);
+    resolver.deposits.clear();
+    for (&id, resolved) in deposits {
+        resolver.deposits.insert(id, *resolved);
     }
 }
 
@@ -1036,7 +1036,7 @@ fn submit_resolved_ir_partitions_fresh(
     let PresentSubmitOptions {
         present_slots,
         mut deferred_acquire,
-        upload_buffers,
+        deposits,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1069,7 +1069,7 @@ fn submit_resolved_ir_partitions_fresh(
     }
 
     let mut resolver = SlotResolver::new();
-    seed_upload_resolver(&mut resolver, upload_buffers);
+    seed_upload_resolver(&mut resolver, deposits);
 
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
@@ -1186,7 +1186,7 @@ fn submit_resolved_ir_partitions_replay(
     let PresentSubmitOptions {
         present_slots,
         mut deferred_acquire,
-        upload_buffers,
+        deposits,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1246,7 +1246,7 @@ fn submit_resolved_ir_partitions_replay(
     }
 
     let mut resolver = SlotResolver::new();
-    seed_upload_resolver(&mut resolver, upload_buffers);
+    seed_upload_resolver(&mut resolver, deposits);
 
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
@@ -1709,7 +1709,7 @@ impl IrSubmitState {
     /// binding ids that partition still needs. Pass `None` and a pre-filled
     /// `present_slots` for tests / eager acquire.
     ///
-    /// `upload_buffers` maps logical upload-buffer ids to the physical parcels
+    /// `deposits` maps logical upload-buffer ids to the physical parcels
     /// selected for this submission (may be empty).
     ///
     /// On failure after some partitions succeeded, `partial` / `partial_tv` hold
@@ -1721,7 +1721,7 @@ impl IrSubmitState {
         ir: &GraphIR,
         present_slots: &'a mut Vec<ResolvedPresentSlot>,
         deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
-        upload_buffers: &'a std::collections::HashMap<u32, super::ResolvedUploadBuffer>,
+        deposits: &'a std::collections::HashMap<u32, super::ResolvedDeposit>,
         ir_clean: bool,
         partial: &'a mut PartitionSubmitResult,
         partial_tv: &'a mut TimelineValue,
@@ -1738,7 +1738,7 @@ impl IrSubmitState {
             PresentSubmitOptions {
                 present_slots,
                 deferred_acquire,
-                upload_buffers,
+                deposits,
                 resource_stamps: &self.resource_stamps,
                 stamp_targets: &self.stamp_targets,
                 ir_clean,
@@ -1967,7 +1967,7 @@ mod slice_retention_tests {
     use crate::compute::ComputePipeline;
     use crate::device::Device;
     use crate::shader::ShaderModule;
-    use crate::task_graph::ResolvedUploadBuffer;
+    use crate::task_graph::ResolvedDeposit;
     use crate::task_graph::{IrSubmitState, NodeAccess, ResourceBinding, TaskNode};
     use std::sync::Arc;
 
@@ -2101,7 +2101,7 @@ mod slice_retention_tests {
                 PresentSubmitOptions {
                     present_slots: &mut present_slots,
                     deferred_acquire: None,
-                    upload_buffers: &empty_uploads,
+                    deposits: &empty_uploads,
                     resource_stamps: &empty_stamps,
                     stamp_targets: &[],
                     ir_clean,
@@ -2202,7 +2202,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred),
-                upload_buffers: &empty_uploads,
+                deposits: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -2261,7 +2261,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred2),
-                upload_buffers: &empty_uploads,
+                deposits: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: true,
@@ -2396,7 +2396,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred),
-                upload_buffers: &empty_uploads,
+                deposits: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -2518,7 +2518,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
-                upload_buffers: &empty_uploads,
+                deposits: &empty_uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -2543,7 +2543,7 @@ mod slice_retention_tests {
     }
 
     fn upload_then_compute_ir(buf_dst: BufferHandle, p: ComputePipelineHandle) -> GraphIR {
-        let upload_src = ResourceId::UploadBuffer(0);
+        let upload_src = ResourceId::Deposit(0);
         let dst = ResourceId::Buffer(buf_dst);
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
@@ -2628,7 +2628,7 @@ mod slice_retention_tests {
         let mut uploads = std::collections::HashMap::new();
         uploads.insert(
             0,
-            ResolvedUploadBuffer {
+            ResolvedDeposit {
                 parent: buf.handle,
                 offset: 0,
                 len: 64,
@@ -2646,7 +2646,7 @@ mod slice_retention_tests {
             PresentSubmitOptions {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
-                upload_buffers: &uploads,
+                deposits: &uploads,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -2693,7 +2693,7 @@ mod slice_retention_tests {
         let mut uploads = std::collections::HashMap::new();
         uploads.insert(
             0,
-            ResolvedUploadBuffer {
+            ResolvedDeposit {
                 parent: buf.handle,
                 offset: 0,
                 len: 64,
@@ -3629,14 +3629,14 @@ mod partitioning_tests {
     // Other destinations (e.g. SwapchainOutput) must NOT be retainable.
     // ------------------------------------------------------------------
 
-    fn grant_read_node(label: &'static str, resource: ResourceId, grant_id: u32) -> TaskNode {
+    fn grant_read_node(label: &'static str, resource: ResourceId, withdraw_id: u32) -> TaskNode {
         TaskNode {
             label,
             bindings: vec![ResourceBinding {
                 resource,
                 access: NodeAccess::Read,
             }],
-            kind: NodeKind::GrantRead { grant_id },
+            kind: NodeKind::WithdrawRead { withdraw_id },
         }
     }
 
@@ -3650,7 +3650,7 @@ mod partitioning_tests {
 
     #[test]
     fn copy_render_target_to_texture_is_retainable() {
-        // RenderPass → CopyRenderTarget(Texture) → GrantRead
+        // RenderPass → CopyRenderTarget(Texture) → WithdrawRead
         // All in one chain; CopyRenderTarget → Texture must not force standalone.
         let nodes = vec![
             render_pass_node("rp", 10),

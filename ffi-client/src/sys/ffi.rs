@@ -26,7 +26,6 @@ pub type FnGoldySchemeComputeNodeWithBufferUnit =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer, u32, GoldyNodeAccess) -> GoldyResult;
 pub type FnGoldySchemeRenderPassWithBufferUnit =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer, u32, GoldyNodeAccess) -> GoldyResult;
-pub type FnGoldySchemeGrantRead = unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer) -> *mut GoldyReadGrant;
 pub type FnGoldySchemeComputeNodeWithParam = unsafe extern "C" fn(*mut GoldyScheme, u32) -> GoldyResult;
 pub type FnGoldySchemeComputeNodeDispatch = unsafe extern "C" fn(*mut GoldyScheme, u32, u32, u32) -> GoldyResult;
 pub type FnGoldySchemeSubmit = unsafe extern "C" fn(*mut GoldyScheme, *mut *mut GoldySchemeSubmission) -> GoldyResult;
@@ -34,10 +33,52 @@ pub type FnGoldySchemeSubmissionDestroy = unsafe extern "C" fn(*mut GoldySchemeS
 pub type FnGoldySchemeSubmissionTimelineValue = unsafe extern "C" fn(*const GoldySchemeSubmission) -> u64;
 pub type FnGoldySchemeSubmissionWait =
     unsafe extern "C" fn(*const GoldyContext, *const GoldySchemeSubmission) -> GoldyResult;
-pub type FnGoldyReadGrantDestroy = unsafe extern "C" fn(*mut GoldyReadGrant);
-pub type FnGoldyReadGrantByteSize = unsafe extern "C" fn(*const GoldyReadGrant) -> u64;
-pub type FnGoldyReadGrantConsume =
-    unsafe extern "C" fn(*const GoldyReadGrant, *const GoldySchemeSubmission, *mut u8, usize) -> GoldyResult;
+
+pub type FnGoldyMemoryExchangeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyMemoryExchange;
+pub type FnGoldyMemoryExchangeDestroy = unsafe extern "C" fn(*mut GoldyMemoryExchange);
+pub type FnGoldyMemoryExchangeBindWithdraw = unsafe extern "C" fn(
+    *const GoldyMemoryExchange,
+    *mut GoldyScheme,
+    *const GoldyParcel,
+) -> *mut GoldyWithdrawTransaction;
+pub type FnGoldyMemoryExchangeBindWithdrawTexture = unsafe extern "C" fn(
+    *const GoldyMemoryExchange,
+    *mut GoldyScheme,
+    *const GoldyTexture,
+) -> *mut GoldyWithdrawTransaction;
+pub type FnGoldyMemoryExchangeBindDepositBuffer = unsafe extern "C" fn(
+    *const GoldyMemoryExchange,
+    *mut GoldyScheme,
+    *const GoldyParcel,
+    u64,
+) -> *mut GoldyDepositTransaction;
+pub type FnGoldyMemoryExchangeBindDepositTexture = unsafe extern "C" fn(
+    *const GoldyMemoryExchange,
+    *mut GoldyScheme,
+    *const GoldyTexture,
+    u32,
+    u32,
+    u32,
+    u32,
+    u64,
+    u32,
+) -> *mut GoldyDepositTransaction;
+pub type FnGoldyWithdrawTransactionDestroy = unsafe extern "C" fn(*mut GoldyWithdrawTransaction);
+pub type FnGoldyWithdrawTransactionByteSize = unsafe extern "C" fn(*const GoldyWithdrawTransaction) -> u64;
+pub type FnGoldyWithdrawTransactionClaim =
+    unsafe extern "C" fn(*const GoldyWithdrawTransaction, *mut GoldySchemeSubmission) -> *mut GoldyWithdrawClaim;
+pub type FnGoldyWithdrawClaimDestroy = unsafe extern "C" fn(*mut GoldyWithdrawClaim);
+pub type FnGoldyWithdrawClaimConsume = unsafe extern "C" fn(*mut GoldyWithdrawClaim) -> *mut GoldyWithdrawBytes;
+pub type FnGoldyWithdrawClaimDiscard = unsafe extern "C" fn(*mut GoldyWithdrawClaim) -> GoldyResult;
+pub type FnGoldyWithdrawBytesLen = unsafe extern "C" fn(*const GoldyWithdrawBytes) -> u64;
+pub type FnGoldyWithdrawBytesData = unsafe extern "C" fn(*const GoldyWithdrawBytes) -> *const u8;
+pub type FnGoldyWithdrawBytesCopy = unsafe extern "C" fn(*const GoldyWithdrawBytes, *mut u8, usize) -> GoldyResult;
+pub type FnGoldyWithdrawBytesDestroy = unsafe extern "C" fn(*mut GoldyWithdrawBytes);
+pub type FnGoldyDepositTransactionDestroy = unsafe extern "C" fn(*mut GoldyDepositTransaction);
+pub type FnGoldyDepositTransactionCapacity = unsafe extern "C" fn(*const GoldyDepositTransaction) -> u64;
+pub type FnGoldyDepositTransactionId = unsafe extern "C" fn(*const GoldyDepositTransaction) -> u32;
+pub type FnGoldyDepositTransactionWrite =
+    unsafe extern "C" fn(*const GoldyDepositTransaction, *mut GoldyScheme, u64, *const u8, usize) -> GoldyResult;
 
 pub type FnGoldySchemeLeaseRenderTarget = unsafe extern "C" fn(
     *mut GoldyScheme,
@@ -71,8 +112,6 @@ pub type FnGoldySchemeRenderPassDrawFullscreen = unsafe extern "C" fn(*mut Goldy
 pub type FnGoldySchemeRenderPassFinish = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
 pub type FnGoldySchemeCopyToTexture =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldySchemeRenderTargetLease, *const GoldyTexture) -> GoldyResult;
-pub type FnGoldySchemeGrantReadTexture =
-    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyTexture) -> *mut GoldyReadGrant;
 pub type FnGoldyRetainedPoolAcquireTexture = unsafe extern "C" fn(
     *mut GoldyRetainedPool,
     u32,

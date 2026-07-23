@@ -29,9 +29,11 @@ using var rt = scheme.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
 using (var pass = scheme.RenderPassClear("clear", rt, Color.CornflowerBlue)) { }
 
 scheme.CopyToTexture(rt, readback);
-using var grant = scheme.GrantReadTexture(readback);
+using var memory = new MemoryExchange(ctx);
+using var withdraw = memory.BindWithdrawTexture(scheme, readback);
 using var submission = scheme.Submit();
-byte[] pixels = grant.Consume(submission);
+using var claim = withdraw.Claim(submission);
+using var pixels = claim.Consume();
 ```
 
 ## Features

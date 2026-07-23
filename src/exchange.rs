@@ -1,21 +1,28 @@
 //! Erased exchange transactions and claims.
 //!
-//! A concrete exchange (for example [`SurfaceExchange`]) binds a source into a
-//! scheme and returns a reusable [`Transaction`]. Each successful
-//! [`crate::Scheme::submit`] publishes one erased [`Claim`] per transaction.
-//! The claim is extracted with [`Transaction::claim`] and settled by
-//! [`Claim::consume`], [`Claim::discard`], or drop.
+//! Concrete exchanges ([`SurfaceExchange`], [`MemoryExchange`]) bind a relationship into a
+//! scheme and return a reusable transaction. Each successful [`crate::Scheme::submit`] may
+//! publish a claim for relationships that settle outside graph execution.
+//!
+//! - Surface present: [`Transaction::claim`] → erased [`Claim`] → [`Claim::consume`] / discard
+//! - Memory withdraw: [`WithdrawTransaction::claim`] → [`WithdrawClaim`] → [`WithdrawBytes`]
+//! - Memory deposit: graph execution settles the upload; there is no claim
 
 use crate::context::Context;
 use crate::error::GoldyError;
+use crate::parcel::Parcel;
 use crate::scheme::{Lease, LeaseRenderTarget, Scheme, Submission, Transaction};
 use crate::surface::Frame as SurfaceFrame;
 use crate::swapchain_pool::{PresentLease, SwapchainPool};
+use crate::texture::TextureCopyFootprint;
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
+use crate::Buffer;
 use crate::Texture;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::ops::Deref;
+use std::sync::Arc;
 
-/// Object-safe per-submission foreign handoff.
+/// Object-safe per-submission foreign handoff (surface present today).
 pub(crate) trait ClaimImpl: Send {
     fn consume(self: Box<Self>) -> Result<(), GoldyError>;
     fn discard(self: Box<Self>) -> Result<(), GoldyError>;
@@ -81,7 +88,7 @@ impl Drop for SurfaceClaimImpl {
     }
 }
 
-/// Erased linear claim for one submission's foreign handoff.
+/// Erased linear claim for one submission's surface present handoff.
 pub struct Claim {
     pub(crate) implementation: Option<Box<dyn ClaimImpl>>,
 }
@@ -279,6 +286,291 @@ impl Transaction {
     /// Fails when the exchange generation no longer matches the published claim
     /// (for example after resize between submit and claim).
     pub fn claim(&self, submission: &mut Submission) -> Result<Claim, GoldyError> {
-        submission.take_claim(self.scheme_id, self.key, self.binding_id, self.generation())
+        submission.take_present_claim(self.scheme_id, self.key, self.binding_id, self.generation())
+    }
+}
+
+/// CPU↔GPU memory exchange: withdrawals (readback) and deposits (upload).
+#[derive(Clone)]
+pub struct MemoryExchange {
+    ctx: Context,
+}
+
+impl MemoryExchange {
+    /// Create a memory exchange bound to `context`.
+    pub fn new(ctx: &Context) -> Self {
+        Self { ctx: ctx.clone() }
+    }
+
+    /// Bind a withdrawal over a buffer or texture deed parcel.
+    ///
+    /// Buffer parcels and texture parcels (`COPY_SRC`, storage-writable) are both accepted.
+    /// Texture layout is captured at bind time. Each successful submit publishes one claim.
+    pub fn bind_withdraw(&self, scheme: &mut Scheme, parcel: &Parcel) -> Result<WithdrawTransaction, GoldyError> {
+        let _ = &self.ctx;
+        scheme.register_withdraw(parcel)
+    }
+
+    /// Bind a deposit that copies staging bytes into a destination buffer parcel.
+    ///
+    /// Records copy topology once. Each submission must [`DepositTransaction::write`] before
+    /// [`Scheme::submit`]; graph execution settles the upload (no claim).
+    pub fn bind_deposit_buffer(
+        &self,
+        scheme: &mut Scheme,
+        destination: &Parcel,
+        capacity: u64,
+    ) -> Result<DepositTransaction, GoldyError> {
+        scheme.register_deposit_buffer(destination, capacity)
+    }
+
+    /// Bind a deposit that copies staging bytes into a texture region.
+    ///
+    /// Prefer a non-zero `src_row_pitch` (device footprint pitch) so the partition remains
+    /// retainable without backend repacking.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_deposit_texture(
+        &self,
+        scheme: &mut Scheme,
+        destination: &Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        capacity: u64,
+        src_row_pitch: u32,
+    ) -> Result<DepositTransaction, GoldyError> {
+        scheme.register_deposit_texture(destination, x, y, width, height, capacity, src_row_pitch)
+    }
+}
+
+impl std::fmt::Debug for MemoryExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryExchange").finish_non_exhaustive()
+    }
+}
+
+/// How withdraw staging contents are interpreted on the CPU.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WithdrawReadKind {
+    Buffer,
+    Texture(TextureCopyFootprint),
+}
+
+/// Stable withdraw relationship recorded in one [`Scheme`].
+///
+/// Reusable across submissions. Extract each submission's product with [`Self::claim`].
+#[derive(Clone)]
+pub struct WithdrawTransaction {
+    pub(crate) scheme_id: u64,
+    pub(crate) key: crate::scheme::ClaimKey,
+    pub(crate) byte_size: u64,
+    pub(crate) read_kind: WithdrawReadKind,
+    pub(crate) ctx: Context,
+}
+
+impl WithdrawTransaction {
+    /// Logical byte size of readable data for this withdrawal.
+    pub fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
+    /// Texture copy footprint when this withdrawal reads a texture; `None` for buffers.
+    pub fn texture_layout(&self) -> Option<TextureCopyFootprint> {
+        match self.read_kind {
+            WithdrawReadKind::Buffer => None,
+            WithdrawReadKind::Texture(layout) => Some(layout),
+        }
+    }
+
+    /// Remove this transaction's withdraw claim from a successful submission.
+    pub fn claim(&self, submission: &mut Submission) -> Result<WithdrawClaim, GoldyError> {
+        let slot = submission.take_withdraw_claim(self.scheme_id, self.key)?;
+        Ok(WithdrawClaim {
+            slot: Some(slot),
+            byte_size: self.byte_size,
+            read_kind: self.read_kind,
+            ctx: self.ctx.clone(),
+            ready_after: submission.timeline_value(),
+        })
+    }
+}
+
+impl std::fmt::Debug for WithdrawTransaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WithdrawTransaction")
+            .field("scheme_id", &self.scheme_id)
+            .field("key", &self.key)
+            .field("byte_size", &self.byte_size)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Staging handle published for one withdraw claim.
+pub(crate) struct WithdrawSlot {
+    pub(crate) staging: crate::backend::BufferHandle,
+    pub(crate) pool: Arc<crate::scheme::WithdrawStagingPool>,
+}
+
+/// Linear claim for one submission's memory withdrawal.
+pub struct WithdrawClaim {
+    slot: Option<WithdrawSlot>,
+    byte_size: u64,
+    read_kind: WithdrawReadKind,
+    ctx: Context,
+    ready_after: crate::timeline::TimelineValue,
+}
+
+impl WithdrawClaim {
+    /// Wait for the submission, read staging into CPU bytes, and return RAII-managed bytes.
+    ///
+    /// Terminal even when it returns an error (staging is recycled on failure after take).
+    pub fn consume(mut self) -> Result<WithdrawBytes, GoldyError> {
+        let slot = self
+            .slot
+            .take()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("withdraw claim already settled")))?;
+        self.ctx.wait_until(self.ready_after)?;
+        let byte_size = usize::try_from(self.byte_size)
+            .map_err(|_| GoldyError::Backend(anyhow::anyhow!("withdraw readback byte size exceeds address space")))?;
+        let mut bytes = vec![0u8; byte_size];
+        let read_result = {
+            let backend = self.ctx.device().inner.backend.lock().unwrap();
+            match self.read_kind {
+                WithdrawReadKind::Buffer => backend.read_readback_buffer(slot.staging, &mut bytes),
+                WithdrawReadKind::Texture(layout) => {
+                    backend.read_texture_readback_staging(slot.staging, layout, &mut bytes)
+                }
+            }
+        };
+        if let Err(e) = read_result {
+            slot.pool.return_handle(slot.staging, self.ready_after);
+            return Err(self.ctx.classify(e));
+        }
+        Ok(WithdrawBytes {
+            bytes,
+            handle: slot.staging,
+            ready_after: self.ready_after,
+            return_pool: slot.pool,
+        })
+    }
+
+    /// Settle without reading bytes; recycle staging.
+    pub fn discard(mut self) -> Result<(), GoldyError> {
+        if let Some(slot) = self.slot.take() {
+            slot.pool.return_handle(slot.staging, self.ready_after);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WithdrawClaim {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.pool.return_handle(slot.staging, self.ready_after);
+        }
+    }
+}
+
+impl std::fmt::Debug for WithdrawClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WithdrawClaim")
+            .field("settled", &self.slot.is_none())
+            .field("byte_size", &self.byte_size)
+            .finish_non_exhaustive()
+    }
+}
+
+/// CPU-readable bytes from a consumed withdraw claim.
+///
+/// Dropping returns the staging buffer to the withdraw pool once the submission timeline retires.
+pub struct WithdrawBytes {
+    bytes: Vec<u8>,
+    handle: crate::backend::BufferHandle,
+    ready_after: crate::timeline::TimelineValue,
+    return_pool: Arc<crate::scheme::WithdrawStagingPool>,
+}
+
+impl std::fmt::Debug for WithdrawBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WithdrawBytes")
+            .field("len", &self.bytes.len())
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Deref for WithdrawBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl WithdrawBytes {
+    /// Owned copy of the readback bytes (staging still recycled on drop of this value).
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+
+    /// Consume into an owned `Vec`, recycling staging immediately after copy.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl Drop for WithdrawBytes {
+    fn drop(&mut self) {
+        self.return_pool.return_handle(self.handle, self.ready_after);
+    }
+}
+
+/// Stable deposit relationship recorded in one [`Scheme`].
+///
+/// Topology (destination copy) is recorded at bind time. Each submission writes staging
+/// bytes via [`Self::write`]; [`Scheme::submit`] settles the upload inside graph execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DepositTransaction {
+    pub(crate) scheme_id: u64,
+    pub(crate) deposit_id: u32,
+    pub(crate) capacity: u64,
+}
+
+impl DepositTransaction {
+    /// Staging capacity declared for this deposit.
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    /// Stable declaration index within the owning [`Scheme`].
+    pub fn id(&self) -> u32 {
+        self.deposit_id
+    }
+
+    /// Write `data` into a settled (or newly allocated) physical staging parcel.
+    ///
+    /// Never waits: if every prior parcel is still in flight, allocates another.
+    /// Must be called before [`Scheme::submit`] for every deposit referenced this frame.
+    pub fn write(&self, scheme: &mut Scheme, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
+        scheme.stage_deposit(self.scheme_id, self.deposit_id, offset, data)
+    }
+
+    /// Write `data` at offset 0.
+    pub fn write_bytes(&self, scheme: &mut Scheme, data: &[u8]) -> Result<(), GoldyError> {
+        self.write(scheme, 0, data)
+    }
+}
+
+/// Convenience: buffer-shaped destination helper for callers that hold a [`Buffer`].
+impl MemoryExchange {
+    /// Bind a full-buffer deposit into `destination.whole()` with `capacity` staging bytes.
+    pub fn bind_deposit_into_buffer(
+        &self,
+        scheme: &mut Scheme,
+        destination: &Buffer,
+        capacity: u64,
+    ) -> Result<DepositTransaction, GoldyError> {
+        self.bind_deposit_buffer(scheme, destination.whole(), capacity)
     }
 }

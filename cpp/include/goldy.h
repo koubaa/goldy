@@ -181,22 +181,23 @@ typedef struct GoldyComputePipeline GoldyComputePipeline;
 // Opaque handle to a Goldy submission context.
 typedef struct GoldyContext GoldyContext;
 
+// Stable deposit relationship recorded in one scheme.
+typedef struct GoldyDepositTransaction GoldyDepositTransaction;
+
 // Opaque handle to a Goldy Device.
 typedef struct GoldyDevice GoldyDevice;
 
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
+// Opaque CPU↔GPU memory exchange.
+typedef struct GoldyMemoryExchange GoldyMemoryExchange;
+
 // Opaque handle to a bindable [`goldy::Parcel`] (buffer units; textures use [`GoldyTexture`]).
 typedef struct GoldyParcel GoldyParcel;
 
 // Opaque handle to a stable present lease from a surface exchange.
 typedef struct GoldyPresentLease GoldyPresentLease;
-
-// Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
-//
-// Heap-allocated; destroy with [`goldy_read_grant_destroy`].
-typedef struct GoldyReadGrant GoldyReadGrant;
 
 // Builder for a retained record buffer (one backing buffer, multiple sub-views).
 typedef struct GoldyRecordBuilder GoldyRecordBuilder;
@@ -232,6 +233,15 @@ typedef struct GoldyTexture GoldyTexture;
 
 // Erased exchange transaction recorded in a scheme.
 typedef struct GoldyTransaction GoldyTransaction;
+
+// CPU-readable bytes from a consumed withdraw claim.
+typedef struct GoldyWithdrawBytes GoldyWithdrawBytes;
+
+// Linear claim for one submission's memory withdrawal.
+typedef struct GoldyWithdrawClaim GoldyWithdrawClaim;
+
+// Stable withdraw relationship recorded in one scheme.
+typedef struct GoldyWithdrawTransaction GoldyWithdrawTransaction;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -394,6 +404,34 @@ void goldy_context_destroy(struct GoldyContext *ctx);
 // `ctx` must be valid when non-null.
 enum GoldyResult goldy_context_is_valid(const struct GoldyContext *ctx);
 
+// Staging capacity declared for this deposit.
+//
+// # Safety
+// `transaction` must be valid.
+uint64_t goldy_deposit_transaction_capacity(const struct GoldyDepositTransaction *transaction);
+
+// Destroy a deposit transaction.
+//
+// # Safety
+// `transaction` must be valid and not used after this call.
+void goldy_deposit_transaction_destroy(struct GoldyDepositTransaction *transaction);
+
+// Stable declaration index within the owning scheme.
+//
+// # Safety
+// `transaction` must be valid.
+uint32_t goldy_deposit_transaction_id(const struct GoldyDepositTransaction *transaction);
+
+// Write `data` into deposit staging before submit. No claim afterward.
+//
+// # Safety
+// All pointers must be valid. `data` must point to at least `data_size` bytes.
+enum GoldyResult goldy_deposit_transaction_write(const struct GoldyDepositTransaction *transaction,
+                                                 struct GoldyScheme *scheme,
+                                                 uint64_t offset,
+                                                 const uint8_t *data,
+                                                 size_t data_size);
+
 // Get the adapter ID this device was created on.
 //
 // # Safety
@@ -468,6 +506,59 @@ enum GoldyResult goldy_instance_get_adapter(const struct GoldyInstance *instance
                                             uint32_t index,
                                             struct GoldyAdapterInfo *info);
 
+// Bind a deposit that copies staging bytes into a destination buffer parcel.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyDepositTransaction *goldy_memory_exchange_bind_deposit_buffer(const struct GoldyMemoryExchange *exchange,
+                                                                          struct GoldyScheme *scheme,
+                                                                          const struct GoldyParcel *destination,
+                                                                          uint64_t capacity);
+
+// Bind a deposit that copies staging bytes into a texture region.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyDepositTransaction *goldy_memory_exchange_bind_deposit_texture(const struct GoldyMemoryExchange *exchange,
+                                                                           struct GoldyScheme *scheme,
+                                                                           const struct GoldyTexture *destination,
+                                                                           uint32_t x,
+                                                                           uint32_t y,
+                                                                           uint32_t width,
+                                                                           uint32_t height,
+                                                                           uint64_t capacity,
+                                                                           uint32_t src_row_pitch);
+
+// Bind a withdrawal over a buffer or texture deed parcel.
+//
+// Returns a heap-allocated transaction; destroy with [`goldy_withdraw_transaction_destroy`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyWithdrawTransaction *goldy_memory_exchange_bind_withdraw(const struct GoldyMemoryExchange *exchange,
+                                                                     struct GoldyScheme *scheme,
+                                                                     const struct GoldyParcel *parcel);
+
+// Bind a withdrawal over a texture deed (same as parcel withdraw; texture is a parcel).
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyWithdrawTransaction *goldy_memory_exchange_bind_withdraw_texture(const struct GoldyMemoryExchange *exchange,
+                                                                             struct GoldyScheme *scheme,
+                                                                             const struct GoldyTexture *texture);
+
+// Create a memory exchange bound to `ctx`.
+//
+// # Safety
+// `ctx` must be valid.
+struct GoldyMemoryExchange *goldy_memory_exchange_create(const struct GoldyContext *ctx);
+
+// Destroy a memory exchange.
+//
+// # Safety
+// `exchange` must be valid and not used after this call.
+void goldy_memory_exchange_destroy(struct GoldyMemoryExchange *exchange);
+
 uint64_t goldy_parcel_byte_size(const struct GoldyParcel *parcel);
 
 void goldy_parcel_destroy(struct GoldyParcel *parcel);
@@ -477,31 +568,6 @@ void goldy_parcel_destroy(struct GoldyParcel *parcel);
 // # Safety
 // `lease` must be valid and not used after this call.
 void goldy_present_lease_destroy(struct GoldyPresentLease *lease);
-
-// Logical byte size of readable data for this grant.
-//
-// # Safety
-// `grant` must be valid.
-uint64_t goldy_read_grant_byte_size(const struct GoldyReadGrant *grant);
-
-// Consume bytes for the `(grant × submission)` cell into `output`.
-//
-// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
-// Each submission may be consumed at most once per grant. Drop the submission when done if you
-// rely on staging-buffer reuse.
-//
-// # Safety
-// All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_read_grant_consume(const struct GoldyReadGrant *grant,
-                                          const struct GoldySchemeSubmission *submission,
-                                          uint8_t *output,
-                                          size_t output_size);
-
-// Destroy a read grant from [`goldy_scheme_grant_read`].
-//
-// # Safety
-// `grant` must be valid and not used after this call.
-void goldy_read_grant_destroy(struct GoldyReadGrant *grant);
 
 struct GoldyBuffer *goldy_record_builder_build(struct GoldyRecordBuilder *builder,
                                                struct GoldyRetainedPool *pool);
@@ -639,7 +705,7 @@ enum GoldyResult goldy_scheme_compute_node_with_texture(struct GoldyScheme *sche
                                                         const struct GoldyTexture *texture,
                                                         enum GoldyNodeAccess node_access);
 
-// Copy a scheme-held render target into a texture parcel (for grant readback).
+// Copy a scheme-held render target into a texture parcel (for memory withdraw readback).
 //
 // # Safety
 // All pointers must be valid.
@@ -658,26 +724,6 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // # Safety
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
-
-// Record a read-easement grant over a **buffer** parcel (once per scheme).
-//
-// For texture parcels use [`goldy_scheme_grant_read_texture`].
-//
-// Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
-// Call after the producing dispatch node(s). Marks the scheme dirty.
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyReadGrant *goldy_scheme_grant_read(struct GoldyScheme *scheme,
-                                               const struct GoldyParcel *parcel);
-
-//
-// Like [`goldy_scheme_grant_read`] but requires a texture parcel with [`TextureFlags::COPY_SRC`].
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyReadGrant *goldy_scheme_grant_read_texture(struct GoldyScheme *scheme,
-                                                       const struct GoldyTexture *texture);
 
 // True when the next submit must re-record.
 //
@@ -828,7 +874,7 @@ uint64_t goldy_scheme_submission_timeline_value(const struct GoldySchemeSubmissi
 
 // Block until the GPU work for `submission` has completed.
 //
-// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
+// Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
 //
 // # Safety
 // `ctx` and `submission` must be valid.
@@ -838,8 +884,8 @@ enum GoldyResult goldy_scheme_submission_wait(const struct GoldyContext *ctx,
 // Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 //
 // Does not block. The caller owns `*out_submission` and must call
-// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded grant, use
-// [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
+// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded withdrawal, use
+// [`crate::goldy_withdraw_transaction_claim`] then [`crate::goldy_withdraw_claim_consume`].
 //
 // # Safety
 // `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
@@ -993,6 +1039,77 @@ void goldy_transaction_destroy(struct GoldyTransaction *transaction);
 // # Safety
 // `transaction` must be valid.
 uint64_t goldy_transaction_generation(const struct GoldyTransaction *transaction);
+
+// Copy consumed withdraw data into `output` (must be exactly [`goldy_withdraw_bytes_len`] bytes).
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_withdraw_bytes_copy(const struct GoldyWithdrawBytes *bytes,
+                                           uint8_t *output,
+                                           size_t output_size);
+
+// Pointer to consumed withdraw data (valid until [`goldy_withdraw_bytes_destroy`]).
+//
+// # Safety
+// `bytes` must be valid.
+const uint8_t *goldy_withdraw_bytes_data(const struct GoldyWithdrawBytes *bytes);
+
+// Destroy consumed withdraw bytes (recycles staging).
+//
+// # Safety
+// `bytes` must be valid and not used after this call.
+void goldy_withdraw_bytes_destroy(struct GoldyWithdrawBytes *bytes);
+
+// Byte length of consumed withdraw data.
+//
+// # Safety
+// `bytes` must be valid.
+uint64_t goldy_withdraw_bytes_len(const struct GoldyWithdrawBytes *bytes);
+
+// Wait for the submission, read staging into CPU bytes, and return RAII-managed bytes.
+//
+// Takes ownership of `claim` (do not destroy it afterward). Destroy the result with
+// [`goldy_withdraw_bytes_destroy`].
+//
+// # Safety
+// `claim` must be valid.
+struct GoldyWithdrawBytes *goldy_withdraw_claim_consume(struct GoldyWithdrawClaim *claim);
+
+// Destroy a withdraw claim without consuming or discarding intentionally.
+//
+// Drop recycles staging like discard when the claim is still unsettled.
+//
+// # Safety
+// `claim` must be valid and not used after this call.
+void goldy_withdraw_claim_destroy(struct GoldyWithdrawClaim *claim);
+
+// Settle without reading bytes; recycle staging. Takes ownership of `claim`.
+//
+// # Safety
+// `claim` must be valid.
+enum GoldyResult goldy_withdraw_claim_discard(struct GoldyWithdrawClaim *claim);
+
+// Logical byte size of readable data for this withdrawal.
+//
+// # Safety
+// `transaction` must be valid.
+uint64_t goldy_withdraw_transaction_byte_size(const struct GoldyWithdrawTransaction *transaction);
+
+// Extract this transaction's claim from a successful submission.
+//
+// Returns a heap-allocated claim; settle with [`goldy_withdraw_claim_consume`] or
+// [`goldy_withdraw_claim_discard`], or destroy with [`goldy_withdraw_claim_destroy`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyWithdrawClaim *goldy_withdraw_transaction_claim(const struct GoldyWithdrawTransaction *transaction,
+                                                            struct GoldySchemeSubmission *submission);
+
+// Destroy a withdraw transaction.
+//
+// # Safety
+// `transaction` must be valid and not used after this call.
+void goldy_withdraw_transaction_destroy(struct GoldyWithdrawTransaction *transaction);
 
 #ifdef __cplusplus
 }  // extern "C"

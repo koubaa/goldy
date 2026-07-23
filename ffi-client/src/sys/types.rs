@@ -237,7 +237,27 @@ pub struct GoldySchemeSubmission {
 }
 
 #[repr(C)]
-pub struct GoldyReadGrant {
+pub struct GoldyMemoryExchange {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct GoldyWithdrawTransaction {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct GoldyWithdrawClaim {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct GoldyWithdrawBytes {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct GoldyDepositTransaction {
     _private: [u8; 0],
 }
 

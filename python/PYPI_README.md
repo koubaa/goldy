@@ -65,9 +65,10 @@ with scheme.render_pass("clear", rt) as rp:
     rp.set_vertex_buffer_parcel(0, vertex_parcel)
     rp.draw(vertex_count=3)
 scheme.copy_to_texture(rt, readback)
-grant = scheme.grant_read_texture(readback)
+memory = goldy.MemoryExchange(ctx)
+withdraw = memory.bind_withdraw_texture(scheme, readback)
 submission = scheme.submit()
-pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(100, 100, 4)
+pixels = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.uint8).reshape(100, 100, 4)
 ```
 
 ## Examples
@@ -98,10 +99,12 @@ pool = goldy.RetainedPool(device)
 parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 ```
 
-Readback uses scheme grants on textures or buffer units:
+Readback uses `MemoryExchange` withdraw (claim then consume):
 ```python
-grant = scheme.grant_read(texture)
-pixels = grant.consume()  # raw bytes; reshape as needed
+memory = goldy.MemoryExchange(ctx)
+withdraw = memory.bind_withdraw_texture(scheme, texture)
+submission = scheme.submit()
+pixels = withdraw.claim(submission).consume()  # raw bytes; reshape as needed
 ```
 
 ### Context Managers

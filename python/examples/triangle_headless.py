@@ -76,9 +76,9 @@ def main():
         )
 
     scheme.copy_to_texture(rt, readback)
-    grant = scheme.grant_read_texture(readback)
+    grant = goldy.MemoryExchange(ctx).bind_withdraw_texture(scheme, readback)
     submission = scheme.submit()
-    pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(100, 100, 4)
+    pixels = np.frombuffer(grant.claim(submission).consume(), dtype=np.uint8).reshape(100, 100, 4)
 
     assert pixels.shape == (100, 100, 4)
     assert np.any(pixels[:, :, :3] > 0), "Triangle should write non-black pixels"

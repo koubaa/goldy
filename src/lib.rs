@@ -59,14 +59,13 @@ pub mod transient_pool;
 pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
-pub use exchange::{Claim, SurfaceExchange};
+pub use exchange::{
+    Claim, DepositTransaction, MemoryExchange, SurfaceExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
+};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
-pub use scheme::{
-    Grant, GrantBuffer, GrantBytes, GrantTexture, Lease, LeaseRenderTarget, ReadGrant, ReplayStats, Scheme,
-    SchemeRenderPassBuilder, Submission, Transaction, UploadBuffer,
-};
+pub use scheme::{Lease, LeaseRenderTarget, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, Transaction};
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
 pub use vram_allocator::DeferredPayload;

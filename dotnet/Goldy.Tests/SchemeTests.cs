@@ -37,10 +37,12 @@ public class SchemeTests
                     .Dispatch(1, 1, 1);
             }
 
-            using var grant = scheme.GrantRead(buffer.Field(0));
+            using var memory = new MemoryExchange(ctx);
+            using var withdraw = memory.BindWithdraw(scheme, buffer.Field(0));
             using var frame = scheme.Submit();
-            var bytes = grant.Consume(frame);
-            var values = MemoryMarshal.Cast<byte, uint>(bytes);
+            using var claim = withdraw.Claim(frame);
+            using var bytes = claim.Consume();
+            var values = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan());
             foreach (var v in values)
                 Assert.Equal(42u, v);
         }
@@ -51,7 +53,7 @@ public class SchemeTests
     }
 
     [Fact]
-    public void Scheme_GrantReadTexture_ReadsRedPixel()
+    public void Scheme_WithdrawTexture_ReadsRedPixel()
     {
         const string writeTextureShader = """
             import goldy_exp;
@@ -91,9 +93,11 @@ public class SchemeTests
                     .Dispatch(2, 2, 1);
             }
 
-            using var grant = scheme.GrantReadTexture(texture);
+            using var memory = new MemoryExchange(ctx);
+            using var withdraw = memory.BindWithdrawTexture(scheme, texture);
             using var frame = scheme.Submit();
-            var bytes = grant.Consume(frame);
+            using var claim = withdraw.Claim(frame);
+            using var bytes = claim.Consume();
             Assert.True(bytes.Length > 0);
             Assert.Equal(255, bytes[0]);
             Assert.Equal(0, bytes[1]);
@@ -128,9 +132,11 @@ public class SchemeTests
             { }
 
             scheme.CopyToTexture(rt, readback);
-            using var grant = scheme.GrantReadTexture(readback);
+            using var memory = new MemoryExchange(ctx);
+            using var withdraw = memory.BindWithdrawTexture(scheme, readback);
             using var submission = scheme.Submit();
-            var pixels = grant.Consume(submission);
+            using var claim = withdraw.Claim(submission);
+            using var pixels = claim.Consume();
 
             Assert.Equal(2u * 2u * 4u, (uint)pixels.Length);
             for (var i = 0; i < pixels.Length; i += 4)
@@ -196,11 +202,21 @@ public class SchemeTests
             }
 
             scheme.CopyToTexture(rt, readback);
-            using var grant = scheme.GrantReadTexture(readback);
+            using var memory = new MemoryExchange(ctx);
+            using var withdraw = memory.BindWithdrawTexture(scheme, readback);
             using var submission = scheme.Submit();
-            var pixels = grant.Consume(submission);
-
-            Assert.Contains(pixels, b => b > 0);
+            using var claim = withdraw.Claim(submission);
+            using var pixels = claim.Consume();
+            var hasColor = false;
+            foreach (var b in pixels.AsSpan())
+            {
+                if (b > 0)
+                {
+                    hasColor = true;
+                    break;
+                }
+            }
+            Assert.True(hasColor);
         }
         catch (GoldyException ex) when (ex.Message.Contains("adapter", StringComparison.OrdinalIgnoreCase))
         {

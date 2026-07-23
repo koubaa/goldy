@@ -75,10 +75,26 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
     pub goldy_scheme_submission_timeline_value: FnGoldySchemeSubmissionTimelineValue,
     pub goldy_scheme_submission_wait: FnGoldySchemeSubmissionWait,
-    pub goldy_scheme_grant_read: FnGoldySchemeGrantRead,
-    pub goldy_read_grant_destroy: FnGoldyReadGrantDestroy,
-    pub goldy_read_grant_byte_size: FnGoldyReadGrantByteSize,
-    pub goldy_read_grant_consume: FnGoldyReadGrantConsume,
+    pub goldy_memory_exchange_create: FnGoldyMemoryExchangeCreate,
+    pub goldy_memory_exchange_destroy: FnGoldyMemoryExchangeDestroy,
+    pub goldy_memory_exchange_bind_withdraw: FnGoldyMemoryExchangeBindWithdraw,
+    pub goldy_memory_exchange_bind_withdraw_texture: FnGoldyMemoryExchangeBindWithdrawTexture,
+    pub goldy_memory_exchange_bind_deposit_buffer: FnGoldyMemoryExchangeBindDepositBuffer,
+    pub goldy_memory_exchange_bind_deposit_texture: FnGoldyMemoryExchangeBindDepositTexture,
+    pub goldy_withdraw_transaction_destroy: FnGoldyWithdrawTransactionDestroy,
+    pub goldy_withdraw_transaction_byte_size: FnGoldyWithdrawTransactionByteSize,
+    pub goldy_withdraw_transaction_claim: FnGoldyWithdrawTransactionClaim,
+    pub goldy_withdraw_claim_destroy: FnGoldyWithdrawClaimDestroy,
+    pub goldy_withdraw_claim_consume: FnGoldyWithdrawClaimConsume,
+    pub goldy_withdraw_claim_discard: FnGoldyWithdrawClaimDiscard,
+    pub goldy_withdraw_bytes_len: FnGoldyWithdrawBytesLen,
+    pub goldy_withdraw_bytes_data: FnGoldyWithdrawBytesData,
+    pub goldy_withdraw_bytes_copy: FnGoldyWithdrawBytesCopy,
+    pub goldy_withdraw_bytes_destroy: FnGoldyWithdrawBytesDestroy,
+    pub goldy_deposit_transaction_destroy: FnGoldyDepositTransactionDestroy,
+    pub goldy_deposit_transaction_capacity: FnGoldyDepositTransactionCapacity,
+    pub goldy_deposit_transaction_id: FnGoldyDepositTransactionId,
+    pub goldy_deposit_transaction_write: FnGoldyDepositTransactionWrite,
     pub goldy_scheme_lease_render_target: FnGoldySchemeLeaseRenderTarget,
     pub goldy_scheme_render_target_lease_destroy: FnGoldySchemeRenderTargetLeaseDestroy,
     pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
@@ -93,7 +109,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_render_pass_draw_fullscreen: FnGoldySchemeRenderPassDrawFullscreen,
     pub goldy_scheme_render_pass_finish: FnGoldySchemeRenderPassFinish,
     pub goldy_scheme_copy_to_texture: FnGoldySchemeCopyToTexture,
-    pub goldy_scheme_grant_read_texture: FnGoldySchemeGrantReadTexture,
     pub goldy_retained_pool_acquire_texture: FnGoldyRetainedPoolAcquireTexture,
     pub goldy_present_lease_destroy: FnGoldyPresentLeaseDestroy,
     pub goldy_surface_exchange_destroy: FnGoldySurfaceExchangeDestroy,
@@ -221,10 +236,50 @@ impl GoldyFfi {
                 FnGoldySchemeSubmissionTimelineValue
             ),
             goldy_scheme_submission_wait: sym!("goldy_scheme_submission_wait", FnGoldySchemeSubmissionWait),
-            goldy_scheme_grant_read: sym!("goldy_scheme_grant_read", FnGoldySchemeGrantRead),
-            goldy_read_grant_destroy: sym!("goldy_read_grant_destroy", FnGoldyReadGrantDestroy),
-            goldy_read_grant_byte_size: sym!("goldy_read_grant_byte_size", FnGoldyReadGrantByteSize),
-            goldy_read_grant_consume: sym!("goldy_read_grant_consume", FnGoldyReadGrantConsume),
+            goldy_memory_exchange_create: sym!("goldy_memory_exchange_create", FnGoldyMemoryExchangeCreate),
+            goldy_memory_exchange_destroy: sym!("goldy_memory_exchange_destroy", FnGoldyMemoryExchangeDestroy),
+            goldy_memory_exchange_bind_withdraw: sym!(
+                "goldy_memory_exchange_bind_withdraw",
+                FnGoldyMemoryExchangeBindWithdraw
+            ),
+            goldy_memory_exchange_bind_withdraw_texture: sym!(
+                "goldy_memory_exchange_bind_withdraw_texture",
+                FnGoldyMemoryExchangeBindWithdrawTexture
+            ),
+            goldy_memory_exchange_bind_deposit_buffer: sym!(
+                "goldy_memory_exchange_bind_deposit_buffer",
+                FnGoldyMemoryExchangeBindDepositBuffer
+            ),
+            goldy_memory_exchange_bind_deposit_texture: sym!(
+                "goldy_memory_exchange_bind_deposit_texture",
+                FnGoldyMemoryExchangeBindDepositTexture
+            ),
+            goldy_withdraw_transaction_destroy: sym!(
+                "goldy_withdraw_transaction_destroy",
+                FnGoldyWithdrawTransactionDestroy
+            ),
+            goldy_withdraw_transaction_byte_size: sym!(
+                "goldy_withdraw_transaction_byte_size",
+                FnGoldyWithdrawTransactionByteSize
+            ),
+            goldy_withdraw_transaction_claim: sym!("goldy_withdraw_transaction_claim", FnGoldyWithdrawTransactionClaim),
+            goldy_withdraw_claim_destroy: sym!("goldy_withdraw_claim_destroy", FnGoldyWithdrawClaimDestroy),
+            goldy_withdraw_claim_consume: sym!("goldy_withdraw_claim_consume", FnGoldyWithdrawClaimConsume),
+            goldy_withdraw_claim_discard: sym!("goldy_withdraw_claim_discard", FnGoldyWithdrawClaimDiscard),
+            goldy_withdraw_bytes_len: sym!("goldy_withdraw_bytes_len", FnGoldyWithdrawBytesLen),
+            goldy_withdraw_bytes_data: sym!("goldy_withdraw_bytes_data", FnGoldyWithdrawBytesData),
+            goldy_withdraw_bytes_copy: sym!("goldy_withdraw_bytes_copy", FnGoldyWithdrawBytesCopy),
+            goldy_withdraw_bytes_destroy: sym!("goldy_withdraw_bytes_destroy", FnGoldyWithdrawBytesDestroy),
+            goldy_deposit_transaction_destroy: sym!(
+                "goldy_deposit_transaction_destroy",
+                FnGoldyDepositTransactionDestroy
+            ),
+            goldy_deposit_transaction_capacity: sym!(
+                "goldy_deposit_transaction_capacity",
+                FnGoldyDepositTransactionCapacity
+            ),
+            goldy_deposit_transaction_id: sym!("goldy_deposit_transaction_id", FnGoldyDepositTransactionId),
+            goldy_deposit_transaction_write: sym!("goldy_deposit_transaction_write", FnGoldyDepositTransactionWrite),
             goldy_scheme_lease_render_target: sym!("goldy_scheme_lease_render_target", FnGoldySchemeLeaseRenderTarget),
             goldy_scheme_render_target_lease_destroy: sym!(
                 "goldy_scheme_render_target_lease_destroy",
@@ -266,7 +321,6 @@ impl GoldyFfi {
             ),
             goldy_scheme_render_pass_finish: sym!("goldy_scheme_render_pass_finish", FnGoldySchemeRenderPassFinish),
             goldy_scheme_copy_to_texture: sym!("goldy_scheme_copy_to_texture", FnGoldySchemeCopyToTexture),
-            goldy_scheme_grant_read_texture: sym!("goldy_scheme_grant_read_texture", FnGoldySchemeGrantReadTexture),
             goldy_retained_pool_acquire_texture: sym!(
                 "goldy_retained_pool_acquire_texture",
                 FnGoldyRetainedPoolAcquireTexture

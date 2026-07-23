@@ -80,11 +80,12 @@ Because timeline values are ordered, you can reason about completion transitivel
 
 ```rust
 let ctx = device.create_context();
-let grant = scheme.grant_read(&buffer);
-let submission = scheme.submit()?;
+let memory = MemoryExchange::new(&ctx);
+let withdraw = memory.bind_withdraw(&mut scheme, &buffer)?;
+let mut submission = scheme.submit()?;
 submission.wait(&ctx)?;
 
-let result = grant.consume(&submission)?;
+let result = withdraw.claim(&mut submission)?.consume()?;
 ```
 
 ### Multi-frame pipelining

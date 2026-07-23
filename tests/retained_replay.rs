@@ -23,15 +23,19 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape},
-    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
-    TextureKind,
+    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, Parcel,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat, TextureKind,
+    WithdrawTransaction,
 };
 use std::sync::Arc;
 use submission::submission_context;
 
-fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
-    let loan = grant.consume(submission).expect("grant consume");
+fn read_grant_u32(grant: &WithdrawTransaction, submission: &mut Submission, count: usize) -> Vec<u32> {
+    let loan = grant
+        .claim(submission)
+        .expect("claim")
+        .consume()
+        .expect("withdraw consume");
     assert_eq!(loan.len(), count * 4, "grant readback size");
     bytemuck::cast_slice(&loan).to_vec()
 }
@@ -91,15 +95,17 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
         .with_parcel(&output, NodeAccess::Write)
         .dispatch(1, 1, 1);
 
-    let grant = worker.grant_read(&output).expect("grant_read");
+    let grant = MemoryExchange::new(worker.context())
+        .bind_withdraw(&mut worker, &output)
+        .expect("withdraw");
     const FRAMES: u32 = 3;
     let mut upload = Scheme::new(&ctx);
     for submission in 1..=FRAMES {
         // Separate upload submission per frame via a persistent upload scheme.
         upload::upload_parcel(&mut upload, &input, bytemuck::cast_slice(&[submission; 8])).expect("upload_parcel");
 
-        let frame = worker.submit().expect("submit worker");
-        for v in read_grant_u32(&grant, &frame, 8) {
+        let mut frame = worker.submit().expect("submit worker");
+        for v in read_grant_u32(&grant, &mut frame, 8) {
             assert_eq!(
                 v, submission,
                 "submission {submission} must observe its upload (cross-scheme serialization)"
@@ -118,7 +124,7 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
 
 /// Logical upload buffers feed a retained worker across pipelined frames without host waits.
 #[test]
-fn upload_buffer_feeds_retained_worker_across_frames() {
+fn deposit_feeds_retained_worker_across_frames() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
 
@@ -139,38 +145,38 @@ fn upload_buffer_feeds_retained_worker_across_frames() {
         .with_parcel(&input, NodeAccess::Read)
         .with_parcel(&output, NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let grant = worker.grant_read(&output).expect("grant_read");
+    let grant = MemoryExchange::new(worker.context())
+        .bind_withdraw(&mut worker, &output)
+        .expect("withdraw");
 
     let mut upload = Scheme::new(&ctx);
-    let staging = upload
-        .declare_upload_buffer((8 * std::mem::size_of::<u32>()) as u64)
-        .expect("declare upload");
-    upload
-        .copy_upload_buffer(&staging, 0, input.whole(), 0, (8 * std::mem::size_of::<u32>()) as u64)
-        .expect("copy topology");
+    let memory = MemoryExchange::new(&ctx);
+    let staging = memory
+        .bind_deposit_buffer(&mut upload, input.whole(), (8 * std::mem::size_of::<u32>()) as u64)
+        .expect("declare deposit");
 
     const FRAMES: u32 = 4;
     for submission in 1..=FRAMES {
         let data = [submission; 8];
-        upload
-            .stage_upload_buffer(&staging, 0, bytemuck::cast_slice(&data))
-            .expect("stage upload");
+        staging
+            .write(&mut upload, 0, bytemuck::cast_slice(&data))
+            .expect("stage deposit");
         let _ = upload.submit().expect("submit upload");
-        let frame = worker.submit().expect("submit worker");
-        for v in read_grant_u32(&grant, &frame, 8) {
+        let mut frame = worker.submit().expect("submit worker");
+        for v in read_grant_u32(&grant, &mut frame, 8) {
             assert_eq!(v, submission, "frame {submission} must observe its staged payload");
         }
     }
 
     assert_eq!(worker.replay_stats().records, 1, "worker records once");
     assert!(
-        upload.upload_buffer_parcel_count(&staging) >= 1,
+        upload.deposit_parcel_count(&staging) >= 1,
         "upload buffer must own at least one physical parcel"
     );
     // After GPU retirement, subsequent stages should not unbounded-grow forever.
     // Mock/backends that complete promptly settle back to one warm parcel.
     assert!(
-        upload.upload_buffer_parcel_count(&staging) <= FRAMES as usize,
+        upload.deposit_parcel_count(&staging) <= FRAMES as usize,
         "parcel count must be bounded by in-flight depth"
     );
 }
@@ -200,7 +206,7 @@ fn clean_scheme_resubmits_without_rerecord() {
         .dispatch(1, 1, 1);
 
     scheme.submit().expect("submit 0");
-    let frame = scheme.submit().expect("submit 1");
+    let mut frame = scheme.submit().expect("submit 1");
     frame.wait(&ctx).expect("wait");
     assert!(output.is_settled(&ctx), "completed work must leave parcel settled");
 
@@ -321,14 +327,16 @@ fn selector_advances_across_identical_submissions() {
         .with_parcel(&selector, NodeAccess::ReadWrite)
         .dispatch(1, 1, 1);
 
-    let grant = scheme.grant_read(&selector).expect("grant_read");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &selector)
+        .expect("withdraw");
     const N: u64 = 5;
     let mut last_frame = None;
     for _ in 0..N {
         last_frame = Some(scheme.submit().expect("submit"));
     }
-    let frame = last_frame.expect("submit");
-    let count = read_grant_u32(&grant, &frame, 1)[0];
+    let mut frame = last_frame.expect("submit");
+    let count = read_grant_u32(&grant, &mut frame, 1)[0];
     assert_eq!(
         count as u64, N,
         "each submission must advance the GPU-side selector once"
@@ -383,19 +391,23 @@ fn two_schemes_on_one_context_do_not_collide() {
         .with_parcel(&out_b, NodeAccess::Write)
         .dispatch(1, 1, 1);
 
-    let grant_a = scheme_a.grant_read(&out_a).expect("grant_read");
-    let grant_b = scheme_b.grant_read(&out_b).expect("grant_read");
+    let grant_a = MemoryExchange::new(scheme_a.context())
+        .bind_withdraw(&mut scheme_a, &out_a)
+        .expect("withdraw");
+    let grant_b = MemoryExchange::new(scheme_b.context())
+        .bind_withdraw(&mut scheme_b, &out_b)
+        .expect("withdraw");
 
     // Interleave submissions: A, B, A, B
     let _ = scheme_a.submit().expect("a1");
     let _ = scheme_b.submit().expect("b1");
-    let frame_a = scheme_a.submit().expect("a2");
-    let frame_b = scheme_b.submit().expect("b2");
+    let mut frame_a = scheme_a.submit().expect("a2");
+    let mut frame_b = scheme_b.submit().expect("b2");
 
-    for v in read_grant_u32(&grant_a, &frame_a, 8) {
+    for v in read_grant_u32(&grant_a, &mut frame_a, 8) {
         assert_eq!(v, 1u32, "scheme_a must produce 1s");
     }
-    for v in read_grant_u32(&grant_b, &frame_b, 8) {
+    for v in read_grant_u32(&grant_b, &mut frame_b, 8) {
         assert_eq!(v, 2u32, "scheme_b must produce 2s");
     }
 
@@ -523,7 +535,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) {
 
 /// Grant readback with N-backing: submit K and K+1 without waiting; both frames read correctly.
 #[test]
-fn grant_read_concurrent_frames_distinct_backings() {
+fn withdraw_concurrent_frames_distinct_backings() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
 
@@ -543,13 +555,15 @@ fn grant_read_concurrent_frames_distinct_backings() {
         .node("fill", &pipe)
         .with_parcel(&buf, NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
 
-    let frame1 = scheme.submit().expect("submit K");
-    let frame2 = scheme.submit().expect("submit K+1 without waiting on K");
+    let mut frame1 = scheme.submit().expect("submit K");
+    let mut frame2 = scheme.submit().expect("submit K+1 without waiting on K");
 
-    for frame in [&frame1, &frame2] {
-        let loan = grant.consume(frame).expect("grant consume");
+    for frame in [&mut frame1, &mut frame2] {
+        let loan = grant.claim(frame).expect("claim").consume().expect("withdraw consume");
         assert_eq!(loan.len(), 64 * 4);
         for chunk in loan.chunks_exact(4) {
             assert_eq!(u32::from_le_bytes(chunk.try_into().unwrap()), 42);
@@ -580,7 +594,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 
 /// Texture grant readback with N-backing: submit K and K+1 without waiting; both frames read correctly.
 #[test]
-fn grant_read_texture_concurrent_frames_distinct_backings() {
+fn withdraw_texture_concurrent_frames_distinct_backings() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
 
@@ -609,13 +623,15 @@ fn grant_read_texture_concurrent_frames_distinct_backings() {
         .node("write_tex", &pipeline)
         .with_parcel(&texture, NodeAccess::Write)
         .dispatch(wg_x, wg_y, 1);
-    let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &texture)
+        .expect("withdraw");
 
-    let frame1 = scheme.submit().expect("submit K");
-    let frame2 = scheme.submit().expect("submit K+1 without waiting on K");
+    let mut frame1 = scheme.submit().expect("submit K");
+    let mut frame2 = scheme.submit().expect("submit K+1 without waiting on K");
 
-    for frame in [&frame1, &frame2] {
-        let loan = grant.consume(frame).expect("grant consume");
+    for frame in [&mut frame1, &mut frame2] {
+        let loan = grant.claim(frame).expect("claim").consume().expect("withdraw consume");
         assert!(loan.len() > 0, "texture readback empty");
         assert_eq!(loan[0], 255, "R channel");
         assert_eq!(loan[1], 0, "G channel");
@@ -645,9 +661,9 @@ fn fill_42_scheme(ctx: &Context, pipe: &ComputePipeline, buf: &Parcel) -> Scheme
     scheme
 }
 
-/// Second `grant.consume` on the same submission must fail (staging cell is single-consume).
+/// Second claim on the same submission must fail (withdraw slot is taken exactly once).
 #[test]
-fn grant_read_double_read_same_frame_errors() {
+fn withdraw_double_read_same_frame_errors() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
@@ -658,17 +674,19 @@ fn grant_read_double_read_same_frame_errors() {
         .expect("output parcel");
 
     let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
-    let frame = scheme.submit().expect("submit");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
+    let mut frame = scheme.submit().expect("submit");
 
-    let _loan = grant.consume(&frame).expect("first read");
-    let err = grant.consume(&frame).expect_err("second read must fail");
+    let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
+    let err = grant.claim(&mut frame).expect_err("second claim must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
-/// Cloned frames share one staging cell; only one read succeeds.
+/// After the first claim takes the withdraw slot, a second claim fails.
 #[test]
-fn grant_read_second_consume_errors() {
+fn withdraw_second_consume_errors() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
@@ -679,18 +697,20 @@ fn grant_read_second_consume_errors() {
         .expect("output parcel");
 
     let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
-    let frame = scheme.submit().expect("submit");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
+    let mut frame = scheme.submit().expect("submit");
 
-    let _loan = grant.consume(&frame).expect("first read");
-    let err = grant.consume(&frame).expect_err("second consume must fail");
+    let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
+    let err = grant.claim(&mut frame).expect_err("second claim must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
 /// Grant with no producing dispatch copies parcel bytes as-is (zero-initialized here so
 /// shared-device heap reuse does not inject stale fill_42 contents from prior tests).
 #[test]
-fn grant_read_without_producing_dispatch_reads_zeros() {
+fn withdraw_without_producing_dispatch_reads_zeros() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
 
@@ -709,9 +729,11 @@ fn grant_read_without_producing_dispatch_reads_zeros() {
         .expect("output parcel");
 
     let mut scheme = Scheme::new(&ctx);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
-    let frame = scheme.submit().expect("submit");
-    let values = read_grant_u32(&grant, &frame, GRANT_ZERO_TEST_U32S);
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
+    let mut frame = scheme.submit().expect("submit");
+    let values = read_grant_u32(&grant, &mut frame, GRANT_ZERO_TEST_U32S);
     assert!(
         values.iter().all(|&v| v == 0),
         "expected zeros without a producer dispatch"
@@ -720,7 +742,7 @@ fn grant_read_without_producing_dispatch_reads_zeros() {
 
 /// Grant node before dispatch in IR still reads post-dispatch bytes — copy runs after all dispatches.
 #[test]
-fn grant_read_before_dispatch_node_still_reads_producer_output() {
+fn withdraw_before_dispatch_node_still_reads_producer_output() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
@@ -731,13 +753,15 @@ fn grant_read_before_dispatch_node_still_reads_producer_output() {
         .expect("output parcel");
 
     let mut scheme = Scheme::new(&ctx);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
     scheme
         .node("fill", &pipe)
         .with_parcel(&buf, NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let frame = scheme.submit().expect("submit");
-    let values = read_grant_u32(&grant, &frame, 64);
+    let mut frame = scheme.submit().expect("submit");
+    let values = read_grant_u32(&grant, &mut frame, 64);
     assert!(
         values.iter().all(|&v| v == 42),
         "grant before dispatch in IR still sees fill output"
@@ -746,7 +770,7 @@ fn grant_read_before_dispatch_node_still_reads_producer_output() {
 
 /// Dropping a frame without reading returns staging; a later submission can still be read.
 #[test]
-fn grant_read_drop_frame_without_read_then_submit_and_read() {
+fn withdraw_drop_frame_without_read_then_submit_and_read() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
@@ -757,13 +781,15 @@ fn grant_read_drop_frame_without_read_then_submit_and_read() {
         .expect("output parcel");
 
     let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
 
-    let frame1 = scheme.submit().expect("submit 1");
+    let mut frame1 = scheme.submit().expect("submit 1");
     drop(frame1);
 
-    let frame2 = scheme.submit().expect("submit 2 after frame1 drop");
-    let values = read_grant_u32(&grant, &frame2, 64);
+    let mut frame2 = scheme.submit().expect("submit 2 after frame1 drop");
+    let values = read_grant_u32(&grant, &mut frame2, 64);
     assert!(
         values.iter().all(|&v| v == 42),
         "second frame after dropped unread frame1"
@@ -784,7 +810,7 @@ fn grant_read_drop_frame_without_read_then_submit_and_read() {
 /// `finish_submit_frame` issues `CopyTextureToReadback` on an already-used, retained
 /// command list.
 #[test]
-fn grant_read_texture_sequential_resubmit_correct_data() {
+fn withdraw_texture_sequential_resubmit_correct_data() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
 
@@ -813,15 +839,17 @@ fn grant_read_texture_sequential_resubmit_correct_data() {
         .node("write_tex", &pipeline)
         .with_parcel(&texture, NodeAccess::Write)
         .dispatch(wg_x, wg_y, 1);
-    let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &texture)
+        .expect("withdraw");
 
     // Three sequential submits: wait and read each one before the next.
     // The second and third submits are retained resubmits. Each triggers
     // a new CopyTextureToReadback in finish_submit_frame. The DX12 backend
     // must have the correct last_layout going into the copy barrier each time.
     for round in 0..3u32 {
-        let frame = scheme.submit().expect("submit");
-        let loan = grant.consume(&frame).expect("grant read");
+        let mut frame = scheme.submit().expect("submit");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
         assert!(loan.len() > 0, "texture readback empty on round {round}");
         assert_eq!(loan[0], 255, "R channel, round {round}");
         assert_eq!(loan[1], 0, "G channel, round {round}");
@@ -837,7 +865,7 @@ fn grant_read_texture_sequential_resubmit_correct_data() {
 
 /// Many consecutive submits with dropped unread frames must not exhaust staging (pool recycles on frame drop).
 #[test]
-fn grant_read_many_dropped_frames_without_read_then_read_succeeds() {
+fn withdraw_many_dropped_frames_without_read_then_read_succeeds() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
@@ -848,13 +876,15 @@ fn grant_read_many_dropped_frames_without_read_then_read_succeeds() {
         .expect("output parcel");
 
     let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
-    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &buf)
+        .expect("withdraw");
 
     for _ in 0..8 {
         drop(scheme.submit().expect("submit with dropped frame"));
     }
-    let frame = scheme.submit().expect("final submit");
-    let values = read_grant_u32(&grant, &frame, 64);
+    let mut frame = scheme.submit().expect("final submit");
+    let values = read_grant_u32(&grant, &mut frame, 64);
     assert!(
         values.iter().all(|&v| v == 42),
         "read succeeds after many dropped unread frames (staging pool must recycle)"

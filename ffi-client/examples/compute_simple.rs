@@ -3,8 +3,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example compute_simple`
 
 use goldy_ffi_client::{
-    BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions, RetainedPool,
-    Scheme, ShaderModule,
+    BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
 };
 
 const COMPUTE_SRC: &str = r#"
@@ -41,9 +41,12 @@ fn main() -> goldy_ffi_client::Result<()> {
     let mut node = scheme.compute_node("double", &pipeline);
     node.with_buffer(&buffer, NodeAccess::ReadWrite);
     node.dispatch(1, 1, 1);
-    let grant = scheme.grant_read(&buffer)?;
-    let submission = scheme.submit()?;
-    let bytes = grant.consume(&submission)?;
+    let memory = MemoryExchange::new(&ctx)?;
+    let parcel = buffer.field(0)?;
+    let withdraw = memory.bind_withdraw(&mut scheme, &parcel)?;
+    let mut submission = scheme.submit()?;
+    let claim = withdraw.claim(&mut submission)?;
+    let bytes = claim.consume()?;
     let values: &[f32] = bytemuck::cast_slice(&bytes);
     for (i, &v) in values.iter().enumerate().take(64) {
         let expected = i as f32 * 2.0;

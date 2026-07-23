@@ -89,9 +89,11 @@ fn main() -> goldy_ffi_client::Result<()> {
     }
 
     scheme.copy_to_texture(&rt, &readback)?;
-    let grant = scheme.grant_read_texture(&readback)?;
-    let submission = scheme.submit()?;
-    let pixels = grant.consume(&submission)?;
+    let memory = goldy_ffi_client::MemoryExchange::new(&ctx)?;
+    let withdraw = memory.bind_withdraw_texture(&mut scheme, &readback)?;
+    let mut submission = scheme.submit()?;
+    let claim = withdraw.claim(&mut submission)?;
+    let pixels = claim.consume()?;
 
     let bytes = cells.unit_read_to_cpu(1, &device)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&bytes);

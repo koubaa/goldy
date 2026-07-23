@@ -109,7 +109,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
         (ResourceId::PresentLease(a), ResourceId::PresentLease(b)) => a == b,
-        (ResourceId::UploadBuffer(a), ResourceId::UploadBuffer(b)) => a == b,
+        (ResourceId::Deposit(a), ResourceId::Deposit(b)) => a == b,
         _ => false,
     }
 }
@@ -137,9 +137,9 @@ fn resolve_buffer_copy_target(
     resolver: Option<&SlotResolver>,
 ) -> (crate::backend::BufferHandle, u64) {
     let resolved = match id {
-        ResourceId::UploadBuffer(_) => match resolver {
+        ResourceId::Deposit(_) => match resolver {
             Some(r) => r.resolve(id),
-            None => panic!("CopyBuffer UploadBuffer emitted before submit-time resolve"),
+            None => panic!("CopyBuffer Deposit emitted before submit-time resolve"),
         },
         other => other,
     };
@@ -220,7 +220,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         TransientTexture(u32),
         SwapchainOutput,
         PresentLease(u32),
-        UploadBuffer(u32),
+        Deposit(u32),
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -233,7 +233,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
             ResourceId::SwapchainOutput => GroupKey::SwapchainOutput,
             ResourceId::PresentLease(id) => GroupKey::PresentLease(id),
-            ResourceId::UploadBuffer(id) => GroupKey::UploadBuffer(id),
+            ResourceId::Deposit(id) => GroupKey::Deposit(id),
         }
     }
 
@@ -480,8 +480,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        // GrantRead participates in ordering edges but emits no GPU work in the IR.
-        NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
+        // WithdrawRead participates in ordering edges but emits no GPU work in the IR.
+        NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
     }
 }
 
@@ -504,7 +504,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::TransientBuffer(_)
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
-            | ResourceId::UploadBuffer(_)
+            | ResourceId::Deposit(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE
@@ -540,11 +540,11 @@ fn compute_barriers(
         if depth[from] < wave_idx && wave_set.contains(&to) {
             let from_node = &ir.nodes[from];
             let to_node = &ir.nodes[to];
-            // GrantRead emits no GPU work in this command stream (copy is out-of-band in
+            // WithdrawRead emits no GPU work in this command stream (copy is out-of-band in
             // `Scheme::finish_submit_frame`).  Skip it for barrier semantics so recording
             // grant before dispatch does not emit bogus COMMON→UAV global barriers on WARP.
-            if matches!(from_node.kind, NodeKind::GrantRead { .. })
-                || matches!(to_node.kind, NodeKind::GrantRead { .. })
+            if matches!(from_node.kind, NodeKind::WithdrawRead { .. })
+                || matches!(to_node.kind, NodeKind::WithdrawRead { .. })
             {
                 continue;
             }
@@ -563,7 +563,7 @@ fn compute_barriers(
                                     barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
                                 );
                             }
-                            ResourceId::UploadBuffer(uid) => {
+                            ResourceId::Deposit(uid) => {
                                 let entry = upload_usage.entry(uid).or_default();
                                 entry.src.merge(
                                     bi.access,
@@ -661,7 +661,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
             if !wave.barriers_before.upload_ids.is_empty() {
                 if let Some(r) = resolver {
                     for &(uid, usage) in &wave.barriers_before.upload_ids {
-                        if let Some(resolved) = r.upload_buffers.get(&uid) {
+                        if let Some(resolved) = r.deposits.get(&uid) {
                             if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
                                 barrier_buffers.push((resolved.parent, usage));
                             }
@@ -784,7 +784,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::WithdrawRead { .. } => {}
             }
         }
 
@@ -1321,7 +1321,7 @@ pub(crate) fn partition_waves_have_upload_slots(ir: &GraphIR, waves: &[Wave]) ->
             ir.nodes[ni]
                 .bindings
                 .iter()
-                .any(|b| matches!(b.resource, ResourceId::UploadBuffer(_)))
+                .any(|b| matches!(b.resource, ResourceId::Deposit(_)))
         })
     })
 }
@@ -1379,7 +1379,7 @@ pub(crate) fn emit_graph_commands_for_waves(
             if !wave.barriers_before.upload_ids.is_empty() {
                 if let Some(r) = resolver {
                     for &(uid, usage) in &wave.barriers_before.upload_ids {
-                        if let Some(resolved) = r.upload_buffers.get(&uid) {
+                        if let Some(resolved) = r.deposits.get(&uid) {
                             if !barrier_buffers.iter().any(|(h, _)| *h == resolved.parent) {
                                 barrier_buffers.push((resolved.parent, usage));
                             }
@@ -1501,7 +1501,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::WithdrawRead { .. } => {}
             }
         }
 

@@ -66,9 +66,11 @@ static class TriangleHeadless
         }
 
         scheme.CopyToTexture(rt, readback);
-        using var grant = scheme.GrantReadTexture(readback);
+        using var memory = new MemoryExchange(ctx);
+        using var withdraw = memory.BindWithdrawTexture(scheme, readback);
         using var submission = scheme.Submit();
-        var pixels = grant.Consume(submission);
+        using var claim = withdraw.Claim(submission);
+        using var pixels = claim.Consume();
 
         if (pixels.Length != width * height * 4)
             throw new InvalidOperationException($"Unexpected readback size: {pixels.Length}");

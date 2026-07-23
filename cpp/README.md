@@ -73,10 +73,11 @@ int main() {
                 .draw(0, 3);
         }
         scheme.copy_to_texture(rt, readback);
-        goldy::ReadGrant grant = scheme.grant_read_texture(readback);
+        goldy::MemoryExchange memory(ctx);
+        goldy::WithdrawTransaction withdraw = memory.bind_withdraw_texture(scheme, readback);
         goldy::SchemeSubmission submission = scheme.submit();
-        auto pixels = grant.consume(submission);
-        std::cout << "Rendered " << pixels.size() << " bytes\n";
+        goldy::WithdrawBytes bytes = withdraw.claim(submission).consume();
+        std::cout << "Rendered " << bytes.size() << " bytes\n";
         return 0;
     } catch (const goldy::Exception& e) {
         std::cerr << "Goldy error: " << e.what() << '\n';
@@ -164,6 +165,7 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 | `goldy::RenderPipeline` | Graphics pipeline |
 | `goldy::SchemeRenderTargetLease` | Offscreen render target declared on a scheme |
 | `goldy::Scheme` | Retained dependency graph (render passes, compute, present) |
+| `goldy::MemoryExchange` | CPU↔GPU withdraw (readback) and deposit (upload) |
 | `goldy::SurfaceExchange` | Window swapchain (Win32 / macOS / Wayland) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
 | `goldy::Sampler` | Texture sampler |

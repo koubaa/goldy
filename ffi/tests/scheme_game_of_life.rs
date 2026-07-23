@@ -6,15 +6,16 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_unit_byte_size, goldy_buffer_unit_read_to_cpu, goldy_compute_pipeline_create,
     goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy, goldy_device_destroy,
-    goldy_instance_destroy, goldy_read_grant_consume, goldy_read_grant_destroy, goldy_record_builder_build,
-    goldy_record_builder_create, goldy_record_builder_emplace, goldy_render_pipeline_create,
-    goldy_render_pipeline_destroy, goldy_retained_pool_acquire_texture, goldy_retained_pool_create,
-    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch,
-    goldy_scheme_compute_node_with_field, goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy,
-    goldy_scheme_grant_read_texture, goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin,
-    goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
-    goldy_scheme_render_pass_with_field, goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy,
-    goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy, GoldyColor,
+    goldy_instance_destroy, goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create,
+    goldy_memory_exchange_destroy, goldy_record_builder_build, goldy_record_builder_create,
+    goldy_record_builder_emplace, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
+    goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
+    goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_field,
+    goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_lease_render_target,
+    goldy_scheme_render_pass_begin, goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish,
+    goldy_scheme_render_pass_set_pipeline, goldy_scheme_render_pass_with_field,
+    goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
+    goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy, goldy_withdraw_transaction_destroy, GoldyColor,
     GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult, GoldyTargetLoad, GoldyTextureFlags,
     GoldyTextureFormat, GoldyTextureKind,
 };
@@ -212,8 +213,10 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let grant = goldy_scheme_grant_read_texture(scheme, readback);
-        assert!(!grant.is_null(), "{}", last_ffi_message());
+        let memory = goldy_memory_exchange_create(ctx);
+        assert!(!memory.is_null(), "{}", last_ffi_message());
+        let withdraw = goldy_memory_exchange_bind_withdraw_texture(memory, scheme, readback);
+        assert!(!withdraw.is_null(), "{}", last_ffi_message());
 
         let mut submission = std::ptr::null_mut();
         assert_eq!(
@@ -240,13 +243,7 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             "still-life block should remain 4 live cells after one step"
         );
 
-        let mut pixels = vec![0u8; (GRID_WIDTH * GRID_HEIGHT * 4) as usize];
-        assert_eq!(
-            goldy_read_grant_consume(grant, submission, pixels.as_mut_ptr(), pixels.len()),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
+        let pixels = common::withdraw_claim_copy(withdraw, submission);
 
         let cx = (GRID_WIDTH / 2) as usize;
         let cy = (GRID_HEIGHT / 2) as usize;
@@ -258,7 +255,8 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         );
 
         goldy_scheme_submission_destroy(submission);
-        goldy_read_grant_destroy(grant);
+        goldy_withdraw_transaction_destroy(withdraw);
+        goldy_memory_exchange_destroy(memory);
         goldy_scheme_render_target_lease_destroy(rt);
         goldy_scheme_destroy(scheme);
         goldy_render_pipeline_destroy(render_pipeline);

@@ -2,8 +2,10 @@
 
 use goldy_ffi::{
     goldy_get_last_error, goldy_instance_adapter_count, goldy_instance_create,
-    goldy_instance_create_device_for_adapter, goldy_instance_get_adapter, GoldyAdapterInfo, GoldyDevice,
-    GoldyDeviceType, GoldyInstance, GoldyResult,
+    goldy_instance_create_device_for_adapter, goldy_instance_get_adapter, goldy_withdraw_bytes_copy,
+    goldy_withdraw_bytes_destroy, goldy_withdraw_bytes_len, goldy_withdraw_claim_consume,
+    goldy_withdraw_transaction_claim, GoldyAdapterInfo, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyResult,
+    GoldySchemeSubmission, GoldyWithdrawTransaction,
 };
 use std::ffi::CStr;
 
@@ -15,6 +17,27 @@ pub fn last_ffi_message() -> String {
         }
         CStr::from_ptr(p).to_string_lossy().into_owned()
     }
+}
+
+/// Claim a withdraw for `submission`, consume staging, and copy bytes to a `Vec`.
+pub unsafe fn withdraw_claim_copy(
+    withdraw: *const GoldyWithdrawTransaction,
+    submission: *mut GoldySchemeSubmission,
+) -> Vec<u8> {
+    let claim = goldy_withdraw_transaction_claim(withdraw, submission);
+    assert!(!claim.is_null(), "{}", last_ffi_message());
+    let bytes = goldy_withdraw_claim_consume(claim);
+    assert!(!bytes.is_null(), "{}", last_ffi_message());
+    let len = goldy_withdraw_bytes_len(bytes) as usize;
+    let mut out = vec![0u8; len];
+    assert_eq!(
+        goldy_withdraw_bytes_copy(bytes, out.as_mut_ptr(), out.len()),
+        GoldyResult::Ok,
+        "{}",
+        last_ffi_message()
+    );
+    goldy_withdraw_bytes_destroy(bytes);
+    out
 }
 
 pub unsafe fn request_device(instance: *const GoldyInstance) -> *mut GoldyDevice {

@@ -162,12 +162,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_wait")]
     internal static partial GoldyResult SchemeSubmissionWait(nint ctx, nint submission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_grant_read")]
-    internal static partial nint SchemeGrantRead(nint scheme, nint parcel);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_grant_read_texture")]
-    internal static partial nint SchemeGrantReadTexture(nint scheme, nint texture);
-
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_lease_render_target")]
     internal static partial nint SchemeLeaseRenderTarget(
         nint scheme, uint width, uint height, TextureFormat format, [MarshalAs(UnmanagedType.U1)] bool hasDepth, DepthFormat depthFormat);
@@ -220,15 +214,73 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_present_lease_destroy")]
     internal static partial void PresentLeaseDestroy(nint lease);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_destroy")]
-    internal static partial void ReadGrantDestroy(nint grant);
+    // ========================================================================
+    // MemoryExchange / Withdraw / Deposit
+    // ========================================================================
 
-    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_byte_size")]
-    internal static partial ulong ReadGrantByteSize(nint grant);
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_create")]
+    internal static partial nint MemoryExchangeCreate(nint ctx);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_consume")]
-    internal static partial GoldyResult ReadGrantConsume(
-        nint grant, nint submission, nint output, nuint outputSize);
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_destroy")]
+    internal static partial void MemoryExchangeDestroy(nint exchange);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_withdraw")]
+    internal static partial nint MemoryExchangeBindWithdraw(nint exchange, nint scheme, nint parcel);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_withdraw_texture")]
+    internal static partial nint MemoryExchangeBindWithdrawTexture(nint exchange, nint scheme, nint texture);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_deposit_buffer")]
+    internal static partial nint MemoryExchangeBindDepositBuffer(
+        nint exchange, nint scheme, nint destination, ulong capacity);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_deposit_texture")]
+    internal static partial nint MemoryExchangeBindDepositTexture(
+        nint exchange, nint scheme, nint destination, uint x, uint y, uint width, uint height,
+        ulong capacity, uint srcRowPitch);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_transaction_destroy")]
+    internal static partial void WithdrawTransactionDestroy(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_transaction_byte_size")]
+    internal static partial ulong WithdrawTransactionByteSize(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_transaction_claim")]
+    internal static partial nint WithdrawTransactionClaim(nint transaction, nint submission);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_claim_destroy")]
+    internal static partial void WithdrawClaimDestroy(nint claim);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_claim_consume")]
+    internal static partial nint WithdrawClaimConsume(nint claim);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_claim_discard")]
+    internal static partial GoldyResult WithdrawClaimDiscard(nint claim);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_bytes_len")]
+    internal static partial ulong WithdrawBytesLen(nint bytes);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_bytes_data")]
+    internal static partial nint WithdrawBytesData(nint bytes);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_bytes_copy")]
+    internal static partial GoldyResult WithdrawBytesCopy(nint bytes, nint output, nuint outputSize);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_withdraw_bytes_destroy")]
+    internal static partial void WithdrawBytesDestroy(nint bytes);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_deposit_transaction_destroy")]
+    internal static partial void DepositTransactionDestroy(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_deposit_transaction_capacity")]
+    internal static partial ulong DepositTransactionCapacity(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_deposit_transaction_id")]
+    internal static partial uint DepositTransactionId(nint transaction);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_deposit_transaction_write")]
+    internal static partial GoldyResult DepositTransactionWrite(
+        nint transaction, nint scheme, ulong offset, nint data, nuint dataSize);
 
     // ========================================================================
     // RetainedPool / Parcel

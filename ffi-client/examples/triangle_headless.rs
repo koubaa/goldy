@@ -1,4 +1,4 @@
-//! Headless triangle example using goldy-ffi-client Scheme render pass + grant readback.
+//! Headless triangle example using goldy-ffi-client Scheme render pass + memory withdraw.
 //!
 //! Mirrors the dotnet/python headless triangle smoke tests.
 //!
@@ -70,9 +70,11 @@ fn main() -> goldy_ffi_client::Result<()> {
         pass.finish_recorded();
     }
     scheme.copy_to_texture(&rt, &readback)?;
-    let grant = scheme.grant_read_texture(&readback)?;
-    let submission = scheme.submit()?;
-    let pixels = grant.consume(&submission)?;
+    let memory = goldy_ffi_client::MemoryExchange::new(&ctx)?;
+    let withdraw = memory.bind_withdraw_texture(&mut scheme, &readback)?;
+    let mut submission = scheme.submit()?;
+    let claim = withdraw.claim(&mut submission)?;
+    let pixels = claim.consume()?;
     assert!(pixels.iter().any(|&b| b > 0), "readback should contain lit pixels");
 
     println!("Triangle rendered and read back successfully ({} bytes).", pixels.len());
