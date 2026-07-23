@@ -17,9 +17,11 @@ mod heap_tests {
     //! DX12 and Vulkan use committed resources without a shared heap cap.
 
     use crate::buffer::Allocation;
+    use crate::parcel::Parcel;
     use crate::test_support::{scheme_advance_timeline, SerialGpuDevice};
     use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
-    use crate::BufferKind;
+    use crate::{BufferKind, MemoryExchange, Scheme};
+    use std::sync::Arc;
 
     fn submission_context(device: &crate::Device) -> crate::Context {
         device.create_context().expect("context")
@@ -782,23 +784,30 @@ mod heap_tests {
         let device = make_device();
         let ctx = submission_context(&device);
         let initial_data: Vec<u32> = (0..64).collect();
-        let mut buf = device
-            .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
-            .unwrap();
+        let mut arc = Arc::new(
+            device
+                .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
+                .unwrap(),
+        );
 
         // Grow the buffer (triggers blit-copy internally).
         let new_size = 1024;
-        buf.resize_to(new_size).unwrap();
-        assert_eq!(buf.size(), new_size);
+        Arc::get_mut(&mut arc).unwrap().resize_to(new_size).unwrap();
+        assert_eq!(arc.size(), new_size);
 
         // Submit a fence to ensure the internal blit-copy has completed.
         let tv = scheme_submit_pipelined(&ctx);
         ctx.wait_until(tv).unwrap();
 
-        // Read back — first 256 bytes should be preserved.
-        let mut readback = vec![0u8; 256];
-        buf.read_to_cpu(&device, &mut readback).unwrap();
-        let result: &[u32] = bytemuck::cast_slice(&readback);
+        // Withdraw — first 256 bytes should be preserved.
+        let parcel = Parcel::from_whole_buffer(Arc::clone(&arc), Arc::downgrade(&device.inner));
+        let mut scheme = Scheme::new(&ctx);
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &parcel)
+            .expect("withdraw");
+        let mut sub = scheme.submit().expect("submit");
+        let readback = grant.claim(&mut sub).expect("claim").consume().expect("consume");
+        let result: &[u32] = bytemuck::cast_slice(&readback[..256]);
         assert_eq!(&result[..64], &initial_data[..]);
     }
 

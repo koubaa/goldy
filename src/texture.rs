@@ -183,7 +183,7 @@ impl TextureBacking {
     /// - GPU upload fails
     #[deprecated(
         since = "0.1.0",
-        note = "Use Scheme::write_texture_region() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> Result<()> {
@@ -227,7 +227,7 @@ impl TextureBacking {
     /// - GPU upload fails
     #[deprecated(
         since = "0.1.0",
-        note = "Use Scheme::write_texture() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     pub fn write(&self, data: &[u8]) -> Result<()> {
@@ -263,29 +263,6 @@ impl TextureBacking {
     pub fn byte_size(&self) -> usize {
         let bytes = u64::from(self.width) * u64::from(self.height) * u64::from(self.format.bytes_per_pixel());
         usize::try_from(bytes).unwrap_or(usize::MAX)
-    }
-
-    /// Read texture contents to CPU memory.
-    ///
-    /// The texture must have been created with [`TextureFlags::COPY_SRC`].
-    /// The output slice must be at least [`byte_size()`](Self::byte_size) bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Output buffer is too small
-    /// - Texture was not created with COPY_SRC
-    /// - GPU readback fails
-    #[deprecated(
-        note = "Copy to a CPU_READABLE buffer parcel via a scheme, submit, wait the timeline, then read the buffer"
-    )]
-    pub fn read_to_cpu(&self, output: &mut [u8]) -> Result<()> {
-        let expected_size = self.byte_size();
-        if output.len() < expected_size {
-            anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
-        }
-        let mut backend = self.backend.lock().unwrap();
-        backend.read_texture_to_cpu(self.handle, output)
     }
 
     /// Get the backend handle for this texture.

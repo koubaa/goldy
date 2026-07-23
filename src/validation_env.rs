@@ -11,7 +11,7 @@
 //!     variable is unset — set once before the first device is enumerated). For loader-only
 //!     Vulkan layers, set `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
-//!   - `scheme` / `readback` — retained-scheme grant readback invariants (staging pool, frame pairing)
+//!   - `scheme` / `readback` — retained-scheme withdraw staging invariants (staging pool, frame pairing)
 //!   - `all` — layout, GPU API, timeline, and scheme
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
@@ -109,7 +109,7 @@ pub(crate) fn timeline_validation_enabled() -> bool {
     from_goldy_validation_var().timeline
 }
 
-/// Retained-scheme grant readback invariants (frame/grant pairing, staging pool checks).
+/// Retained-scheme withdraw staging invariants (frame/grant pairing, staging pool checks).
 #[must_use]
 pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme

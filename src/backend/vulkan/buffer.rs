@@ -254,7 +254,7 @@ pub(super) fn create(
             is_sparse: false,
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -388,7 +388,7 @@ pub(super) fn create_sparse_with_capacity(
             is_sparse: true,
             sparse_block_size: block,
             sparse_pages,
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -1138,7 +1138,7 @@ pub(super) fn resize(
         is_sparse: false,
         sparse_block_size: 0,
         sparse_pages: Vec::new(),
-        is_grant_readback: false,
+        is_withdraw_staging: false,
         texture_copy_footprint: None,
     };
 
@@ -1380,7 +1380,7 @@ pub(super) fn create_view(
             is_sparse: false,
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -1582,104 +1582,6 @@ pub(super) fn bindless_index(buffers: &SharedBufferTable, buffer_handle: BufferH
         .and_then(|b| b.bindless_index)
 }
 
-/// Read buffer contents to CPU. Copies from offset 0 for length output.len().
-///
-/// For DEVICE_LOCAL storage buffers, lazily creates a staging buffer, then issues
-/// a GPU copy and maps. For HOST_VISIBLE uniform buffers, maps directly.
-pub(super) fn read_to_cpu(
-    instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &SharedBufferTable,
-    device_handle: DeviceHandle,
-    buffer_handle: BufferHandle,
-    output: &mut [u8],
-) -> Result<()> {
-    let _tz = crate::tracy_zone!("vk.buffer.read_to_cpu");
-    {
-        let _validate = crate::tracy_zone!("vk.buffer.read_to_cpu.validate");
-        let buffers_guard = buffers.read().unwrap();
-        let buffer = buffers_guard
-            .entries
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
-        if buffer.device_handle != device_handle {
-            anyhow::bail!("Buffer belongs to different device");
-        }
-        let len = output.len() as u64;
-        if len > buffer.size {
-            anyhow::bail!("Read would exceed buffer bounds");
-        }
-        if let Some(base) = buffer.host_mapped {
-            let _copy = crate::tracy_zone!("vk.buffer.read_to_cpu.host_mapped_copy");
-            let p = base as *const u8;
-            unsafe {
-                std::ptr::copy_nonoverlapping(p, output.as_mut_ptr(), output.len());
-            }
-            return Ok(());
-        }
-    }
-
-    // Lazily create staging buffer for storage buffers
-    {
-        let _staging = crate::tracy_zone!("vk.buffer.read_to_cpu.ensure_staging");
-        ensure_staging(instance, devices, buffers, buffer_handle)?;
-    }
-
-    let buffer = {
-        let _lookup = crate::tracy_zone!("vk.buffer.read_to_cpu.lookup_after_staging");
-        let buffers_guard = buffers.read().unwrap();
-        buffers_guard
-            .entries
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?
-            .clone()
-    };
-
-    let device = devices.get(&device_handle).context("Invalid device handle")?;
-
-    if buffer.device_handle != device_handle {
-        anyhow::bail!("Buffer belongs to different device");
-    }
-
-    let len = output.len() as u64;
-    if len > buffer.size {
-        anyhow::bail!("Read would exceed buffer bounds");
-    }
-
-    if let (Some(stg_buf), Some(stg_mem)) = (buffer.staging_buffer, buffer.staging_memory) {
-        // DEVICE_LOCAL path: GPU copy to staging, then map staging
-        {
-            let _copy = crate::tracy_zone!("vk.buffer.read_to_cpu.submit_copy");
-            submit_copy(device, buffer.buffer, stg_buf, 0, 0, len)?;
-        }
-
-        unsafe {
-            let _map = crate::tracy_zone!("vk.buffer.read_to_cpu.staging_map_copy_unmap");
-            let ptr = device
-                .map_memory2(stg_mem, 0, len)
-                .context("Failed to map staging buffer for readback")?;
-            std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), output.len());
-            device
-                .unmap_memory2(stg_mem)
-                .context("Failed to unmap staging buffer")?;
-        }
-    } else {
-        // HOST_VISIBLE path: direct map
-        unsafe {
-            let _map = crate::tracy_zone!("vk.buffer.read_to_cpu.direct_map_copy_unmap");
-            let ptr = device
-                .map_memory2(buffer.memory, 0, len)
-                .context("Failed to map buffer memory")?;
-            std::ptr::copy_nonoverlapping(ptr as *const u8, output.as_mut_ptr(), output.len());
-            device
-                .unmap_memory2(buffer.memory)
-                .context("Failed to unmap buffer memory")?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
 pub(super) fn clear(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
@@ -1742,7 +1644,7 @@ pub(super) fn clear(
     Ok(())
 }
 
-/// Allocate a persistently mapped host-visible staging buffer for grant readback.
+/// Allocate a persistently mapped host-visible staging buffer for withdraw staging.
 pub(super) fn alloc_readback_buffer(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
@@ -1776,7 +1678,7 @@ pub(super) fn alloc_readback_buffer(
         .context("Failed to allocate readback buffer memory")?;
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind readback buffer memory")?;
-    let ptr = unsafe { logical_device.map_memory2(memory, 0, size) }.context("Failed to map grant readback buffer")?;
+    let ptr = unsafe { logical_device.map_memory2(memory, 0, size) }.context("Failed to map withdraw staging buffer")?;
     let host_mapped = Some(ptr as usize);
 
     let handle = buffers.write().unwrap().alloc_handle();
@@ -1801,7 +1703,7 @@ pub(super) fn alloc_readback_buffer(
             is_sparse: false,
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
-            is_grant_readback: true,
+            is_withdraw_staging: true,
             texture_copy_footprint: None,
         },
     );
@@ -1854,10 +1756,10 @@ pub(super) fn read_texture_readback_staging(
         .entries
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
-    if !buffer.is_grant_readback {
-        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    if !buffer.is_withdraw_staging {
+        anyhow::bail!("read_texture_readback_staging requires a withdraw staging buffer");
     }
-    let base = buffer.host_mapped.context("texture grant readback buffer not mapped")?;
+    let base = buffer.host_mapped.context("texture withdraw staging buffer not mapped")?;
     let row_bytes = layout.tight_row_bytes() as usize;
     let pitch = layout.row_pitch as usize;
     let p = base as *const u8;
@@ -1871,7 +1773,7 @@ pub(super) fn read_texture_readback_staging(
     Ok(())
 }
 
-/// Read bytes from a grant readback staging buffer.
+/// Read bytes from a withdraw staging staging buffer.
 pub(super) fn read_readback_buffer(
     buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
@@ -1882,10 +1784,10 @@ pub(super) fn read_readback_buffer(
         .entries
         .get(&buffer_handle)
         .context("Invalid buffer handle")?;
-    if !buffer.is_grant_readback {
-        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    if !buffer.is_withdraw_staging {
+        anyhow::bail!("read_readback_buffer requires a withdraw staging buffer");
     }
-    let base = buffer.host_mapped.context("grant readback buffer not mapped")?;
+    let base = buffer.host_mapped.context("withdraw staging buffer not mapped")?;
     if output.len() as u64 > buffer.size {
         anyhow::bail!("read_readback_buffer would exceed buffer bounds");
     }

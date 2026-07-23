@@ -630,7 +630,7 @@ pub(crate) enum GpuCommand {
         width: u32,
         height: u32,
     },
-    /// Copy a texture subresource into a grant-readback staging buffer (placed footprint).
+    /// Copy a texture subresource into a withdraw-staging staging buffer (placed footprint).
     CopyTextureToReadback {
         src: TextureHandle,
         dst: BufferHandle,
@@ -1059,13 +1059,11 @@ pub(crate) trait GpuBackend:
 
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
-    /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
-    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
-    /// Allocate a persistently mapped READBACK staging buffer for grant readback (no bindless slot).
+    /// Allocate a persistently mapped READBACK staging buffer for withdraw staging (no bindless slot).
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle>;
     /// Read bytes from a buffer created by [`Self::alloc_readback_buffer`].
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
-    /// Release a grant-readback staging buffer.
+    /// Release a withdraw-staging staging buffer.
     fn free_readback_buffer(&mut self, buffer: BufferHandle);
     /// Query copy/readback layout for a 2D texture grant (uncompressed formats only in v1).
     fn query_texture_copy_footprint(
@@ -1096,7 +1094,7 @@ pub(crate) trait GpuBackend:
     /// COMMON → shader-read after the first upload).
     fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64;
 
-    /// Mock-backend grant readback allocation counter (tests only).
+    /// Mock-backend withdraw staging allocation counter (tests only).
     #[doc(hidden)]
     #[cfg(test)]
     fn test_readback_alloc_count(&self) -> usize {
@@ -1104,7 +1102,7 @@ pub(crate) trait GpuBackend:
         0
     }
 
-    /// Mock-backend grant readback free counter (tests only).
+    /// Mock-backend withdraw staging free counter (tests only).
     #[doc(hidden)]
     #[cfg(test)]
     fn test_readback_free_count(&self) -> usize {
@@ -1283,9 +1281,6 @@ pub(crate) trait GpuBackend:
     /// Backends that do not support debug naming provide a default no-op
     /// implementation, so callers do not need to feature-gate the call.
     fn set_texture_debug_name(&mut self, _handle: TextureHandle, _name: &str) {}
-    /// Read texture contents to CPU memory.
-    /// The texture must have been created with TextureFlags::COPY_SRC.
-    fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()>;
     /// Get the texture's index in the global bindless descriptor set.
     /// Returns None if the texture is not registered.
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32>;

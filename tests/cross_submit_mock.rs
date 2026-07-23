@@ -6,8 +6,8 @@ use goldy::test_support::{
     mock_recorded_waits, mock_reset_tracking, mock_retained_resubmit_count,
 };
 use goldy::{
-    BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RetainedPool,
-    Scheme, ShaderModule, TextureFormat,
+    BufferKind, ComputePipeline, Context, Device, MemoryExchange, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RetainedPool, Scheme, ShaderModule, TextureFormat,
 };
 
 fn mock_ctx(device: &Device) -> Context {
@@ -124,7 +124,10 @@ fn upload_then_consumer_emits_raw_barrier() {
         .expect("parcel");
 
     let mut upload = Scheme::new(&ctx);
-    upload.write_parcel(&parcel, 0, vec![1, 0, 0, 0]).expect("upload");
+    let deposit = MemoryExchange::new(&ctx)
+        .bind_deposit_buffer(&mut upload, &parcel, 4)
+        .expect("bind deposit");
+    deposit.write(&mut upload, 0, &[1, 0, 0, 0]).expect("deposit write");
     upload.submit().expect("upload submit");
 
     clear_mock(&device);
@@ -417,7 +420,10 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
 
 fn upload_write_scheme(ctx: &Context, parcel: &Parcel) -> Scheme {
     let mut s = Scheme::new(ctx);
-    s.write_parcel(parcel, 0, vec![42, 0, 0, 0]).expect("upload write");
+    let deposit = MemoryExchange::new(ctx)
+        .bind_deposit_buffer(&mut s, parcel, 4)
+        .expect("bind deposit");
+    deposit.write(&mut s, 0, &[42, 0, 0, 0]).expect("deposit write");
     s
 }
 
@@ -672,8 +678,16 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
         "host sidecar must be recorded on at least one partition"
     );
 
-    let mut staging_bytes = [0u8; 16];
-    staging.read_to_cpu(&device, &mut staging_bytes).expect("read staging");
+    let mut verify = Scheme::new(&ctx);
+    let grant = MemoryExchange::new(&ctx)
+        .bind_withdraw(&mut verify, staging.whole())
+        .expect("withdraw staging");
+    let mut sub = verify.submit().expect("verify submit");
+    let staging_bytes = grant
+        .claim(&mut sub)
+        .expect("claim")
+        .consume()
+        .expect("consume");
     assert_eq!(&staging_bytes[..4], &[7, 0, 0, 0]);
 
     // Silence unused warning if Buffer import is only for type clarity.

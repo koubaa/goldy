@@ -4,7 +4,7 @@
 
 ## Creating buffers (recommended)
 
-For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, `write_parcel`). All Rust, Python, FFI, and .NET examples use this path.
+For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, [`MemoryExchange`](../compute/timeline.md) deposits). All Rust, Python, FFI, and .NET examples use this path.
 
 ```rust
 use goldy::{BufferFlags, BufferKind, RetainedPool};
@@ -13,7 +13,7 @@ let mut pool = RetainedPool::new(device.clone());
 let vertices = [/* Vertex2D ... */];
 let vertex_parcel = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-// Uninitialized storage (e.g. a uniform updated each frame via write_parcel):
+// Uninitialized storage (e.g. a uniform updated each frame via MemoryExchange deposit):
 let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 ```
 
@@ -109,6 +109,7 @@ bitflags! {
         const COPY_SRC      = 1 << 0;
         const COPY_DST      = 1 << 1;
         const CPU_READABLE  = 1 << 2;
+        const CPU_WRITABLE  = 1 << 4;
     }
 }
 ```
@@ -117,11 +118,14 @@ bitflags! {
 |------|---------|
 | `COPY_SRC` | Buffer can be a copy source |
 | `COPY_DST` | Buffer can be a copy destination |
-| `CPU_READABLE` | Optimize for readback. On Vulkan/Metal, `read_to_cpu` is a direct memcpy from host-visible memory. On DX12, it performs a GPU copy into a READBACK heap and waits. |
+| `CPU_READABLE` | Medium hint for host-visible storage. Prefer [`MemoryExchange::bind_withdraw`](../compute/timeline.md) for observation. Not a public host-read API. |
+| `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/timeline.md) for application uploads. |
 
-Query `DeviceCapabilities::has_zero_copy_storage_readback` to detect whether readback is zero-copy on the current backend.
+Query `DeviceCapabilities::has_zero_copy_storage_readback` to detect whether withdraw staging can elide a GPU copy on the current backend.
 
 ## Writing Data
+
+Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/timeline.md) for CPU→GPU uploads. Direct host writes on `CPU_WRITABLE` staging parcels remain for deposit/staging internals:
 
 ### Raw bytes
 
@@ -139,11 +143,13 @@ Both methods write at a byte offset from the start of the buffer.
 
 ## Reading Data
 
-Read buffer contents back to the CPU. The buffer should have been created with `BufferFlags::CPU_READABLE` for optimal performance.
+Use a memory exchange withdraw bound into a scheme:
 
 ```rust
-let mut output = vec![0u8; buffer.size() as usize];
-buffer.read_to_cpu(&device, &mut output)?;
+let memory = MemoryExchange::new(&ctx);
+let withdraw = memory.bind_withdraw(&mut scheme, buffer.whole())?;
+let mut submission = scheme.submit()?;
+let bytes = withdraw.claim(&mut submission)?.consume()?;
 ```
 
 ## Clearing
@@ -185,7 +191,7 @@ let view = buffer.create_typed_view::<[f32; 4]>(0, 256)?;
 
 ### Using Views
 
-Views implement `BufferSource`, so they work anywhere a `Buffer` does — `set_vertex_buffer`, `set_index_buffer`, `write_data`, `read_to_cpu`, `clear`, and bindless binding:
+Views implement `BufferSource`, so they work anywhere a `Buffer` does — `set_vertex_buffer`, `set_index_buffer`, `write_data`, `clear`, and bindless binding:
 
 ```rust
 let view_handle = view.handle(ResourceAccess::Read).unwrap();

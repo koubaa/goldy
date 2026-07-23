@@ -166,7 +166,7 @@ fn insert_buffer_common(
             parent_for_view,
             access,
             view_byte_offset,
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -414,7 +414,7 @@ pub(super) fn create_view(
             parent_for_view: Some(parent_handle),
             access: BufferKind::Scattered,
             view_byte_offset: Some(offset),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -528,7 +528,7 @@ pub(super) fn resize(
         parent_for_view: None,
         access: old_state.access,
         view_byte_offset: None,
-        is_grant_readback: false,
+        is_withdraw_staging: false,
         texture_copy_footprint: None,
     };
 
@@ -716,51 +716,6 @@ pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) ->
     state.buffers.get(&buffer_handle).map(|b| b.arg_buffer_index)
 }
 
-/// Read buffer contents back to CPU memory.
-/// Metal buffers use StorageModeShared so contents() is always valid.
-pub(super) fn read_to_cpu(
-    state: &MetalState,
-    _device_handle: DeviceHandle,
-    buffer_handle: BufferHandle,
-    output: &mut [u8],
-) -> Result<()> {
-    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
-
-    let len = output.len() as u64;
-    if len > buffer.size {
-        anyhow::bail!("Read would exceed buffer bounds");
-    }
-
-    if buffer.flags.contains(BufferFlags::GPU_ONLY) {
-        let device_handle = buffer.device_handle;
-        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-        let staging = logical_device.device.new_buffer(
-            len,
-            MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache,
-        );
-        let command_buffer = logical_device.command_queue.new_command_buffer();
-        let blit = command_buffer.new_blit_command_encoder();
-        blit.copy_from_buffer(&buffer.buffer, 0, &staging, 0, len);
-        blit.end_encoding();
-        command_buffer.commit();
-        command_buffer.wait_until_completed();
-
-        unsafe {
-            let ptr = staging.contents() as *const u8;
-            std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
-        }
-        return Ok(());
-    }
-
-    unsafe {
-        let ptr = buffer.buffer.contents() as *const u8;
-        std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
-    }
-
-    Ok(())
-}
-
 /// Fill buffer region with zeros.
 ///
 /// # Why both a CPU memset and a queue-ordered blit
@@ -834,7 +789,7 @@ pub(super) fn clear(
     Ok(())
 }
 
-/// Allocate a shared-storage staging buffer for grant readback (no argument-buffer slot).
+/// Allocate a shared-storage staging buffer for withdraw staging (no argument-buffer slot).
 pub(super) fn alloc_readback_buffer(
     state: &mut MetalState,
     device_handle: DeviceHandle,
@@ -862,7 +817,7 @@ pub(super) fn alloc_readback_buffer(
             parent_for_view: None,
             access: BufferKind::Scattered,
             view_byte_offset: None,
-            is_grant_readback: true,
+            is_withdraw_staging: true,
             texture_copy_footprint: None,
         },
     );
@@ -909,8 +864,8 @@ pub(super) fn read_texture_readback_staging(
         anyhow::bail!("read_texture_readback_staging size mismatch");
     }
     let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
-    if !buffer.is_grant_readback {
-        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    if !buffer.is_withdraw_staging {
+        anyhow::bail!("read_texture_readback_staging requires a withdraw staging buffer");
     }
     let row_bytes = layout.tight_row_bytes() as usize;
     let pitch = layout.row_pitch as usize;
@@ -925,11 +880,11 @@ pub(super) fn read_texture_readback_staging(
     Ok(())
 }
 
-/// Read bytes from a grant readback staging buffer.
+/// Read bytes from a withdraw staging staging buffer.
 pub(super) fn read_readback_buffer(state: &MetalState, buffer_handle: BufferHandle, output: &mut [u8]) -> Result<()> {
     let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
-    if !buffer.is_grant_readback {
-        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    if !buffer.is_withdraw_staging {
+        anyhow::bail!("read_readback_buffer requires a withdraw staging buffer");
     }
     if output.len() as u64 > buffer.size {
         anyhow::bail!("read_readback_buffer would exceed buffer bounds");

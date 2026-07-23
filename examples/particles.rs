@@ -7,7 +7,7 @@
 use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    DepositTransaction, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
@@ -91,6 +91,9 @@ struct RenderState {
     _retained_pool: RetainedPool,
     particle_buffer: Buffer,
     params_buffer: Buffer,
+    upload_scheme: Scheme,
+    particle_deposit: DepositTransaction,
+    params_deposit: DepositTransaction,
     is_snow: bool,
     frame_count: f32,
     start_time: std::time::Instant,
@@ -216,6 +219,16 @@ impl RenderState {
             Self::background_color(false),
         )?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
+        let particle_deposit = MemoryExchange::new(&ctx)
+            .bind_deposit_buffer(&mut upload_scheme, &particle_buffer, particle_capacity)?;
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &params_buffer,
+            std::mem::size_of::<ParticleParams>() as u64,
+        )?;
+
         println!("Created rain/snow simulation with {NUM_PARTICLES} particles (Scheme + Present)");
 
         Ok(Self {
@@ -232,6 +245,9 @@ impl RenderState {
             _retained_pool: retained_pool,
             particle_buffer,
             params_buffer,
+            upload_scheme,
+            particle_deposit,
+            params_deposit,
             is_snow: false,
             frame_count: 0.0,
             start_time: std::time::Instant::now(),
@@ -274,9 +290,12 @@ impl RenderState {
         self.is_snow = !self.is_snow;
 
         let particles = Self::create_particles(self.is_snow);
-        let mut upload = Scheme::new(&self.ctx);
-        upload.write_parcel(&self.particle_buffer, 0, bytemuck::cast_slice(&particles).to_vec())?;
-        upload.submit()?;
+        self.particle_deposit.write(
+            &mut self.upload_scheme,
+            0,
+            bytemuck::cast_slice(&particles),
+        )?;
+        self.upload_scheme.submit()?;
 
         self.window.set_title(&format!(
             "Goldy - {} (Space to toggle)",
@@ -297,9 +316,9 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        let mut upload = Scheme::new(&self.ctx);
-        upload.write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
-        upload.submit()?;
+        self.params_deposit
+            .write(&mut self.upload_scheme, 0, bytemuck::bytes_of(&params))?;
+        self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         self.present.claim(&mut submission)?.consume()?;

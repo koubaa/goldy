@@ -96,7 +96,7 @@ Guard against out-of-bounds writes in the shader when the resolution isn't a mul
 
 ```rust
 use goldy::{
-    BufferKind, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PresentMode,
+    BufferKind, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, PresentMode,
     RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
 };
 
@@ -134,10 +134,15 @@ scheme
 
 // --- Render loop ---
 let mut upload = Scheme::new(&ctx);
-upload.write_parcel(
+let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+    &mut upload,
     &uniform_buffer,
+    std::mem::size_of::<Uniforms>() as u64,
+)?;
+uniform_deposit.write(
+    &mut upload,
     0,
-    bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }).to_vec(),
+    bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }),
 )?;
 upload.submit()?;
 

@@ -609,7 +609,7 @@ pub(super) fn resize(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -799,7 +799,7 @@ pub(super) fn create(
             (None, None)
         };
 
-        // CPU_READABLE storage: pair DEFAULT UAV with a READBACK heap for `read_coherent`.
+        // CPU_READABLE storage: pair DEFAULT UAV with a READBACK heap.
         let (coherent_readback, coherent_readback_mapped) = if cpu_readable && is_storage {
             let readback_heap = D3D12_HEAP_PROPERTIES {
                 Type: D3D12_HEAP_TYPE_READBACK,
@@ -1014,7 +1014,7 @@ pub(super) fn create(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -1167,7 +1167,7 @@ pub(super) fn create_reserved_with_capacity(
             is_reserved: true,
             tile_byte_size: tiles::BUFFER_TILE_BYTES,
             reserved_tiles,
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -1351,8 +1351,8 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     }
     if buffer.coherent_readback_mapped.is_some() {
         let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-        if buffer.is_grant_readback {
-            // Grant readback maps the primary READBACK resource directly.
+        if buffer.is_withdraw_staging {
+            // Withdraw staging maps the primary READBACK resource directly.
             unsafe { buffer.resource.Unmap(0, Some(&no_write)) };
         } else if let Some(ref rb) = buffer.coherent_readback {
             unsafe { rb.Unmap(0, Some(&no_write)) };
@@ -1604,7 +1604,7 @@ pub(super) fn create_view(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );
@@ -1919,269 +1919,6 @@ pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle)
         .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
 }
 
-/// Record DEFAULT → READBACK copy for a `CPU_READABLE` buffer on an already-open command list.
-/// Does not submit.
-pub(super) fn emit_copy_coherent_readback_on_command_list(
-    state: &Dx12State,
-    buffer_handle: BufferHandle,
-    command_list: &ID3D12GraphicsCommandList,
-    command_list7: &ID3D12GraphicsCommandList7,
-) -> Result<()> {
-    use windows::Win32::Graphics::Direct3D12::*;
-
-    let (main_resource, readback, len) = {
-        let buffers_read = state.buffers.read().unwrap();
-        let buffer = buffers_read
-            .entries
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
-        if !buffer.flags.contains(BufferFlags::CPU_READABLE) || !buffer.is_storage {
-            return Ok(());
-        }
-        let readback = buffer
-            .coherent_readback
-            .as_ref()
-            .context("CPU_READABLE buffer missing readback resource")?;
-        (buffer.resource.clone(), readback.clone(), buffer.size)
-    };
-
-    let pre_copy = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_ALL,
-        SyncAfter: D3D12_BARRIER_SYNC_COPY,
-        AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-        AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-    };
-    let post_copy = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_COPY,
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-    };
-    unsafe {
-        barriers::barrier_globals(command_list7, &[pre_copy]);
-    }
-    unsafe {
-        command_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
-    }
-    unsafe {
-        barriers::barrier_globals(command_list7, &[post_copy]);
-    }
-    Ok(())
-}
-
-/// Standalone GPU copy + wait for `read_to_cpu` on `CPU_READABLE` buffers.
-/// Creates a one-shot command list to copy the UAV to the paired READBACK heap.
-fn standalone_copy_coherent_readback(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    buffer_handle: BufferHandle,
-) -> Result<()> {
-    use windows::Win32::Graphics::Direct3D12::*;
-
-    let device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-    let copy_allocator: ID3D12CommandAllocator =
-        unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
-            .context("Failed to create copy command allocator (coherent readback)")?;
-
-    let copy_list: ID3D12GraphicsCommandList = unsafe {
-        device
-            .device
-            .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &copy_allocator, None)
-    }
-    .context("Failed to create copy command list (coherent readback)")?;
-    let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast()?;
-
-    emit_copy_coherent_readback_on_command_list(state, buffer_handle, &copy_list, &copy_list7)?;
-    unsafe { copy_list.Close() }.context("Failed to close copy command list (coherent readback)")?;
-
-    let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
-    let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-    super::utils::wait_for_fence(&device.fence, fence_value)?;
-
-    Ok(())
-}
-
-/// Read from the persistent READBACK map after the submit's auto-copy.
-pub(super) fn read_coherent(
-    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    output: &mut [u8],
-) -> Result<()> {
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_READABLE) {
-        anyhow::bail!("read_coherent requires BufferFlags::CPU_READABLE");
-    }
-    let base = buffer
-        .coherent_readback_mapped
-        .context("CPU_READABLE buffer not mapped for readback")?;
-    if offset + output.len() as u64 > buffer.size {
-        anyhow::bail!("read_coherent would exceed buffer bounds");
-    }
-    let p = base as *mut u8;
-    unsafe {
-        std::ptr::copy_nonoverlapping(p.add(offset as usize) as *const u8, output.as_mut_ptr(), output.len());
-    }
-    Ok(())
-}
-
-/// Read buffer contents back to CPU memory.
-///
-/// For DEFAULT heap buffers (storage), creates a readback buffer and copies.
-/// For UPLOAD heap buffers (uniform), reads directly via Map.
-pub(super) fn read_to_cpu(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    buffer_handle: BufferHandle,
-    output: &mut [u8],
-) -> Result<()> {
-    use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
-
-    let coherent_readback = {
-        let buffers_read = state.buffers.read().unwrap();
-        let buffer = buffers_read
-            .entries
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
-
-        let len = output.len() as u64;
-        if len > buffer.size {
-            anyhow::bail!("Read would exceed buffer bounds");
-        }
-
-        buffer.is_storage && buffer.flags.contains(BufferFlags::CPU_READABLE) && buffer.coherent_readback.is_some()
-    };
-
-    if coherent_readback {
-        standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;
-        return read_coherent(&state.buffers.read().unwrap().entries, buffer_handle, 0, output);
-    }
-
-    let buffers_read = state.buffers.read().unwrap();
-    let buffer = buffers_read
-        .entries
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
-
-    let len = output.len() as u64;
-    if len > buffer.size {
-        anyhow::bail!("Read would exceed buffer bounds");
-    }
-
-    if buffer.is_storage {
-        // DEFAULT heap (storage): need a READBACK buffer + GPU copy
-        let device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-        let readback_heap = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_READBACK,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 0,
-            VisibleNodeMask: 0,
-        };
-        let readback_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: len,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_NONE,
-        };
-        let mut readback: Option<ID3D12Resource> = None;
-        unsafe {
-            device.device.CreateCommittedResource(
-                &readback_heap,
-                D3D12_HEAP_FLAG_NONE,
-                &readback_desc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                None,
-                &mut readback,
-            )
-        }
-        .context("Failed to create readback buffer")?;
-        let readback = readback.context("Readback resource is null")?;
-
-        let main_resource = buffer.resource.clone();
-
-        // Command list: transition → copy → transition back
-        let copy_allocator: ID3D12CommandAllocator =
-            unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
-                .context("Failed to create copy command allocator")?;
-
-        let copy_list: ID3D12GraphicsCommandList = unsafe {
-            device
-                .device
-                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &copy_allocator, None)
-        }
-        .context("Failed to create copy command list")?;
-        let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast().context("ID3D12GraphicsCommandList7")?;
-
-        // Use global barriers instead of per-buffer barriers. D3D12_BARRIER_TYPE_BUFFER
-        // enhanced barriers cause WARP on Windows Server to silently remove the device
-        // during ExecuteCommandLists, making the subsequent Signal() call AV.
-        // Global barriers (D3D12_BARRIER_TYPE_GLOBAL) are proven to work on all targets.
-        let pre_copy = D3D12_GLOBAL_BARRIER {
-            SyncBefore: D3D12_BARRIER_SYNC_ALL,
-            SyncAfter: D3D12_BARRIER_SYNC_COPY,
-            AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        };
-        let post_copy = D3D12_GLOBAL_BARRIER {
-            SyncBefore: D3D12_BARRIER_SYNC_COPY,
-            SyncAfter: D3D12_BARRIER_SYNC_ALL,
-            AccessBefore: D3D12_BARRIER_ACCESS_COPY_SOURCE,
-            AccessAfter: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-        };
-        unsafe {
-            barriers::barrier_globals(&copy_list7, &[pre_copy]);
-        }
-        unsafe {
-            copy_list.CopyBufferRegion(&readback, 0, &main_resource, 0, len);
-        }
-        unsafe {
-            barriers::barrier_globals(&copy_list7, &[post_copy]);
-        }
-        unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
-
-        let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
-        let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-        super::utils::wait_for_fence(&device.fence, fence_value)?;
-
-        // Map readback buffer and copy to output
-        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-        let read_range = D3D12_RANGE {
-            Begin: 0,
-            End: len as usize,
-        };
-        unsafe { readback.Map(0, Some(&read_range), Some(&mut mapped)) }.context("Failed to map readback buffer")?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(mapped as *const u8, output.as_mut_ptr(), len as usize);
-        }
-        let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { readback.Unmap(0, Some(&no_write)) };
-    } else {
-        // UPLOAD heap (uniform): directly mappable
-        let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-        let read_range = D3D12_RANGE {
-            Begin: 0,
-            End: len as usize,
-        };
-        unsafe { buffer.resource.Map(0, Some(&read_range), Some(&mut mapped)) }.context("Failed to map buffer")?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(mapped as *const u8, output.as_mut_ptr(), len as usize);
-        }
-        let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { buffer.resource.Unmap(0, Some(&no_write)) };
-    }
-
-    Ok(())
-}
-
 /// Fill buffer region with zeros (standalone, synchronous version).
 ///
 /// For DEFAULT heap buffers (storage), uses CopyBufferRegion from the device's zero buffer.
@@ -2290,7 +2027,7 @@ pub(super) fn clear(
     Ok(())
 }
 
-/// Allocate a persistently mapped READBACK staging buffer for grant readback.
+/// Allocate a persistently mapped READBACK staging buffer for withdraw staging.
 pub(super) fn alloc_readback_buffer(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
@@ -2329,11 +2066,11 @@ pub(super) fn alloc_readback_buffer(
             &mut resource,
         )
     }
-    .context("Failed to create grant readback buffer")?;
+    .context("Failed to create withdraw staging buffer")?;
     let resource = resource.context("CreateCommittedResource readback returned null")?;
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map grant readback buffer")?;
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map withdraw staging buffer")?;
     let mapped_addr = mapped as usize;
 
     let handle = state.buffers.write().unwrap().alloc_handle();
@@ -2360,14 +2097,14 @@ pub(super) fn alloc_readback_buffer(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
-            is_grant_readback: true,
+            is_withdraw_staging: true,
             texture_copy_footprint: None,
         },
     );
     Ok(handle)
 }
 
-/// Allocate a persistently mapped READBACK staging buffer for texture grant readback.
+/// Allocate a persistently mapped READBACK staging buffer for texture withdraw staging.
 pub(super) fn alloc_texture_readback_staging(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
@@ -2406,12 +2143,12 @@ pub(super) fn alloc_texture_readback_staging(
             &mut resource,
         )
     }
-    .context("Failed to create texture grant readback buffer")?;
+    .context("Failed to create texture withdraw staging buffer")?;
     let resource = resource.context("CreateCommittedResource texture readback returned null")?;
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
     unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
-        .context("Failed to map texture grant readback buffer")?;
+        .context("Failed to map texture withdraw staging buffer")?;
     let mapped_addr = mapped as usize;
 
     let handle = state.buffers.write().unwrap().alloc_handle();
@@ -2438,14 +2175,14 @@ pub(super) fn alloc_texture_readback_staging(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
-            is_grant_readback: true,
+            is_withdraw_staging: true,
             texture_copy_footprint: Some(layout),
         },
     );
     Ok(handle)
 }
 
-/// Read tight linear bytes from a texture grant readback staging buffer.
+/// Read tight linear bytes from a texture withdraw staging staging buffer.
 pub(super) fn read_texture_readback_staging(
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
@@ -2453,15 +2190,15 @@ pub(super) fn read_texture_readback_staging(
     output: &mut [u8],
 ) -> Result<()> {
     let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
-    if !buffer.is_grant_readback {
-        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    if !buffer.is_withdraw_staging {
+        anyhow::bail!("read_texture_readback_staging requires a withdraw staging buffer");
     }
     if output.len() as u64 != layout.logical_bytes {
         anyhow::bail!("read_texture_readback_staging size mismatch");
     }
     let base = buffer
         .coherent_readback_mapped
-        .context("texture grant readback buffer not mapped")?;
+        .context("texture withdraw staging buffer not mapped")?;
     let row_bytes = layout.tight_row_bytes() as usize;
     let pitch = layout.row_pitch as usize;
     let p = base as *const u8;
@@ -2475,7 +2212,7 @@ pub(super) fn read_texture_readback_staging(
     Ok(())
 }
 
-/// Read bytes from a grant readback staging buffer.
+/// Read bytes from a withdraw staging staging buffer.
 pub(super) fn read_readback_buffer(
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
@@ -2484,12 +2221,12 @@ pub(super) fn read_readback_buffer(
     let Some(buffer) = buffers.get(&buffer_handle) else {
         anyhow::bail!("Invalid buffer handle");
     };
-    if !buffer.is_grant_readback {
-        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    if !buffer.is_withdraw_staging {
+        anyhow::bail!("read_readback_buffer requires a withdraw staging buffer");
     }
     let base = buffer
         .coherent_readback_mapped
-        .context("grant readback buffer not mapped")?;
+        .context("withdraw staging buffer not mapped")?;
     if output.len() as u64 > buffer.size {
         anyhow::bail!("read_readback_buffer would exceed buffer bounds");
     }

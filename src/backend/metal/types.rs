@@ -1366,7 +1366,7 @@ pub(crate) struct BufferState {
     /// Byte offset into parent for views; [`None`] for root buffers.
     pub view_byte_offset: Option<u64>,
     /// Grant-read staging buffer (shared storage, CPU-readable; no shader binding).
-    pub is_grant_readback: bool,
+    pub is_withdraw_staging: bool,
     pub texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 

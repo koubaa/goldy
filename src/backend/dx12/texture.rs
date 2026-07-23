@@ -860,7 +860,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
     Ok(())
 }
 
-/// Query grant-readback staging layout for a 2D texture allocation.
+/// Query withdraw-staging staging layout for a 2D texture allocation.
 pub(super) fn query_texture_copy_footprint(
     state: &Dx12State,
     device_handle: DeviceHandle,
@@ -917,7 +917,7 @@ pub(super) fn query_texture_copy_footprint(
     })
 }
 
-/// Record copy from a texture into a grant-readback staging buffer.
+/// Record copy from a texture into a withdraw-staging staging buffer.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_copy_texture_to_readback(
     command_list: &ID3D12GraphicsCommandList,
@@ -1002,187 +1002,6 @@ pub(super) fn record_copy_texture_to_readback(
     if let Some(tex) = textures.get_mut(&src) {
         tex.last_layout = post_layout;
     }
-
-    Ok(())
-}
-
-/// Read texture contents to CPU memory.
-/// The texture must have been created with TextureFlags::COPY_SRC.
-pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
-    use windows::Win32::Graphics::Direct3D12::*;
-
-    let textures_read = state.textures.read().unwrap();
-    let texture = textures_read
-        .entries
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
-
-    let device_handle = texture.device_handle;
-    let width = texture.width;
-    let height = texture.height;
-    let format = texture.format;
-    let expected_size = (width * height * format.bytes_per_pixel()) as usize;
-
-    if output.len() < expected_size {
-        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
-    }
-
-    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-    // Use the texture's actual resource desc for correct layout
-    let res_desc = unsafe { texture.resource.GetDesc() };
-    let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
-    let mut _num_rows: u32 = 0;
-    let mut _row_size: u64 = 0;
-    let mut total_bytes: u64 = 0;
-    unsafe {
-        logical_device.device.GetCopyableFootprints(
-            &res_desc,
-            0,
-            1,
-            0,
-            Some(&mut footprint),
-            Some(&mut _num_rows),
-            Some(&mut _row_size),
-            Some(&mut total_bytes),
-        );
-    }
-    let staging_size = total_bytes;
-
-    let heap_properties = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_READBACK,
-        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-        CreationNodeMask: 0,
-        VisibleNodeMask: 0,
-    };
-
-    let resource_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Alignment: 0,
-        Width: staging_size,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        Flags: D3D12_RESOURCE_FLAG_NONE,
-    };
-
-    // Check for device removal before allocating (TDR during prior compute work)
-    let removed_reason = unsafe { logical_device.device.GetDeviceRemovedReason() };
-    if removed_reason.is_err() {
-        anyhow::bail!("Device removed before texture readback: {:?}", removed_reason);
-    }
-
-    let mut staging_buffer: Option<ID3D12Resource> = None;
-    unsafe {
-        logical_device.device.CreateCommittedResource(
-            &heap_properties,
-            D3D12_HEAP_FLAG_NONE,
-            &resource_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            None,
-            &mut staging_buffer,
-        )
-    }
-    .context("Failed to create staging buffer (texture read_to_cpu)")?;
-    let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
-
-    // Reset allocator before reuse (required after prior compute/render work that used it)
-    unsafe { logical_device.command_allocator.Reset() }.context("Failed to reset command allocator")?;
-
-    let command_list: ID3D12GraphicsCommandList = unsafe {
-        logical_device.device.CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            &logical_device.command_allocator,
-            None,
-        )
-    }
-    .context("Failed to create command list")?;
-    let command_list7: ID3D12GraphicsCommandList7 = command_list.cast().context("ID3D12GraphicsCommandList7")?;
-
-    // Newly created list is already in recording state; Reset is for reusing a closed list
-
-    let layout_before = texture.last_layout;
-
-    let b_to_src = barriers::texture_barrier_full(
-        &texture.resource,
-        D3D12_BARRIER_SYNC_ALL,
-        D3D12_BARRIER_SYNC_COPY,
-        access_for_layout(layout_before),
-        D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        layout_before,
-        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-    );
-    unsafe { barriers::barrier_textures(&command_list7, &[b_to_src]) };
-
-    let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
-        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
-    };
-
-    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&staging_buffer) },
-        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: footprint.Offset,
-                Footprint: footprint.Footprint,
-            },
-        },
-    };
-
-    let b_back = barriers::texture_barrier_full(
-        &texture.resource,
-        D3D12_BARRIER_SYNC_COPY,
-        D3D12_BARRIER_SYNC_ALL,
-        D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        access_for_layout(layout_before),
-        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-        layout_before,
-    );
-    unsafe {
-        command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None);
-        barriers::barrier_textures(&command_list7, &[b_back]);
-    }
-
-    unsafe { command_list.Close() }.context("Failed to close command list")?;
-
-    let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
-    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
-    wait_for_fence(&logical_device.fence, fence_value)?;
-
-    if let Some(dev) = state.devices.get(&device_handle) {
-        // Check for device removal (compute passes may have caused TDR)
-        let removed = unsafe { dev.device.GetDeviceRemovedReason() };
-        if removed.is_err() {
-            anyhow::bail!("Device removed before texture readback map: {:?}", removed);
-        }
-    }
-
-    let mut mapped_data: *mut u8 = std::ptr::null_mut();
-    unsafe { staging_buffer.Map(0, None, Some(&mut mapped_data as *mut *mut u8 as *mut *mut _)) }
-        .context("Failed to map staging buffer (texture read_to_cpu)")?;
-
-    let bytes_per_row = (width * format.bytes_per_pixel()) as usize;
-    let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
-    for row in 0..height as usize {
-        let src_offset = (footprint.Offset + row as u64 * row_pitch_bytes as u64) as usize;
-        let dst_offset = row * bytes_per_row;
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                mapped_data.add(src_offset),
-                output.as_mut_ptr().add(dst_offset),
-                bytes_per_row,
-            );
-        }
-    }
-
-    unsafe { staging_buffer.Unmap(0, None) };
 
     Ok(())
 }

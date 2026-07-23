@@ -1,7 +1,6 @@
 //! Python wrapper for retained [`goldy::Buffer`].
 
-use crate::device::PyDevice;
-use crate::error::{GoldyError, IntoPyResult};
+use crate::error::GoldyError;
 use crate::parcel::{parcel_from_buffer_unit, PyParcel};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -54,24 +53,6 @@ impl PyBuffer {
             }
         }
         Err(GoldyError::new_err(format!("unknown buffer field {name:?}")))
-    }
-
-    /// Read one buffer unit back to CPU memory.
-    fn unit_read_to_cpu<'py>(&self, py: Python<'py>, unit: u32, device: &PyDevice) -> PyResult<Bound<'py, PyAny>> {
-        let idx = unit as usize;
-        if idx >= self.inner.unit_count() {
-            return Err(GoldyError::new_err(format!(
-                "buffer unit index {unit} out of range (unit_count={})",
-                self.inner.unit_count()
-            )));
-        }
-        let size = self.inner.unit(idx).byte_size() as usize;
-        let mut output = vec![0u8; size];
-        self.inner
-            .unit(idx)
-            .read_to_cpu(&device.inner, &mut output)
-            .into_py_result()?;
-        Ok(pyo3::types::PyBytes::new(py, &output).into_any())
     }
 
     fn __getitem__(&self, index: usize) -> PyResult<PyParcel> {

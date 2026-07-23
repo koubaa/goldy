@@ -6,9 +6,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -94,6 +95,8 @@ struct RenderState {
     _retained_pool: RetainedPool,
     star_buffer: Buffer,
     params_buffer: Buffer,
+    upload_scheme: Scheme,
+    params_deposit: DepositTransaction,
     speed: f32,
     frame_count: f32,
     start_time: std::time::Instant,
@@ -217,6 +220,13 @@ impl RenderState {
             &scene_rt,
         )?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &params_buffer,
+            std::mem::size_of::<StarfieldParams>() as u64,
+        )?;
+
         println!("Created starfield with {NUM_STARS} stars (Scheme + Present)");
 
         Ok(Self {
@@ -233,6 +243,8 @@ impl RenderState {
             _retained_pool: retained_pool,
             star_buffer,
             params_buffer,
+            upload_scheme,
+            params_deposit,
             speed: 0.01,
             frame_count: 0.0,
             start_time: std::time::Instant::now(),
@@ -249,9 +261,9 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        let mut upload = Scheme::new(&self.ctx);
-        upload.write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
-        upload.submit()?;
+        self.params_deposit
+            .write(&mut self.upload_scheme, 0, bytemuck::bytes_of(&params))?;
+        self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         self.present.claim(&mut submission)?.consume()?;

@@ -68,9 +68,9 @@ pub(crate) struct MockBackend {
     pub retained_resubmit_count: usize,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
     pub wait_until_count: usize,
-    /// Count of grant readback staging buffer allocations
+    /// Count of withdraw staging staging buffer allocations
     pub readback_alloc_count: usize,
-    /// Grant readback buffers freed via [`GpuBackend::free_readback_buffer`].
+    /// Withdraw staging buffers freed via [`GpuBackend::free_readback_buffer`].
     pub readback_free_count: usize,
     /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
     pub buffer_view_create_count: usize,
@@ -151,7 +151,7 @@ struct MockBuffer {
     bindless_index: u32,
     flags: BufferFlags,
     /// Grant-read staging buffer (persistently CPU-readable; no bindless slot).
-    is_grant_readback: bool,
+    is_withdraw_staging: bool,
     texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 
@@ -762,7 +762,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; size as usize],
                 bindless_index,
                 flags,
-                is_grant_readback: false,
+                is_withdraw_staging: false,
                 texture_copy_footprint: None,
             },
         );
@@ -799,7 +799,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; cap as usize],
                 bindless_index,
                 flags,
-                is_grant_readback: false,
+                is_withdraw_staging: false,
                 texture_copy_footprint: None,
             },
         );
@@ -892,7 +892,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0; size as usize],
                 bindless_index: index,
                 flags: BufferFlags::empty(),
-                is_grant_readback: false,
+                is_withdraw_staging: false,
                 texture_copy_footprint: None,
             },
         );
@@ -925,21 +925,6 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn read_buffer_to_cpu(&mut self, _device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
-        let buf = self
-            .buffers
-            .get(&buffer)
-            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
-
-        let len_u64 = output.len() as u64;
-        if len_u64 > buf.size {
-            anyhow::bail!("Read would exceed buffer bounds");
-        }
-        let len = len_u64 as usize;
-        output[..len].copy_from_slice(&buf.data[..len]);
-        Ok(())
-    }
-
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -956,7 +941,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; size as usize],
                 bindless_index: 0,
                 flags: BufferFlags::empty(),
-                is_grant_readback: true,
+                is_withdraw_staging: true,
                 texture_copy_footprint: None,
             },
         );
@@ -1008,7 +993,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; layout.staging_bytes as usize],
                 bindless_index: 0,
                 flags: BufferFlags::empty(),
-                is_grant_readback: true,
+                is_withdraw_staging: true,
                 texture_copy_footprint: Some(layout),
             },
         );
@@ -1032,8 +1017,8 @@ impl GpuBackend for MockBackend {
             .buffers
             .get(&buffer)
             .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
-        if !buf.is_grant_readback {
-            anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+        if !buf.is_withdraw_staging {
+            anyhow::bail!("read_texture_readback_staging requires a withdraw staging buffer");
         }
         let row_bytes = layout.tight_row_bytes() as usize;
         let pitch = layout.row_pitch as usize;
@@ -1050,8 +1035,8 @@ impl GpuBackend for MockBackend {
             .buffers
             .get(&buffer)
             .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
-        if !buf.is_grant_readback {
-            anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+        if !buf.is_withdraw_staging {
+            anyhow::bail!("read_readback_buffer requires a withdraw staging buffer");
         }
         let len = output.len().min(buf.data.len());
         output[..len].copy_from_slice(&buf.data[..len]);
@@ -1486,20 +1471,6 @@ impl GpuBackend for MockBackend {
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
         self.textures.remove(&texture);
-    }
-
-    fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()> {
-        let tex = self
-            .textures
-            .get(&texture)
-            .ok_or_else(|| anyhow::anyhow!("Invalid texture handle"))?;
-
-        let expected_size = tex.data.len();
-        if output.len() < expected_size {
-            anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
-        }
-        output[..expected_size].copy_from_slice(&tex.data);
-        Ok(())
     }
 
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {

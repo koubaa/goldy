@@ -250,8 +250,9 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         let (mut reader, grant) = retained_copy_reader(&ctx, &pipe, &src, &dst);
 
         let mut upload = Scheme::new(&ctx);
+        let deposit = upload::bind_upload_deposit(&ctx, &mut upload, &src, 4).expect("bind deposit");
         for value in [11u32, 22, 33] {
-            upload::upload_parcel(&mut upload, &src, bytemuck::bytes_of(&value)).expect("upload src");
+            upload::upload_parcel(&mut upload, &deposit, bytemuck::bytes_of(&value)).expect("upload src");
             let mut submission = reader.submit().expect("retained resubmit");
             assert_eq!(
                 read_u32(&grant, &mut submission),
@@ -283,8 +284,9 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .expect("grant");
 
         let mut upload_scheme = Scheme::new(&ctx);
+        let deposit = upload::bind_upload_deposit(&ctx, &mut upload_scheme, &src, 4).expect("bind deposit");
         for upload_value in [99u32, 88, 77] {
-            upload::upload_parcel(&mut upload_scheme, &src, bytemuck::bytes_of(&upload_value)).expect("upload src");
+            upload::upload_parcel(&mut upload_scheme, &deposit, bytemuck::bytes_of(&upload_value)).expect("upload src");
             let mut submission = worker.submit().expect("retained resubmit");
             assert_eq!(
                 read_u32(&grant, &mut submission),
@@ -313,8 +315,9 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         let (mut reader, grant) = retained_copy_reader(&ctx_consumer, &pipe, &src, &dst);
 
         let mut upload = Scheme::new(&ctx_producer);
+        let deposit = upload::bind_upload_deposit(&ctx_producer, &mut upload, &src, 4).expect("bind deposit");
         for value in [5u32, 15, 25] {
-            upload::upload_parcel(&mut upload, &src, bytemuck::bytes_of(&value)).expect("upload src");
+            upload::upload_parcel(&mut upload, &deposit, bytemuck::bytes_of(&value)).expect("upload src");
             let mut submission = reader.submit().expect("cross-context resubmit");
             assert_eq!(
                 read_u32(&grant, &mut submission),

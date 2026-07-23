@@ -5,7 +5,7 @@
 ## Quick start
 
 ```rust
-use goldy::{BufferKind, BufferFlags, RetainedPool, field, Init, NodeAccess, Scheme};
+use goldy::{BufferKind, BufferFlags, MemoryExchange, RetainedPool, field, Init, NodeAccess, Scheme};
 
 let mut pool = RetainedPool::new(device.clone());
 
@@ -22,7 +22,7 @@ let uniform_buf = pool.acquire_buffer(
     Some(&raw_bytes),
 )?;
 
-// Uninitialized buffer (rewrite each frame with write_parcel):
+// Uninitialized buffer (rewrite each frame with a MemoryExchange deposit):
 let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
 // Texture parcel:
@@ -38,8 +38,10 @@ let cells = pool.acquire_record([
 ## Scheme binding
 
 ```rust
+let memory = MemoryExchange::new(&ctx);
 let mut upload = Scheme::new(&ctx);
-upload.write_parcel(&*uniform, 0, bytemuck::bytes_of(&data).to_vec())?;
+let deposit = memory.bind_deposit_buffer(&mut upload, &*uniform, std::mem::size_of::<MyUniforms>() as u64)?;
+deposit.write(&mut upload, 0, bytemuck::bytes_of(&data))?;
 upload.submit()?;
 
 let mut pass = scheme.render_pass("draw", &rt);

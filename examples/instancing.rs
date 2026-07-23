@@ -7,7 +7,7 @@
 use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    DepositTransaction, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 
@@ -76,6 +76,8 @@ struct RenderState {
     _retained_pool: RetainedPool,
     instance_buffer: Buffer,
     params_buffer: Buffer,
+    upload_scheme: Scheme,
+    params_deposit: DepositTransaction,
     start_time: Instant,
     last_time: f32,
     frame_count: u32,
@@ -239,9 +241,9 @@ impl RenderState {
             _pad: 0,
         };
 
-        let mut upload = Scheme::new(&self.ctx);
-        upload.write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
-        upload.submit()?;
+        self.params_deposit
+            .write(&mut self.upload_scheme, 0, bytemuck::bytes_of(&params))?;
+        self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         self.present.claim(&mut submission)?.consume()?;

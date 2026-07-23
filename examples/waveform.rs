@@ -5,9 +5,9 @@
 //! Run with: `cargo run --example waveform`
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +68,8 @@ struct App {
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
     channel_parcels: Option<[Buffer; NUM_CHANNELS]>,
+    upload_scheme: Option<Scheme>,
+    channel_deposits: Option<[DepositTransaction; NUM_CHANNELS]>,
     window: Option<Arc<Window>>,
     surface: Option<SurfaceExchange>,
     present: Option<Transaction>,
@@ -94,6 +96,8 @@ impl App {
             frame_count: 0,
             _retained_pool: None,
             channel_parcels: None,
+            upload_scheme: None,
+            channel_deposits: None,
         })
     }
 
@@ -174,6 +178,17 @@ impl App {
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.channel_parcels = Some(channel_parcels);
+        let channel_parcels = self.channel_parcels.as_ref().unwrap();
+        let mut upload_scheme = Scheme::new(&ctx);
+        let memory = MemoryExchange::new(&ctx);
+        let channel_capacity = channel_parcels[0].byte_size();
+        let channel_deposits = std::array::from_fn(|ch| {
+            memory
+                .bind_deposit_buffer(&mut upload_scheme, &channel_parcels[ch], channel_capacity)
+                .expect("bind channel deposit")
+        });
+        self.upload_scheme = Some(upload_scheme);
+        self.channel_deposits = Some(channel_deposits);
         self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
@@ -223,11 +238,12 @@ impl App {
         ];
         let y_offsets = [0.6, 0.2, -0.2, -0.6];
 
-        let mut upload = Scheme::new(ctx);
+        let upload = self.upload_scheme.as_mut().unwrap();
+        let channel_deposits = self.channel_deposits.as_ref().unwrap();
         for ch in 0..NUM_CHANNELS {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
-            upload.write_parcel(&channel_parcels[ch], 0, bytemuck::cast_slice(&vertices).to_vec())?;
+            channel_deposits[ch].write(upload, 0, bytemuck::cast_slice(&vertices))?;
         }
         upload.submit()?;
 

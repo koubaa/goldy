@@ -81,12 +81,14 @@ static class GameOfLifeHeadless
 
         scheme.CopyToTexture(rt, readback);
         using var memory = new MemoryExchange(ctx);
-        using var withdraw = memory.BindWithdrawTexture(scheme, readback);
+        using var withdrawTex = memory.BindWithdrawTexture(scheme, readback);
+        using var cellsParcel = cells.Field(1);
+        using var withdrawCells = memory.BindWithdraw(scheme, cellsParcel);
         using var submission = scheme.Submit();
-        using var claim = withdraw.Claim(submission);
-        using var pixels = claim.Consume();
+        using var pixels = withdrawTex.Claim(submission).Consume();
+        using var cellBytes = withdrawCells.Claim(submission).Consume();
 
-        var cellsOut = MemoryMarshal.Cast<byte, uint>(cells.UnitReadToCpu(1, device));
+        var cellsOut = MemoryMarshal.Cast<byte, uint>(cellBytes.AsSpan());
         var live = 0;
         foreach (var cell in cellsOut)
         {

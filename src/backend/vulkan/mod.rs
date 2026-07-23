@@ -660,22 +660,6 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn read_buffer_to_cpu(
-        &mut self,
-        device_handle: DeviceHandle,
-        buffer_handle: BufferHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
-        buffer::read_to_cpu(
-            &self.state.instance,
-            &self.state.devices,
-            &self.state.buffers,
-            device_handle,
-            buffer_handle,
-            output,
-        )
-    }
-
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         buffer::alloc_readback_buffer(
             &self.state.instance,
@@ -1086,16 +1070,6 @@ impl GpuBackend for VulkanBackend {
             handle,
             name,
         );
-    }
-
-    fn read_texture_to_cpu(&mut self, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
-        texture::read_to_cpu(
-            &self.state.instance,
-            &self.state.devices,
-            &self.state.textures,
-            texture_handle,
-            output,
-        )
     }
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {

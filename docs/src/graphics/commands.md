@@ -87,7 +87,9 @@ let pixels = withdraw.claim(&mut submission)?.consume()?;
 Put compute `node` dispatches and `render_pass` nodes in the **same** scheme, then submit once:
 
 ```rust
-scheme.write_parcel(&staging, 0, data)?;
+let memory = MemoryExchange::new(&ctx);
+let deposit = memory.bind_deposit_buffer(&mut scheme, &staging, data.len() as u64)?;
+deposit.write(&mut scheme, 0, &data)?;
 scheme.node("sim", &compute_pipeline)
     .with_parcel(&state_buf, NodeAccess::ReadWrite)
     .dispatch(wg, 1, 1);

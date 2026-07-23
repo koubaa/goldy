@@ -432,15 +432,15 @@ bitflags! {
         const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
         const COPY_DST = 1 << 1;
-        /// Optimize this buffer for CPU readback.
+        /// Medium hint: prefer host-visible storage when the runtime chooses to map
+        /// withdraw staging onto the same allocation (UMA backends). Discrete backends may
+        /// still keep GPU-local storage and blit into withdraw staging at claim time.
         ///
-        /// On backends with shared storage memory (Vulkan `HOST_VISIBLE`, Metal Shared),
-        /// [`crate::buffer::Allocation::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
-        /// On Direct3D 12, storage buffers live on GPU-local memory; `read_to_cpu` performs a
-        /// GPU copy to a pre-allocated READBACK heap and waits for completion.
+        /// Prefer [`crate::MemoryExchange::bind_withdraw`] for CPU observation — this flag
+        /// is not a public readback API.
         ///
-        /// Query [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`] to distinguish
-        /// these at runtime.
+        /// Query [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`] to
+        /// distinguish zero-copy vs staged withdraw behavior.
         const CPU_READABLE = 1 << 2;
         /// GPU-local storage (Metal: [`MTLStorageMode::Private`]), no CPU mapping.
         ///
@@ -449,22 +449,22 @@ bitflags! {
         ///
         /// **Backends**: implemented on Metal. Other backends treat this flag as unused for now.
         const GPU_ONLY = 1 << 3;
-        /// Host-visible storage buffer for per-frame CPU writes (staging uploads).
+        /// Host-visible storage buffer for per-frame CPU writes (deposit / staging uploads).
         ///
         /// On Vulkan/Metal the buffer is persistently mapped for [`crate::Buffer::write`].
         /// On Direct3D 12, storage buffers use a paired UPLOAD heap for CPU writes and
-        /// a DEFAULT heap UAV for GPU access; [`crate::Scheme::copy_buffer_parcel`] copies
-        /// staging → device each submission.
+        /// a DEFAULT heap UAV for GPU access; scheme [`CopyBuffer`](crate::task_graph::NodeKind::CopyBuffer)
+        /// nodes (including deposits) copy staging → device each submission.
         ///
         /// **Write contract:** [`crate::Buffer::write`] on a `CPU_WRITABLE` buffer does
         /// **not** queue-order the host write behind in-flight GPU readers. Callers must
         /// only write when the buffer is **settled** (host-observed GPU progress past its
-        /// last use) or **fresh** (never GPU-referenced). [`crate::Scheme`] upload parcels
+        /// last use) or **fresh** (never GPU-referenced). [`crate::MemoryExchange`] deposits
         /// and [`crate::Parcel::is_settled`] enforce this; arbitrary reuse with live GPU
         /// readers is a race (Vulkan/Metal host-visible semantics; DX12 applies at copy time).
         ///
-        /// Only valid for [`BufferKind::Scattered`]. Cannot be combined with
-        /// [`Self::CPU_READABLE`] or [`Self::GPU_ONLY`].
+        /// Prefer deposits for application uploads. Only valid for [`BufferKind::Scattered`].
+        /// Cannot be combined with [`Self::CPU_READABLE`] or [`Self::GPU_ONLY`].
         const CPU_WRITABLE = 1 << 4;
     }
 }

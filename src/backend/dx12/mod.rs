@@ -795,10 +795,6 @@ impl GpuBackend for Dx12Backend {
         buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
     }
 
-    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
-        buffer::read_to_cpu(&mut self.state, device, buffer, output)
-    }
-
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         buffer::alloc_readback_buffer(&mut self.state, device, size)
     }
@@ -1186,10 +1182,6 @@ impl GpuBackend for Dx12Backend {
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
         texture::destroy(&mut self.state, texture_handle);
-    }
-
-    fn read_texture_to_cpu(&mut self, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
-        texture::read_to_cpu(&mut self.state, texture_handle, output)
     }
 
     fn texture_bindless_index(&self, texture_handle: TextureHandle) -> Option<u32> {

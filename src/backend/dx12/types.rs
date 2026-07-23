@@ -1384,7 +1384,7 @@ pub(crate) struct BufferState {
     /// If true, this is a view into another buffer — don't free the resource on destroy.
     pub is_view: bool,
     /// Direct3D 12: paired READBACK resource for [`crate::types::BufferFlags::CPU_READABLE`]
-    /// storage buffers. Copied UAV → READBACK by [`super::buffer::read_to_cpu`].
+    /// storage buffers.
     pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
     /// Persistent map of `coherent_readback` (see above).
     /// Persistent `Map` result address for the readback resource (`usize` for `Send`/`Sync`).
@@ -1404,7 +1404,7 @@ pub(crate) struct BufferState {
     pub tile_byte_size: u32,
     pub reserved_tiles: Vec<Option<(Direct3D12::ID3D12Heap, u64)>>,
     /// Grant-read staging buffer (READBACK heap, persistently mapped; no bindless slot).
-    pub is_grant_readback: bool,
+    pub is_withdraw_staging: bool,
     pub texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 

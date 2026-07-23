@@ -5,8 +5,8 @@
 //! Run with: `cargo run --example mandelbrot`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, DepositTransaction, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
     SurfaceExchange, TargetLoad, Transaction,
 };
 use std::sync::Arc;
@@ -42,6 +42,8 @@ struct App {
     present: Option<Transaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
+    upload_scheme: Option<Scheme>,
+    uniform_deposit: Option<DepositTransaction>,
     center: [f32; 2],
     zoom: f32,
     start_time: std::time::Instant,
@@ -63,6 +65,8 @@ impl App {
             present: None,
             scene_rt: None,
             scheme: None,
+            upload_scheme: None,
+            uniform_deposit: None,
             center: [-0.5, 0.0],
             zoom: 1.0,
             start_time: std::time::Instant::now(),
@@ -122,6 +126,10 @@ impl App {
         let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &uniform, &scene_rt)?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let uniform_deposit = MemoryExchange::new(&ctx)
+            .bind_deposit_buffer(&mut upload_scheme, &uniform, std::mem::size_of::<Uniforms>() as u64)?;
+
         self.ctx = Some(ctx);
         self.device = Some(device);
         self.shader = Some(shader);
@@ -132,6 +140,8 @@ impl App {
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
+        self.upload_scheme = Some(upload_scheme);
+        self.uniform_deposit = Some(uniform_deposit);
         Ok(())
     }
 
@@ -144,8 +154,6 @@ impl App {
             return Ok(());
         }
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let uniform = self.uniform.as_ref().unwrap();
         let scheme = self.scheme.as_mut().unwrap();
 
         let uniforms = Uniforms {
@@ -153,8 +161,10 @@ impl App {
             zoom: self.zoom,
             _padding: 0.0,
         };
-        let mut upload = Scheme::new(ctx);
-        upload.write_parcel(uniform, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+        let upload = self.upload_scheme.as_mut().unwrap();
+        self.uniform_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::bytes_of(&uniforms))?;
         upload.submit()?;
 
         let present = self.present.as_ref().unwrap();

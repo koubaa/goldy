@@ -7,7 +7,7 @@
 use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    DepositTransaction, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
@@ -229,13 +229,12 @@ impl RenderState {
         let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
         self.last_frame_time = std::time::Instant::now();
 
-        let mut upload = Scheme::new(&self.ctx);
-        upload.write_parcel(
-            &self.params_buffer,
+        self.params_deposit.write(
+            &mut self.upload_scheme,
             0,
-            bytemuck::bytes_of(&SimParams { delta_time: dt }).to_vec(),
+            bytemuck::bytes_of(&SimParams { delta_time: dt }),
         )?;
-        upload.submit()?;
+        self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         self.present.claim(&mut submission)?.consume()?;

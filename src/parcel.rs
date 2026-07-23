@@ -367,19 +367,6 @@ impl Parcel {
         &self.stamp.home_device
     }
 
-    /// Backend buffer handle and graph resource id for [`crate::Scheme::write_parcel`].
-    pub(crate) fn write_buffer_target(&self) -> anyhow::Result<(BufferHandle, ResourceId)> {
-        match &self.backing {
-            ParcelBacking::WholeBuffer(b) => {
-                let h = b.gpu_buffer_handle();
-                Ok((h, ResourceId::Buffer(h)))
-            }
-            ParcelBacking::BufferRange { .. } | ParcelBacking::Texture(_) => {
-                anyhow::bail!("write_parcel is only valid for whole-buffer parcels")
-            }
-        }
-    }
-
     /// Task-graph resource identity (runtime only).
     pub(crate) fn resource_id(&self) -> ResourceId {
         match &self.backing {
@@ -496,17 +483,6 @@ impl Parcel {
             .home_device
             .upgrade()
             .is_some_and(|home| Arc::ptr_eq(&home, &ctx.device().inner))
-    }
-
-    /// Read this parcel's GPU bytes back to CPU memory (testing / diagnostics).
-    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
-        match &self.backing {
-            ParcelBacking::WholeBuffer(b) => b.read_to_cpu(device, output),
-            ParcelBacking::BufferRange { view, .. } => view.read_to_cpu(device, output),
-            ParcelBacking::Texture(_) => anyhow::bail!(
-                "texture parcels are not host-readable; copy to a CPU_READABLE buffer parcel via a scheme first"
-            ),
-        }
     }
 }
 
@@ -690,8 +666,7 @@ impl Buffer {
     ///
     /// Prefer [`crate::MemoryExchange`] deposits / epoch-gated staging pools, which
     /// select settled or newly allocated parcels. GPU visibility of a staging write is
-    /// covered by same-frame scheme copy tests (e.g. `scheme_cpu_writable_staging_write_then_copy`),
-    /// not by CPU→CPU `read_to_cpu` roundtrips alone.
+    /// covered by same-frame scheme copy tests (e.g. `scheme_cpu_writable_staging_write_then_copy`).
     ///
     /// For other flags, backends may use a queue-ordered path (e.g. Metal blit+wait for
     /// non-`CPU_WRITABLE` Shared buffers).
@@ -702,11 +677,6 @@ impl Buffer {
                 anyhow::bail!("Buffer::write requires a single-unit buffer; write to a specific parcel instead")
             }
         }
-    }
-
-    /// Read the whole-buffer parcel back to CPU memory.
-    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
-        self.whole().read_to_cpu(device, output)
     }
 
     /// GPU clear on a single-unit buffer (see [`Self::clear`]).
@@ -767,15 +737,6 @@ impl Buffer {
             BufferStorage::Partitioned { .. } | BufferStorage::Detached => {
                 anyhow::bail!("detach_allocation requires a single-unit buffer")
             }
-        }
-    }
-
-    /// Backing allocation handle for whole-buffer operations (clear, write_parcel).
-    pub(crate) fn backing_handle(&self) -> BufferHandle {
-        match &self.storage {
-            BufferStorage::Single(b) => b.gpu_buffer_handle(),
-            BufferStorage::Partitioned { parent, .. } => parent.gpu_buffer_handle(),
-            BufferStorage::Detached => panic!("Buffer::backing_handle after detach"),
         }
     }
 
@@ -984,7 +945,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use Scheme::write_texture_region() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
@@ -996,20 +957,12 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use Scheme::write_texture() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
     pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
         self.parcel.grant_texture_keepalive()?.write(data)
-    }
-
-    #[deprecated(
-        note = "Copy to a CPU_READABLE buffer parcel via a scheme, submit, wait the timeline, then read the buffer"
-    )]
-    #[allow(deprecated)]
-    pub fn read_to_cpu(&self, output: &mut [u8]) -> anyhow::Result<()> {
-        self.parcel.grant_texture_keepalive()?.read_to_cpu(output)
     }
 
     pub(crate) fn release_bookkeeping(&mut self) {

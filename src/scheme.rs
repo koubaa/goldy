@@ -32,7 +32,6 @@ use crate::types::{
     TextureKind,
 };
 use crate::validation_env;
-use crate::Buffer;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -761,31 +760,6 @@ impl Scheme {
         }
     }
 
-    /// Append a CPU→GPU write node for a retained buffer [`Parcel`].
-    ///
-    /// Marks the scheme dirty. Pair with [`Self::submit`] for a property-only upload
-    /// dispatch, or retain the scheme and refresh the payload each submission.
-    pub fn write_parcel(&mut self, parcel: &Parcel, offset: u64, data: Vec<u8>) -> Result<(), GoldyError> {
-        self.dirty = true;
-        let (buffer, resource) = parcel.write_buffer_target().map_err(|e| self.ctx.classify(e))?;
-        self.submit_state.register_parcel_stamp(parcel);
-        let access = if offset == 0 && data.len() as u64 == parcel.byte_size() {
-            NodeAccess::Overwrite
-        } else {
-            NodeAccess::Write
-        };
-        self.ir.nodes.push(TaskNode {
-            label: "write_parcel",
-            bindings: vec![ResourceBinding { resource, access }],
-            kind: NodeKind::WriteBuffer {
-                buffer,
-                offset,
-                data: Arc::from(data),
-            },
-        });
-        Ok(())
-    }
-
     /// Append a GPU buffer-to-buffer copy between two buffer parcels (identity only; no bytes in IR).
     ///
     /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
@@ -839,9 +813,13 @@ impl Scheme {
     }
 
     /// Register a destination-bound buffer deposit (called by [`crate::MemoryExchange`]).
+    ///
+    /// `dst_offset` is relative to the start of `destination` (added to any buffer-range base).
+    /// The recorded copy size is `capacity.min(destination.byte_size().saturating_sub(dst_offset))`.
     pub(crate) fn register_deposit_buffer(
         &mut self,
         destination: &Parcel,
+        dst_offset: u64,
         capacity: u64,
     ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
         if capacity == 0 {
@@ -856,12 +834,20 @@ impl Scheme {
                 "bind_deposit_buffer requires a buffer parcel destination"
             )));
         }
+        let remaining = destination.byte_size().saturating_sub(dst_offset);
+        if remaining == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "bind_deposit_buffer: dst_offset {dst_offset} exceeds destination size {}",
+                destination.byte_size()
+            )));
+        }
+        let copy_size = capacity.min(remaining);
         let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
         self.deposits.push(DepositPool::new(capacity));
         self.submit_state.register_parcel_stamp(destination);
         let src_resource = ResourceId::Deposit(deposit_id);
-        let copy_size = capacity.min(destination.byte_size());
-        let dst_access = if destination.source_offset() == 0 && copy_size == destination.byte_size() {
+        let abs_dst_offset = destination.source_offset() + dst_offset;
+        let dst_access = if dst_offset == 0 && copy_size == destination.byte_size() {
             NodeAccess::Overwrite
         } else {
             NodeAccess::Write
@@ -882,7 +868,7 @@ impl Scheme {
                 src: src_resource,
                 src_offset: 0,
                 dst: dst_resource,
-                dst_offset: destination.source_offset(),
+                dst_offset: abs_dst_offset,
                 size: copy_size,
             },
         });
@@ -928,8 +914,9 @@ impl Scheme {
                 destination.height()
             )));
         }
+        let bpp = u64::from(destination.format().bytes_per_pixel());
         let min_bytes = if src_row_pitch == 0 {
-            (width as u64) * (height as u64) * 4
+            (width as u64) * (height as u64) * bpp
         } else {
             (src_row_pitch as u64) * (height as u64)
         };
@@ -1104,90 +1091,6 @@ impl Scheme {
                 buffer,
                 offset: abs_offset,
                 size: clear_size,
-            },
-        });
-        Ok(())
-    }
-
-    /// Append a CPU→GPU full-texture upload node.
-    ///
-    /// Upload a full texture via an upload micro-scheme.
-    pub fn write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
-        let expected = texture.byte_size();
-        if data.len() != expected as usize {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "write_texture: expected {} bytes, got {}",
-                expected,
-                data.len()
-            )));
-        }
-        self.dirty = true;
-        let th = texture.gpu_handle();
-        self.ir.nodes.push(TaskNode {
-            label: "write_texture",
-            bindings: vec![ResourceBinding {
-                resource: ResourceId::Texture(th),
-                access: NodeAccess::Overwrite,
-            }],
-            kind: NodeKind::WriteTexture {
-                texture: th,
-                data: std::sync::Arc::from(data),
-                width: texture.width(),
-                height: texture.height(),
-            },
-        });
-        Ok(())
-    }
-
-    /// Append a CPU→GPU partial-texture upload node for a rectangular sub-region.
-    ///
-    /// Upload a texture subregion via an upload micro-scheme.
-    pub fn write_texture_region(
-        &mut self,
-        texture: &crate::Texture,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        data: Vec<u8>,
-    ) -> Result<(), GoldyError> {
-        let x_end = x
-            .checked_add(width)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("write_texture_region: x+width overflow")))?;
-        let y_end = y
-            .checked_add(height)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("write_texture_region: y+height overflow")))?;
-        if x_end > texture.width() || y_end > texture.height() {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
-                width,
-                height,
-                x,
-                y,
-                texture.width(),
-                texture.height()
-            )));
-        }
-        self.dirty = true;
-        let th = texture.gpu_handle();
-        let full_replace = x == 0 && y == 0 && width == texture.width() && height == texture.height();
-        self.ir.nodes.push(TaskNode {
-            label: "write_texture_region",
-            bindings: vec![ResourceBinding {
-                resource: ResourceId::Texture(th),
-                access: if full_replace {
-                    NodeAccess::Overwrite
-                } else {
-                    NodeAccess::Write
-                },
-            }],
-            kind: NodeKind::WriteTextureRegion {
-                texture: th,
-                data: std::sync::Arc::from(data),
-                x,
-                y,
-                width,
-                height,
             },
         });
         Ok(())
@@ -2315,91 +2218,6 @@ impl Scheme {
             ctx: self.ctx.clone(),
         })
     }
-
-    /// Record a GPU copy from `src` into `dst`.
-    ///
-    /// When `dst` is a [`Buffer`] with [`BufferFlags::CPU_READABLE`], the copy uses the
-    /// buffer footprint from [`crate::Texture::copy_layout`]. Acquire `dst` sized to
-    /// `layout.staging_bytes`, then [`Self::submit`] and wait the returned timeline before
-    /// reading `dst` on the CPU.
-    ///
-    /// Required when `src` may have been written by a prior scheme submission on the same
-    /// [`Context`]: cross-submission barriers and parcel stamps are applied before the transfer read.
-    pub fn copy_texture(&mut self, src: &crate::Texture, dst: &Buffer) -> Result<TextureCopyFootprint, GoldyError> {
-        if !dst.flags().contains(BufferFlags::CPU_READABLE) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_texture to buffer requires BufferFlags::CPU_READABLE destination"
-            )));
-        }
-        let layout = src.copy_layout();
-        if dst.byte_size() < layout.staging_bytes {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_texture destination too small: {} < {}",
-                dst.byte_size(),
-                layout.staging_bytes
-            )));
-        }
-
-        let src_h = src.gpu_handle();
-        let stamp = src.whole().stamp_handle();
-
-        // This node kind is a single-slot readback recorded repeatedly on an otherwise
-        // retained `Scheme` (see doc comment above): each call replaces the prior
-        // `CopyTexture` node outright rather than accumulating one per call. When `src`
-        // changes across calls (e.g. the caller re-created its source texture), the old
-        // source is no longer bound by any node in this IR. Forget its stamp registration
-        // too, or a resource that is merely retired-and-replaced — not actually still
-        // referenced — permanently fails `all_stamps_alive` once its owning retained-pool
-        // resource is dropped, even though this scheme no longer binds it.
-        let mut replaced_srcs = Vec::new();
-        self.ir.nodes.retain(|node| match node.kind {
-            NodeKind::CopyTexture {
-                src: old_src,
-                dst_buffer_layout: Some(_),
-                ..
-            } => {
-                replaced_srcs.push(old_src);
-                false
-            }
-            _ => true,
-        });
-        for old_src in replaced_srcs {
-            let still_bound = old_src == src_h
-                || self
-                    .ir
-                    .nodes
-                    .iter()
-                    .any(|n| n.bindings.iter().any(|b| b.resource == ResourceId::Texture(old_src)));
-            if !still_bound {
-                self.submit_state.forget_resource_stamp(ResourceId::Texture(old_src));
-            }
-        }
-
-        self.submit_state
-            .register_stamp_parts(ResourceId::Texture(src_h), stamp);
-
-        self.ir.nodes.push(TaskNode {
-            label: "copy_texture",
-            bindings: vec![
-                ResourceBinding {
-                    resource: ResourceId::Texture(src_h),
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: ResourceId::Buffer(dst.backing_handle()),
-                    access: NodeAccess::Write,
-                },
-            ],
-            kind: NodeKind::CopyTexture {
-                src: src_h,
-                dst: ResourceId::Buffer(dst.backing_handle()),
-                dst_buffer_layout: Some(layout),
-            },
-        });
-        self.dirty = true;
-
-        Ok(layout)
-    }
 }
 
 pub(crate) fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
@@ -3085,28 +2903,35 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn clear_and_full_write_parcel_bind_as_overwrite() {
+    fn clear_and_full_deposit_buffer_bind_as_overwrite() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let buffer = retained_buffer(&mut pool);
         let parcel = &*buffer;
+        let memory = MemoryExchange::new(&ctx);
 
         let mut clear_scheme = Scheme::new(&ctx);
         clear_scheme.clear_parcel(parcel, 0, parcel.byte_size()).expect("clear");
         assert_eq!(clear_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
 
         let mut write_scheme = Scheme::new(&ctx);
-        write_scheme
-            .write_parcel(parcel, 0, vec![0u8; parcel.byte_size() as usize])
-            .expect("full write");
-        assert_eq!(write_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
+        let deposit = memory
+            .bind_deposit_buffer(&mut write_scheme, parcel, parcel.byte_size())
+            .expect("bind full deposit");
+        deposit
+            .write(&mut write_scheme, 0, &vec![0u8; parcel.byte_size() as usize])
+            .expect("full deposit write");
+        assert_eq!(write_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Overwrite);
 
         let mut partial_scheme = Scheme::new(&ctx);
-        partial_scheme
-            .write_parcel(parcel, 4, vec![1, 2, 3, 4])
-            .expect("partial write");
-        assert_eq!(partial_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Write);
+        let partial_deposit = memory
+            .bind_deposit_buffer_at(&mut partial_scheme, parcel, 4, 4)
+            .expect("bind partial deposit");
+        partial_deposit
+            .write(&mut partial_scheme, 0, &[1, 2, 3, 4])
+            .expect("partial deposit write");
+        assert_eq!(partial_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Write);
     }
 
     #[test]

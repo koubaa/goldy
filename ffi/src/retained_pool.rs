@@ -228,31 +228,6 @@ pub unsafe extern "C" fn goldy_buffer_unit_byte_size(buffer: *const GoldyBuffer,
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_unit_read_to_cpu(
-    buffer: *const GoldyBuffer,
-    unit: u32,
-    device: *const GoldyDevice,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    if device.is_null() || output.is_null() {
-        return GoldyResult::NullPointer;
-    }
-    let parcel = match buffer_unit_at(buffer, unit) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let out = slice::from_raw_parts_mut(output, output_size);
-    match parcel.read_to_cpu(&(*device).inner, out) {
-        Ok(()) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            GoldyResult::GpuError
-        }
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn goldy_record_builder_create() -> *mut GoldyRecordBuilder {
     Box::into_raw(Box::new(GoldyRecordBuilder { specs: Vec::new() }))
 }

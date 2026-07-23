@@ -5,9 +5,10 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, IndexFormat, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, IndexFormat, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -130,6 +131,9 @@ struct App {
     _retained_pool: Option<RetainedPool>,
     vertex_parcel: Option<Buffer>,
     index_parcel: Option<Buffer>,
+    upload_scheme: Option<Scheme>,
+    vertex_deposit: Option<DepositTransaction>,
+    index_deposit: Option<DepositTransaction>,
     window: Option<Arc<Window>>,
     surface: Option<SurfaceExchange>,
     present: Option<Transaction>,
@@ -157,6 +161,9 @@ impl App {
             _retained_pool: None,
             vertex_parcel: None,
             index_parcel: None,
+            upload_scheme: None,
+            vertex_deposit: None,
+            index_deposit: None,
             cube_vertices: generate_cube_vertices(),
             frame_count: 0,
         })
@@ -251,6 +258,23 @@ impl App {
         self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
         self.index_parcel = Some(index_parcel);
+        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
+        let index_parcel = self.index_parcel.as_ref().unwrap();
+        let mut upload_scheme = Scheme::new(&ctx);
+        let memory = MemoryExchange::new(&ctx);
+        let vertex_deposit = memory.bind_deposit_buffer(
+            &mut upload_scheme,
+            vertex_parcel,
+            vertex_parcel.byte_size(),
+        )?;
+        let index_deposit = memory.bind_deposit_buffer(
+            &mut upload_scheme,
+            index_parcel,
+            index_parcel.byte_size(),
+        )?;
+        self.upload_scheme = Some(upload_scheme);
+        self.vertex_deposit = Some(vertex_deposit);
+        self.index_deposit = Some(index_deposit);
         self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
@@ -310,18 +334,13 @@ impl App {
             ]);
         }
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let mut upload = Scheme::new(ctx);
-        upload.write_parcel(
-            self.vertex_parcel.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&vertices).to_vec(),
-        )?;
-        upload.write_parcel(
-            self.index_parcel.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&sorted_indices).to_vec(),
-        )?;
+        let upload = self.upload_scheme.as_mut().unwrap();
+        self.vertex_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::cast_slice(&vertices))?;
+        self.index_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::cast_slice(&sorted_indices))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

@@ -740,13 +740,6 @@ public:
         return goldy_buffer_unit_byte_size(ptr_.get(), unit);
     }
 
-    std::vector<uint8_t> unit_read_to_cpu(uint32_t unit, const Device& device) const {
-        std::vector<uint8_t> output(unit_byte_size(unit));
-        detail::throw_on_result(goldy_buffer_unit_read_to_cpu(
-            ptr_.get(), unit, device.get(), output.data(), output.size()));
-        return output;
-    }
-
     /**
      * @brief Borrow one bindable unit as an owned parcel handle (source buffer must outlive GPU use).
      */

@@ -341,12 +341,6 @@ uint64_t goldy_buffer_unit_byte_size(const struct GoldyBuffer *buffer, uint32_t 
 
 uint32_t goldy_buffer_unit_count(const struct GoldyBuffer *buffer);
 
-enum GoldyResult goldy_buffer_unit_read_to_cpu(const struct GoldyBuffer *buffer,
-                                               uint32_t unit,
-                                               const struct GoldyDevice *device,
-                                               uint8_t *output,
-                                               size_t output_size);
-
 // Perform the claim's external handoff (for example present).
 //
 // # Safety

@@ -9,7 +9,7 @@
 use anyhow::Result;
 use goldy::{
     task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance, PresentMode,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction,
+    DepositTransaction, MemoryExchange, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -104,6 +104,8 @@ struct RenderState {
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
     uniform_buffer: Buffer,
+    upload_scheme: Scheme,
+    uniform_deposit: DepositTransaction,
     start_time: std::time::Instant,
     vsync: bool,
     frame_count: u32,
@@ -186,6 +188,13 @@ impl App {
             surface.height(),
         )?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &uniform_buffer,
+            std::mem::size_of::<Uniforms>() as u64,
+        )?;
+
         self.state = Some(RenderState {
             window,
             ctx,
@@ -195,6 +204,8 @@ impl App {
             compute_pipeline,
             _retained_pool: retained_pool,
             uniform_buffer,
+            upload_scheme,
+            uniform_deposit,
             start_time: std::time::Instant::now(),
             vsync: true,
             frame_count: 0,
@@ -305,9 +316,9 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    let mut upload = Scheme::new(&state.ctx);
-    upload.write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
-    upload.submit()?;
+    state.uniform_deposit
+        .write(&mut state.upload_scheme, 0, bytemuck::bytes_of(&uniforms))?;
+    state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;
     state.present.claim(&mut submission)?.consume()?;
