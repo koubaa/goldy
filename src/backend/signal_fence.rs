@@ -1,6 +1,6 @@
 //! Background fence / timeline polling for Vulkan and DX12 signal delivery.
 
-use crate::signal::{Signal, SignalQueue};
+use crate::signal::SignalQueue;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -16,7 +16,7 @@ pub struct FencePollerState {
     pub gpu_completed: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
-/// Spawn a thread that watches GPU completion and posts [`Signal::BoundaryCrossed`].
+/// Spawn a thread that watches GPU completion and posts boundary-crossed signals.
 pub fn spawn_fence_poller(state: FencePollerState) -> JoinHandle<()> {
     thread::spawn(move || {
         while !state.shutdown.load(Ordering::Relaxed) {
@@ -32,7 +32,7 @@ pub fn spawn_fence_poller(state: FencePollerState) -> JoinHandle<()> {
                 let mut last = state.last_emitted_epoch.load(Ordering::Acquire);
                 while last < completed {
                     last += 1;
-                    state.signal_queue.push(Signal::BoundaryCrossed { epoch: last });
+                    state.signal_queue.push_boundary_crossed(last);
                     state.last_emitted_epoch.store(last, Ordering::Release);
                 }
             }

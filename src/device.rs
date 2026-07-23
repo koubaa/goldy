@@ -836,7 +836,7 @@ impl Device {
     ///
     /// Epochs from any [`crate::Scheme::submit`] on this device share one value space; use this
     /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
-    pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
+    pub(crate) fn timeline_retired(&self) -> crate::timeline::TimelineValue {
         self.inner
             .backend
             .lock()
@@ -863,7 +863,7 @@ impl Device {
     /// from external contexts they do not own.
     ///
     /// [`Context::wait_until`]: crate::Context::wait_until
-    pub fn wait_until_retired(&self, value: crate::timeline::TimelineValue) -> Result<(), GoldyError> {
+    pub(crate) fn wait_until_retired(&self, value: crate::timeline::TimelineValue) -> Result<(), GoldyError> {
         let mut backend = self.inner.backend.lock().unwrap();
         backend.device_wait_until(self.inner.handle, value).map_err(|e| {
             drop(backend);

@@ -72,8 +72,8 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
     pub goldy_scheme_submit: FnGoldySchemeSubmit,
     pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
-    pub goldy_scheme_submission_timeline_value: FnGoldySchemeSubmissionTimelineValue,
-    pub goldy_scheme_submission_wait: FnGoldySchemeSubmissionWait,
+    pub goldy_scheme_submission_is_settled: FnGoldySchemeSubmissionIsSettled,
+    pub goldy_scheme_submission_wait_until_settled: FnGoldySchemeSubmissionWaitUntilSettled,
     pub goldy_memory_exchange_create: FnGoldyMemoryExchangeCreate,
     pub goldy_memory_exchange_destroy: FnGoldyMemoryExchangeDestroy,
     pub goldy_memory_exchange_bind_withdraw: FnGoldyMemoryExchangeBindWithdraw,
@@ -229,11 +229,14 @@ impl GoldyFfi {
             ),
             goldy_scheme_submit: sym!("goldy_scheme_submit", FnGoldySchemeSubmit),
             goldy_scheme_submission_destroy: sym!("goldy_scheme_submission_destroy", FnGoldySchemeSubmissionDestroy),
-            goldy_scheme_submission_timeline_value: sym!(
-                "goldy_scheme_submission_timeline_value",
-                FnGoldySchemeSubmissionTimelineValue
+            goldy_scheme_submission_is_settled: sym!(
+                "goldy_scheme_submission_is_settled",
+                FnGoldySchemeSubmissionIsSettled
             ),
-            goldy_scheme_submission_wait: sym!("goldy_scheme_submission_wait", FnGoldySchemeSubmissionWait),
+            goldy_scheme_submission_wait_until_settled: sym!(
+                "goldy_scheme_submission_wait_until_settled",
+                FnGoldySchemeSubmissionWaitUntilSettled
+            ),
             goldy_memory_exchange_create: sym!("goldy_memory_exchange_create", FnGoldyMemoryExchangeCreate),
             goldy_memory_exchange_destroy: sym!("goldy_memory_exchange_destroy", FnGoldyMemoryExchangeDestroy),
             goldy_memory_exchange_bind_withdraw: sym!(

@@ -805,7 +805,7 @@ impl GpuBackend for MetalBackend {
         &mut self,
         ctx: ContextHandle,
         _progress: crate::timeline::TimelineValue,
-    ) -> Vec<crate::signal::Signal> {
+    ) -> Vec<crate::signal::QueuedSignal> {
         let device = self.context_device(ctx);
         let sc_arc = match self.state.contexts.get(&ctx) {
             Some(sc) => sc.clone(),
@@ -822,18 +822,7 @@ impl GpuBackend for MetalBackend {
             }
         }
         let sc2 = sc_arc.lock().unwrap();
-        crate::signal::drain_all_signals(&sc2.signal_queue)
-    }
-
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc_arc = self.state.contexts.get(&ctx)?;
-        let sc = sc_arc.lock().unwrap();
-        let progress = context::context_gpu_progress(&sc);
-        if progress < sc.last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
+        crate::signal::drain_all_queued_signals(&sc2.signal_queue)
     }
 
     fn submit_standalone(

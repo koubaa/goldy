@@ -10,24 +10,23 @@ public sealed class SchemeSubmission : IDisposable
 
     internal SchemeSubmission(nint handle) => Handle = handle;
 
-    /// <summary>Timeline value for this submission (debug only).</summary>
-    public ulong TimelineValue
+    /// <summary>True when this submission's GPU work has retired.</summary>
+    public bool IsSettled
     {
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return Native.NativeMethods.SchemeSubmissionTimelineValue(Handle);
+            return Native.NativeMethods.SchemeSubmissionIsSettled(Handle);
         }
     }
 
     /// <summary>Block until this submission's GPU work has completed.</summary>
-    public void Wait(Context ctx)
+    public void WaitUntilSettled()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ctx.ThrowIfDisposed();
-        var result = Native.NativeMethods.SchemeSubmissionWait(ctx.Handle, Handle);
+        var result = Native.NativeMethods.SchemeSubmissionWaitUntilSettled(Handle);
         if (result != Native.GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme submission wait");
+            throw GoldyException.FromLastError("Scheme submission wait until settled");
     }
 
     public void Dispose()

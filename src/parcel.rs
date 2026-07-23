@@ -180,6 +180,85 @@ impl ParcelStamp {
             None => Settle::Ready,
         }
     }
+
+    /// Device-wide settle: pending promises or any stamped context not yet retired.
+    pub(crate) fn settle_global(&self, device: &crate::device::Device) -> Settle {
+        if self.block_or_gc_pending_nonblocking() {
+            return Settle::Pending;
+        }
+        let merged = self.sync.lock().unwrap().merged();
+        if merged.is_empty() {
+            return Settle::Ready;
+        }
+        let mut waiting = None;
+        for (c, tv) in merged.iter() {
+            let progress = device
+                .context_gpu_progress(c)
+                .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
+            if progress < tv {
+                waiting = Some(waiting.map_or(tv, |w: TimelineValue| w.max(tv)));
+            }
+        }
+        match waiting {
+            Some(tv) => Settle::Waiting(tv),
+            None => Settle::Ready,
+        }
+    }
+
+    /// Non-blocking GC of resolved/abandoned promises. Returns true if any remain pending.
+    fn block_or_gc_pending_nonblocking(&self) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            return false;
+        }
+        let mut sync = self.sync.lock().unwrap();
+        let mut any_pending = false;
+        pending.retain(|promise| match promise.poll() {
+            PromiseState::Pending => {
+                any_pending = true;
+                true
+            }
+            PromiseState::Resolved(tv) => {
+                // Fold into every context already present in the ledger; if empty, stamp ctx 0
+                // is avoided — wait path uses wait_until_retired on the max Waiting tv.
+                let keys: Vec<_> = sync.merged().keys().collect();
+                if keys.is_empty() {
+                    // No prior contexts: record against a destroyed-context sentinel by
+                    // using foreign_reads with the resolved tv on a synthetic wait via
+                    // inserting into last_reads of no context — instead mark write table
+                    // max via a dedicated path: put tv into foreign_reads keyed by 0 and
+                    // rely on context_gpu_progress(0) → CONTEXT_DESTROYED or 0.
+                    // Prefer: track as last_reads on first available — use mark on ctx 0.
+                    sync.record_foreign_read(0, tv);
+                } else {
+                    for c in keys {
+                        sync.record_foreign_read(c, tv);
+                    }
+                }
+                false
+            }
+            PromiseState::Abandoned => false,
+        });
+        any_pending
+    }
+
+    /// Block until every pending promise resolves or is abandoned, then fold into the ledger.
+    pub(crate) fn block_pending_promises(&self) {
+        loop {
+            let snapshot: Vec<TimelinePromise> = self.pending.lock().unwrap().clone();
+            if snapshot.is_empty() {
+                return;
+            }
+            for promise in &snapshot {
+                if matches!(promise.poll(), PromiseState::Pending) {
+                    promise.block();
+                }
+            }
+            if !self.block_or_gc_pending_nonblocking() {
+                return;
+            }
+        }
+    }
 }
 
 /// Backing storage for a bindable [`Parcel`].
@@ -319,7 +398,7 @@ impl Parcel {
     }
 
     /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
-    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
+    pub(crate) fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
         self.stamp
             .sync
             .lock()
@@ -328,23 +407,53 @@ impl Parcel {
     }
 
     /// Context-qualified last-referencing timelines for this parcel.
-    pub fn last_referenced(&self) -> ReferenceTable {
+    pub(crate) fn last_referenced(&self) -> ReferenceTable {
         self.stamp.merged_references()
     }
 
     /// Last referencing timeline for a single context, if any.
-    pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
+    pub(crate) fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
         self.stamp.merged_references().get(ctx)
     }
 
     /// Reuse-gate state for this parcel on `ctx`, including outstanding timeline promises.
-    pub fn settle(&self, ctx: &Context) -> Settle {
+    pub(crate) fn settle_on(&self, ctx: &Context) -> Settle {
         self.stamp.settle_on_context(ctx)
     }
 
-    /// True when no in-flight GPU work on `ctx` still references this parcel.
-    pub fn is_settled(&self, ctx: &Context) -> bool {
-        matches!(self.settle(ctx), Settle::Ready)
+    /// True when no in-flight GPU work still references this parcel (all stamped contexts).
+    pub fn is_settled(&self) -> bool {
+        let Some(inner) = self.stamp.home_device.upgrade() else {
+            return true;
+        };
+        matches!(
+            self.stamp.settle_global(&crate::device::Device { inner }),
+            Settle::Ready
+        )
+    }
+
+    /// True when this parcel is settled for reuse on `ctx`.
+    pub(crate) fn is_settled_on(&self, ctx: &Context) -> bool {
+        matches!(self.settle_on(ctx), Settle::Ready)
+    }
+
+    /// Block until no in-flight GPU work still references this parcel.
+    pub fn wait_until_settled(&self) -> Result<(), crate::error::GoldyError> {
+        let Some(inner) = self.stamp.home_device.upgrade() else {
+            return Ok(());
+        };
+        let device = crate::device::Device { inner };
+        loop {
+            match self.stamp.settle_global(&device) {
+                Settle::Ready => return Ok(()),
+                Settle::Pending => {
+                    self.stamp.block_pending_promises();
+                }
+                Settle::Waiting(tv) => {
+                    device.wait_until_retired(tv)?;
+                }
+            }
+        }
     }
 
     /// Shared stamp cell updated by [`crate::Scheme`] at submit.
@@ -645,7 +754,7 @@ impl Buffer {
     }
 
     /// Context-qualified last-referencing timelines merged across all parcels.
-    pub fn last_referenced(&self) -> ReferenceTable {
+    pub(crate) fn last_referenced(&self) -> ReferenceTable {
         let mut merged = ReferenceTable::new();
         for unit in &self.units {
             for (ctx, tv) in unit.last_referenced().iter() {
@@ -655,8 +764,15 @@ impl Buffer {
         merged
     }
 
-    pub fn is_settled(&self, ctx: &Context) -> bool {
-        self.units.iter().all(|u| u.is_settled(ctx))
+    pub fn is_settled(&self) -> bool {
+        self.units.iter().all(|u| u.is_settled())
+    }
+
+    pub fn wait_until_settled(&self) -> Result<(), crate::error::GoldyError> {
+        for unit in &self.units {
+            unit.wait_until_settled()?;
+        }
+        Ok(())
     }
 
     /// CPU write into a single-unit buffer.
@@ -664,7 +780,7 @@ impl Buffer {
     /// For [`crate::types::BufferFlags::CPU_WRITABLE`] buffers, this is a host-mapped
     /// memcpy (Metal/Vulkan) or a write into the paired UPLOAD mapping (DX12). It is
     /// **not** serialized behind in-flight GPU work: the caller must only write when the
-    /// buffer is **settled** ([`Self::is_settled`] / host-observed progress past last use)
+    /// buffer is **settled** ([`Self::is_settled`] / [`Self::wait_until_settled`])
     /// or **fresh** (never GPU-referenced). Writing while the GPU still reads the buffer
     /// is a data race on Metal/Vulkan; on DX12 the staged bytes apply at the next
     /// `CopyBuffer` instead.
@@ -692,11 +808,6 @@ impl Buffer {
                 anyhow::bail!("Buffer::clear requires a single-unit buffer; clear a specific parcel instead")
             }
         }
-    }
-
-    /// Record GPU reference on the whole-buffer parcel (single-unit buffers only).
-    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        self.whole().mark_referenced(ctx, epoch);
     }
 
     pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
@@ -901,16 +1012,16 @@ impl Texture {
         self.parcel.texture_is_owned()
     }
 
-    pub fn last_referenced(&self) -> ReferenceTable {
+    pub(crate) fn last_referenced(&self) -> ReferenceTable {
         self.parcel.last_referenced()
     }
 
-    pub fn is_settled(&self, ctx: &Context) -> bool {
-        self.parcel.is_settled(ctx)
+    pub fn is_settled(&self) -> bool {
+        self.parcel.is_settled()
     }
 
-    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        self.parcel.mark_referenced(ctx, epoch);
+    pub fn wait_until_settled(&self) -> Result<(), crate::error::GoldyError> {
+        self.parcel.wait_until_settled()
     }
 
     pub fn set_debug_name(&self, name: &str) {
@@ -1208,8 +1319,9 @@ mod tests {
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let parcel = mock_parcel(&device, &mut pool);
-        assert_eq!(parcel.settle(&ctx), Settle::Ready);
-        assert!(parcel.is_settled(&ctx));
+        assert_eq!(parcel.settle_on(&ctx), Settle::Ready);
+        assert!(parcel.is_settled());
+        assert!(parcel.is_settled_on(&ctx));
     }
 
     #[test]
@@ -1220,8 +1332,9 @@ mod tests {
         let parcel = mock_parcel(&device, &mut pool);
         let (promise, _resolver) = TimelinePromise::new();
         parcel.stamp_handle().push_pending(promise);
-        assert_eq!(parcel.settle(&ctx), Settle::Pending);
-        assert!(!parcel.is_settled(&ctx));
+        assert_eq!(parcel.settle_on(&ctx), Settle::Pending);
+        assert!(!parcel.is_settled());
+        assert!(!parcel.is_settled_on(&ctx));
     }
 
     #[test]
@@ -1231,8 +1344,9 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let parcel = mock_parcel(&device, &mut pool);
         parcel.mark_referenced(ctx.backend_handle(), 50);
-        assert_eq!(parcel.settle(&ctx), Settle::Waiting(50));
-        assert!(!parcel.is_settled(&ctx));
+        assert_eq!(parcel.settle_on(&ctx), Settle::Waiting(50));
+        assert!(!parcel.is_settled());
+        assert!(!parcel.is_settled_on(&ctx));
     }
 
     #[test]
@@ -1246,7 +1360,7 @@ mod tests {
         let (promise, resolver) = TimelinePromise::new();
         stamp.push_pending(promise);
         resolver.resolve(25);
-        assert_eq!(parcel.settle(&ctx), Settle::Waiting(25));
+        assert_eq!(parcel.settle_on(&ctx), Settle::Waiting(25));
         assert!(stamp.pending.lock().unwrap().is_empty());
         let sync = stamp.sync.lock().unwrap();
         assert_eq!(sync.foreign_reads.get(ctx_handle), Some(25));
@@ -1264,7 +1378,8 @@ mod tests {
         stamp.push_pending(promise);
         drop(resolver);
         assert_eq!(promise_state_after_abandon(&stamp), PromiseState::Abandoned);
-        assert_eq!(parcel.settle(&ctx), Settle::Ready);
+        assert_eq!(parcel.settle_on(&ctx), Settle::Ready);
+        assert!(parcel.is_settled());
         assert!(stamp.pending.lock().unwrap().is_empty());
     }
 

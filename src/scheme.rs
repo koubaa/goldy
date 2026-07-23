@@ -181,7 +181,7 @@ struct SubmissionCore {
 }
 
 impl SubmissionHandle {
-    /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
+    /// Timeline value for this submission (crate-internal clearing clock).
     pub fn timeline_value(&self) -> TimelineValue {
         self.core.timeline
     }
@@ -239,11 +239,15 @@ impl fmt::Debug for Transaction {
 
 /// Unique receipt returned by [`Scheme::submit`].
 ///
-/// Owns untaken exchange claims (present and withdraw). Clone the
-/// submission handle for timeline identity that must outlive claim extraction.
-/// Dropping this receipt discards every claim that has not been taken.
+/// Owns untaken exchange claims (present and withdraw). Dropping this receipt
+/// discards every claim that has not been taken.
+///
+/// GPU completion is observed via [`Self::is_settled`] / [`Self::wait_until_settled`]
+/// — not via raw timeline values.
 pub struct Submission {
     handle: SubmissionHandle,
+    /// Context that submitted this work (for settlement waits).
+    ctx: Context,
     /// Present claim slots (parallel to [`Self::claim_bindings`] / generations).
     present_claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
     /// Scheme-unique present binding id for each present claim slot.
@@ -278,7 +282,7 @@ impl fmt::Debug for Submission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Submission")
             .field("scheme_id", &self.handle.scheme_id())
-            .field("timeline", &self.handle.timeline_value())
+            .field("settled", &self.is_settled())
             .field("present_claims", &self.present_claims.len())
             .field("withdraw_claims", &self.withdraw_claims.len())
             .finish()
@@ -292,13 +296,33 @@ impl Submission {
         self.handle.clone()
     }
 
-    /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
-    pub fn timeline_value(&self) -> TimelineValue {
+    /// Crate-internal clearing epoch for this submission.
+    pub(crate) fn timeline_value(&self) -> TimelineValue {
         self.handle.timeline_value()
     }
 
+    /// True when this submission's GPU work has retired.
+    pub fn is_settled(&self) -> bool {
+        self.ctx.gpu_progress() >= self.handle.timeline_value()
+    }
+
     /// Block until this submission's GPU work has completed.
-    pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
+    pub fn wait_until_settled(&self) -> Result<(), GoldyError> {
+        self.handle.wait(&self.ctx)
+    }
+
+    /// Like [`Self::wait_until_settled`] but returns `Ok(false)` on timeout.
+    pub fn wait_until_settled_timeout(&self, timeout_ms: u32) -> Result<bool, GoldyError> {
+        match self.ctx.wait_until_timeout(self.handle.timeline_value(), timeout_ms) {
+            Ok(()) => Ok(true),
+            Err(GoldyError::SubmitTimeout) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Block until this submission's GPU work has completed (caller-supplied context).
+    #[cfg(test)]
+    pub(crate) fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
         self.handle.wait(ctx)
     }
 
@@ -396,8 +420,8 @@ impl Submission {
     }
 }
 
-impl From<Submission> for TimelineValue {
-    fn from(submission: Submission) -> Self {
+impl From<&Submission> for TimelineValue {
+    fn from(submission: &Submission) -> Self {
         submission.timeline_value()
     }
 }
@@ -586,7 +610,7 @@ impl DepositPool {
         if let Some(idx) = self.pending {
             return Ok(idx);
         }
-        if let Some(idx) = self.parcels.iter().position(|p| p.is_settled(ctx)) {
+        if let Some(idx) = self.parcels.iter().position(|p| p.is_settled_on(ctx)) {
             self.pending = Some(idx);
             return Ok(idx);
         }
@@ -1275,22 +1299,29 @@ impl Scheme {
     }
 
     /// Record GPU-orderable buffer reuse dependencies enforced at submit-worker execute time.
-    pub fn record_reuse_epochs(&mut self, refs: &crate::timeline::ReferenceTable) {
-        self.submit_state.record_reuse_epochs(refs);
+    pub fn record_reuse_parcel(&mut self, parcel: &crate::Parcel) {
+        self.submit_state.record_reuse_epochs(&parcel.last_referenced());
     }
 
-    /// Defer a host-visible buffer write until the submission worker after `refs` retire on the CPU.
+    /// Record GPU-orderable reuse for all parcels in a buffer.
+    pub fn record_reuse_buffer(&mut self, buffer: &crate::Buffer) {
+        self.submit_state.record_reuse_epochs(&buffer.last_referenced());
+    }
+
+    /// Defer a host-visible buffer write until the submission worker after prior uses of
+    /// `ready_after` retire on the CPU.
     ///
     /// Applied by the DX12, Vulkan, and Metal submission workers when
     /// [`crate::DeviceCapabilities::host_sidecar_on_submit_worker`] is true.
     pub fn defer_host_write(
         &mut self,
-        refs: &crate::timeline::ReferenceTable,
+        ready_after: &crate::Buffer,
         buffer: &crate::Buffer,
         offset: u64,
         data: Box<[u8]>,
     ) {
-        self.submit_state.defer_host_write(refs, buffer, offset, data);
+        self.submit_state
+            .defer_host_write(&ready_after.last_referenced(), buffer, offset, data);
     }
 
     /// Submit the scheme: resubmit the retained command list when clean, re-record when dirty.
@@ -1672,6 +1703,7 @@ impl Scheme {
                         timeline: tv_dispatch,
                     }),
                 },
+                ctx: self.ctx.clone(),
                 present_claims,
                 claim_bindings,
                 claim_generations,
@@ -1746,6 +1778,7 @@ impl Scheme {
                     timeline: tv_copy,
                 }),
             },
+            ctx: self.ctx.clone(),
             present_claims,
             claim_bindings,
             claim_generations,
@@ -3023,7 +3056,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let parcel = retained_buffer(&mut pool);
-        assert!(parcel.is_settled(&ctx), "never-referenced parcel is settled");
+        assert!(parcel.is_settled(), "never-referenced parcel is settled");
     }
 
     #[test]

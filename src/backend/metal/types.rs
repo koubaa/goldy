@@ -563,7 +563,7 @@ impl TimelineWaiter {
             let mut last = self.last_emitted.load(Ordering::Acquire);
             while last < value {
                 last += 1;
-                queue.push(crate::signal::Signal::BoundaryCrossed { epoch: last });
+                queue.push_boundary_crossed(last);
                 self.last_emitted.store(last, Ordering::Release);
             }
         }

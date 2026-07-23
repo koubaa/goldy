@@ -1171,7 +1171,7 @@ impl GpuBackend for VulkanBackend {
         &mut self,
         ctx: ContextHandle,
         progress: crate::timeline::TimelineValue,
-    ) -> Vec<crate::signal::Signal> {
+    ) -> Vec<crate::signal::QueuedSignal> {
         let device_handle = self.context_device(ctx);
         let signal_queue = self
             .state
@@ -1197,21 +1197,7 @@ impl GpuBackend for VulkanBackend {
                 }
             });
         }
-        crate::signal::drain_all_signals(&signal_queue)
-    }
-
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc_arc = {
-            let contexts = self.state.contexts.read().unwrap();
-            contexts.get(&ctx)?.clone()
-        };
-        let last_submitted_seq = sc_arc.lock().unwrap().last_submitted_seq;
-        let progress = self.gpu_progress(ctx);
-        if progress < last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
+        crate::signal::drain_all_queued_signals(&signal_queue)
     }
 
     fn submit_standalone(

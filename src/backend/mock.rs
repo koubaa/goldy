@@ -103,9 +103,7 @@ impl crate::backend::submission_worker::PendingSubmit for MockPendingSubmit {
         let _tz = crate::tracy_zone!("goldy.submit_worker.mock");
         let mut state = self.context_state.lock().unwrap();
         state.completed = self.tv;
-        state
-            .signal_queue
-            .push(crate::signal::Signal::BoundaryCrossed { epoch: self.tv });
+        state.signal_queue.push_boundary_crossed(self.tv);
         Ok(())
     }
 }
@@ -1550,17 +1548,8 @@ impl GpuBackend for MockBackend {
         &mut self,
         ctx: ContextHandle,
         _progress: crate::timeline::TimelineValue,
-    ) -> Vec<crate::signal::Signal> {
-        crate::signal::drain_all_signals(&self.context_state(ctx).signal_queue)
-    }
-
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let state = self.context_state(ctx);
-        if state.completed < state.last_submitted_seq {
-            Some(state.completed.saturating_add(1))
-        } else {
-            None
-        }
+    ) -> Vec<crate::signal::QueuedSignal> {
+        crate::signal::drain_all_queued_signals(&self.context_state(ctx).signal_queue)
     }
 
     fn submit_standalone(
@@ -2351,12 +2340,18 @@ mod tests {
         assert_eq!(mock_pending_acquire(&backend, surface), 0);
 
         let signals = backend.poll_signals(ctx, backend.gpu_progress(ctx));
-        assert!(signals
-            .iter()
-            .any(|s| matches!(s, crate::signal::Signal::SwapchainAcquired { .. })));
-        assert!(signals
-            .iter()
-            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+        assert!(signals.iter().any(|s| {
+            matches!(
+                s,
+                crate::signal::QueuedSignal::Client(crate::signal::Signal::SwapchainAcquired { .. })
+            )
+        }));
+        assert!(signals.iter().any(|s| {
+            matches!(
+                s,
+                crate::signal::QueuedSignal::Client(crate::signal::Signal::SwapchainReturned { .. })
+            )
+        }));
     }
 
     #[test]
@@ -2396,9 +2391,12 @@ mod tests {
 
         mock_present(&mut backend, frame, tv);
         let a_signals = backend.poll_signals(ctx_a, backend.gpu_progress(ctx_a));
-        assert!(a_signals
-            .iter()
-            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+        assert!(a_signals.iter().any(|s| {
+            matches!(
+                s,
+                crate::signal::QueuedSignal::Client(crate::signal::Signal::SwapchainReturned { .. })
+            )
+        }));
         assert!(backend.poll_signals(ctx_b, backend.gpu_progress(ctx_b)).is_empty());
     }
 
@@ -2436,9 +2434,12 @@ mod tests {
         assert_eq!(mock_pending_acquire(&backend, surface), 0);
 
         let signals = backend.poll_signals(ctx, backend.gpu_progress(ctx));
-        assert!(!signals
-            .iter()
-            .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+        assert!(!signals.iter().any(|s| {
+            matches!(
+                s,
+                crate::signal::QueuedSignal::Client(crate::signal::Signal::SwapchainReturned { .. })
+            )
+        }));
     }
 
     #[test]

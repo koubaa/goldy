@@ -805,7 +805,7 @@ mod imp {
             .expect("parcel");
 
         let token = write_to_parcel(&ctx, &parcel, &vec![0u8; 64 * 4]).expect("write_to_parcel zeros");
-        token.wait(&ctx).expect("wait");
+        token.wait_until_settled().expect("wait");
 
         for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, 64).iter().enumerate() {
             assert_eq!(val, 0, "element {i} should be 0 after zero write");
@@ -826,7 +826,7 @@ mod imp {
             *slot = 0;
         }
         let token = write_to_parcel(&ctx, &parcel, bytemuck::cast_slice(&data)).expect("write_to_parcel");
-        token.wait(&ctx).expect("wait");
+        token.wait_until_settled().expect("wait");
 
         for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, 64).iter().enumerate() {
             let expected = if (16..32).contains(&i) { 0 } else { SENTINEL };
@@ -848,7 +848,7 @@ mod imp {
             *slot = 0;
         }
         let token = write_to_parcel(&ctx, &parcel, bytemuck::cast_slice(&data)).expect("write_to_parcel");
-        token.wait(&ctx).expect("wait");
+        token.wait_until_settled().expect("wait");
 
         for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, 64).iter().enumerate() {
             let expected = if i < 32 { SENTINEL } else { 0 };
@@ -1710,7 +1710,7 @@ mod imp {
             .with_parcel(&texture, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
         let mut frame = scheme.submit().expect("submit");
-        frame.wait(&ctx).expect("wait");
+        frame.wait_until_settled().expect("wait");
 
         let mut output = read_texture_via_scheme_copy(&ctx, &texture);
 
@@ -1928,7 +1928,7 @@ mod imp {
         let mut frame_a = scheme.submit().expect("ctx_a submit");
         drop(buf);
 
-        frame_a.wait(&ctx_a).expect("ctx_a wait");
+        frame_a.wait_until_settled().expect("ctx_a wait");
         ctx_a.flush_deferred_deletions();
 
         assert_eq!(

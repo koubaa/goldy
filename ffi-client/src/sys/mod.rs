@@ -273,15 +273,12 @@ pub unsafe fn goldy_scheme_submission_destroy(submission: *mut GoldySchemeSubmis
     (lib().goldy_scheme_submission_destroy)(submission)
 }
 
-pub unsafe fn goldy_scheme_submission_timeline_value(submission: *const GoldySchemeSubmission) -> u64 {
-    (lib().goldy_scheme_submission_timeline_value)(submission)
+pub unsafe fn goldy_scheme_submission_is_settled(submission: *const GoldySchemeSubmission) -> bool {
+    (lib().goldy_scheme_submission_is_settled)(submission)
 }
 
-pub unsafe fn goldy_scheme_submission_wait(
-    ctx: *const GoldyContext,
-    submission: *const GoldySchemeSubmission,
-) -> GoldyResult {
-    (lib().goldy_scheme_submission_wait)(ctx, submission)
+pub unsafe fn goldy_scheme_submission_wait_until_settled(submission: *const GoldySchemeSubmission) -> GoldyResult {
+    (lib().goldy_scheme_submission_wait_until_settled)(submission)
 }
 
 pub unsafe fn goldy_memory_exchange_create(ctx: *const GoldyContext) -> *mut GoldyMemoryExchange {

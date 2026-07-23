@@ -1027,7 +1027,7 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         ctx: ContextHandle,
         progress: crate::timeline::TimelineValue,
-    ) -> Vec<crate::signal::Signal> {
+    ) -> Vec<crate::signal::QueuedSignal> {
         let device_handle = self.context_device(ctx);
         let signal_queue = self
             .state
@@ -1053,19 +1053,7 @@ impl GpuBackend for Dx12Backend {
                 }
             });
         }
-        crate::signal::drain_all_signals(&signal_queue)
-    }
-
-    fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let fences = self.state.context_fences.read().unwrap();
-        let (_, fence, last_submitted) = fences.get(&ctx)?;
-        let progress = unsafe { fence.GetCompletedValue() };
-        let last = last_submitted.load(std::sync::atomic::Ordering::Relaxed);
-        if progress < last {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
+        crate::signal::drain_all_queued_signals(&signal_queue)
     }
 
     fn submit_standalone(
