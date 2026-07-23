@@ -661,7 +661,7 @@ fn fill_42_scheme(ctx: &Context, pipe: &ComputePipeline, buf: &Parcel) -> Scheme
     scheme
 }
 
-/// Second `grant.consume` on the same submission must fail (staging cell is single-consume).
+/// Second claim on the same submission must fail (withdraw slot is taken exactly once).
 #[test]
 fn withdraw_double_read_same_frame_errors() {
     let (device, _cb) = make_device();
@@ -680,15 +680,11 @@ fn withdraw_double_read_same_frame_errors() {
     let mut frame = scheme.submit().expect("submit");
 
     let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
-    let err = grant
-        .claim(&mut frame)
-        .expect("claim")
-        .consume()
-        .expect_err("second read must fail");
+    let err = grant.claim(&mut frame).expect_err("second claim must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
-/// Cloned frames share one staging cell; only one read succeeds.
+/// After the first claim takes the withdraw slot, a second claim fails.
 #[test]
 fn withdraw_second_consume_errors() {
     let (device, _cb) = make_device();
@@ -707,11 +703,7 @@ fn withdraw_second_consume_errors() {
     let mut frame = scheme.submit().expect("submit");
 
     let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
-    let err = grant
-        .claim(&mut frame)
-        .expect("claim")
-        .consume()
-        .expect_err("second consume must fail");
+    let err = grant.claim(&mut frame).expect_err("second claim must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 

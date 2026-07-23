@@ -1,9 +1,8 @@
-//! Retained scheme — the primary submission unit of the diwan machine.
+//! Retained scheme — goldy's primary submission unit.
 //!
-//! A [`Scheme`] is goldy's realization of the diwan scheme (spec §2): a set of dispatches
-//! and precedences, first-class, retained across submissions. Schemes persist across
-//! frames; structural mutation sets a COW dirty bit, and a clean scheme resubmits with
-//! zero recording cost.
+//! A [`Scheme`] is a set of dispatches and precedences, first-class, retained across
+//! submissions. Schemes persist across frames; structural mutation sets a COW dirty
+//! bit, and a clean scheme resubmits with zero recording cost.
 //!
 //! **Construction**: `Scheme::new(&ctx)` — bound to one context for its lifetime.
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
