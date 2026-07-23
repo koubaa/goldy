@@ -68,6 +68,16 @@ Goldy's hardware floor is defined by a set of architectural capabilities, not sp
 
 GPUs from roughly 2018 onward universally support these features. The specific API version requirements (Vulkan 1.4, DX12 Enhanced Barriers, Metal Tier 2) are the mechanism by which Goldy enforces this floor.
 
+## Additional Backends
+
+| Backend | Status | Notes |
+|---------|--------|-------|
+| CUDA | In progress | NVIDIA compute prototype; `cuda` Cargo feature |
+| WebGPU | In progress | Cross-platform prototype via wgpu; `webgpu` Cargo feature |
+| Tenstorrent | Planned | **Torus** Fondaco runtime design (not yet implemented) |
+
+These backends are not yet supported for production use. See [Backend Architecture](../backends/overview.md) for details.
+
 ## What This Excludes
 
 | Excluded | Reason |

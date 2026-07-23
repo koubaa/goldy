@@ -1,6 +1,6 @@
 # Examples Gallery
 
-Goldy ships with **21 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on supported backends (Vulkan 1.4+, DX12, Metal Tier 2+).
+Goldy ships with **21 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on shipped backends (Vulkan 1.4+, DX12, Metal Tier 2+). CUDA and WebGPU backends are in progress; Tenstorrent is planned.
 
 ## Running Examples
 

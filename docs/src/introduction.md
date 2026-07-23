@@ -4,7 +4,7 @@
 
 # Goldy: GPU runtime for the Fondaco Machine
 
-**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md): merchants are sovereign over **parcels** (data), express **schemes** (computation with ownership-derived ordering), and settle foreign I/O through **exchanges**. Goldy targets Vulkan 1.4+, DX12, and Metal Tier 2+ with native backends and a single shader language (Slang).
+**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](./fondaco/specification.md).
 
 > **Maturity**: Goldy 0.1.x is pre-0.2. Breaking changes are expected before 0.2.
 
@@ -18,7 +18,7 @@
 | Exchange | [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html), [`MemoryExchange`](https://docs.rs/goldy/latest/goldy/struct.MemoryExchange.html) |
 | Settlement | [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) → [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html) |
 
-Goldy abstracts **where bytes live** (descriptor slots, residency, relocation) but exposes **what access costs** (access patterns, resize cost, readback path). See the [design thesis](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/abstract-gpu.md).
+Goldy abstracts **where bytes live** (descriptor slots, residency, relocation) but exposes **what access costs** (access patterns, resize cost, readback path). See the [design thesis](./fondaco/design-thesis.md).
 
 ## Typed bindless shaders
 
@@ -81,14 +81,17 @@ present.claim(&mut submission)?.consume()?;
 | Linux | Vulkan (Wayland surfaces) |
 | macOS | Metal |
 
-Bindings: [Python](./bindings/python.md), [.NET](./bindings/dotnet.md), [C++](https://github.com/koubaa/goldy/tree/main/cpp).
+CUDA and WebGPU backends are **in progress**. A Tenstorrent backend (**Torus**) is **planned**. See [Backend Architecture](./backends/overview.md).
+
+Bindings: [Python](./bindings/python.md), [.NET](./bindings/dotnet.md), [C++](./bindings/cpp.md), [Rust FFI Client](./bindings/rust-ffi-client.md).
 
 ## Quick links
 
 - [Installation](./tutorial/installation.md)
 - [Your First Triangle](./tutorial/first-triangle.md)
 - [Your First Compute Shader](./tutorial/first-compute.md)
-- [Goldy runtime mapping (research)](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-goldy-runtime.md)
+- [Fondaco overview](./design/fondaco.md)
+- [Goldy runtime mapping](./fondaco/goldy-runtime.md)
 - [GitHub](https://github.com/koubaa/goldy)
 
 ## License

@@ -25,6 +25,8 @@ cargo add goldy
 | `vulkan` | yes | Vulkan 1.4+ backend (Linux, Windows) |
 | `dx12` | yes | DirectX 12 backend (Windows) |
 | `metal` | yes | Metal Tier 2+ backend (macOS) |
+| `cuda` | no | CUDA backend (in progress; NVIDIA compute) |
+| `webgpu` | no | WebGPU backend (in progress; via wgpu) |
 | `instrumentation` | yes | Structured tracing via `tracing-subscriber` (zero-cost when disabled) |
 
 Platform-inappropriate features are no-ops — enabling `metal` on Linux or `dx12` on macOS compiles cleanly but does nothing.

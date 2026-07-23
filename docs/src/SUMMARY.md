@@ -10,7 +10,7 @@
 
 # Programming Model
 
-- [Bindless by Default](./programming-model/bindless.md)
+- [Parcels](./programming-model/parcels.md)
 - [Virtual Entry Points](./programming-model/virtual-entry-points.md)
 - [Slang in One Source](./programming-model/slang.md)
 
@@ -23,7 +23,7 @@
 # Graphics Workflows
 
 - [Pipelines](./graphics/pipelines.md)
-- [Command Encoding](./graphics/commands.md)
+- [Render Pass Nodes](./graphics/commands.md)
 - [Vertex Types and Layouts](./graphics/vertices.md)
 
 # Surfaces and Render Targets
@@ -52,6 +52,8 @@
 
 - [Python](./bindings/python.md)
 - [.NET](./bindings/dotnet.md)
+- [C++](./bindings/cpp.md)
+- [Rust FFI Client](./bindings/rust-ffi-client.md)
 
 # Examples
 
@@ -66,12 +68,11 @@
 
 # Fondaco Machine (research)
 
-External research docs in the [docu repository](https://github.com/koba-computers/docu):
-
-- [Fondaco Machine specification](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md)
-- [Goldy runtime mapping](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-goldy-runtime.md)
-- [Design thesis](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/abstract-gpu.md)
-- [Terminology](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/TERMINOLOGY.md)
+- [Overview](./design/fondaco.md)
+- [Terminology](./fondaco/terminology.md)
+- [Machine Specification](./fondaco/specification.md)
+- [Goldy Runtime Mapping](./fondaco/goldy-runtime.md)
+- [Design Thesis](./fondaco/design-thesis.md)
 
 # Appendix
 

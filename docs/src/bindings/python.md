@@ -27,7 +27,7 @@ local development. Rebuild after editing `python/src/*.rs` with `maturin develop
 
 - Python 3.9+
 - NumPy 1.20+
-- A GPU with Vulkan 1.4+, DX12, or Metal Tier 2+ support
+- A GPU with Vulkan 1.4+, DX12, or Metal Tier 2+ support (CUDA and WebGPU backends are in progress; Tenstorrent is planned)
 
 ### Optional Dependencies
 
@@ -202,7 +202,7 @@ instance = goldy.Instance()
 
 ```python
 instance = goldy.Instance()
-instance.backend_type            # BackendType (Vulkan, DX12, Metal)
+instance.backend_type            # BackendType (Vulkan, DX12, Metal; CUDA and WebGPU in progress)
 instance.enumerate_adapters()    # list of AdapterInfo
 instance.request_adapter()       # Adapter
 ```

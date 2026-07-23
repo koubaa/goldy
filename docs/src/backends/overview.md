@@ -1,13 +1,17 @@
 # Backend Architecture
 
-Goldy supports three GPU backends, each implemented natively against the platform
-graphics API — no translation layers (like MoltenVK) are involved.
+Goldy ships three GPU backends today, each implemented natively against the platform
+graphics API — no translation layers (like MoltenVK) are involved. Two additional
+backends are in active development; a Tenstorrent backend is planned.
 
-| Backend | API Level | Platforms | Rust Crate |
-|---------|-----------|-----------|------------|
-| Vulkan | 1.4+ | Windows, Linux | `ash` |
-| DX12 | Direct3D 12 | Windows | `windows` + `gpu-allocator` |
-| Metal | Tier 2+ | macOS | `metal` |
+| Backend | Status | API Level | Platforms | Rust Crate |
+|---------|--------|-----------|-----------|------------|
+| Vulkan | Shipped | 1.4+ | Windows, Linux | `ash` |
+| DX12 | Shipped | Direct3D 12 | Windows | `windows` + `gpu-allocator` |
+| Metal | Shipped | Tier 2+ | macOS | `metal` |
+| CUDA | In progress | CUDA Driver API | NVIDIA GPUs | `cudarc` |
+| WebGPU | In progress | WebGPU (via wgpu) | Cross-platform | `wgpu` |
+| Tenstorrent | Planned | TT-Metalium / TT-MLIR | Tenstorrent accelerators | — |
 
 ## Native Implementations
 
@@ -63,11 +67,13 @@ GOLDY_BACKEND=dx12   cargo run --example triangle
 
 Accepted values (case-insensitive):
 
-| Value | Backend |
-|-------|---------|
-| `vulkan`, `vk` | Vulkan |
-| `dx12`, `d3d12`, `directx` | DX12 |
-| `metal`, `mtl` | Metal |
+| Value | Backend | Status |
+|-------|---------|--------|
+| `vulkan`, `vk` | Vulkan | Shipped |
+| `dx12`, `d3d12`, `directx` | DX12 | Shipped |
+| `metal`, `mtl` | Metal | Shipped |
+| `cuda` | CUDA | In progress |
+| `webgpu`, `wgpu` | WebGPU | In progress |
 
 An unrecognized value produces a clear error listing the valid options.
 
@@ -183,6 +189,18 @@ The Metal backend uses the `metal` crate (native Metal, not MoltenVK):
 - **Argument buffers** for bindless resource binding
 - **Native hazard tracking** — Metal tracks resource hazards automatically
 - Shader compilation via Slang to Metal Shading Language
+
+### CUDA Backend (in progress)
+
+Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API. Slang compiles to PTX; dispatches use the CUDA launch model. Graphics, surfaces, and exchanges are not yet supported. Enable with the `cuda` Cargo feature.
+
+### WebGPU Backend (in progress)
+
+Cross-platform prototype built on [wgpu](https://github.com/gfx-rs/wgpu). Intended for broader portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature. Not yet at parity with the shipped Vulkan/DX12/Metal backends.
+
+### Tenstorrent Backend (planned)
+
+**Torus** is a planned Fondaco runtime for Tenstorrent Tensix hardware. No implementation ships in Goldy today.
 
 ## The `GpuBackend` Trait
 

@@ -1,6 +1,6 @@
 # Goldy - Modern GPU Library for .NET
 
-Goldy is a GPU runtime for the [Fondaco Machine](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md), targeting Vulkan 1.4+, DX12, and Metal with C# bindings (.NET 8+).
+Goldy is a GPU runtime for the [Fondaco Machine](../../docs/src/fondaco/specification.md), targeting Vulkan 1.4+, DX12, and Metal with C# bindings (.NET 8+).
 
 ## Quick Start
 
@@ -53,4 +53,4 @@ using var pixels = claim.Consume();
 
 ## License
 
-MIT License. See the [goldy repository](https://github.com/koubaa/goldy/blob/main/LICENSE) for the full text.
+MIT License. See [LICENSE](../../LICENSE) for the full text.

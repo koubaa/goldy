@@ -1,6 +1,6 @@
-//! # Goldy - Modern GPU Library
+//! # Goldy
 //!
-//! A modern GPU library targeting Vulkan 1.4+, DX12, and Metal.
+//! A GPU library targeting Vulkan 1.4+, DX12, and Metal.
 //!
 //! ## Quick Start
 //!

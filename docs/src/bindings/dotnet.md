@@ -29,7 +29,7 @@ dotnet add reference path/to/goldy/dotnet/Goldy/Goldy.csproj
 
 - .NET 8.0 or later
 - Windows x64, Linux x64, or macOS (x64 / arm64)
-- A GPU with Vulkan 1.4+, DX12, or Metal Tier 2+ support
+- A GPU with Vulkan 1.4+, DX12, or Metal Tier 2+ support (CUDA and WebGPU backends are in progress; Tenstorrent is planned)
 
 ## Quick Start
 
@@ -192,7 +192,7 @@ Graphics and compute both go through `Scheme`.
 
 ```csharp
 public enum DeviceType   { DiscreteGpu, IntegratedGpu, Cpu, Other }
-public enum BackendType  { Vulkan, Metal, Dx12 }
+public enum BackendType  { Vulkan, Metal, Dx12 }  // CUDA and WebGPU in progress in core Goldy
 public enum BufferKind   { Scattered, Broadcast }
 public enum NodeAccess   { Read, Write, ReadWrite, Overwrite }
 ```

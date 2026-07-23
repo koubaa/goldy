@@ -6,7 +6,7 @@ Legacy compatibility is not relevant before the 0.2 release. Make breaking chang
 
 There is churn happening now, it is important to keep certain architectural principles in mind.
 
-- A "parcel" is a stable identity for data held by the runtime in trust for the merchant, generic enough to span lifecycle (leased vs owned) and type (buffers, textures, images, ...).
+- A "parcel" is a stable identity for data held by the runtime in trust for the program, generic enough to span lifecycle (leased vs owned) and type (buffers, textures, images, ...).
 - An "exchange" is the mediated relationship with an external subsystem
   (`SurfaceExchange`, `MemoryExchange`). Bind once into a scheme as a
   `Transaction` / withdraw or deposit transaction; each submission may produce a

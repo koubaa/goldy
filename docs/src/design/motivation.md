@@ -1,26 +1,20 @@
 # Motivation
 
-Goldy implements the **Fondaco Machine** on modern GPUs: merchants describe parcels and schemes; the runtime manages the physical medium, derives precedences from ownership, and mediates present/readback through exchanges. For the normative machine spec see the [Fondaco Machine specification](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md); for what Goldy ships today see the [runtime mapping](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-goldy-runtime.md).
+Goldy implements the **Fondaco Machine** on modern GPUs: programs describe parcels and schemes; the runtime manages the physical medium, derives precedences from ownership, and mediates present/readback through exchanges. For the normative machine spec see the [Machine Specification](../fondaco/specification.md); for what Goldy ships today see the [runtime mapping](../fondaco/goldy-runtime.md).
 
 ## The Problem with "Modern" Graphics APIs
 
-DX12, Vulkan, and Metal are commonly called modern APIs, but they were designed over a decade ago for hardware that has since changed dramatically. Sebastian Aaltonen's **["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api)** captures the core tension:
+DX12, Vulkan, and Metal are commonly called modern APIs, but they were designed over a decade ago for hardware that has since changed dramatically. The GPU architectures those APIs targeted lacked coherent caches, bindless descriptors, and 64-bit pointers. The APIs compensated with layers of indirection — descriptor sets, render pass objects, explicit image layout transitions, pipeline layouts as first-class objects — that served as hints and contracts for hardware that needed them.
 
-> "DirectX 12, Vulkan, and Metal are often referred to as 'modern APIs'. These APIs are now 10 years old. They were initially designed to support GPUs that are now 13 years old, an incredibly long time in GPU history."
+Furthermore, high-performance GPU programs tend to converge on the same shape, whether they are written with PyTorch, CUDA, Metal, Vulkan, or something else. They are not best understood as a stream of API calls. They are graphs whose nodes are kernels, copies, and foreign operations, and whose edges describe data dependencies. Independent nodes may run concurrently; dependent nodes require an ordering mechanism such as a barrier, event, semaphore, or stream dependency.
 
-The GPU architectures those APIs targeted lacked coherent caches, bindless descriptors, and 64-bit pointers. The APIs compensated with layers of indirection — descriptor sets, render pass objects, explicit image layout transitions, pipeline layouts as first-class objects — that served as hints and contracts for hardware that needed them.
+PyTorch makes this especially visible. A model is a graph of tensor operations; autograd constructs another graph for the backward pass, and compilers such as TorchInductor capture, specialize, fuse, and schedule that work. Beneath it, CUDA libraries submit kernels and transfers to streams, use events to express cross-stream dependencies, reuse temporary allocations according to tensor lifetimes, and fuse adjacent operations to reduce launch and memory-traffic costs. Hand-written CUDA programs eventually acquire the same machinery: stream graphs, memory pools, dependency tracking, and explicit synchronization around shared buffers.
 
-Modern GPUs (roughly 2018+) no longer need most of that scaffolding:
+Graphics workloads arrive at the same structure from another direction. A frame graph records render, compute, copy, and presentation passes together with how each pass reads or writes resources. From those declarations, an engine derives execution order, barriers, transient-memory aliasing, queue placement, and opportunities for overlap. The APIs differ, but the optimization problem is the same: preserve data dependencies while minimizing synchronization, allocation, launch, and memory-traffic costs.
 
-| Then (2012-era) | Now (2018+) |
-|-----------------|-------------|
-| Incoherent caches, manual flush | Coherent L2, automatic |
-| Discrete memory, explicit copies | PCIe REBAR, unified where possible |
-| 32-bit pointers, indirect | 64-bit, direct in shaders |
-| CPU-bound descriptor binding | Bindless, GPU-resident |
-| Render passes for tile optimization | Dynamic rendering works fine |
+This convergence suggests that the graph and its resource relationships are the durable program model. Descriptor updates, barriers, command buffers, streams, and semaphores - and yes, sometimes even CPU waits - are mechanisms a runtime can derive from that model for a particular GPU.
 
-Yet every application using these APIs still pays the complexity cost of the old model, even when targeting only recent hardware.
+Yet every application using graphics APIs still pays the complexity cost of the old model, and do not idiomatically map to the model of the best GPU programs.
 
 ## Why Bindless Matters
 
@@ -55,29 +49,4 @@ The shader language landscape is fragmented. GLSL, HLSL, MSL, and WGSL each targ
 | Automatic differentiation | First-class for ML and physics workloads |
 | Khronos governance | Long-term stability and active development |
 
-By committing to Slang as the sole shader language, Goldy eliminates an entire category of cross-platform bugs and keeps its codebase focused on GPU work rather than shader translation.
-
-## Intellectual Roots
-
-Goldy synthesizes ideas from several sources:
-
-- **Sebastian Aaltonen, "No Graphics API"** — The primary philosophical foundation. Modern GPUs have converged enough that a dramatically simpler API is possible if you drop legacy support.
-- **Ralph Levien, ["Requiem for piet-gpu-hal"](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)** — The insight that good abstractions expose *cost and reality* while abstracting *meaning and rules*. Classic HALs failed by hiding both.
-- **wgpu** — Excellent API ergonomics (Instance/Device architecture, explicit command recording, pass structure). Goldy borrows patterns but is free to diverge from the WebGPU spec.
-- **Wayland compositor architecture** — Frames, not commands. Explicit synchronization, not implicit state machines.
-- **TU Darmstadt, ["Recursive Hardware Abstraction Layers"](https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf)** — Rigorous analysis of what a minimal HAL actually needs when targeting converged modern hardware.
-- **CUDA** — A composable language that exposes memory directly, with a broad library ecosystem built on that simplicity.
-
-No single source defines Goldy. The value is in the synthesis — and the willingness to ship an opinionated library rather than wait for committee consensus.
-
-### The Name
-
-Goldy aspires to exist in the golden mean between wgpu's emphasis on compatibility and the vision of no-graphics-api.
-
-## Further Reading
-
-- [Sebastian Aaltonen: No Graphics API](https://www.sebastianaaltonen.com/blog/no-graphics-api)
-- [Ralph Levien: Requiem for piet-gpu-hal](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)
-- [TU Darmstadt: Recursive HALs](https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf)
-- [What Goldy Sheds](./what-goldy-sheds.md)
-- [Goldy vs wgpu](./comparison.md)
+By committing to Slang as the sole shader language, Goldy eliminates an entire category of cross-platform bugs and keeps its codebase focused on GPU work rather than shader translation. By embedding a verified compatible version of slang, goldy simplifies packaging.
