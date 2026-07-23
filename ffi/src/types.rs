@@ -74,6 +74,7 @@ pub enum GoldyBackendType {
     Metal = 1,
     Dx12 = 2,
     WebGpu = 3,
+    Cuda = 4,
 }
 
 impl From<goldy::BackendType> for GoldyBackendType {
@@ -83,6 +84,7 @@ impl From<goldy::BackendType> for GoldyBackendType {
             goldy::BackendType::Metal => GoldyBackendType::Metal,
             goldy::BackendType::Dx12 => GoldyBackendType::Dx12,
             goldy::BackendType::WebGpu => GoldyBackendType::WebGpu,
+            goldy::BackendType::Cuda => GoldyBackendType::Cuda,
         }
     }
 }

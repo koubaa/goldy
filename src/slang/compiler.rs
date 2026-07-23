@@ -271,6 +271,8 @@ pub enum ShaderTarget {
     Metal,
     /// WebGPU Shading Language
     Wgsl,
+    /// CUDA PTX (Slang → CUDA C++ → NVRTC)
+    Ptx,
 }
 
 impl ShaderTarget {
@@ -280,6 +282,7 @@ impl ShaderTarget {
             ShaderTarget::Dxil => SlangCompileTarget::Dxil,
             ShaderTarget::Metal => SlangCompileTarget::Metal,
             ShaderTarget::Wgsl => SlangCompileTarget::Wgsl,
+            ShaderTarget::Ptx => SlangCompileTarget::Ptx,
         }
     }
 
@@ -302,7 +305,7 @@ impl CompiledShader {
     /// Get the data as a string (for text-based targets like Metal).
     pub fn as_str(&self) -> Option<&str> {
         match self.target {
-            ShaderTarget::Metal | ShaderTarget::Wgsl => std::str::from_utf8(&self.data).ok(),
+            ShaderTarget::Metal | ShaderTarget::Wgsl | ShaderTarget::Ptx => std::str::from_utf8(&self.data).ok(),
             ShaderTarget::Spirv | ShaderTarget::Dxil => None,
         }
     }
@@ -458,6 +461,7 @@ impl SlangCompiler {
             ShaderTarget::Dxil => vec![("__DX12__", "1")],
             ShaderTarget::Metal => vec![("__METAL__", "1")],
             ShaderTarget::Wgsl => vec![("__WGSL__", "1")],
+            ShaderTarget::Ptx => vec![("__CUDA__", "1")],
         }
     }
 

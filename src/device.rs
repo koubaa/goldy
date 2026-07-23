@@ -1145,6 +1145,7 @@ impl Device {
             BackendType::Dx12 => ShaderTarget::Dxil,
             BackendType::Metal => ShaderTarget::Metal,
             BackendType::WebGpu => ShaderTarget::Wgsl,
+            BackendType::Cuda => ShaderTarget::Ptx,
         };
         let compiler = SlangCompiler::new().context("Failed to create Slang compiler for reflect_struct")?;
         compiler.reflect_struct_layout(shader_source, target, &path_refs, type_name)
