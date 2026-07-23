@@ -47,6 +47,7 @@ typedef enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_METAL = 1,
     GOLDY_BACKEND_TYPE_DX12 = 2,
     GOLDY_BACKEND_TYPE_WEB_GPU = 3,
+    GOLDY_BACKEND_TYPE_CUDA = 4,
 } GoldyBackendType;
 
 // GPU device type.

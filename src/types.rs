@@ -658,6 +658,8 @@ pub enum BackendType {
     Dx12,
     /// Portable WebGPU backend (currently compute-only).
     WebGpu,
+    /// NVIDIA CUDA backend (currently compute-only prototype).
+    Cuda,
 }
 
 /// A simple 2D vertex with position and color.
