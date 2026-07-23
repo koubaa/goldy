@@ -8,8 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance, PresentMode,
-    DepositTransaction, MemoryExchange, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction,
+    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance,
+    MemoryExchange, PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    SurfaceExchange, Transaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -316,7 +317,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    state.uniform_deposit
+    state
+        .uniform_deposit
         .write(&mut state.upload_scheme, 0, bytemuck::bytes_of(&uniforms))?;
     state.upload_scheme.submit()?;
 

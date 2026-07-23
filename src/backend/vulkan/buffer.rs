@@ -1678,7 +1678,8 @@ pub(super) fn alloc_readback_buffer(
         .context("Failed to allocate readback buffer memory")?;
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind readback buffer memory")?;
-    let ptr = unsafe { logical_device.map_memory2(memory, 0, size) }.context("Failed to map withdraw staging buffer")?;
+    let ptr =
+        unsafe { logical_device.map_memory2(memory, 0, size) }.context("Failed to map withdraw staging buffer")?;
     let host_mapped = Some(ptr as usize);
 
     let handle = buffers.write().unwrap().alloc_handle();
@@ -1759,7 +1760,9 @@ pub(super) fn read_texture_readback_staging(
     if !buffer.is_withdraw_staging {
         anyhow::bail!("read_texture_readback_staging requires a withdraw staging buffer");
     }
-    let base = buffer.host_mapped.context("texture withdraw staging buffer not mapped")?;
+    let base = buffer
+        .host_mapped
+        .context("texture withdraw staging buffer not mapped")?;
     let row_bytes = layout.tight_row_bytes() as usize;
     let pitch = layout.row_pitch as usize;
     let p = base as *const u8;

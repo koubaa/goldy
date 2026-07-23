@@ -6,9 +6,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    DepositTransaction, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -287,13 +288,12 @@ impl RenderState {
         let particles = Self::create_particles(self.is_snow);
         let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
         let mut particle_upload = Scheme::new(&self.ctx);
-        let particle_deposit = MemoryExchange::new(&self.ctx)
-            .bind_deposit_buffer(&mut particle_upload, &self.particle_buffer, particle_capacity)?;
-        particle_deposit.write(
+        let particle_deposit = MemoryExchange::new(&self.ctx).bind_deposit_buffer(
             &mut particle_upload,
-            0,
-            bytemuck::cast_slice(&particles),
+            &self.particle_buffer,
+            particle_capacity,
         )?;
+        particle_deposit.write(&mut particle_upload, 0, bytemuck::cast_slice(&particles))?;
         particle_upload.submit()?;
 
         self.window.set_title(&format!(

@@ -683,11 +683,7 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
         .bind_withdraw(&mut verify, staging.whole())
         .expect("withdraw staging");
     let mut sub = verify.submit().expect("verify submit");
-    let staging_bytes = grant
-        .claim(&mut sub)
-        .expect("claim")
-        .consume()
-        .expect("consume");
+    let staging_bytes = grant.claim(&mut sub).expect("claim").consume().expect("consume");
     assert_eq!(&staging_bytes[..4], &[7, 0, 0, 0]);
 
     // Silence unused warning if Buffer import is only for type clarity.

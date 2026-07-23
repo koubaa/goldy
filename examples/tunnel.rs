@@ -122,8 +122,11 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &uniform, &scene_rt)?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let uniform_deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut upload_scheme, &uniform, std::mem::size_of::<Uniforms>() as u64)?;
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &uniform,
+            std::mem::size_of::<Uniforms>() as u64,
+        )?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);

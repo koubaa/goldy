@@ -7,8 +7,8 @@
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, IndexFormat, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
-    Transaction, Vertex2D,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -263,16 +263,9 @@ impl App {
         let index_parcel = self.index_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);
         let memory = MemoryExchange::new(ctx);
-        let vertex_deposit = memory.bind_deposit_buffer(
-            &mut upload_scheme,
-            vertex_parcel,
-            vertex_parcel.byte_size(),
-        )?;
-        let index_deposit = memory.bind_deposit_buffer(
-            &mut upload_scheme,
-            index_parcel,
-            index_parcel.byte_size(),
-        )?;
+        let vertex_deposit =
+            memory.bind_deposit_buffer(&mut upload_scheme, vertex_parcel, vertex_parcel.byte_size())?;
+        let index_deposit = memory.bind_deposit_buffer(&mut upload_scheme, index_parcel, index_parcel.byte_size())?;
         self.upload_scheme = Some(upload_scheme);
         self.vertex_deposit = Some(vertex_deposit);
         self.index_deposit = Some(index_deposit);

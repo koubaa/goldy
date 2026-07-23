@@ -17,11 +17,7 @@ mod buffer_alloc_tests {
             .bind_withdraw(&mut scheme, &parcel)
             .expect("bind_withdraw");
         let mut sub = scheme.submit().expect("submit");
-        tx.claim(&mut sub)
-            .expect("claim")
-            .consume()
-            .expect("consume")
-            .to_vec()
+        tx.claim(&mut sub).expect("claim").consume().expect("consume").to_vec()
     }
 
     // ─── Buffer resize (Phase 1: stable handles, realloc-copy fallback) ───────────
@@ -106,10 +102,7 @@ mod buffer_alloc_tests {
                 .expect("buf"),
         );
         let idx = arc.resource_index(ResourceAccess::Write).expect("bindless");
-        Arc::get_mut(&mut arc)
-            .unwrap()
-            .write(0, &[0xabu8; 16])
-            .expect("seed");
+        Arc::get_mut(&mut arc).unwrap().write(0, &[0xabu8; 16]).expect("seed");
         Arc::get_mut(&mut arc).unwrap().resize_to(256).expect("grow within cap");
         assert_eq!(arc.resource_index(ResourceAccess::Write), Some(idx));
         assert!(arc.size() >= 256);
@@ -127,10 +120,7 @@ mod buffer_alloc_tests {
                 .alloc_buffer_with_capacity(16, 256, BufferKind::Scattered, BufferFlags::empty())
                 .expect("buf"),
         );
-        Arc::get_mut(&mut arc)
-            .unwrap()
-            .write(0, &[7u8; 16])
-            .expect("w");
+        Arc::get_mut(&mut arc).unwrap().write(0, &[7u8; 16]).expect("w");
         Arc::get_mut(&mut arc).unwrap().resize_to(512).expect("grow past cap");
         assert!(arc.allocated_size() >= 512);
         let got = withdraw_bytes(&ctx, &device, &arc);
@@ -146,10 +136,7 @@ mod buffer_alloc_tests {
                 .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
                 .expect("buf"),
         );
-        Arc::get_mut(&mut arc)
-            .unwrap()
-            .write(0, &[0x11u8; 64])
-            .expect("w");
+        Arc::get_mut(&mut arc).unwrap().write(0, &[0x11u8; 64]).expect("w");
         Arc::get_mut(&mut arc).unwrap().hint_unused_above(32);
         let got = withdraw_bytes(&ctx, &device, &arc);
         assert_eq!(&got[..32], &[0x11u8; 32]);
@@ -212,10 +199,7 @@ mod buffer_alloc_tests {
                 .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
                 .expect("buf"),
         );
-        Arc::get_mut(&mut arc)
-            .unwrap()
-            .write(0, &[0x11u8; 64])
-            .expect("w");
+        Arc::get_mut(&mut arc).unwrap().write(0, &[0x11u8; 64]).expect("w");
         Arc::get_mut(&mut arc).unwrap().resize_to(256).expect("grow within cap");
         let got = withdraw_bytes(&ctx, &device, &arc);
         assert_eq!(&got[..64], &[0x11u8; 64]);
@@ -263,7 +247,10 @@ mod buffer_alloc_tests {
             .write(0, bytemuck::cast_slice(&initial))
             .expect("w");
 
-        Arc::get_mut(&mut arc).unwrap().resize_to(200 * 1024).expect("grow across tiles");
+        Arc::get_mut(&mut arc)
+            .unwrap()
+            .resize_to(200 * 1024)
+            .expect("grow across tiles");
         assert_eq!(arc.resource_index(ResourceAccess::ReadWrite), Some(bindless));
 
         let out = withdraw_bytes(&ctx, &device, &arc);
@@ -292,10 +279,16 @@ mod buffer_alloc_tests {
         }
 
         // Shrink to one tile, decommit reserved tail with `hint_unused_above`, then grow again.
-        Arc::get_mut(&mut arc).unwrap().resize_to(64 * 1024).expect("shrink to one tile");
+        Arc::get_mut(&mut arc)
+            .unwrap()
+            .resize_to(64 * 1024)
+            .expect("shrink to one tile");
         assert_eq!(arc.resource_index(ResourceAccess::ReadWrite), Some(bindless));
         Arc::get_mut(&mut arc).unwrap().hint_unused_above(64 * 1024);
-        Arc::get_mut(&mut arc).unwrap().resize_to(200 * 1024).expect("grow after decommit hint");
+        Arc::get_mut(&mut arc)
+            .unwrap()
+            .resize_to(200 * 1024)
+            .expect("grow after decommit hint");
         assert_eq!(arc.resource_index(ResourceAccess::ReadWrite), Some(bindless));
 
         let initial2: Vec<u32> = (0..16).collect();

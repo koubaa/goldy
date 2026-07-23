@@ -193,16 +193,8 @@ impl App {
         let cool_parcel = self.cool_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);
         let memory = MemoryExchange::new(ctx);
-        let warm_deposit = memory.bind_deposit_buffer(
-            &mut upload_scheme,
-            warm_parcel,
-            warm_parcel.byte_size(),
-        )?;
-        let cool_deposit = memory.bind_deposit_buffer(
-            &mut upload_scheme,
-            cool_parcel,
-            cool_parcel.byte_size(),
-        )?;
+        let warm_deposit = memory.bind_deposit_buffer(&mut upload_scheme, warm_parcel, warm_parcel.byte_size())?;
+        let cool_deposit = memory.bind_deposit_buffer(&mut upload_scheme, cool_parcel, cool_parcel.byte_size())?;
         self.upload_scheme = Some(upload_scheme);
         self.warm_deposit = Some(warm_deposit);
         self.cool_deposit = Some(cool_deposit);

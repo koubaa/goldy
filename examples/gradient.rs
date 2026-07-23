@@ -8,9 +8,9 @@
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, LayoutCheckable, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, DepositTransaction, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, LayoutCheckable,
+    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -133,8 +133,11 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &uniform, &scene_rt)?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let uniform_deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut upload_scheme, &uniform, std::mem::size_of::<TimeUniforms>() as u64)?;
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &uniform,
+            std::mem::size_of::<TimeUniforms>() as u64,
+        )?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);

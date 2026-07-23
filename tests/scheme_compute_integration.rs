@@ -3020,7 +3020,11 @@ mod imp {
         let mut frame = scheme.submit().expect("submit");
         let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
 
-        assert_eq!(&*output, pixels.as_slice(), "write_texture: readback does not match uploaded data");
+        assert_eq!(
+            &*output,
+            pixels.as_slice(),
+            "write_texture: readback does not match uploaded data"
+        );
     }
 
     fn scheme_write_texture_wrong_size_returns_error(device: &Device) {
@@ -3067,15 +3071,14 @@ mod imp {
             .bind_deposit_texture(&mut scheme, &texture, 0, 0, 4, 4, capacity, 0)
             .expect("bind deposit");
         assert!(scheme.is_dirty(), "scheme must be dirty after bind_deposit_texture");
-        deposit
-            .write(&mut scheme, 0, &[0u8; 4 * 4 * 4])
-            .expect("first write");
+        deposit.write(&mut scheme, 0, &[0u8; 4 * 4 * 4]).expect("first write");
         assert!(scheme.is_dirty(), "scheme must be dirty after deposit write");
         // Second write: scheme is already dirty, but staging another payload keeps it dirty.
-        deposit
-            .write(&mut scheme, 0, &[0u8; 4 * 4 * 4])
-            .expect("second write");
-        assert!(scheme.is_dirty(), "scheme must still be dirty after second deposit write");
+        deposit.write(&mut scheme, 0, &[0u8; 4 * 4 * 4]).expect("second write");
+        assert!(
+            scheme.is_dirty(),
+            "scheme must still be dirty after second deposit write"
+        );
     }
 
     // ─── write_texture_region ─────────────────────────────────────────────
@@ -3108,9 +3111,7 @@ mod imp {
         let deposit = MemoryExchange::new(&ctx)
             .bind_deposit_texture(&mut scheme, &texture, RX, RY, RW, RH, region_capacity, 0)
             .expect("bind deposit");
-        deposit
-            .write(&mut scheme, 0, &region_pixels)
-            .expect("deposit write");
+        deposit.write(&mut scheme, 0, &region_pixels).expect("deposit write");
         let grant = MemoryExchange::new(&ctx)
             .bind_withdraw(&mut scheme, &texture)
             .expect("withdraw");
@@ -3190,9 +3191,7 @@ mod imp {
         let blue_deposit = memory
             .bind_deposit_texture(&mut scheme, &texture, 4, 4, 4, 4, blue_capacity, 0)
             .expect("bind blue deposit");
-        blue_deposit
-            .write(&mut scheme, 0, &blue)
-            .expect("write blue region");
+        blue_deposit.write(&mut scheme, 0, &blue).expect("write blue region");
         let grant = MemoryExchange::new(&ctx)
             .bind_withdraw(&mut scheme, &texture)
             .expect("withdraw");
@@ -4013,10 +4012,7 @@ mod imp {
     /// A retained reader scheme that withdraws the shared texture via MemoryExchange.
     /// The withdraw is topology-invisible, but we still bind a copy_texture reader elsewhere
     /// when testing topology refresh; this helper uses withdraw for observation.
-    fn cross_retention_texture_reader(
-        ctx: &goldy::Context,
-        texture: &goldy::Texture,
-    ) -> (Scheme, WithdrawTransaction) {
+    fn cross_retention_texture_reader(ctx: &goldy::Context, texture: &goldy::Texture) -> (Scheme, WithdrawTransaction) {
         let mut reader = Scheme::new(ctx);
         let grant = MemoryExchange::new(reader.context())
             .bind_withdraw(&mut reader, texture)

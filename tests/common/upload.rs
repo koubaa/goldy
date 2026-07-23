@@ -3,11 +3,7 @@
 use goldy::{Context, DepositTransaction, GoldyError, MemoryExchange, Parcel, Scheme, Submission};
 
 /// Stage bytes through a bound deposit and submit the upload [`Scheme`].
-pub fn upload_parcel(
-    upload: &mut Scheme,
-    deposit: &DepositTransaction,
-    data: &[u8],
-) -> Result<Submission, GoldyError> {
+pub fn upload_parcel(upload: &mut Scheme, deposit: &DepositTransaction, data: &[u8]) -> Result<Submission, GoldyError> {
     deposit.write(upload, 0, data)?;
     upload.submit()
 }
