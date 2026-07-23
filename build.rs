@@ -137,27 +137,31 @@ fn main() {
         }
     };
 
-    // Check vendored binaries directory
+    // Prefer repo-vendored binaries (`slang/bin/...`, gitignored). If missing,
+    // download into OUT_DIR only — never write under CARGO_MANIFEST_DIR during
+    // `cargo publish` verification (cargo forbids modifying the package source).
     let vendored_dir = manifest_dir.join("slang").join("bin").join(platform_dir);
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_bin_dir = out_dir.join("slang_bin").join(platform_dir);
 
-    // Mark all vendored files as dependencies for rebuild
     for file in &platform_info.files {
-        let file_path = vendored_dir.join(file);
-        println!("cargo:rerun-if-changed={}", file_path.display());
+        println!("cargo:rerun-if-changed={}", vendored_dir.join(file).display());
     }
 
-    // If vendored binaries don't exist, try to download them
-    if !vendored_dir.join(&platform_info.primary).exists() {
+    let slang_bin_dir = if vendored_dir.join(&platform_info.primary).exists() {
+        vendored_dir
+    } else {
         println!(
             "cargo:warning=Vendored Slang binaries not found at {}",
             vendored_dir.display()
         );
         println!(
-            "cargo:warning=Downloading Slang v{} for {}...",
+            "cargo:warning=Downloading Slang v{} for {} into OUT_DIR...",
             manifest.version, platform_dir
         );
 
-        if let Err(e) = download_slang_to_vendored(&vendored_dir, platform_dir, &manifest.version, &platform_info.files)
+        if let Err(e) =
+            download_slang_to_vendored(&out_bin_dir, platform_dir, &manifest.version, &platform_info.files)
         {
             println!("cargo:warning=Failed to download Slang: {}", e);
             println!("cargo:warning=Run: cd slang && ./download.sh");
@@ -165,10 +169,10 @@ fn main() {
             emit_goldy_cache_version(Some(manifest.version.as_str()));
             return;
         }
-    }
+        out_bin_dir
+    };
 
-    // Generate the embedded module
-    generate_embedded_module(&manifest.version, &vendored_dir, platform_info);
+    generate_embedded_module(&manifest.version, &slang_bin_dir, platform_info);
     emit_goldy_cache_version(Some(manifest.version.as_str()));
 }
 

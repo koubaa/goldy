@@ -15,7 +15,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO koubaa/goldy
     REF "v${VERSION}"
-    SHA512 8ff9ac74d796cc5ac4660232cf55edda9f848aca4fd565e59d4e6a90c3d2c1ced444b96aa4f2ab4cfe300049eda5aaa275238ba4e7c341771ef3c8b723df79a0
+    SHA512 b2ffdc144d7091a02b9ced0ae423bdc298811c1ebd93d8cde980ad5a661528b3e96106676a4508fe37cc7bfcb2306b00982343f2adef79e9641072e308af30c2
     HEAD_REF main
 )
 
@@ -24,28 +24,28 @@ if(VCPKG_TARGET_IS_WINDOWS AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
     vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
         URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-windows-x64.zip"
         FILENAME "goldy_ffi-${VERSION}-windows-x64.zip"
-        SHA512 15142e06536046d4f2768c95256471efb8c0cb1b52a905f34aaab9636d5f98139b7a038afeace680879298695dfe952061a404eb7da5ef6999f65b8317455ef9
+        SHA512 29d8c54092a71b016079ee9c285c55c9edfe70b301d374cac8bd88166bfa56193d3cfef31ceef184d6a907f887ef25ca097fa0cdcea89696192fa23369c48f50
     )
     set(ARCHIVE_TYPE ZIP)
 elseif(VCPKG_TARGET_IS_LINUX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
     vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
         URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-linux-x64.tar.gz"
         FILENAME "goldy_ffi-${VERSION}-linux-x64.tar.gz"
-        SHA512 ebc70ffdc0895ed8755a5e475d0e06e91114998e0dab1a6a2db4f909a1b606a3b6c150e9325a23ff498a3d82c67ff7e433fe5524399bbbb4e4308f2969ac527f
+        SHA512 72fd5a8c87892e00a249cbdd13ea4a070bd2d79b49b340fff59fe42bb0202cbff7fc70ae30e4e7485b1b12101171577d77727bd7dc3c1326d32fffc318c87914
     )
     set(ARCHIVE_TYPE TARGZ)
 elseif(VCPKG_TARGET_IS_OSX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
     vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
         URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-macos-x64.tar.gz"
         FILENAME "goldy_ffi-${VERSION}-macos-x64.tar.gz"
-        SHA512 416ad1957f96fb7a9e6a5a0711ae58e75c0658f8f84014797b041b482698b4780fd422ffcd515e46796395a69400ece2487ff2225b7df729959c87b05da826e1
+        SHA512 1a7ea0c3a2fa18320d7e7c79da928fe6d25da6879a72f64e926541335c62f09180020fb7516ee0871ff94fc7e9b53f9ea81bf8809bb3a835178e38135c6832ec
     )
     set(ARCHIVE_TYPE TARGZ)
 elseif(VCPKG_TARGET_IS_OSX AND VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
     vcpkg_download_distfile(GOLDY_FFI_ARCHIVE
         URLS "https://github.com/koubaa/goldy/releases/download/v${VERSION}/goldy_ffi-macos-arm64.tar.gz"
         FILENAME "goldy_ffi-${VERSION}-macos-arm64.tar.gz"
-        SHA512 7451fb6cbec47f869c295db480a2d9f32a064e0602e40cc8b9742543e78fccf35fae542e24d883b0ea632d803cc2789a120dfe880ca84e806b5f0091edf5007a
+        SHA512 e0efae0e8e26e2447e7549bc0506bf3efaf206936767c8c893bf1847fde79276de9768a6bee906d4ab06b30312abd5f721a774e6ead434aeec52dd1f0be4ee84
     )
     set(ARCHIVE_TYPE TARGZ)
 else()

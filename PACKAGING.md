@@ -68,12 +68,10 @@ When updating Slang, only this file needs to change (plus downloading new binari
 
 The build script:
 1. Reads `slang/manifest.json`
-2. Checks for vendored binaries in `slang/bin/{platform}/`
-3. Downloads from GitHub releases if missing
-4. Copies all Slang libraries to `OUT_DIR`
-5. Emits `cargo:rustc-link-search` for the loader
-
-Users can override with `GOLDY_SLANG_PATH` environment variable.
+2. Prefers vendored binaries in `slang/bin/{platform}/` (local `./download.sh`)
+3. If missing, downloads from GitHub releases into **`OUT_DIR/slang_bin/`** (not the package source — required for `cargo publish`)
+4. Embeds libraries via `include_bytes!` into the crate
+5. At runtime, extracts and loads them (override with `GOLDY_SLANG_PATH`)
 
 ### FFI Library (goldy-ffi)
 

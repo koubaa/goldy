@@ -2,13 +2,13 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "goldy",
   "version": "0.2.0",
-  "description": "Modern GPU library with Slang shader support",
+  "description": "Modern GPU library",
   "homepage": "https://github.com/koubaa/goldy",
   "license": "MIT",
   "supports": "((windows & x64 & !uwp & !xbox) | (linux & x64 & !android) | (osx & x64) | (osx & arm64)) & !static",
   "features": {
     "examples": {
-      "description": "Build example programs"
+      "description": "Modern cross platform GPU accelerated code"
     }
   }
 }
