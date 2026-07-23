@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](https://koubaa.github.io/goldy/fondaco/specification.html) on modern hardware. Merchants describe **parcels** (data) and **schemes** (computation with ownership-derived ordering); Goldy manages the physical medium, schedules dispatches, and mediates all foreign interaction through **exchanges**.
+**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](https://koubaa.github.io/goldy/fondaco/specification.html) on modern hardware. Programs describe **parcels** (data) and **schemes** (computation with ownership-derived ordering); Goldy manages the physical medium, schedules dispatches, and mediates all foreign interaction through **exchanges**.
 
 > **Maturity**: Goldy **0.2** is the Fondaco Machine public API. SemVer applies within 0.2.x; expect breaking changes at 0.3. Python bindings remain alpha; Rust is the primary surface.
 
