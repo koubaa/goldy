@@ -206,8 +206,6 @@ pub type FnGoldyBufferDestroy = unsafe extern "C" fn(*mut GoldyBuffer);
 pub type FnGoldyBufferByteSize = unsafe extern "C" fn(*const GoldyBuffer) -> u64;
 pub type FnGoldyBufferUnitCount = unsafe extern "C" fn(*const GoldyBuffer) -> u32;
 pub type FnGoldyBufferUnitByteSize = unsafe extern "C" fn(*const GoldyBuffer, u32) -> u64;
-pub type FnGoldyBufferUnitReadToCpu =
-    unsafe extern "C" fn(*const GoldyBuffer, u32, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
 pub type FnGoldyBufferField = unsafe extern "C" fn(*const GoldyBuffer, u32) -> *mut GoldyParcel;
 pub type FnGoldyTextureByteSize = unsafe extern "C" fn(*const GoldyTexture) -> u64;
 pub type FnGoldyTextureDestroy = unsafe extern "C" fn(*mut GoldyTexture);

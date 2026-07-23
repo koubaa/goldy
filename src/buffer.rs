@@ -459,24 +459,6 @@ impl Allocation {
             .map(|i| ResourceHandle::new(ResourceCategory::from(self.access), i))
     }
 
-    /// Read buffer contents back to CPU memory.
-    ///
-    /// The `output` slice must be at least `size` bytes. Reads from offset 0.
-    ///
-    /// For buffers created with [`BufferFlags::CPU_READABLE`], cost differs by backend:
-    /// Vulkan / Metal typically copy directly from host-visible memory (see
-    /// [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`]). Direct3D 12 performs a
-    /// GPU copy into a READBACK heap and waits — query capabilities to branch on behavior.
-    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
-        let _tz = crate::tracy_zone!("buffer.read_to_cpu");
-        let mut backend = {
-            let _lock = crate::tracy_zone!("buffer.read_to_cpu.lock");
-            self.backend.lock().unwrap()
-        };
-        let _backend = crate::tracy_zone!("buffer.read_to_cpu.backend");
-        backend.read_buffer_to_cpu(device.inner.handle, self.handle, output)
-    }
-
     pub(crate) fn device(&self) -> &Device {
         &self.device
     }
@@ -638,29 +620,6 @@ impl BufferView {
             self.offset + offset,
             clear_size,
         )
-    }
-
-    /// Read this view's contents back to CPU memory.
-    ///
-    /// `output` must be exactly `self.size()` bytes. Reads only the view's
-    /// sub-region from the parent buffer.
-    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
-        if output.len() as u64 != self.size {
-            anyhow::bail!(
-                "BufferView::read_to_cpu: output len {} != view size {}",
-                output.len(),
-                self.size
-            );
-        }
-        if self.size == 0 {
-            return Ok(());
-        }
-        let mut backend = self.backend.lock().unwrap();
-        let parent_size = backend.buffer_size(self.parent_handle);
-        let mut full = vec![0u8; parent_size as usize];
-        backend.read_buffer_to_cpu(device.inner.handle, self.parent_handle, &mut full)?;
-        output.copy_from_slice(&full[self.offset as usize..self.offset as usize + self.size as usize]);
-        Ok(())
     }
 
     /// Write typed data into this view's region of the parent buffer.

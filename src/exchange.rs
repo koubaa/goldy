@@ -313,15 +313,27 @@ impl MemoryExchange {
 
     /// Bind a deposit that copies staging bytes into a destination buffer parcel.
     ///
-    /// Records copy topology once. Each submission must [`DepositTransaction::write`] before
-    /// [`Scheme::submit`]; graph execution settles the upload (no claim).
+    /// Records copy topology once (destination offset 0 within the parcel). Each submission
+    /// must [`DepositTransaction::write`] before [`Scheme::submit`]; graph execution settles
+    /// the upload (no claim).
     pub fn bind_deposit_buffer(
         &self,
         scheme: &mut Scheme,
         destination: &Parcel,
         capacity: u64,
     ) -> Result<DepositTransaction, GoldyError> {
-        scheme.register_deposit_buffer(destination, capacity)
+        self.bind_deposit_buffer_at(scheme, destination, 0, capacity)
+    }
+
+    /// Like [`Self::bind_deposit_buffer`], with an explicit byte offset into `destination`.
+    pub fn bind_deposit_buffer_at(
+        &self,
+        scheme: &mut Scheme,
+        destination: &Parcel,
+        dst_offset: u64,
+        capacity: u64,
+    ) -> Result<DepositTransaction, GoldyError> {
+        scheme.register_deposit_buffer(destination, dst_offset, capacity)
     }
 
     /// Bind a deposit that copies staging bytes into a texture region.

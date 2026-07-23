@@ -518,10 +518,6 @@ impl GpuBackend for MetalBackend {
         buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
     }
 
-    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
-        buffer::read_to_cpu(&self.state, device, buffer, output)
-    }
-
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         buffer::alloc_readback_buffer(&mut self.state, device, size)
     }
@@ -698,10 +694,6 @@ impl GpuBackend for MetalBackend {
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
         texture::destroy(&mut self.state, texture);
-    }
-
-    fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()> {
-        texture::read_to_cpu(&self.state, texture, output)
     }
 
     fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {

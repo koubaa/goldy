@@ -5,9 +5,9 @@
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -72,6 +72,8 @@ struct App {
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
     vertex_parcel: Option<Buffer>,
+    upload_scheme: Option<Scheme>,
+    vertex_deposit: Option<DepositTransaction>,
     window: Option<Arc<Window>>,
     surface: Option<SurfaceExchange>,
     present: Option<Transaction>,
@@ -97,6 +99,8 @@ impl App {
             start_time: Instant::now(),
             _retained_pool: None,
             vertex_parcel: None,
+            upload_scheme: None,
+            vertex_deposit: None,
             frame_count: 0,
         })
     }
@@ -169,11 +173,21 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &vertex_parcel, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
+        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
+        let mut upload_scheme = Scheme::new(ctx);
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            vertex_parcel,
+            vertex_parcel.byte_size(),
+        )?;
+        self.upload_scheme = Some(upload_scheme);
+        self.vertex_deposit = Some(vertex_deposit);
         self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
@@ -216,13 +230,10 @@ impl App {
             vertices.push(Vertex2D::new(p2[0], p2[1], color));
         }
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let mut upload = Scheme::new(ctx);
-        upload.write_parcel(
-            self.vertex_parcel.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&vertices).to_vec(),
-        )?;
+        let upload = self.upload_scheme.as_mut().unwrap();
+        self.vertex_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::cast_slice(&vertices))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

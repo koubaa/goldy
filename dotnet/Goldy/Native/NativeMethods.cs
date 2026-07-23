@@ -311,10 +311,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_byte_size")]
     internal static partial ulong BufferUnitByteSize(nint buffer, uint unit);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_read_to_cpu")]
-    internal static partial GoldyResult BufferUnitReadToCpu(
-        nint buffer, uint unit, nint device, nint output, nuint outputSize);
-
     [LibraryImport(LibName, EntryPoint = "goldy_record_builder_create")]
     internal static partial nint RecordBuilderCreate();
 

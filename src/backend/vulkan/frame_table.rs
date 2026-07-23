@@ -359,7 +359,7 @@ fn create_scattered_u32_buffer_registered(
             is_sparse: false,
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );

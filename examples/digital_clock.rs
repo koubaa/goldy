@@ -8,9 +8,9 @@ mod digital_clock_shared;
 
 use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, TimeData};
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout, VertexFormat,
+    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,6 +63,8 @@ struct App {
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
     vertex_parcel: Option<Buffer>,
+    upload_scheme: Option<Scheme>,
+    vertex_deposit: Option<DepositTransaction>,
 
     window: Option<Arc<Window>>,
     surface: Option<SurfaceExchange>,
@@ -98,6 +100,8 @@ impl App {
             clock_state: ClockState::default(),
             _retained_pool: None,
             vertex_parcel: None,
+            upload_scheme: None,
+            vertex_deposit: None,
             recorded_vertex_count: 0,
             recorded_bg_color: Color::BLACK,
         })
@@ -195,11 +199,21 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &vertex_parcel, 1, bg_color, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
+        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
+        let mut upload_scheme = Scheme::new(ctx);
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            vertex_parcel,
+            (MAX_CLOCK_VERTICES * std::mem::size_of::<ClockVertex>()) as u64,
+        )?;
+        self.upload_scheme = Some(upload_scheme);
+        self.vertex_deposit = Some(vertex_deposit);
         self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
@@ -246,10 +260,10 @@ impl App {
 
         self.rerecord_scheme_if_needed(vertex_count, bg_color);
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
-        let mut upload = Scheme::new(ctx);
-        upload.write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
+        let upload = self.upload_scheme.as_mut().unwrap();
+        self.vertex_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::cast_slice(&vertices))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

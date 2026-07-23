@@ -68,13 +68,13 @@ bitflags! {
 
 | Flag | Purpose |
 |------|---------|
-| `COPY_SRC` | Texture can be a copy source (needed for `read_to_cpu`) |
-| `COPY_DST` | Texture can be a copy destination (needed for `write` / `write_region`) |
+| `COPY_SRC` | Texture can be a copy source (needed for withdraw / GPU copies) |
+| `COPY_DST` | Texture can be a copy destination (needed for deposits / copies) |
 | `RENDER_TARGET` | Texture can be used as a color attachment |
 
 ## Writing Data
 
-Prefer `Scheme::write_texture()` for batched, non-blocking uploads. The synchronous methods below stall the GPU:
+Prefer `MemoryExchange::bind_deposit_texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
 
 ```rust
 #[allow(deprecated)]
@@ -86,11 +86,13 @@ texture.write_region(x, y, width, height, &region_pixels)?;
 
 ## Reading Data
 
-Read texture contents back to CPU memory. The texture must have been created with `TextureFlags::COPY_SRC`:
+Use a memory exchange withdraw bound into a scheme. The texture must have been created with `TextureFlags::COPY_SRC` and a storage-writable kind:
 
 ```rust
-let mut output = vec![0u8; texture.byte_size()];
-texture.read_to_cpu(&mut output)?;
+let memory = MemoryExchange::new(&ctx);
+let withdraw = memory.bind_withdraw(&mut scheme, &texture)?;
+let mut submission = scheme.submit()?;
+let bytes = withdraw.claim(&mut submission)?.consume()?;
 ```
 
 ## Texture Queries

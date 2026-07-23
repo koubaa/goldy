@@ -6,9 +6,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -73,6 +74,8 @@ struct RenderState {
     _retained_pool: RetainedPool,
     particle_buffer: Buffer,
     params_buffer: Buffer,
+    upload_scheme: Scheme,
+    params_deposit: DepositTransaction,
     frame_count: u32,
     start_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -200,6 +203,13 @@ impl RenderState {
             &scene_rt,
         )?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &params_buffer,
+            std::mem::size_of::<SimParams>() as u64,
+        )?;
+
         println!("Created compute particles example with {NUM_PARTICLES} particles (Scheme + Present)");
         println!("Press Escape or close window to exit");
 
@@ -217,6 +227,8 @@ impl RenderState {
             _retained_pool: retained_pool,
             particle_buffer,
             params_buffer,
+            upload_scheme,
+            params_deposit,
             frame_count: 0,
             start_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -229,13 +241,12 @@ impl RenderState {
         let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
         self.last_frame_time = std::time::Instant::now();
 
-        let mut upload = Scheme::new(&self.ctx);
-        upload.write_parcel(
-            &self.params_buffer,
+        self.params_deposit.write(
+            &mut self.upload_scheme,
             0,
-            bytemuck::bytes_of(&SimParams { delta_time: dt }).to_vec(),
+            bytemuck::bytes_of(&SimParams { delta_time: dt }),
         )?;
-        upload.submit()?;
+        self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         self.present.claim(&mut submission)?.consume()?;

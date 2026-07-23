@@ -346,7 +346,7 @@ fn create_scattered_u32_buffer_registered(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
-            is_grant_readback: false,
+            is_withdraw_staging: false,
             texture_copy_footprint: None,
         },
     );

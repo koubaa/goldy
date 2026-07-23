@@ -104,7 +104,7 @@ scheme
 
 ### Rendering a Frame
 
-Each frame: upload new uniform values via a small upload scheme, submit the main scheme, claim and consume the surface transaction.
+Each frame: upload new uniform values via a small upload scheme with a bound deposit, submit the main scheme, claim and consume the surface transaction.
 
 ```rust
 fn render_frame(state: &mut RenderState) -> Result<()> {
@@ -118,9 +118,12 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    let mut upload = Scheme::new(&state.ctx);
-    upload.write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
-    upload.submit()?;
+    state.uniform_deposit.write(
+        &mut state.upload_scheme,
+        0,
+        bytemuck::bytes_of(&uniforms),
+    )?;
+    state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;
     state.present.claim(&mut submission)?.consume()?;
@@ -128,9 +131,20 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
 }
 ```
 
+At init, bind the deposit once on a retained upload scheme:
+
+```rust
+let mut upload_scheme = Scheme::new(&ctx);
+let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+    &mut upload_scheme,
+    &uniform_buffer,
+    std::mem::size_of::<Uniforms>() as u64,
+)?;
+```
+
 ### Step by Step
 
-**Update uniforms** — `Scheme::write_parcel` on a short-lived upload scheme stages the new time/size values before the main submit.
+**Update uniforms** — `MemoryExchange::bind_deposit_buffer` records the upload topology once; each frame call `deposit.write` on the upload scheme before the main submit.
 
 **Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 

@@ -1,5 +1,4 @@
-use crate::device::Device;
-use crate::error::{check, non_null, Result};
+use crate::error::{non_null, Result};
 use crate::parcel::Parcel;
 use crate::sys::{self, GoldyBuffer};
 
@@ -23,15 +22,6 @@ impl Buffer {
 
     pub fn unit_byte_size(&self, unit: u32) -> u64 {
         unsafe { sys::goldy_buffer_unit_byte_size(self.ptr, unit) }
-    }
-
-    pub fn unit_read_to_cpu(&self, unit: u32, device: &Device) -> Result<Vec<u8>> {
-        let size = self.unit_byte_size(unit);
-        let mut output = vec![0u8; size as usize];
-        check(unsafe {
-            sys::goldy_buffer_unit_read_to_cpu(self.ptr, unit, device.as_ptr(), output.as_mut_ptr(), output.len())
-        })?;
-        Ok(output)
     }
 
     /// Borrow one bindable field unit as an owned parcel handle.

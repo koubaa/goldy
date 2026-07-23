@@ -166,19 +166,6 @@ impl PyScheme {
         Ok(())
     }
 
-    /// Append a CPU→GPU write node for a retained buffer parcel.
-    ///
-    /// Marks the scheme dirty. Prefer [`crate::memory_exchange::PyMemoryExchange`] deposits for
-    /// reusable upload topology; use an ephemeral scheme for one-shot writes.
-    #[pyo3(signature = (parcel, data, offset=0))]
-    fn write_parcel(&self, parcel: &PyParcel, data: &[u8], offset: u64) -> PyResult<()> {
-        self.ensure_no_active_recorder()?;
-        self.inner
-            .borrow_mut()
-            .write_parcel(parcel.inner.as_parcel(), offset, data.to_vec())
-            .into_py_result()
-    }
-
     fn submit(&self) -> PyResult<PySchemeSubmission> {
         self.ensure_no_active_recorder()?;
         let submission = self.inner.borrow_mut().submit().into_py_result()?;

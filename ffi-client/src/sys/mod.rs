@@ -113,16 +113,6 @@ pub unsafe fn goldy_buffer_unit_byte_size(buffer: *const GoldyBuffer, unit: u32)
     (lib().goldy_buffer_unit_byte_size)(buffer, unit)
 }
 
-pub unsafe fn goldy_buffer_unit_read_to_cpu(
-    buffer: *const GoldyBuffer,
-    unit: u32,
-    device: *const GoldyDevice,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    (lib().goldy_buffer_unit_read_to_cpu)(buffer, unit, device, output, output_size)
-}
-
 pub unsafe fn goldy_buffer_field(buffer: *const GoldyBuffer, unit: u32) -> *mut GoldyParcel {
     (lib().goldy_buffer_field)(buffer, unit)
 }

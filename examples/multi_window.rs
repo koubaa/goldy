@@ -5,9 +5,10 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, TargetLoad, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 mod common;
 
@@ -238,6 +239,8 @@ struct WindowState {
     time_multiplier: f32,
     _retained_pool: RetainedPool,
     vertex_parcel: Buffer,
+    upload_scheme: Scheme,
+    vertex_deposit: DepositTransaction,
     has_focus: bool,
 }
 
@@ -320,6 +323,13 @@ impl WindowState {
             effect_type.title(),
         )?;
 
+        let mut upload_scheme = Scheme::new(ctx);
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &vertex_parcel,
+            vertex_parcel.byte_size(),
+        )?;
+
         Ok(Self {
             window,
             ctx: ctx.clone(),
@@ -336,6 +346,8 @@ impl WindowState {
             time_multiplier: 1.0,
             _retained_pool: retained_pool,
             vertex_parcel,
+            upload_scheme,
+            vertex_deposit,
             has_focus: false,
         })
     }
@@ -388,9 +400,9 @@ impl WindowState {
         }
 
         let vertices = create_quad(self.current_time());
-        let mut upload = Scheme::new(ctx);
-        upload.write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
-        upload.submit()?;
+        self.vertex_deposit
+            .write(&mut self.upload_scheme, 0, bytemuck::cast_slice(&vertices))?;
+        self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         self.present.claim(&mut submission)?.consume()?;

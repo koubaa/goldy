@@ -179,7 +179,7 @@ pub(super) fn reclamation_barrier_for_context(state: &Dx12State, ctx: ContextHan
 
 /// Per-context requirement snapshot when destroy could not be attributed to one context.
 ///
-/// Covers GPU uses that never update `slot_last_seen` (e.g. `CopyBuffer` / grant readback):
+/// Covers GPU uses that never update `slot_last_seen` (e.g. `CopyBuffer` / withdraw staging):
 /// every live context on the device must retire its last submit before the resource is freed.
 pub(super) fn reclamation_requirements_all_contexts(
     state: &Dx12State,

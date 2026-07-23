@@ -7,10 +7,10 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor,
-    Instance, Lease, LeaseRenderTarget, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTransaction, DepthFormat, DepthStencilState,
+    DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    TargetLoad, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -75,6 +75,9 @@ struct App {
     _retained_pool: Option<RetainedPool>,
     warm_parcel: Option<Buffer>,
     cool_parcel: Option<Buffer>,
+    upload_scheme: Option<Scheme>,
+    warm_deposit: Option<DepositTransaction>,
+    cool_deposit: Option<DepositTransaction>,
     surface: Option<SurfaceExchange>,
     present: Option<Transaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
@@ -95,6 +98,9 @@ impl App {
             _retained_pool: None,
             warm_parcel: None,
             cool_parcel: None,
+            upload_scheme: None,
+            warm_deposit: None,
+            cool_deposit: None,
             surface: None,
             present: None,
             scene_rt: None,
@@ -176,12 +182,22 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &warm_parcel, &cool_parcel, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.warm_parcel = Some(warm_parcel);
         self.cool_parcel = Some(cool_parcel);
+        let warm_parcel = self.warm_parcel.as_ref().unwrap();
+        let cool_parcel = self.cool_parcel.as_ref().unwrap();
+        let mut upload_scheme = Scheme::new(ctx);
+        let memory = MemoryExchange::new(ctx);
+        let warm_deposit = memory.bind_deposit_buffer(&mut upload_scheme, warm_parcel, warm_parcel.byte_size())?;
+        let cool_deposit = memory.bind_deposit_buffer(&mut upload_scheme, cool_parcel, cool_parcel.byte_size())?;
+        self.upload_scheme = Some(upload_scheme);
+        self.warm_deposit = Some(warm_deposit);
+        self.cool_deposit = Some(cool_deposit);
         self.surface = Some(surface);
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
@@ -210,18 +226,13 @@ impl App {
             ));
         }
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let mut upload = Scheme::new(ctx);
-        upload.write_parcel(
-            self.warm_parcel.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&warm_verts).to_vec(),
-        )?;
-        upload.write_parcel(
-            self.cool_parcel.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&cool_verts).to_vec(),
-        )?;
+        let upload = self.upload_scheme.as_mut().unwrap();
+        self.warm_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::cast_slice(&warm_verts))?;
+        self.cool_deposit
+            .unwrap()
+            .write(upload, 0, bytemuck::cast_slice(&cool_verts))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

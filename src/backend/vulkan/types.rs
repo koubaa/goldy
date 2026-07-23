@@ -1182,7 +1182,7 @@ pub(crate) struct BufferState {
     /// Per sparse page: physical backing from the page pool (`None` = unbound tile).
     pub sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>>,
     /// Grant-read staging buffer (host-visible, persistently mapped; no bindless slot).
-    pub is_grant_readback: bool,
+    pub is_withdraw_staging: bool,
     pub texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 

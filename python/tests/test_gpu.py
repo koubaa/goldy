@@ -100,7 +100,7 @@ class TestRetainedPool:
         assert buffer.byte_size == 12
         assert buffer[0].byte_size == 12
 
-    def test_write_parcel(self, device):
+    def test_deposit_buffer(self, device):
         import goldy
 
         pool = goldy.RetainedPool(device)
@@ -110,7 +110,9 @@ class TestRetainedPool:
         )
         ctx = device.create_context()
         upload = goldy.Scheme(ctx)
-        upload.write_parcel(buffer[0], np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
+        memory = goldy.MemoryExchange(ctx)
+        deposit = memory.bind_deposit_buffer(upload, buffer[0], 16)
+        deposit.write(upload, np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
         frame = upload.submit()
         frame.wait(ctx)
 

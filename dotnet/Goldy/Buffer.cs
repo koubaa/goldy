@@ -61,28 +61,6 @@ public sealed class Buffer : IDisposable
         return new Parcel(parcel, UnitByteSize(unit));
     }
 
-    /// <summary>
-    /// Read one buffer unit back to CPU memory.
-    /// </summary>
-    public byte[] UnitReadToCpu(uint unit, Device device)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        device.ThrowIfDisposed();
-        var size = UnitByteSize(unit);
-        var output = new byte[size];
-        unsafe
-        {
-            fixed (byte* p = output)
-            {
-                var result = NativeMethods.BufferUnitReadToCpu(
-                    Handle, unit, device.Handle, (nint)p, (nuint)output.Length);
-                if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("Buffer unit_read_to_cpu");
-            }
-        }
-        return output;
-    }
-
     public void Dispose()
     {
         if (!_disposed)

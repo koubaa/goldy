@@ -1,14 +1,21 @@
 //! Upload helpers for integration tests (migration convenience).
 
-use goldy::{Context, GoldyError, Parcel, Scheme, Submission};
+use goldy::{Context, DepositTransaction, GoldyError, MemoryExchange, Parcel, Scheme, Submission};
 
-/// Upload CPU bytes via a retained upload [`Scheme`] (reuse across frames).
-///
-/// Reusing one upload scheme avoids topology churn that dirties unrelated retained
-/// reader/worker schemes when each upload would otherwise register a new foreign edge.
-pub fn upload_parcel(upload: &mut Scheme, parcel: &Parcel, data: &[u8]) -> Result<Submission, GoldyError> {
-    upload.write_parcel(parcel, 0, data.to_vec())?;
+/// Stage bytes through a bound deposit and submit the upload [`Scheme`].
+pub fn upload_parcel(upload: &mut Scheme, deposit: &DepositTransaction, data: &[u8]) -> Result<Submission, GoldyError> {
+    deposit.write(upload, 0, data)?;
     upload.submit()
+}
+
+/// Bind a reusable buffer deposit on an upload scheme.
+pub fn bind_upload_deposit(
+    ctx: &Context,
+    upload: &mut Scheme,
+    parcel: &Parcel,
+    capacity: u64,
+) -> Result<DepositTransaction, GoldyError> {
+    MemoryExchange::new(ctx).bind_deposit_buffer(upload, parcel, capacity)
 }
 
 /// One-shot upload on an ephemeral scheme. Fine for tests that do not assert retained
@@ -16,5 +23,6 @@ pub fn upload_parcel(upload: &mut Scheme, parcel: &Parcel, data: &[u8]) -> Resul
 #[allow(dead_code)]
 pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, data: &[u8]) -> Result<Submission, GoldyError> {
     let mut upload = Scheme::new(ctx);
-    upload_parcel(&mut upload, parcel, data)
+    let deposit = MemoryExchange::new(ctx).bind_deposit_buffer(&mut upload, parcel, data.len() as u64)?;
+    upload_parcel(&mut upload, &deposit, data)
 }

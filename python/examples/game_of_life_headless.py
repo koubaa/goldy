@@ -94,11 +94,12 @@ def main() -> int:
         )
 
     scheme.copy_to_texture(rt, readback)
-    grant = goldy.MemoryExchange(ctx).bind_withdraw_texture(scheme, readback)
+    memory = goldy.MemoryExchange(ctx)
+    grant_tex = memory.bind_withdraw_texture(scheme, readback)
+    grant_cells = memory.bind_withdraw(scheme, cells[1])
     submission = scheme.submit()
-    pixels = grant.claim(submission).consume()
-
-    cells_out = np.frombuffer(cells.unit_read_to_cpu(1, device), dtype=np.uint32)
+    pixels = grant_tex.claim(submission).consume()
+    cells_out = np.frombuffer(grant_cells.claim(submission).consume(), dtype=np.uint32)
     assert cells_out.shape == (CELL_COUNT,)
     live = count_live(cells_out)
     assert live == 4, f"still-life block should remain 4 live cells, got {live}"

@@ -100,9 +100,11 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
         .expect("withdraw");
     const FRAMES: u32 = 3;
     let mut upload = Scheme::new(&ctx);
+    let deposit = upload::bind_upload_deposit(&ctx, &mut upload, &input, (8 * std::mem::size_of::<u32>()) as u64)
+        .expect("bind deposit");
     for submission in 1..=FRAMES {
         // Separate upload submission per frame via a persistent upload scheme.
-        upload::upload_parcel(&mut upload, &input, bytemuck::cast_slice(&[submission; 8])).expect("upload_parcel");
+        upload::upload_parcel(&mut upload, &deposit, bytemuck::cast_slice(&[submission; 8])).expect("upload_parcel");
 
         let mut frame = worker.submit().expect("submit worker");
         for v in read_grant_u32(&grant, &mut frame, 8) {

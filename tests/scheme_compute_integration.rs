@@ -53,36 +53,19 @@ mod imp {
             .expect("acquire_texture")
     }
 
-    /// Read a scheme-tracked texture via copy to a host buffer parcel.
+    /// Read a scheme-tracked texture via MemoryExchange withdraw.
     fn read_texture_via_scheme_copy(ctx: &goldy::Context, texture: &goldy::Texture) -> Vec<u8> {
-        let layout = texture.copy_layout();
-        let mut pool = RetainedPool::new(Arc::new(ctx.device().clone()));
-        let host_buf = pool
-            .acquire_buffer(
-                layout.staging_bytes,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::CPU_READABLE,
-                None,
-            )
-            .expect("host buffer");
         let mut scheme = Scheme::new(ctx);
-        scheme.copy_texture(texture, &host_buf).expect("copy_texture");
+        let grant = MemoryExchange::new(ctx)
+            .bind_withdraw(&mut scheme, texture)
+            .expect("withdraw texture");
         let mut frame = scheme.submit().expect("submit");
-        frame.wait(ctx).expect("wait");
-        let mut padded = vec![0u8; layout.staging_bytes as usize];
-        host_buf
-            .read_to_cpu(ctx.device(), &mut padded)
-            .expect("read host buffer");
-        let row_bytes = layout.tight_row_bytes() as usize;
-        let pitch = layout.row_pitch as usize;
-        let mut output = vec![0u8; layout.logical_bytes as usize];
-        for row in 0..layout.height as usize {
-            let src_offset = layout.footprint_offset as usize + row * pitch;
-            let dst_offset = row * row_bytes;
-            output[dst_offset..dst_offset + row_bytes].copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
-        }
-        output
+        grant
+            .claim(&mut frame)
+            .expect("claim")
+            .consume()
+            .expect("consume")
+            .to_vec()
     }
 
     fn read_grant_u32(grant: &WithdrawTransaction, submission: &mut Submission, count: usize) -> Vec<u32> {
@@ -1959,13 +1942,13 @@ mod imp {
     /// the **same** parcel then copy it to a distinct output.
     ///
     /// This is the Scheme-API migration of `test_write_buffer_reuse_across_submissions`.
-    /// Each scheme uses [`Scheme::write_parcel`] so the write node is part of
+    /// Each scheme uses [`MemoryExchange::bind_deposit_buffer`] so the deposit copy is part of
     /// the same GPU submission as the compute node that reads it.  Both schemes are
     /// submitted without any CPU-side wait between them; correctness relies entirely
     /// on the staging belt handing out independent staging regions for the two uploads
     /// (tagged with each scheme's timeline value) and not recycling the first region
     /// until the first submission's GPU work has completed.
-    fn scheme_write_parcel_reuse_across_submissions(device: &Device) {
+    fn scheme_deposit_buffer_reuse_across_submissions(device: &Device) {
         const N: usize = 16;
 
         let ctx = submission_context(&device);
@@ -2010,7 +1993,11 @@ mod imp {
 
         // Scheme 1: write data_a into mid, copy mid → out_a, then read out_a back.
         let mut s1 = Scheme::new(&ctx);
-        s1.write_parcel(&mid, 0, bytemuck::cast_slice(&data_a).to_vec())
+        let deposit_a = MemoryExchange::new(&ctx)
+            .bind_deposit_buffer(&mut s1, &mid, (N * core::mem::size_of::<u32>()) as u64)
+            .expect("bind deposit a");
+        deposit_a
+            .write(&mut s1, 0, bytemuck::cast_slice(&data_a))
             .expect("commit write a");
         s1.node("copy_a", &pipeline)
             .with_parcel(&mid, NodeAccess::Read)
@@ -2024,7 +2011,11 @@ mod imp {
         // Scheme 2: submitted immediately, without waiting for sub1.
         // The staging belt must not recycle the staging region used by s1.
         let mut s2 = Scheme::new(&ctx);
-        s2.write_parcel(&mid, 0, bytemuck::cast_slice(&data_b).to_vec())
+        let deposit_b = MemoryExchange::new(&ctx)
+            .bind_deposit_buffer(&mut s2, &mid, (N * core::mem::size_of::<u32>()) as u64)
+            .expect("bind deposit b");
+        deposit_b
+            .write(&mut s2, 0, bytemuck::cast_slice(&data_b))
             .expect("commit write b");
         s2.node("copy_b", &pipeline)
             .with_parcel(&mid, NodeAccess::Read)
@@ -2541,13 +2532,13 @@ mod imp {
 
     /// Migrated from `stress_alternating_write_dispatch` in `task_graph_integration.rs`.
     ///
-    /// Two `write_parcel` calls on the same buffer, each followed by a dispatch
+    /// Two deposit writes on the same buffer, each followed by a dispatch
     /// that reads it, all within one `Scheme` submission.  This exercises the
     /// write → dispatch → write → dispatch (WAW + RAW) barrier sequence and confirms
     /// that the upload remap table correctly tracks both write nodes despite them
     /// sharing the same `(buffer, offset)` key.
     ///
-    /// Because the scheme contains `WriteBuffer` nodes it is never retained — it
+    /// Because the scheme contains deposit copy nodes it is never retained — it
     /// records fresh on every `submit()`.
     fn scheme_stress_alternating_write_dispatch(device: &Device) {
         let ctx = submission_context(&device);
@@ -2573,15 +2564,22 @@ mod imp {
         let bytes2: Vec<u8> = bytemuck::cast_slice(&data2).to_vec();
 
         let mut scheme = Scheme::new(&ctx);
+        let memory = MemoryExchange::new(&ctx);
+        let deposit1 = memory
+            .bind_deposit_buffer(&mut scheme, &buf, bytes1.len() as u64)
+            .expect("bind deposit 1");
         // Phase 1: write data1 into buf, copy to out1.
-        scheme.write_parcel(&buf, 0, bytes1).expect("commit write 1");
+        deposit1.write(&mut scheme, 0, &bytes1).expect("commit write 1");
         scheme
             .node("copy1", &copy_pipe)
             .with_parcel(&buf, NodeAccess::Read)
             .with_parcel(&out1, NodeAccess::Write)
             .dispatch((N / 64) as u32, 1, 1);
         // Phase 2: overwrite buf with data2 (WAW), copy to out2.
-        scheme.write_parcel(&buf, 0, bytes2).expect("commit write 2");
+        let deposit2 = memory
+            .bind_deposit_buffer(&mut scheme, &buf, bytes2.len() as u64)
+            .expect("bind deposit 2");
+        deposit2.write(&mut scheme, 0, &bytes2).expect("commit write 2");
         scheme
             .node("copy2", &copy_pipe)
             .with_parcel(&buf, NodeAccess::Read)
@@ -3011,14 +3009,22 @@ mod imp {
         );
 
         let mut scheme = Scheme::new(&ctx);
-        scheme.write_texture(&texture, pixels.clone()).expect("write_texture");
+        let capacity = (W * H * 4) as u64;
+        let deposit = MemoryExchange::new(&ctx)
+            .bind_deposit_texture(&mut scheme, &texture, 0, 0, W, H, capacity, 0)
+            .expect("bind deposit");
+        deposit.write(&mut scheme, 0, &pixels).expect("deposit write");
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        frame.wait(&ctx).expect("wait");
+        let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
 
-        let mut output = vec![0u8; texture.byte_size() as usize];
-        texture.read_to_cpu(&mut output).expect("read_to_cpu");
-
-        assert_eq!(output, pixels, "write_texture: readback does not match uploaded data");
+        assert_eq!(
+            &*output,
+            pixels.as_slice(),
+            "write_texture: readback does not match uploaded data"
+        );
     }
 
     fn scheme_write_texture_wrong_size_returns_error(device: &Device) {
@@ -3034,12 +3040,16 @@ mod imp {
         );
 
         let mut scheme = Scheme::new(&ctx);
-        // Too few bytes — must error.
-        let result = scheme.write_texture(&texture, vec![0u8; 10]);
-        assert!(result.is_err(), "write_texture should reject wrong-size data");
-        // Too many bytes — must also error.
-        let result2 = scheme.write_texture(&texture, vec![0u8; 8 * 8 * 4 + 4]);
-        assert!(result2.is_err(), "write_texture should reject oversized data");
+        let capacity = (8 * 8 * 4) as u64;
+        let deposit = MemoryExchange::new(&ctx)
+            .bind_deposit_texture(&mut scheme, &texture, 0, 0, 8, 8, capacity, 0)
+            .expect("bind deposit");
+        // Partial staging fills are allowed; only exceeding declaration capacity errors.
+        deposit
+            .write(&mut scheme, 0, &[0u8; 10])
+            .expect("undersized write should fit within capacity");
+        let result2 = deposit.write(&mut scheme, 0, &[0u8; 8 * 8 * 4 + 4]);
+        assert!(result2.is_err(), "deposit write should reject oversized data");
     }
 
     fn scheme_write_texture_marks_scheme_dirty(device: &Device) {
@@ -3056,17 +3066,19 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
-        // Add a no-op submit to make it clean.
-        // We can't easily make a no-op scheme, so we just verify that each write_texture re-marks dirty.
-        scheme
-            .write_texture(&texture, vec![0u8; 4 * 4 * 4])
-            .expect("first write");
-        assert!(scheme.is_dirty(), "scheme must be dirty after write_texture");
-        // Second write: scheme is already dirty, but adding another node keeps it dirty.
-        scheme
-            .write_texture(&texture, vec![0u8; 4 * 4 * 4])
-            .expect("second write");
-        assert!(scheme.is_dirty(), "scheme must still be dirty after second write");
+        let capacity = (4 * 4 * 4) as u64;
+        let deposit = MemoryExchange::new(&ctx)
+            .bind_deposit_texture(&mut scheme, &texture, 0, 0, 4, 4, capacity, 0)
+            .expect("bind deposit");
+        assert!(scheme.is_dirty(), "scheme must be dirty after bind_deposit_texture");
+        deposit.write(&mut scheme, 0, &[0u8; 4 * 4 * 4]).expect("first write");
+        assert!(scheme.is_dirty(), "scheme must be dirty after deposit write");
+        // Second write: scheme is already dirty, but staging another payload keeps it dirty.
+        deposit.write(&mut scheme, 0, &[0u8; 4 * 4 * 4]).expect("second write");
+        assert!(
+            scheme.is_dirty(),
+            "scheme must still be dirty after second deposit write"
+        );
     }
 
     // ─── write_texture_region ─────────────────────────────────────────────
@@ -3095,14 +3107,16 @@ mod imp {
         let region_pixels: Vec<u8> = vec![200u8, 100u8, 50u8, 255u8].repeat((RW * RH) as usize);
 
         let mut scheme = Scheme::new(&ctx);
-        scheme
-            .write_texture_region(&texture, RX, RY, RW, RH, region_pixels.clone())
-            .expect("write_texture_region");
+        let region_capacity = (RW * RH * 4) as u64;
+        let deposit = MemoryExchange::new(&ctx)
+            .bind_deposit_texture(&mut scheme, &texture, RX, RY, RW, RH, region_capacity, 0)
+            .expect("bind deposit");
+        deposit.write(&mut scheme, 0, &region_pixels).expect("deposit write");
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        frame.wait(&ctx).expect("wait");
-
-        let mut output = vec![0u8; texture.byte_size() as usize];
-        texture.read_to_cpu(&mut output).expect("read_to_cpu");
+        let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
 
         for y in 0..H as usize {
             for x in 0..W as usize {
@@ -3138,11 +3152,12 @@ mod imp {
         );
 
         let mut scheme = Scheme::new(&ctx);
+        let memory = MemoryExchange::new(&ctx);
         // Region extends beyond texture width.
-        let result = scheme.write_texture_region(&texture, 6, 0, 4, 4, vec![0u8; 4 * 4 * 4]);
+        let result = memory.bind_deposit_texture(&mut scheme, &texture, 6, 0, 4, 4, 4 * 4 * 4, 0);
         assert!(result.is_err(), "x+width exceeds texture width → error");
         // Region extends beyond texture height.
-        let result2 = scheme.write_texture_region(&texture, 0, 6, 4, 4, vec![0u8; 4 * 4 * 4]);
+        let result2 = memory.bind_deposit_texture(&mut scheme, &texture, 0, 6, 4, 4, 4 * 4 * 4, 0);
         assert!(result2.is_err(), "y+height exceeds texture height → error");
     }
 
@@ -3166,17 +3181,22 @@ mod imp {
         let blue: Vec<u8> = vec![0u8, 0, 255, 255].repeat(16);
 
         let mut scheme = Scheme::new(&ctx);
-        scheme
-            .write_texture_region(&texture, 0, 0, 4, 4, red)
-            .expect("write red region");
-        scheme
-            .write_texture_region(&texture, 4, 4, 4, 4, blue)
-            .expect("write blue region");
+        let memory = MemoryExchange::new(&ctx);
+        let red_capacity = (4 * 4 * 4) as u64;
+        let blue_capacity = (4 * 4 * 4) as u64;
+        let red_deposit = memory
+            .bind_deposit_texture(&mut scheme, &texture, 0, 0, 4, 4, red_capacity, 0)
+            .expect("bind red deposit");
+        red_deposit.write(&mut scheme, 0, &red).expect("write red region");
+        let blue_deposit = memory
+            .bind_deposit_texture(&mut scheme, &texture, 4, 4, 4, 4, blue_capacity, 0)
+            .expect("bind blue deposit");
+        blue_deposit.write(&mut scheme, 0, &blue).expect("write blue region");
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        frame.wait(&ctx).expect("wait");
-
-        let mut output = vec![0u8; texture.byte_size() as usize];
-        texture.read_to_cpu(&mut output).expect("read_to_cpu");
+        let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
 
         for y in 0..H as usize {
             for x in 0..W as usize {
@@ -3224,7 +3244,7 @@ mod imp {
             .expect("staging");
         staging.write(0, &pixels).expect("staging.write");
 
-        // Destination texture (COPY_DST for buffer→texture copy; COPY_SRC for read_to_cpu readback).
+        // Destination texture (COPY_DST for buffer→texture copy; COPY_SRC for withdraw).
         let texture = test_alloc_texture(
             &device,
             &vec![0u8; (W * H * 4) as usize],
@@ -3239,14 +3259,15 @@ mod imp {
         scheme
             .copy_buffer_to_texture_parcel(&staging, 0, 0, &texture, 0, 0, W, H)
             .expect("copy_buffer_to_texture_parcel");
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        frame.wait(&ctx).expect("wait");
-
-        let mut output = vec![0u8; texture.byte_size() as usize];
-        texture.read_to_cpu(&mut output).expect("read_to_cpu");
+        let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
 
         assert_eq!(
-            output, pixels,
+            &*output,
+            pixels.as_slice(),
             "copy_buffer_to_texture_parcel: readback does not match staged pixel data"
         );
     }
@@ -3988,30 +4009,19 @@ mod imp {
         worker
     }
 
-    /// A retained reader scheme that copies the shared texture to a CPU-readable buffer via
-    /// [`Scheme::copy_texture`]. The `copy_texture` node reads the texture (topology-visible),
-    /// so it forces exactly one worker topology refresh — and exercises the storage-image
-    /// transfer-layout path that previously segfaulted.
-    fn cross_retention_texture_reader(ctx: &goldy::Context, texture: &goldy::Texture) -> (Scheme, goldy::Buffer) {
-        let layout = texture.copy_layout();
-        let mut pool = RetainedPool::new(Arc::new(ctx.device().clone()));
-        let host_buf = pool
-            .acquire_buffer(
-                layout.staging_bytes,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::CPU_READABLE,
-                None,
-            )
-            .expect("host buffer");
+    /// A retained reader scheme that withdraws the shared texture via MemoryExchange.
+    /// The withdraw is topology-invisible, but we still bind a copy_texture reader elsewhere
+    /// when testing topology refresh; this helper uses withdraw for observation.
+    fn cross_retention_texture_reader(ctx: &goldy::Context, texture: &goldy::Texture) -> (Scheme, WithdrawTransaction) {
         let mut reader = Scheme::new(ctx);
-        reader.copy_texture(texture, &host_buf).expect("copy_texture");
-        (reader, host_buf)
+        let grant = MemoryExchange::new(reader.context())
+            .bind_withdraw(&mut reader, texture)
+            .expect("withdraw");
+        (reader, grant)
     }
 
     /// Cross-scheme texture readback under retention: a worker writes a `Direct` (storage)
-    /// texture every frame and a separate reader scheme copies it to a CPU buffer via
-    /// [`Scheme::copy_texture`], retained across frames.
+    /// texture every frame and a separate reader scheme withdraws it, retained across frames.
     ///
     /// History: this scenario previously aborted the test process with
     /// `STATUS_ACCESS_VIOLATION`. The proximate cause was the texture upload/transition path
@@ -4019,8 +4029,8 @@ mod imp {
     /// (VUID-VkImageMemoryBarrier2-oldLayout-01211), leaving the image in a layout the
     /// driver could not legally consume on the retained resubmit. Storage textures now
     /// settle to `GENERAL` (see `texture.rs::settled_shader_read_layout`). This test guards
-    /// against a regression of that crash and pins the cross-scheme record behavior for the
-    /// texture-copy reader (mirrors a `render_to_buffer` readback path).
+    /// against a regression of that crash. Withdraw is topology-invisible, so the worker
+    /// records once (bootstrap only) — unlike the old `copy_texture` reader.
     fn cross_scheme_texture_readback_retained_loop_records_twice(device: &Device) {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
@@ -4028,30 +4038,33 @@ mod imp {
         let texture = cross_retention_texture(&device);
 
         let mut worker = cross_retention_texture_writer(&ctx, &pipeline, &texture);
-        let (mut reader, host_buf) = cross_retention_texture_reader(&ctx, &texture);
+        let (mut reader, grant) = cross_retention_texture_reader(&ctx, &texture);
 
         const FRAMES: u32 = 4;
+        let mut last_pixels = Vec::new();
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
             let mut frame = reader.submit().expect("reader submit");
-            frame.wait(&ctx).expect("wait readback");
+            last_pixels = grant
+                .claim(&mut frame)
+                .expect("claim")
+                .consume()
+                .expect("consume")
+                .to_vec();
         }
 
-        // Sanity: the readback buffer observed the worker's texture writes (non-zero).
-        let mut padded = vec![0u8; texture.copy_layout().staging_bytes as usize];
-        host_buf
-            .read_to_cpu(ctx.device(), &mut padded)
-            .expect("read host buffer");
-        assert!(padded.iter().any(|&b| b != 0), "texture readback must observe writes");
+        assert!(
+            last_pixels.iter().any(|&b| b != 0),
+            "texture readback must observe writes"
+        );
 
-        // The copy_texture readback reads the texture, a WAR against the worker's write, so
-        // the worker takes exactly one topology refresh: bootstrap + one re-record.
+        // Withdraw is topology-invisible: worker only bootstrap-records.
         assert_eq!(
             worker.replay_stats().records,
-            2,
-            "texture writer + copy_texture readback: bootstrap record + one topology refresh"
+            1,
+            "texture writer + withdraw reader: bootstrap record only"
         );
-        assert_eq!(worker.replay_stats().topology_records, 1);
+        assert_eq!(worker.replay_stats().topology_records, 0);
     }
 
     /// Returning a transient texture that a scheme still binds must fail subsequent submit.
@@ -4149,7 +4162,7 @@ mod imp {
         trial!(scheme_texture_dual_view_round_trip);
         trial!(scheme_two_contexts_both_submit_and_complete);
         trial!(scheme_two_contexts_reclaim_independently);
-        trial!(scheme_write_parcel_reuse_across_submissions);
+        trial!(scheme_deposit_buffer_reuse_across_submissions);
         trial!(scheme_uniform_param_uint_roundtrip);
         trial!(scheme_uniform_param_uint_zero);
         trial!(scheme_uniform_param_uint_max);
