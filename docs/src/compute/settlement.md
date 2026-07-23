@@ -84,7 +84,7 @@ orch.drain_all()?;
 
 Traditional GPU APIs expose fence objects or timeline counters to the application.
 Goldy keeps those as runtime clearing instruments (finance analogy: sequence numbers in
-a clearinghouse). Application code holds **receipts** (`Submission`) and **property**
+a clearinghouse). Application code holds **receipts** (`Submission`) and **parcels**
 (`Parcel`) and asks when those are settled.
 
 | | Fence / timeline counter | Settlement |

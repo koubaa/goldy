@@ -163,10 +163,12 @@ Transform2D    // float2 position, float rotation, float2 scale, float _pad
 The `goldy_exp` library is automatically registered when you create a `Device`:
 
 ```rust
-use goldy::{Instance, DeviceType, ShaderModule, shaders};
+use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule, shaders};
 
 let instance = Instance::new()?;
-let device = instance.create_device(DeviceType::DiscreteGpu)?;
+let device = instance
+    .request_adapter(&RequestAdapterOptions::default())?
+    .request_device(&DeviceDescriptor::default())?;
 
 // The goldy_exp library is pre-registered - just use import goldy_exp;
 let shader = ShaderModule::from_slang(&device, shaders::PLASMA)?;

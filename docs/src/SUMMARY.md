@@ -64,6 +64,15 @@
 - [Goldy vs wgpu](./design/comparison.md)
 - [Target Hardware](./design/hardware.md)
 
+# Fondaco Machine (research)
+
+External research docs in the [docu repository](https://github.com/koba-computers/docu):
+
+- [Fondaco Machine specification](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md)
+- [Goldy runtime mapping](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-goldy-runtime.md)
+- [Design thesis](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/abstract-gpu.md)
+- [Terminology](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/TERMINOLOGY.md)
+
 # Appendix
 
 - [Slang Quick Reference](./appendix/slang-reference.md)

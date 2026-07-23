@@ -89,8 +89,10 @@ for adapter in instance.enumerate_adapters() {
     println!("{}: {:?}", adapter.name, adapter.device_type);
 }
 
-// create_device returns an error on unsupported hardware
-let device = instance.create_device(DeviceType::DiscreteGpu)?;
+// request_device returns an error on unsupported hardware
+let device = instance
+    .request_adapter(&RequestAdapterOptions::default())?
+    .request_device(&DeviceDescriptor::default())?;
 ```
 
 ## The Tradeoff

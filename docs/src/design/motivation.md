@@ -1,5 +1,7 @@
 # Motivation
 
+Goldy implements the **Fondaco Machine** on modern GPUs: merchants describe parcels and schemes; the runtime manages the physical medium, derives precedences from ownership, and mediates present/readback through exchanges. For the normative machine spec see the [Fondaco Machine specification](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md); for what Goldy ships today see the [runtime mapping](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-goldy-runtime.md).
+
 ## The Problem with "Modern" Graphics APIs
 
 DX12, Vulkan, and Metal are commonly called modern APIs, but they were designed over a decade ago for hardware that has since changed dramatically. Sebastian Aaltonen's **["No Graphics API"](https://www.sebastianaaltonen.com/blog/no-graphics-api)** captures the core tension:

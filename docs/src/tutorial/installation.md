@@ -38,12 +38,14 @@ goldy = { version = "0.1", default-features = false, features = ["vulkan"] }
 
 ## Shader Toolchain
 
-Goldy uses **Slang** as its shader language. The Slang compiler is bundled automatically via `slang-rs` — no separate SDK install is needed. Shaders are compiled at runtime to the appropriate target (SPIR-V, DXIL, or Metal IR).
+Goldy uses **Slang** as its shader language. The Rust `build.rs` downloads (if needed) and **embeds** the pinned Slang version at compile time; at runtime Goldy extracts and loads it automatically. Application developers do not install Slang separately.
+
+Set `GOLDY_SLANG_PATH` only to override with a custom Slang build.
 
 ## Verifying Installation
 
 ```rust
-use goldy::{Instance, DeviceType};
+use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
@@ -53,7 +55,9 @@ fn main() -> anyhow::Result<()> {
         println!("  {} ({:?})", adapter.name, adapter.device_type);
     }
 
-    let device = instance.create_device(DeviceType::DiscreteGpu)?;
+    let device = instance
+        .request_adapter(&RequestAdapterOptions::default())?
+        .request_device(&DeviceDescriptor::default())?;
     println!("\nUsing: {}", device.adapter_info().name);
 
     Ok(())
@@ -121,12 +125,10 @@ xcode-select --install
 
 ## Windowing (for examples)
 
-The examples use `winit` for windowing:
+Examples require the `examples` feature (winit is gated):
 
-```toml
-[dev-dependencies]
-winit = "0.30"
-anyhow = "1.0"
+```bash
+cargo run --features examples --example triangle --release
 ```
 
 ## Next Steps

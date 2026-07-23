@@ -1,7 +1,7 @@
 [book]
 title = "Goldy - Modern GPU Library"
 authors = ["Mohamed Koubaa"]
-description = "A modern GPU library for Vulkan 1.4+, DX12, and Metal"
+description = "GPU runtime for the Fondaco Machine — Vulkan 1.4+, DX12, and Metal"
 language = "en"
 src = "src"
 

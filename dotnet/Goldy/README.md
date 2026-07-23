@@ -1,6 +1,6 @@
 # Goldy - Modern GPU Library for .NET
 
-Goldy is a modern GPU library targeting Vulkan 1.4+, DX12, and Metal, with C# bindings using .NET 7+ source-generated interop.
+Goldy is a GPU runtime for the [Fondaco Machine](https://github.com/koba-computers/docu/blob/main/research/technical_stack/fondaco/fondaco-machine-specification.md), targeting Vulkan 1.4+, DX12, and Metal with C# bindings (.NET 8+).
 
 ## Quick Start
 

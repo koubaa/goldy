@@ -61,11 +61,9 @@ This can significantly reduce build times and binary size.
 |---------|-------------|-------|
 | `vulkan` | Windows, Linux (any platform with a Vulkan loader) | Broadest platform support |
 | `dx12` | Windows only | Gated by `#[cfg(target_os = "windows")]` — the feature is ignored on other platforms |
-| `metal` | macOS, iOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms |
+| `metal` | macOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms |
 
-On macOS, enabling both `vulkan` and `metal` is valid — the default
-backend will be Metal, but you can switch to Vulkan at runtime via
-`GOLDY_BACKEND=vulkan` if a Vulkan loader (e.g. MoltenVK) is present.
+On macOS, the default backend is native Metal. Goldy does not require MoltenVK.
 
 ## Default Features
 

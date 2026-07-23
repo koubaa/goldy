@@ -7,7 +7,7 @@ graphics API — no translation layers (like MoltenVK) are involved.
 |---------|-----------|-----------|------------|
 | Vulkan | 1.4+ | Windows, Linux | `ash` |
 | DX12 | Direct3D 12 | Windows | `windows` + `gpu-allocator` |
-| Metal | Tier 2+ | macOS, iOS | `metal` |
+| Metal | Tier 2+ | macOS | `metal` |
 
 ## Native Implementations
 
@@ -127,7 +127,12 @@ Request a device with a preferred `DeviceType`. If no adapter matches,
 Goldy falls back to the first available adapter:
 
 ```rust
-let device = instance.create_device(DeviceType::DiscreteGpu)?;
+let device = instance
+    .request_adapter(&RequestAdapterOptions {
+        power_preference: PowerPreference::HighPerformance,
+        ..Default::default()
+    })?
+    .request_device(&DeviceDescriptor::default())?;
 
 // Or target a specific adapter by ID:
 let device = instance.create_device_for_adapter(adapter.id())?;
