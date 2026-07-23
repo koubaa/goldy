@@ -459,7 +459,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         writer.submit().expect("writer record");
 
         let mut submission = reader.submit().expect("reader topology re-record");
-        submission.wait(&ctx).expect("wait");
+        submission.wait_until_settled().expect("wait");
         assert_eq!(read_u32(&grant, &mut submission), 42);
     }
 

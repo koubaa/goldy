@@ -209,7 +209,7 @@ fn clean_scheme_resubmits_without_rerecord() {
 
     scheme.submit().expect("submit 0");
     let mut frame = scheme.submit().expect("submit 1");
-    frame.wait(&ctx).expect("wait");
+    frame.wait_until_settled().expect("wait");
     assert!(output.is_settled(), "completed work must leave parcel settled");
 
     assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
