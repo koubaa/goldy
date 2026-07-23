@@ -1,1 +1,0 @@
-# Goldy runtime mapping
