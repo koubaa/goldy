@@ -320,6 +320,19 @@ impl Context {
         }
     }
 
+    /// Block until every submission scheduled on this context has retired.
+    ///
+    /// Use before destroying surfaces or other resources that may still be
+    /// referenced by in-flight work. Prefer [`crate::Submission::wait_until_settled`]
+    /// when waiting for a specific receipt.
+    pub fn wait_until_idle(&self) -> Result<(), GoldyError> {
+        let hw = self.high_water_timeline();
+        if hw == 0 {
+            return Ok(());
+        }
+        self.wait_until(hw)
+    }
+
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
     pub(crate) fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
         self.inner
