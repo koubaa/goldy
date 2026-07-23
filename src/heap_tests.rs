@@ -31,7 +31,7 @@ mod heap_tests {
         SerialGpuDevice::new()
     }
 
-    fn scheme_submit_pipelined(ctx: &crate::Context) -> crate::TimelineValue {
+    fn scheme_submit_pipelined(ctx: &crate::Context) -> crate::timeline::TimelineValue {
         scheme_advance_timeline(ctx)
     }
 
@@ -507,7 +507,7 @@ mod heap_tests {
         ctx: &crate::Context,
     ) -> (
         crate::Scheme,
-        crate::TimelineValue,
+        crate::timeline::TimelineValue,
         crate::retained_pool::RetainedPool,
         crate::Buffer,
     ) {

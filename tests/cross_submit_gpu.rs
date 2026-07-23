@@ -580,12 +580,12 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .bind_withdraw(&mut scheme, &dest)
             .expect("grant");
         let mut first = scheme.submit().expect("record");
-        let first_tv = first.timeline_value();
+        let first_tv = goldy::test_support::submission_epoch(&first);
         assert_eq!(read_u32(&grant, &mut first), 0, "initial dest must be zero");
 
         let new_bytes: Box<[u8]> = Box::from([7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0]);
-        scheme.record_reuse_epochs(&dest.last_referenced());
-        scheme.defer_host_write(&staging.last_referenced(), &staging, 0, new_bytes);
+        scheme.record_reuse_buffer(&dest);
+        scheme.defer_host_write(&staging, &staging, 0, new_bytes);
 
         let mut second = scheme.submit().expect("resubmit with host sidecar");
         #[cfg(not(feature = "metal"))]
@@ -594,7 +594,10 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             1,
             "second submit must be a retained hit"
         );
-        assert!(second.timeline_value() > first_tv, "resubmit must advance the timeline");
+        assert!(
+            goldy::test_support::submission_epoch(&second) > first_tv,
+            "resubmit must advance the timeline"
+        );
         assert_eq!(
             read_u32(&grant, &mut second),
             7,

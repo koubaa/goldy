@@ -156,11 +156,12 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_destroy")]
     internal static partial void SchemeSubmissionDestroy(nint submission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_timeline_value")]
-    internal static partial ulong SchemeSubmissionTimelineValue(nint submission);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_is_settled")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool SchemeSubmissionIsSettled(nint submission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_wait")]
-    internal static partial GoldyResult SchemeSubmissionWait(nint ctx, nint submission);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_wait_until_settled")]
+    internal static partial GoldyResult SchemeSubmissionWaitUntilSettled(nint submission);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_lease_render_target")]
     internal static partial nint SchemeLeaseRenderTarget(

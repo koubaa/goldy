@@ -21,10 +21,11 @@ pub enum OversubscribedReason {
 }
 
 /// A non-blocking notification from the GPU backend.
+///
+/// GPU completion (`BoundaryCrossed`) is serviced inside
+/// [`crate::Context::poll_signals_and_service`] and is **not** returned to clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
-    /// GPU completion handler advanced the monotonic timeline to `epoch`.
-    BoundaryCrossed { epoch: TimelineValue },
     /// A swapchain drawable was handed to the client (`Surface::begin` / acquire).
     SwapchainAcquired { image_index: u32 },
     /// Compositor / WSI released a drawable back to the swapchain pool.
@@ -36,10 +37,26 @@ pub enum Signal {
     },
 }
 
+/// Internal + client signals carried on the backend queue before filtering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QueuedSignal {
+    /// GPU completion handler advanced the monotonic timeline to `epoch`.
+    BoundaryCrossed {
+        epoch: TimelineValue,
+    },
+    Client(Signal),
+}
+
+impl From<Signal> for QueuedSignal {
+    fn from(signal: Signal) -> Self {
+        QueuedSignal::Client(signal)
+    }
+}
+
 /// Thread-safe queue for async signals (producer: driver callback / fence thread).
 #[derive(Debug, Default)]
 pub struct SignalQueue {
-    inner: Mutex<Vec<Signal>>,
+    inner: Mutex<Vec<QueuedSignal>>,
 }
 
 impl SignalQueue {
@@ -47,17 +64,35 @@ impl SignalQueue {
         Self::default()
     }
 
-    pub fn push(&self, signal: Signal) {
+    pub(crate) fn push_queued(&self, signal: QueuedSignal) {
         if let Ok(mut q) = self.inner.lock() {
             q.push(signal);
         }
     }
 
-    pub fn drain(&self) -> Vec<Signal> {
+    pub fn push(&self, signal: Signal) {
+        self.push_queued(QueuedSignal::Client(signal));
+    }
+
+    pub(crate) fn push_boundary_crossed(&self, epoch: TimelineValue) {
+        self.push_queued(QueuedSignal::BoundaryCrossed { epoch });
+    }
+
+    pub(crate) fn drain_queued(&self) -> Vec<QueuedSignal> {
         self.inner
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default()
+    }
+
+    pub fn drain(&self) -> Vec<Signal> {
+        self.drain_queued()
+            .into_iter()
+            .filter_map(|s| match s {
+                QueuedSignal::Client(c) => Some(c),
+                QueuedSignal::BoundaryCrossed { .. } => None,
+            })
+            .collect()
     }
 }
 
@@ -76,14 +111,25 @@ fn drain_sync_signals() -> Vec<Signal> {
 
 /// Drain async queue first, then thread-local synchronous signals.
 ///
-/// Async signals (`BoundaryCrossed`, swapchain events) lead so the caller sees
-/// GPU-completion notifications before same-frame allocation failures.
+/// Boundary-crossed events are returned in the queued list for internal servicing;
+/// [`crate::Context::poll_signals_and_service`] filters them from the client-facing result.
 /// `Oversubscribed` always trails because it fires on the calling thread after
 /// the async queue snapshot is already taken.
-pub fn drain_all_signals(queue: &SignalQueue) -> Vec<Signal> {
-    let mut out = queue.drain();
-    out.append(&mut drain_sync_signals());
+pub(crate) fn drain_all_queued_signals(queue: &SignalQueue) -> Vec<QueuedSignal> {
+    let mut out = queue.drain_queued();
+    out.extend(drain_sync_signals().into_iter().map(QueuedSignal::Client));
     out
+}
+
+/// Drain async queue first, then thread-local synchronous signals (client-visible only).
+pub fn drain_all_signals(queue: &SignalQueue) -> Vec<Signal> {
+    drain_all_queued_signals(queue)
+        .into_iter()
+        .filter_map(|s| match s {
+            QueuedSignal::Client(c) => Some(c),
+            QueuedSignal::BoundaryCrossed { .. } => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -93,11 +139,11 @@ mod tests {
     #[test]
     fn signal_queue_fifo() {
         let q = SignalQueue::new();
-        q.push(Signal::BoundaryCrossed { epoch: 1 });
+        q.push_boundary_crossed(1);
         q.push(Signal::SwapchainAcquired { image_index: 0 });
-        let drained = q.drain();
+        let drained = q.drain_queued();
         assert_eq!(drained.len(), 2);
-        assert!(matches!(drained[0], Signal::BoundaryCrossed { epoch: 1 }));
+        assert!(matches!(drained[0], QueuedSignal::BoundaryCrossed { epoch: 1 }));
     }
 
     #[test]
@@ -107,16 +153,26 @@ mod tests {
             reason: OversubscribedReason::BufferHeap,
             size_hint: 512,
         });
-        q.push(Signal::BoundaryCrossed { epoch: 3 });
-        let all = drain_all_signals(&q);
+        q.push_boundary_crossed(3);
+        let all = drain_all_queued_signals(&q);
         assert_eq!(all.len(), 2);
-        assert!(matches!(all[0], Signal::BoundaryCrossed { epoch: 3 }));
+        assert!(matches!(all[0], QueuedSignal::BoundaryCrossed { epoch: 3 }));
         assert!(matches!(
             all[1],
-            Signal::Oversubscribed {
+            QueuedSignal::Client(Signal::Oversubscribed {
                 reason: OversubscribedReason::BufferHeap,
                 size_hint: 512,
-            }
+            })
         ));
+    }
+
+    #[test]
+    fn client_drain_filters_boundary_crossed() {
+        let q = SignalQueue::new();
+        q.push_boundary_crossed(3);
+        q.push(Signal::SwapchainReturned { image_index: 1 });
+        let client = drain_all_signals(&q);
+        assert_eq!(client.len(), 1);
+        assert!(matches!(client[0], Signal::SwapchainReturned { image_index: 1 }));
     }
 }

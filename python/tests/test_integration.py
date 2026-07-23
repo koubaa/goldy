@@ -95,7 +95,7 @@ def test_parcel_write(device):
     deposit = memory.bind_deposit_buffer(upload, buffer[0], 16)
     deposit.write(upload, np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
     frame = upload.submit()
-    frame.wait(ctx)
+    frame.wait_until_settled()
 
 
 def test_shader_compilation(device):

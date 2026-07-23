@@ -37,16 +37,16 @@ pub struct PySchemeSubmission {
 
 #[pymethods]
 impl PySchemeSubmission {
-    fn timeline_value(&self) -> u64 {
-        self.inner.timeline_value()
+    fn is_settled(&self) -> bool {
+        self.inner.is_settled()
     }
 
-    fn wait(&self, ctx: &PyContext) -> PyResult<()> {
-        self.inner.wait(&ctx.inner).into_py_result()
+    fn wait_until_settled(&self) -> PyResult<()> {
+        self.inner.wait_until_settled().into_py_result()
     }
 
     fn __repr__(&self) -> String {
-        format!("SchemeSubmission(timeline_value={})", self.inner.timeline_value())
+        format!("SchemeSubmission(settled={})", self.inner.is_settled())
     }
 }
 

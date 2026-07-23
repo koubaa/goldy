@@ -11,6 +11,7 @@
 
 use crate::context::Context;
 use crate::error::GoldyError;
+use crate::scheme::Submission;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
 use crate::tracy_zone;
@@ -98,6 +99,30 @@ impl FrameOrchestrator {
         self.drain_ring()
     }
 
+    /// Block until the oldest in-flight ring slot retires (or reclaim if already done).
+    ///
+    /// Used under memory pressure when the client needs the GPU to make progress before
+    /// retrying an allocation. No-op when the ring is empty.
+    pub fn wait_for_progress(&mut self) -> Result<(), GoldyError> {
+        let Some(front) = self.ring.front() else {
+            self.context.flush_deferred_deletions();
+            return Ok(());
+        };
+        if let Some(tv) = front.timeline {
+            if self.context.gpu_progress() < tv {
+                self.context.wait_until(tv)?;
+            }
+        } else {
+            let hw = self.context.high_water_timeline().max(self.context.gpu_progress());
+            if self.context.gpu_progress() < hw {
+                self.context.wait_until(hw)?;
+            }
+        }
+        self.drain_ring()?;
+        self.context.flush_deferred_deletions();
+        Ok(())
+    }
+
     /// Begin recording a new frame: drains completed slots, then returns a handle if there is
     /// capacity (possibly after blocking on the oldest in-flight work).
     ///
@@ -122,21 +147,17 @@ impl FrameOrchestrator {
     /// End a standalone (headless / render-to-texture) frame whose GPU work was already
     /// submitted (e.g. via [`crate::Scheme::submit`]).
     ///
-    /// Pushes a ring slot stamped with `timeline`, clears the open handle, and
+    /// Pushes a ring slot stamped from `submission`, clears the open handle, and
     /// emits a Tracy frame mark.
-    pub fn end_frame_standalone(
-        &mut self,
-        handle: FrameHandle,
-        timeline: TimelineValue,
-    ) -> Result<TimelineValue, GoldyError> {
+    pub fn end_frame_standalone(&mut self, handle: FrameHandle, submission: &Submission) -> Result<(), GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_standalone");
         self.expect_open(handle)?;
         self.ring.push_back(FrameSlot {
-            timeline: Some(timeline),
+            timeline: Some(submission.timeline_value()),
         });
         self.open = None;
         tracy_frame_mark!();
-        Ok(timeline)
+        Ok(())
     }
 
     /// End a frame whose scanout is deferred to surface present or
@@ -144,16 +165,12 @@ impl FrameOrchestrator {
     ///
     /// Pushes a ring slot whose timeline is filled later via [`Self::note_presented`], and does
     /// **not** emit a Tracy frame mark (the mark belongs at present time).
-    pub fn end_frame_for_present(
-        &mut self,
-        handle: FrameHandle,
-        submit_timeline: TimelineValue,
-    ) -> Result<TimelineValue, GoldyError> {
+    pub fn end_frame_for_present(&mut self, handle: FrameHandle, _submission: &Submission) -> Result<(), GoldyError> {
         let _tz = tracy_zone!("orchestrator.end_frame_for_present");
         self.expect_open(handle)?;
         self.ring.push_back(FrameSlot { timeline: None });
         self.open = None;
-        Ok(submit_timeline)
+        Ok(())
     }
 
     /// Close an open frame without creating a retirement-ring slot.
@@ -168,11 +185,11 @@ impl FrameOrchestrator {
         Ok(())
     }
 
-    /// After surface present, stamp the most recent surface slot with the returned timeline.
-    pub fn note_presented(&mut self, tv: TimelineValue) {
+    /// After surface present / claim consume, stamp the most recent surface slot from `submission`.
+    pub fn note_presented(&mut self, submission: &Submission) {
         if let Some(back) = self.ring.back_mut() {
             if back.timeline.is_none() {
-                back.timeline = Some(tv);
+                back.timeline = Some(submission.timeline_value());
             }
         }
     }
@@ -180,7 +197,7 @@ impl FrameOrchestrator {
     /// Block until every pending slot has retired.
     ///
     /// Slots whose timeline is still unknown (`None`, i.e. surface path before
-    /// [`Self::note_presented`]) use [`crate::Context::high_water_timeline`] as a completion fence —
+    /// [`Self::note_presented`]) use the context high-water as a completion fence —
     /// callers draining mid-presentation should prefer [`Self::reclaim`] / presenting first.
     pub fn drain_all(&mut self) -> Result<(), GoldyError> {
         while let Some(slot) = self.ring.pop_front() {

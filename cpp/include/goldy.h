@@ -860,20 +860,19 @@ enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
 // `submission` must be valid and not used after this call.
 void goldy_scheme_submission_destroy(struct GoldySchemeSubmission *submission);
 
-// Timeline value for this submission (for debugging only).
+// True when this submission's GPU work has retired.
 //
 // # Safety
 // `submission` must be valid.
-uint64_t goldy_scheme_submission_timeline_value(const struct GoldySchemeSubmission *submission);
+bool goldy_scheme_submission_is_settled(const struct GoldySchemeSubmission *submission);
 
 // Block until the GPU work for `submission` has completed.
 //
 // Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
 //
 // # Safety
-// `ctx` and `submission` must be valid.
-enum GoldyResult goldy_scheme_submission_wait(const struct GoldyContext *ctx,
-                                              const struct GoldySchemeSubmission *submission);
+// `submission` must be valid.
+enum GoldyResult goldy_scheme_submission_wait_until_settled(const struct GoldySchemeSubmission *submission);
 
 // Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 //

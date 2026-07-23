@@ -212,7 +212,7 @@ impl Context {
     }
 
     /// Latest GPU completion counter on this context's timeline.
-    pub fn gpu_progress(&self) -> TimelineValue {
+    pub(crate) fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("context.gpu_progress");
         let _query = crate::tracy_zone!("context.gpu_progress.query");
         if let Some(progress) = &self.inner.gpu_progress {
@@ -228,7 +228,7 @@ impl Context {
     }
 
     /// Block until the timeline reaches at least `value`.
-    pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
+    pub(crate) fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
         self.wait_until_context(self.inner.handle, value)
     }
 
@@ -279,7 +279,7 @@ impl Context {
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
-    pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<(), GoldyError> {
+    pub(crate) fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<(), GoldyError> {
         let ctx = self.inner.handle;
         let already_complete = self.gpu_progress() >= value;
         let backend_mutex = &self.inner.device.inner.backend;
@@ -321,7 +321,7 @@ impl Context {
     }
 
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
-    pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
+    pub(crate) fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
         self.inner
             .device
             .inner
@@ -332,7 +332,7 @@ impl Context {
     }
 
     /// The largest [`TimelineValue`] ever returned by a scheme submit on this context.
-    pub fn high_water_timeline(&self) -> TimelineValue {
+    pub(crate) fn high_water_timeline(&self) -> TimelineValue {
         self.inner.high_water_timeline.load(Ordering::Relaxed)
     }
 
@@ -341,24 +341,44 @@ impl Context {
     }
 
     /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
-    pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+    ///
+    /// Boundary-crossed events are included for internal servicing only; prefer
+    /// [`Self::poll_signals_and_service`] which reclaims and returns client-visible signals.
+    pub(crate) fn poll_signals_queued(&self) -> Vec<crate::signal::QueuedSignal> {
         let progress = self.gpu_progress();
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
         backend.poll_signals(self.inner.handle, progress)
     }
 
-    /// Drain pending signals and service [`crate::signal::Signal::BoundaryCrossed`].
+    /// Drain pending backend signals (swapchain, oversubscribed). Boundary-crossed is omitted.
+    pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+        self.poll_signals_queued()
+            .into_iter()
+            .filter_map(|s| match s {
+                crate::signal::QueuedSignal::Client(c) => Some(c),
+                crate::signal::QueuedSignal::BoundaryCrossed { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Drain pending signals, service boundary-crossed reclamation, return client-visible signals.
     pub fn poll_signals_and_service(&self) -> Vec<crate::signal::Signal> {
         let _tz = crate::tracy_zone!("context.poll_signals_and_service");
-        let signals = self.poll_signals();
-        let latest_boundary = signals.iter().fold(None, |latest, signal| match signal {
-            crate::signal::Signal::BoundaryCrossed { epoch } => Some(latest.unwrap_or(0).max(*epoch)),
+        let queued = self.poll_signals_queued();
+        let latest_boundary = queued.iter().fold(None, |latest, signal| match signal {
+            crate::signal::QueuedSignal::BoundaryCrossed { epoch } => Some(latest.unwrap_or(0).max(*epoch)),
             _ => latest,
         });
         if let Some(epoch) = latest_boundary {
             self.boundary_crossed(epoch);
         }
-        signals
+        queued
+            .into_iter()
+            .filter_map(|s| match s {
+                crate::signal::QueuedSignal::Client(c) => Some(c),
+                crate::signal::QueuedSignal::BoundaryCrossed { .. } => None,
+            })
+            .collect()
     }
 
     /// Process deferred GPU deletions and reclaim VRAM-ring payloads whose epoch has retired.
@@ -470,7 +490,7 @@ impl Context {
     }
 
     /// Block until every context in `refs` has retired the stamped timeline values.
-    pub fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
+    pub(crate) fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
         for (ctx_handle, tv) in refs.iter() {
             self.wait_until_context(ctx_handle, tv)?;
         }

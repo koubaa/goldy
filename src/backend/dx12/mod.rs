@@ -1027,7 +1027,7 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         ctx: ContextHandle,
         progress: crate::timeline::TimelineValue,
-    ) -> Vec<crate::signal::Signal> {
+    ) -> Vec<crate::signal::QueuedSignal> {
         let device_handle = self.context_device(ctx);
         let signal_queue = self
             .state
@@ -1053,7 +1053,7 @@ impl GpuBackend for Dx12Backend {
                 }
             });
         }
-        crate::signal::drain_all_signals(&signal_queue)
+        crate::signal::drain_all_queued_signals(&signal_queue)
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {

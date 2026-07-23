@@ -73,7 +73,7 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let tv = scheme.submit().expect("submit").timeline_value();
+        let submission = scheme.submit().expect("submit");
 
         assert_eq!(
             ctx.deferred_deletion_pending_count(),
@@ -85,7 +85,7 @@ mod imp {
         // destroy evicts retained CBs that pin its slots, and marks the scheme stamp dead.
         drop(buf);
 
-        ctx.wait_until(tv).expect("wait_until");
+        submission.wait_until_settled().expect("wait_until_settled");
 
         assert_eq!(
             ctx.deferred_deletion_pending_count(),

@@ -1355,7 +1355,7 @@ pub(crate) trait GpuBackend:
         &mut self,
         ctx: ContextHandle,
         progress: crate::timeline::TimelineValue,
-    ) -> Vec<crate::signal::Signal>;
+    ) -> Vec<crate::signal::QueuedSignal>;
 
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;

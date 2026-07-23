@@ -54,9 +54,9 @@ mod imp {
     }
 
     /// Advance the context timeline with an empty scheme submission.
-    fn scheme_submit_empty(ctx: &goldy::Context) -> goldy::TimelineValue {
+    fn scheme_submit_empty(ctx: &goldy::Context) -> u64 {
         let mut scheme = Scheme::new(ctx);
-        scheme.submit().expect("submit empty").timeline_value()
+        goldy::test_support::submission_epoch(&scheme.submit().expect("submit empty"))
     }
 
     fn test_compute_pipeline_creation(device: &Device) {
@@ -151,12 +151,12 @@ mod imp {
 
         let mut scheme = Scheme::new(&ctx);
         scheme.node("n0", &pipeline).dispatch(1, 1, 1);
-        let tv = scheme.submit().expect("submit").timeline_value();
+        let submission = scheme.submit().expect("submit");
 
         let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
         drop(buf);
 
-        ctx.wait_until(tv).expect("wait_until");
+        submission.wait_until_settled().expect("wait_until_settled");
     }
 
     #[cfg(feature = "vulkan")]
@@ -407,7 +407,7 @@ mod imp {
         let ctx = submission_context(device);
         let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
         let tv = scheme_submit_empty(&ctx);
-        ctx.wait_until(tv).expect("wait");
+        goldy::test_support::wait_until(&ctx, tv).expect("wait");
 
         drop(buf);
         ctx.flush_deferred_deletions();
@@ -427,7 +427,7 @@ mod imp {
         drop(buf);
 
         ctx.flush_deferred_deletions();
-        ctx.wait_until(tv).expect("wait");
+        goldy::test_support::wait_until(&ctx, tv).expect("wait");
         ctx.flush_deferred_deletions();
 
         assert_eq!(

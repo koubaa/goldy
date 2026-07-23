@@ -16,7 +16,7 @@
 
 # Compute Workflows
 
-- [Device Timeline](./compute/timeline.md)
+- [Settlement](./compute/settlement.md)
 - [Pipelined Frames](./compute/pipelined-frames.md)
 - [Compute to Surface](./compute/compute-to-surface.md)
 

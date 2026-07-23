@@ -30,9 +30,8 @@ pub type FnGoldySchemeComputeNodeWithParam = unsafe extern "C" fn(*mut GoldySche
 pub type FnGoldySchemeComputeNodeDispatch = unsafe extern "C" fn(*mut GoldyScheme, u32, u32, u32) -> GoldyResult;
 pub type FnGoldySchemeSubmit = unsafe extern "C" fn(*mut GoldyScheme, *mut *mut GoldySchemeSubmission) -> GoldyResult;
 pub type FnGoldySchemeSubmissionDestroy = unsafe extern "C" fn(*mut GoldySchemeSubmission);
-pub type FnGoldySchemeSubmissionTimelineValue = unsafe extern "C" fn(*const GoldySchemeSubmission) -> u64;
-pub type FnGoldySchemeSubmissionWait =
-    unsafe extern "C" fn(*const GoldyContext, *const GoldySchemeSubmission) -> GoldyResult;
+pub type FnGoldySchemeSubmissionIsSettled = unsafe extern "C" fn(*const GoldySchemeSubmission) -> bool;
+pub type FnGoldySchemeSubmissionWaitUntilSettled = unsafe extern "C" fn(*const GoldySchemeSubmission) -> GoldyResult;
 
 pub type FnGoldyMemoryExchangeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyMemoryExchange;
 pub type FnGoldyMemoryExchangeDestroy = unsafe extern "C" fn(*mut GoldyMemoryExchange);

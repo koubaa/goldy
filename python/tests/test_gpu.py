@@ -114,7 +114,7 @@ class TestRetainedPool:
         deposit = memory.bind_deposit_buffer(upload, buffer[0], 16)
         deposit.write(upload, np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
         frame = upload.submit()
-        frame.wait(ctx)
+        frame.wait_until_settled()
 
 
 class TestShaderModule:

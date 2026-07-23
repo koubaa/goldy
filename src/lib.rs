@@ -54,7 +54,7 @@ pub mod retained_pool;
 pub mod scheme;
 pub mod signal;
 pub mod swapchain_pool;
-pub mod timeline;
+pub(crate) mod timeline;
 pub mod transient_pool;
 pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
@@ -88,7 +88,6 @@ pub use signal::{OversubscribedReason, Signal};
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use task_graph::NodeAccess;
 pub use texture::TextureCopyFootprint;
-pub use timeline::TimelineValue;
 
 pub use handles::{SamplerHandle, TextureHandle};
 pub use types::*;
@@ -141,8 +140,13 @@ pub mod test_support {
         with_mock(device, |m| m.reset_tracking());
     }
 
-    pub fn mock_recorded_waits(device: &Device) -> Vec<Vec<crate::timeline::Epoch>> {
-        with_mock(device, |m| m.recorded_waits.clone())
+    pub fn mock_recorded_waits(device: &Device) -> Vec<Vec<(u64, u64)>> {
+        with_mock(device, |m| {
+            m.recorded_waits
+                .iter()
+                .map(|batch| batch.iter().map(|e| (e.context, e.value)).collect())
+                .collect()
+        })
     }
 
     pub fn mock_retained_resubmit_count(device: &Device) -> usize {
@@ -224,7 +228,9 @@ pub mod test_support {
     /// Drops the temporary [`crate::Scheme`] before returning, which waits the
     /// high-water timeline. Do not use this when you need to observe in-flight
     /// command buffers immediately after submit.
-    pub fn scheme_advance_timeline(ctx: &crate::Context) -> crate::TimelineValue {
+    ///
+    /// Returns the crate-internal clearing epoch as `u64` for characterization tests.
+    pub fn scheme_advance_timeline(ctx: &crate::Context) -> u64 {
         use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
         let device = Arc::new(ctx.device().clone());
         let mut pool = RetainedPool::new(device);
@@ -234,6 +240,26 @@ pub mod test_support {
         let mut scheme = Scheme::new(ctx);
         scheme.clear_parcel(&buf, 0, 256).expect("clear");
         scheme.submit().expect("submit").timeline_value()
+    }
+
+    /// Crate-internal clearing epoch for a submission (tests only).
+    pub fn submission_epoch(submission: &crate::Submission) -> u64 {
+        submission.timeline_value()
+    }
+
+    /// Latest GPU progress on `ctx` (tests only).
+    pub fn gpu_progress(ctx: &crate::Context) -> u64 {
+        ctx.gpu_progress()
+    }
+
+    /// Block until `ctx` reaches `epoch` (tests only).
+    pub fn wait_until(ctx: &crate::Context, epoch: u64) -> Result<(), crate::GoldyError> {
+        ctx.wait_until(epoch)
+    }
+
+    /// Last-referenced epoch for `parcel` on `ctx` (tests only).
+    pub fn parcel_last_epoch_on(parcel: &crate::Parcel, ctx: &crate::Context) -> Option<u64> {
+        parcel.last_referenced_on(ctx.backend_handle())
     }
 
     /// Process-wide gate for DX12 WARP lib tests. MockBackend never takes this lock.

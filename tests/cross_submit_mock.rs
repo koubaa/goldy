@@ -22,7 +22,7 @@ fn clear_mock(device: &Device) {
     mock_reset_tracking(device);
 }
 
-fn recorded_waits(device: &Device) -> Vec<Vec<goldy::timeline::Epoch>> {
+fn recorded_waits(device: &Device) -> Vec<Vec<(u64, u64)>> {
     mock_recorded_waits(device)
 }
 
@@ -221,7 +221,7 @@ fn cross_context_raw_emits_wait() {
     consumer.submit().expect("cross ctx");
     let waits = recorded_waits(&device).last().cloned().unwrap_or_default();
     assert_eq!(waits.len(), 1);
-    assert_eq!(waits[0].context, ctx1.test_backend_handle());
+    assert_eq!(waits[0].0, ctx1.test_backend_handle());
 }
 
 #[test]
@@ -355,9 +355,10 @@ fn stamp_monotonicity_never_regresses() {
         scheme.submit().expect("submit");
     }
     let ctx_handle = ctx.test_backend_handle();
-    let epoch = parcel.last_referenced().get(ctx_handle).expect("stamped");
+    let _ = ctx_handle;
+    let epoch = goldy::test_support::parcel_last_epoch_on(parcel.whole(), &ctx).expect("stamped");
     scheme.submit().expect("again");
-    let later = parcel.last_referenced().get(ctx_handle).expect("stamped");
+    let later = goldy::test_support::parcel_last_epoch_on(parcel.whole(), &ctx).expect("stamped");
     assert!(later >= epoch);
 }
 
@@ -647,14 +648,14 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
         .with_parcel(&dest, NodeAccess::Write)
         .dispatch(1, 1, 1);
     let first = scheme.submit().expect("record");
-    let first_tv = first.timeline_value();
+    let first_tv = goldy::test_support::submission_epoch(&first);
 
     clear_mock(&device);
 
     // Frame N+1: reuse dest (queue wait) + deferred host write into staging before resubmit.
-    scheme.record_reuse_epochs(&dest.last_referenced());
+    scheme.record_reuse_buffer(&dest);
     scheme.defer_host_write(
-        &staging.last_referenced(),
+        &staging,
         &staging,
         0,
         Box::from([7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0]),
@@ -665,7 +666,7 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
 
     let waits = recorded_waits(&device);
     assert!(
-        waits.iter().any(|w| w.iter().any(|e| e.value >= first_tv)),
+        waits.iter().any(|w| w.iter().any(|&(_ctx, value)| value >= first_tv)),
         "retained resubmit must carry reuse epoch in SubmitSync.waits: {waits:?}"
     );
 

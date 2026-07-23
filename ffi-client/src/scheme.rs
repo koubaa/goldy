@@ -18,12 +18,12 @@ pub struct SchemeSubmission {
 }
 
 impl SchemeSubmission {
-    pub fn timeline_value(&self) -> u64 {
-        unsafe { sys::goldy_scheme_submission_timeline_value(self.ptr) }
+    pub fn is_settled(&self) -> bool {
+        unsafe { sys::goldy_scheme_submission_is_settled(self.ptr) }
     }
 
-    pub fn wait(&self, ctx: &Context) -> Result<()> {
-        check(unsafe { sys::goldy_scheme_submission_wait(ctx.as_ptr(), self.ptr) })
+    pub fn wait_until_settled(&self) -> Result<()> {
+        check(unsafe { sys::goldy_scheme_submission_wait_until_settled(self.ptr) })
     }
 
     pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldySchemeSubmission {

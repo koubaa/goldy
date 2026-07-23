@@ -357,16 +357,16 @@ pub unsafe extern "C" fn goldy_scheme_submission_destroy(submission: *mut GoldyS
     }
 }
 
-/// Timeline value for this submission (for debugging only).
+/// True when this submission's GPU work has retired.
 ///
 /// # Safety
 /// `submission` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_submission_timeline_value(submission: *const GoldySchemeSubmission) -> u64 {
+pub unsafe extern "C" fn goldy_scheme_submission_is_settled(submission: *const GoldySchemeSubmission) -> bool {
     if submission.is_null() {
-        return 0;
+        return false;
     }
-    (*submission).inner.timeline_value()
+    (*submission).inner.is_settled()
 }
 
 /// Block until the GPU work for `submission` has completed.
@@ -374,16 +374,15 @@ pub unsafe extern "C" fn goldy_scheme_submission_timeline_value(submission: *con
 /// Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
 ///
 /// # Safety
-/// `ctx` and `submission` must be valid.
+/// `submission` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_submission_wait(
-    ctx: *const GoldyContext,
+pub unsafe extern "C" fn goldy_scheme_submission_wait_until_settled(
     submission: *const GoldySchemeSubmission,
 ) -> GoldyResult {
-    if ctx.is_null() || submission.is_null() {
+    if submission.is_null() {
         return GoldyResult::NullPointer;
     }
-    match (*submission).inner.wait(&(*ctx).inner) {
+    match (*submission).inner.wait_until_settled() {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));

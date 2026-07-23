@@ -1041,12 +1041,12 @@ public:
     SchemeSubmission(SchemeSubmission&&) = default;
     SchemeSubmission& operator=(SchemeSubmission&&) = default;
 
-    [[nodiscard]] uint64_t timeline_value() const {
-        return goldy_scheme_submission_timeline_value(ptr_.get());
+    [[nodiscard]] bool is_settled() const {
+        return goldy_scheme_submission_is_settled(ptr_.get());
     }
 
-    void wait(const Context& ctx) const {
-        detail::throw_on_result(goldy_scheme_submission_wait(ctx.get(), ptr_.get()));
+    void wait_until_settled() const {
+        detail::throw_on_result(goldy_scheme_submission_wait_until_settled(ptr_.get()));
     }
 
     GoldySchemeSubmission* get() const { return ptr_.get(); }
