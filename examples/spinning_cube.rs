@@ -99,6 +99,8 @@ impl App {
             start_time: Instant::now(),
             _retained_pool: None,
             vertex_parcel: None,
+            upload_scheme: None,
+            vertex_deposit: None,
             frame_count: 0,
         })
     }
@@ -171,6 +173,7 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &vertex_parcel, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -227,7 +230,6 @@ impl App {
             vertices.push(Vertex2D::new(p2[0], p2[1], color));
         }
 
-        let ctx = self.ctx.as_ref().unwrap();
         let upload = self.upload_scheme.as_mut().unwrap();
         self.vertex_deposit
             .unwrap()

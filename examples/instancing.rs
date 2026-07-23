@@ -202,6 +202,13 @@ impl RenderState {
             &scene_rt,
         )?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &params_buffer,
+            std::mem::size_of::<AnimParams>() as u64,
+        )?;
+
         println!(
             "Created instancing example with {} quads (GPU compute + graphics)",
             NUM_QUADS
@@ -221,6 +228,8 @@ impl RenderState {
             _retained_pool: retained_pool,
             instance_buffer,
             params_buffer,
+            upload_scheme,
+            params_deposit,
             start_time: Instant::now(),
             last_time: 0.0,
             frame_count: 0,

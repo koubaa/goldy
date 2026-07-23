@@ -92,7 +92,6 @@ struct RenderState {
     particle_buffer: Buffer,
     params_buffer: Buffer,
     upload_scheme: Scheme,
-    particle_deposit: DepositTransaction,
     params_deposit: DepositTransaction,
     is_snow: bool,
     frame_count: f32,
@@ -220,9 +219,6 @@ impl RenderState {
         )?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
-        let particle_deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut upload_scheme, &particle_buffer, particle_capacity)?;
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
             &mut upload_scheme,
             &params_buffer,
@@ -246,7 +242,6 @@ impl RenderState {
             particle_buffer,
             params_buffer,
             upload_scheme,
-            particle_deposit,
             params_deposit,
             is_snow: false,
             frame_count: 0.0,
@@ -290,12 +285,16 @@ impl RenderState {
         self.is_snow = !self.is_snow;
 
         let particles = Self::create_particles(self.is_snow);
-        self.particle_deposit.write(
-            &mut self.upload_scheme,
+        let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
+        let mut particle_upload = Scheme::new(&self.ctx);
+        let particle_deposit = MemoryExchange::new(&self.ctx)
+            .bind_deposit_buffer(&mut particle_upload, &self.particle_buffer, particle_capacity)?;
+        particle_deposit.write(
+            &mut particle_upload,
             0,
             bytemuck::cast_slice(&particles),
         )?;
-        self.upload_scheme.submit()?;
+        particle_upload.submit()?;
 
         self.window.set_title(&format!(
             "Goldy - {} (Space to toggle)",

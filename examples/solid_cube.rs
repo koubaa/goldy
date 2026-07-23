@@ -252,6 +252,7 @@ impl App {
         )?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -260,8 +261,8 @@ impl App {
         self.index_parcel = Some(index_parcel);
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
         let index_parcel = self.index_parcel.as_ref().unwrap();
-        let mut upload_scheme = Scheme::new(&ctx);
-        let memory = MemoryExchange::new(&ctx);
+        let mut upload_scheme = Scheme::new(ctx);
+        let memory = MemoryExchange::new(ctx);
         let vertex_deposit = memory.bind_deposit_buffer(
             &mut upload_scheme,
             vertex_parcel,

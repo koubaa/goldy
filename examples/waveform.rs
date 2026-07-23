@@ -173,14 +173,15 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &channel_parcels, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.channel_parcels = Some(channel_parcels);
         let channel_parcels = self.channel_parcels.as_ref().unwrap();
-        let mut upload_scheme = Scheme::new(&ctx);
-        let memory = MemoryExchange::new(&ctx);
+        let mut upload_scheme = Scheme::new(ctx);
+        let memory = MemoryExchange::new(ctx);
         let channel_capacity = channel_parcels[0].byte_size();
         let channel_deposits = std::array::from_fn(|ch| {
             memory
@@ -205,8 +206,6 @@ impl App {
             return Ok(());
         }
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let channel_parcels = self.channel_parcels.as_ref().unwrap();
         let scheme = self.scheme.as_mut().unwrap();
         let time = self.start_time.elapsed().as_secs_f32();
 

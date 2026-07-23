@@ -182,6 +182,7 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &warm_parcel, &cool_parcel, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -190,8 +191,8 @@ impl App {
         self.cool_parcel = Some(cool_parcel);
         let warm_parcel = self.warm_parcel.as_ref().unwrap();
         let cool_parcel = self.cool_parcel.as_ref().unwrap();
-        let mut upload_scheme = Scheme::new(&ctx);
-        let memory = MemoryExchange::new(&ctx);
+        let mut upload_scheme = Scheme::new(ctx);
+        let memory = MemoryExchange::new(ctx);
         let warm_deposit = memory.bind_deposit_buffer(
             &mut upload_scheme,
             warm_parcel,

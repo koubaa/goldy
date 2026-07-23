@@ -199,14 +199,15 @@ impl App {
         let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &vertex_parcel, 1, bg_color, &scene_rt)?;
 
         self.ctx = Some(ctx);
+        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
-        let mut upload_scheme = Scheme::new(&ctx);
-        let vertex_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let mut upload_scheme = Scheme::new(ctx);
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
             &mut upload_scheme,
             vertex_parcel,
             (MAX_CLOCK_VERTICES * std::mem::size_of::<ClockVertex>()) as u64,
@@ -259,8 +260,6 @@ impl App {
 
         self.rerecord_scheme_if_needed(vertex_count, bg_color);
 
-        let ctx = self.ctx.as_ref().unwrap();
-        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
         let upload = self.upload_scheme.as_mut().unwrap();
         self.vertex_deposit
             .unwrap()

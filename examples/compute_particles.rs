@@ -73,6 +73,8 @@ struct RenderState {
     _retained_pool: RetainedPool,
     particle_buffer: Buffer,
     params_buffer: Buffer,
+    upload_scheme: Scheme,
+    params_deposit: DepositTransaction,
     frame_count: u32,
     start_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -200,6 +202,13 @@ impl RenderState {
             &scene_rt,
         )?;
 
+        let mut upload_scheme = Scheme::new(&ctx);
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &params_buffer,
+            std::mem::size_of::<SimParams>() as u64,
+        )?;
+
         println!("Created compute particles example with {NUM_PARTICLES} particles (Scheme + Present)");
         println!("Press Escape or close window to exit");
 
@@ -217,6 +226,8 @@ impl RenderState {
             _retained_pool: retained_pool,
             particle_buffer,
             params_buffer,
+            upload_scheme,
+            params_deposit,
             frame_count: 0,
             start_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
