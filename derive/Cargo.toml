@@ -1,9 +1,15 @@
 [package]
 name = "goldy_derive"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Derive macros for goldy (LayoutCheckable, etc.)"
+description = "Derive macros for goldy (LayoutCheckable, StructuredBufferElement, etc.)"
+repository = "https://github.com/koubaa/goldy"
+homepage = "https://koubaa.github.io/goldy/"
+documentation = "https://docs.rs/goldy_derive"
+readme = "README.md"
+keywords = ["gpu", "graphics", "derive", "proc-macro"]
+categories = ["graphics"]
 
 [lib]
 proc-macro = true

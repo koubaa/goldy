@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-goldy = "0.1"
+goldy = "0.2"
 ```
 
 Or with cargo:
@@ -35,7 +35,7 @@ To build with only specific backends:
 
 ```toml
 [dependencies]
-goldy = { version = "0.1", default-features = false, features = ["vulkan"] }
+goldy = { version = "0.2", default-features = false, features = ["vulkan"] }
 ```
 
 ## Shader Toolchain

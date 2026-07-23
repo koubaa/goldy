@@ -1,6 +1,6 @@
 ## Compatibility
 
-Legacy compatibility is not relevant before the 0.2 release. Make breaking changes as required for clean code and update all clients locally in the workspace.
+Within 0.2.x, prefer additive changes and document breakages in CHANGELOG. Major API shifts belong in a new minor (0.3) until 1.0.
 
 ## Design considerations
 

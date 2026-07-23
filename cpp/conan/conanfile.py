@@ -6,7 +6,7 @@ import os
 
 class GoldyConan(ConanFile):
     name = "goldy"
-    version = "0.1.0"
+    version = "0.2.0"
     license = "MIT"
     author = "Goldy Contributors"
     url = "https://github.com/koubaa/goldy"
@@ -32,20 +32,20 @@ class GoldyConan(ConanFile):
     # Pre-built binary URLs and SHA256 hashes per platform
     _binary_info = {
         ("Windows", "x86_64"): {
-            "url": "https://github.com/koubaa/goldy/releases/download/v0.1.0/goldy_ffi-windows-x64.zip",
-            "sha256": "7abd86b278756c8c73171ef2df4f248667e0fbcaab5f23dc2521ca569bead7a9",
+            "url": "https://github.com/koubaa/goldy/releases/download/v0.2.0/goldy_ffi-windows-x64.zip",
+            "sha256": "UPDATE_AFTER_GITHUB_RELEASE",
         },
         ("Linux", "x86_64"): {
-            "url": "https://github.com/koubaa/goldy/releases/download/v0.1.0/goldy_ffi-linux-x64.tar.gz",
-            "sha256": "ccbc4152b4867c3bc5261ae56a046b087d76bf51063424799365711d52f49c01",
+            "url": "https://github.com/koubaa/goldy/releases/download/v0.2.0/goldy_ffi-linux-x64.tar.gz",
+            "sha256": "UPDATE_AFTER_GITHUB_RELEASE",
         },
         ("Macos", "x86_64"): {
-            "url": "https://github.com/koubaa/goldy/releases/download/v0.1.0/goldy_ffi-macos-x64.tar.gz",
-            "sha256": "632a12c2daf6cceb2cb4b5306e049abd613f6a309d62a329421acaa34070d7ce",
+            "url": "https://github.com/koubaa/goldy/releases/download/v0.2.0/goldy_ffi-macos-x64.tar.gz",
+            "sha256": "UPDATE_AFTER_GITHUB_RELEASE",
         },
         ("Macos", "armv8"): {
-            "url": "https://github.com/koubaa/goldy/releases/download/v0.1.0/goldy_ffi-macos-arm64.tar.gz",
-            "sha256": "53bdf0a288f39f6044d18851d9c41afdab35260929f64665cacac0630003aa34",
+            "url": "https://github.com/koubaa/goldy/releases/download/v0.2.0/goldy_ffi-macos-arm64.tar.gz",
+            "sha256": "UPDATE_AFTER_GITHUB_RELEASE",
         },
     }
     

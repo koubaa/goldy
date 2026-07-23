@@ -21,7 +21,7 @@ vcpkg install goldy
 ```bash
 # conanfile.txt
 [requires]
-goldy/0.1.0
+goldy/0.2.0
 ```
 
 ### Building from Source

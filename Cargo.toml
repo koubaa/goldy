@@ -4,21 +4,42 @@ resolver = "2"
 
 [package]
 name = "goldy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Goldy - Modern Graphics Library"
+description = "Fondaco Machine GPU runtime for Rust (Vulkan, DX12, Metal)"
 repository = "https://github.com/koubaa/goldy"
+homepage = "https://koubaa.github.io/goldy/"
+documentation = "https://docs.rs/goldy"
+readme = "README.md"
 keywords = ["gpu", "graphics", "vulkan", "rendering"]
 categories = ["graphics", "rendering"]
 autoexamples = false
+exclude = [
+    ".cursor/",
+    ".github/",
+    "cpp/",
+    "derive/",
+    "docker/",
+    "docs/",
+    "dotnet/",
+    "ffi/",
+    "ffi-client/",
+    "python/",
+    "scripts/",
+    "AGENTS.md",
+    "DEBUGGING.md",
+    "PACKAGING.md",
+    "RELEASING.md",
+    "run_all_examples.sh",
+]
 
 # Allow unexpected_cfgs for objc crate's deprecated cargo-clippy cfg checks
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }
 
 [dependencies]
-goldy_derive = { version = "0.1.0", path = "derive" }
+goldy_derive = { version = "0.2.0", path = "derive" }
 
 # Vulkan bindings (native only)
 ash = { version = "0.38", optional = true }

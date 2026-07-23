@@ -108,11 +108,11 @@ vcpkg install goldy
 ```bash
 # Add to your conanfile.txt
 [requires]
-goldy/0.1.0
+goldy/0.2.0
 
 # Or conanfile.py
 def requirements(self):
-    self.requires("goldy/0.1.0")
+    self.requires("goldy/0.2.0")
 ```
 
 ### Manual Build
