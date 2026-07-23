@@ -107,7 +107,10 @@ static const uint GOLDY_FRAME_TABLE_ROW_STRIDE = 512;
 /// occur when multiple command buffers are in flight simultaneously.
 public uint goldy_frame_table_index(uint dispatch_base, uint slot_k, uint selector_slot, uint table_slot)
 {
-#if defined(__METAL__)
+#if defined(__WGSL__)
+    // WebGPU uses fixed bind-group bindings and does not call this function.
+    return 0;
+#elif defined(__METAL__)
     return goldy_scattered<uint>(table_slot)[dispatch_base + slot_k];
 #else
     uint sel = goldy_scattered<uint>(selector_slot)[0];

@@ -33,6 +33,10 @@ pub(crate) mod mock;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) mod metal;
 
+// Portable WebGPU backend (compute-only prototype).
+#[cfg(feature = "webgpu")]
+pub(crate) mod webgpu;
+
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
     BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
@@ -1592,7 +1596,7 @@ pub(crate) trait GpuBackend:
 /// Create the default backend for the current platform.
 ///
 /// The backend can be overridden at runtime by setting the `GOLDY_BACKEND`
-/// environment variable to one of: `vulkan`, `dx12`, `metal`.
+/// environment variable to one of: `vulkan`, `dx12`, `metal`, `webgpu`.
 ///
 /// Without the override, the platform default is used:
 /// - macOS: Metal
@@ -1605,8 +1609,9 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
             "vulkan" | "vk" => BackendType::Vulkan,
             "dx12" | "d3d12" | "directx" => BackendType::Dx12,
             "metal" | "mtl" => BackendType::Metal,
+            "webgpu" | "wgpu" => BackendType::WebGpu,
             other => anyhow::bail!(
-                "Unknown GOLDY_BACKEND value '{}'. Valid options: vulkan, dx12, metal",
+                "Unknown GOLDY_BACKEND value '{}'. Valid options: vulkan, dx12, metal, webgpu",
                 other
             ),
         };
@@ -1693,6 +1698,11 @@ pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBac
         BackendType::Metal => {
             tracing::info!("Creating Metal backend");
             Ok(Box::new(metal::MetalBackend::new()?))
+        }
+        #[cfg(feature = "webgpu")]
+        BackendType::WebGpu => {
+            tracing::info!("Creating WebGPU backend (compute-only)");
+            Ok(Box::new(webgpu::WebGpuBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }
