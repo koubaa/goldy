@@ -46,6 +46,7 @@ pub enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_VULKAN = 0,
     GOLDY_BACKEND_TYPE_METAL = 1,
     GOLDY_BACKEND_TYPE_DX12 = 2,
+    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
 }
 
 #[repr(C)]
