@@ -2995,7 +2995,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.submit().unwrap();
         scheme.submit().unwrap();
 
-        let backend = device.inner.backend.lock().unwrap();
         device.with_mock_backend(|mock| {
             assert_eq!(
                 mock.wait_until_count, 0,
@@ -3020,7 +3019,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             scheme.replay_stats(),
             ReplayStats {
                 records: 1,
-                resubmit_hits: 1
+                resubmit_hits: 1,
+                topology_records: 0,
             }
         );
         #[cfg(feature = "metal")]
@@ -3043,7 +3043,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             scheme.replay_stats(),
             ReplayStats {
                 records: 2,
-                resubmit_hits: 2
+                resubmit_hits: 2,
+                topology_records: 0,
             }
         );
         #[cfg(feature = "metal")]
