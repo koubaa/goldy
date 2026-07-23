@@ -86,7 +86,7 @@ Goldy.nupkg
 Update the version in `dotnet/Goldy/Goldy.csproj`:
 
 ```xml
-<Version>0.1.0</Version>
+<Version>0.2.0</Version>
 ```
 
 Follow [Semantic Versioning](https://semver.org/):

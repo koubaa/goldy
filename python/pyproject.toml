@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "goldy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python bindings for the Goldy GPU library"
 readme = "PYPI_README.md"
 license = { text = "MIT" }

@@ -12,7 +12,7 @@
 
     <!-- Package info -->
     <PackageId>Goldy</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>koubaa</Authors>
     <Description>Modern GPU library for .NET - Vulkan, DX12, Metal. High-performance graphics with Slang shaders.</Description>
     <PackageTags>gpu;graphics;vulkan;rendering;dx12;metal;shader;slang</PackageTags>

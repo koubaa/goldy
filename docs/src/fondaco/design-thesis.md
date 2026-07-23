@@ -128,7 +128,7 @@ See also [Motivation](../design/motivation.md).
 
 ## Roadmap posture
 
-**Shipped in 0.1.x**: schemes, exchanges, compute-to-surface, growable buffers, retained replay, language bindings, Rust examples.
+**Shipped in 0.2.x**: schemes, exchanges, compute-to-surface, growable buffers, retained replay, language bindings, Rust examples.
 
 **Designed**: yielding scripts, scheme fusion / splitting, defragmentation, compute algorithm libraries (scan, sort, BLAS-class).
 

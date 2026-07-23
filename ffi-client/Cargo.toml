@@ -1,12 +1,13 @@
 [package]
 name = "goldy-ffi-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Rust RAII client for the Goldy C ABI (libgoldy_ffi)"
 repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "ffi"]
 build = "build.rs"
+publish = false
 
 [dependencies]
 bytemuck = { version = "1.21", features = ["derive"] }

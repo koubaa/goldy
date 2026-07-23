@@ -1,6 +1,6 @@
 # Goldy Runtime Mapping
 
-**Status**: Implementation note for Goldy 0.1.x. Claims use the labels in [Terminology](./terminology.md).
+**Status**: Implementation note for Goldy 0.2.x. Claims use the labels in [Terminology](./terminology.md).
 
 How Goldy realizes the Fondaco machine from [Machine Specification](./specification.md). Goldy is *a* runtime, not the machine. Where this chapter disagrees with the spec, the spec governs.
 

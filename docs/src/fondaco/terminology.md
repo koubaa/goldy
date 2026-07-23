@@ -12,7 +12,7 @@ Vocabulary and status labels used throughout the Fondaco chapters and the rest o
 
 | Label | Meaning |
 |-------|---------|
-| **Shipped** | Available in the public Goldy crate today (0.1.x) |
+| **Shipped** | Available in the public Goldy crate today (0.2.x) |
 | **Designed** | Specified and intended; not yet implemented, or only partially implemented |
 | **Experimental** | Behind a feature flag, alpha binding, or unstable API |
 | **Speculative** | Research or exploration; not committed to the roadmap |

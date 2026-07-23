@@ -13,7 +13,7 @@ dotnet add package Goldy
 Or add to your `.csproj` directly:
 
 ```xml
-<PackageReference Include="Goldy" Version="0.1.*" />
+<PackageReference Include="Goldy" Version="0.2.*" />
 ```
 
 The NuGet package bundles native Goldy + Slang libraries for all supported platforms — no separate native installation is needed.

@@ -6,9 +6,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](docs/src/fondaco/specification.md) on modern hardware. Merchants describe **parcels** (data) and **schemes** (computation with ownership-derived ordering); Goldy manages the physical medium, schedules dispatches, and mediates all foreign interaction through **exchanges**.
+**Goldy** is a Rust GPU library that realizes the [Fondaco Machine](https://koubaa.github.io/goldy/fondaco/specification.html) on modern hardware. Merchants describe **parcels** (data) and **schemes** (computation with ownership-derived ordering); Goldy manages the physical medium, schedules dispatches, and mediates all foreign interaction through **exchanges**.
 
-> **Maturity**: Goldy **0.1.x** is pre-0.2. Breaking API changes are expected. Python bindings are alpha; Rust is the primary surface.
+> **Maturity**: Goldy **0.2** is the Fondaco Machine public API. SemVer applies within 0.2.x; expect breaking changes at 0.3. Python bindings remain alpha; Rust is the primary surface.
 
 ## Why Fondaco?
 
@@ -30,10 +30,10 @@ Goldy makes that model practical on 2020+ GPUs:
 - **Typed bindless shaders** — Slang with `[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]` and `goldy_exp` access patterns (`Scattered`, `Broadcast`, `Interpolated`, …)
 - **Compute-to-surface** — compute shaders write swapchain drawables directly; no raster pass required
 - **Native backends** — Vulkan 1.4+ (Windows, Linux), DX12 (Windows), Metal Tier 2+ (macOS); no MoltenVK
-- **Multi-language bindings** — Rust (primary), [Python](https://pypi.org/project/goldy/), [.NET](dotnet/Goldy/README.md), [C++](cpp/README.md)
+- **Multi-language bindings** — Rust (primary), [Python](https://pypi.org/project/goldy/), [.NET](https://github.com/koubaa/goldy/tree/main/dotnet/Goldy), [C++](https://github.com/koubaa/goldy/tree/main/cpp)
 - **21 Rust examples** — triangle, compute particles, Game of Life, plasma, multi-window, and more
 
-Not yet shipped (see [runtime mapping](docs/src/fondaco/goldy-runtime.md) for status): yielding scripts, `$yield` petitions, scheme fusion/splitting, defragmentation, WASI host integration.
+Not yet shipped (see [runtime mapping](https://koubaa.github.io/goldy/fondaco/goldy-runtime.html) for status): yielding scripts, `$yield` petitions, scheme fusion/splitting, defragmentation, WASI host integration.
 
 ## Quick example: compute-to-surface
 
@@ -94,18 +94,18 @@ Merchant (schemes + parcels)
   Exchanges (present, readback)
 ```
 
-Goldy abstracts **where bytes live** (Layer A: medium) but exposes **what access costs** (Layer B: coalescing, occupancy, residency). See the [design thesis](docs/src/fondaco/design-thesis.md).
+Goldy abstracts **where bytes live** (Layer A: medium) but exposes **what access costs** (Layer B: coalescing, occupancy, residency). See the [design thesis](https://koubaa.github.io/goldy/fondaco/design-thesis.html).
 
 ## Installation
 
 ```toml
 [dependencies]
-goldy = "0.1"
+goldy = "0.2"
 ```
 
 Slang is **embedded at build time** and extracted at runtime — application developers do not install Slang separately. Set `GOLDY_SLANG_PATH` only to override. Maintainer bump procedure: `slang/manifest.json` + `slang/download.sh`.
 
-Release packaging: [PACKAGING.md](PACKAGING.md). Shader debugging: [DEBUGGING.md](DEBUGGING.md).
+Release packaging and shader debugging notes live in the [GitHub repo](https://github.com/koubaa/goldy).
 
 ## Platforms
 
@@ -117,13 +117,13 @@ Release packaging: [PACKAGING.md](PACKAGING.md). Shader debugging: [DEBUGGING.md
 
 Override backend: `GOLDY_BACKEND=vulkan|dx12|metal`.
 
-Minimum hardware: Vulkan 1.4+, DX12 with Enhanced Barriers, Metal Argument Buffers Tier 2+. See [Target Hardware](docs/src/design/hardware.md).
+Minimum hardware: Vulkan 1.4+, DX12 with Enhanced Barriers, Metal Argument Buffers Tier 2+. See [Target Hardware](https://koubaa.github.io/goldy/design/hardware.html).
 
 ## Documentation
 
-- 📖 **[Documentation](docs/src/introduction.md)** — tutorials, programming model, backends, bindings
-- 📖 **[Fondaco Machine spec](docs/src/fondaco/specification.md)** — normative abstract machine
-- 📖 **[Goldy runtime mapping](docs/src/fondaco/goldy-runtime.md)** — what Goldy implements today vs designs in progress
+- 📖 **[Documentation](https://koubaa.github.io/goldy/)** — tutorials, programming model, backends, bindings
+- 📖 **[Fondaco Machine spec](https://koubaa.github.io/goldy/fondaco/specification.html)** — normative abstract machine
+- 📖 **[Goldy runtime mapping](https://koubaa.github.io/goldy/fondaco/goldy-runtime.html)** — what Goldy implements today vs designs in progress
 - 📖 **[API reference](https://docs.rs/goldy)** — Rust docs
 
 ## Development

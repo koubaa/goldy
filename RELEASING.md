@@ -56,8 +56,8 @@ cargo publish -p goldy_derive
 # 2. Core library (depends on goldy_derive on crates.io)
 cargo publish -p goldy
 
-# 3. FFI library (if needed)
-cargo publish -p goldy-ffi
+# 3. FFI library — not published to crates.io (`publish = false`);
+#    distribute via GitHub release / vcpkg / Conan / language bindings
 ```
 
 The root `Cargo.toml` lists `goldy_derive` with both `path` and `version` so local builds use the workspace crate and `cargo publish` resolves the dependency from the registry.
@@ -172,7 +172,7 @@ Conan Center requires a **manual PR** to [conan-center-index](https://github.com
 4. **Edit `recipes/goldy/config.yml`** - add new version:
    ```yaml
    versions:
-     "X.Y.Z":
+     "0.2.0":
        folder: all
      "0.1.0":
        folder: all
@@ -244,13 +244,19 @@ When releasing a new version, update these files:
 
 | File | Field |
 |------|-------|
-| `Cargo.toml` | `version` |
-| `python/Cargo.toml` | `version` |
+| `Cargo.toml` | `version` (+ `goldy_derive` dependency version) |
+| `derive/Cargo.toml` | `version` (must match goldy) |
+| `ffi/Cargo.toml` | `version` (`publish = false`) |
+| `ffi-client/Cargo.toml` | `version` (`publish = false`) |
+| `python/Cargo.toml` | `version` (`publish = false`) |
 | `python/pyproject.toml` | `version` |
+| `python/python/goldy/__init__.py` | `__version__` |
 | `cpp/vcpkg/vcpkg.json` | `version` |
-| `cpp/conan/conanfile.py` | `version` |
+| `cpp/conan/conanfile.py` | `version` (+ release asset URLs/hashes after GitHub release) |
 | `dotnet/Goldy/Goldy.csproj` | `<Version>` |
 | `CHANGELOG.md` | Add release notes |
+
+crates.io publish order: **`goldy_derive` first**, then **`goldy`**. Packaging `goldy` resolves `goldy_derive` from the registry, so the derive crate must already be live.
 
 ---
 
