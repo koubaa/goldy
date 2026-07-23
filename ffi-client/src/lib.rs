@@ -46,8 +46,7 @@ pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
     NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
-    ResourceCategory, ResourceHandle, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 /// Built-in shader sources (`shader::builtins`, matching native Goldy).

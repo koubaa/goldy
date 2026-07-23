@@ -296,7 +296,9 @@ impl Parcel {
     }
 
     /// Resource descriptor index for how this parcel will be accessed in the current dispatch.
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+    ///
+    /// Crate-internal: the public binding path is [`Self::handle`] / scheme `with_parcel`.
+    pub(crate) fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => b.resource_index(access),
             ParcelBacking::BufferRange { view, .. } => view.resource_index(access),
@@ -304,7 +306,10 @@ impl Parcel {
         }
     }
 
-    /// Typed resource descriptor handle for validation and dispatch wiring.
+    /// Opaque typed resource descriptor identity for validation and retention checks.
+    ///
+    /// The raw heap index behind this handle is crate-private; compare handles for
+    /// equality rather than extracting slots.
     pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => b.handle(access),
@@ -880,7 +885,7 @@ impl Texture {
         self.parcel.texture_handle().expect("texture parcel")
     }
 
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+    pub(crate) fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         self.parcel.resource_index(access)
     }
 

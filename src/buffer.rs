@@ -387,7 +387,7 @@ impl Allocation {
     }
 
     /// Resize the buffer in place, preserving contents in `[0..min(old, new))` and zero-initialising
-    /// any newly exposed bytes. [`Self::resource_index`] values and the internal resource handle stay stable.
+    /// any newly exposed bytes. Bindless slot indices and the internal resource handle stay stable.
     pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
         if new_size == self.size {
             return Ok(());
@@ -444,7 +444,8 @@ impl Allocation {
     /// Resource descriptor index for how this buffer will be accessed in the current dispatch.
     ///
     /// Returns `None` for invalid access/kind combinations (e.g. write on `Broadcast`).
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+    /// Crate-internal: the public binding path is [`Self::handle`] / scheme `with_parcel`.
+    pub(crate) fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match (self.access, access) {
             (BufferKind::Broadcast, ResourceAccess::Read) => self.bindless_cbv,
             (BufferKind::Broadcast, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
@@ -453,7 +454,7 @@ impl Allocation {
         }
     }
 
-    /// Typed resource descriptor handle for validation and dispatch wiring.
+    /// Opaque typed resource descriptor identity for validation and retention checks.
     pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         self.resource_index(access)
             .map(|i| ResourceHandle::new(ResourceCategory::from(self.access), i))
@@ -563,14 +564,16 @@ pub struct BufferView {
 
 impl BufferView {
     /// Resource descriptor index for how this view will be accessed in the current dispatch.
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+    ///
+    /// Crate-internal: the public binding path is [`Self::handle`] / scheme `with_parcel`.
+    pub(crate) fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         match access {
             ResourceAccess::Read => self.bindless_srv,
             ResourceAccess::Write | ResourceAccess::ReadWrite => self.bindless_uav,
         }
     }
 
-    /// Typed resource descriptor handle for validation and dispatch wiring.
+    /// Opaque typed resource descriptor identity for validation and retention checks.
     ///
     /// Views are always created on top of `BufferKind::Scattered` backing storage
     /// (the only access pattern for which sub-ranges make sense), so the handle

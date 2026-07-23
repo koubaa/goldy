@@ -1,25 +1,23 @@
 # Bindless by Default
 
-Goldy uses a **typed resource model** built on bindless descriptor heaps as substrate: there are no descriptor sets, no binding tables, and no manual layout declarations. Every GPU resource — buffers, textures, samplers — is identified at dispatch time by a small integer index packed into push constants (Vulkan/DX12) or argument buffers (Metal).
+Goldy uses a **typed resource model** built on bindless descriptor heaps as substrate: there are no descriptor sets, no binding tables, and no manual layout declarations. Every GPU resource — buffers, textures, samplers — is registered in a per-category heap, and scheme dispatches resolve parcels to those slots internally.
 
-> **Terminology:** "Bindless" describes the internal descriptor-heap plumbing, not the public Rust/C API. Client code uses [`ResourceAccess`](../../resources/buffers.md), [`ResourceHandle`](../types), and `resource_index()` / `handle()` — not bindless-specific method names.
+> **Terminology:** "Bindless" describes the internal descriptor-heap plumbing, not the public Rust/C API. Client code binds with `Scheme::with_parcel` (or the equivalent render-pass builders). Raw heap indices are crate-private; [`ResourceHandle`](../types) is an opaque identity for equality / retention checks.
 
 ## How It Works
 
 Traditional GPU APIs require you to declare descriptor set layouts, allocate descriptor pools, update descriptor sets, and bind them before each draw or dispatch. Goldy eliminates all of this. Instead:
 
 1. Resources are registered in per-category descriptor heaps when created.
-2. Each resource gets a `ResourceHandle` — a `(category, index)` pair — via `handle(ResourceAccess)`.
-3. At dispatch time, you pass these handles as ordinary arguments. The GPU shader resolves them to live buffer/texture/sampler handles through the `goldy_exp` access functions.
+2. Schemes bind parcels (and samplers / present leases) by identity + access; the runtime resolves the correct descriptor slot.
+3. At dispatch time, the backend packs those slots into the push-constant / frame-table ABI. Shaders resolve them through the `goldy_exp` access functions.
 
 ```
-CPU side:                         GPU side:
-                                  
-retained_pool.acquire_buffer_with_data(...) goldy_scattered<T>(slot)
-  → ResourceHandle {                → descriptor_heap[slot]
-      category: Scattered,            → RWStructuredBuffer<T>
-      index: 3,
-    }
+CPU side:                              GPU side:
+
+scheme.node(...).with_parcel(&p, Write)   goldy_scattered<T>(slot)
+  → internal ResourceHandle               → descriptor_heap[slot]
+       (opaque identity)                    → RWStructuredBuffer<T>
 ```
 
 ## ResourceCategory
@@ -38,21 +36,20 @@ Goldy's descriptor heaps are organized into five pools, one per access pattern. 
 
 ## ResourceHandle and ResourceAccess
 
-`ResourceAccess` (`Read`, `Write`, `ReadWrite`) selects which descriptor pool entry to use at dispatch time — SRV vs UAV, CBV vs storage, sampled vs storage image. This is distinct from `NodeAccess`, which the scheme uses for scheduling hazards (`Read`, `Write`, `ReadWrite`).
+`ResourceAccess` (`Read`, `Write`, `ReadWrite`) selects which descriptor pool entry to use at dispatch time — SRV vs UAV, CBV vs storage, sampled vs storage image. This is distinct from `NodeAccess`, which the scheme uses for scheduling hazards (`Read`, `Write`, `ReadWrite`, `Overwrite`).
 
-`ResourceHandle` carries both the raw index and the resource category:
+`ResourceHandle` is an opaque typed identity returned by `handle(ResourceAccess)`. Callers may compare handles (for example to detect that a retained scheme must be re-recorded after a reallocation) but must not extract a raw heap index — that contract is crate-private so backends can reinterpret slots.
 
 ```rust
-use goldy::{BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
+use goldy::{BufferKind, ResourceAccess};
 
 let parcel = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
-let index = parcel.resource_index(ResourceAccess::Write).unwrap();
-let handle = ResourceHandle::new(ResourceCategory::Scattered, index);
-
-assert_eq!(handle.category(), ResourceCategory::Scattered);
+let handle = parcel.handle(ResourceAccess::Write).unwrap();
+let again = parcel.handle(ResourceAccess::Write).unwrap();
+assert_eq!(handle, again);
 ```
 
-When you bind handles at dispatch time, Goldy can validate that the handle's category matches what the shader expects in that slot — a `Broadcast` handle bound to a slot the shader reads through `goldy_scattered` is caught as a type error rather than silently producing garbage.
+When you bind parcels at dispatch time, Goldy validates that the resolved handle's category matches what the shader expects in that slot — a `Broadcast` handle bound to a slot the shader reads through `goldy_scattered` is caught as a type error rather than silently producing garbage.
 
 ## Typed Resource Parameters
 

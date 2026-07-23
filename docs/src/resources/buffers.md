@@ -162,16 +162,13 @@ buffer.clear(&device, offset, size)?;
 
 ## Bindless Descriptors
 
-Every buffer with `Scattered` or `Broadcast` access is registered in the global bindless descriptor set. Retrieve the index to pass to shaders:
+Every buffer with `Scattered` or `Broadcast` access is registered in the global bindless descriptor set. Schemes bind parcels via `with_parcel`; the opaque [`ResourceHandle`](../types) is available for identity / retention checks:
 
 ```rust
-// Typed handle (preferred) — carries ResourceCategory for validation
+// Opaque typed identity — equality / hashing only; no public heap index
 let handle = buffer.handle(ResourceAccess::Read).unwrap();
 
-// Raw index
-let index = buffer.resource_index(ResourceAccess::Read).unwrap();
-
-// Read-only SRV index (separate from UAV on DX12; same on Vulkan/Metal)
+// Read-only SRV vs write UAV are distinct handles when both exist
 let srv_handle = buffer.handle(ResourceAccess::Read).unwrap();
 ```
 
@@ -191,7 +188,7 @@ let view = buffer.create_typed_view::<[f32; 4]>(0, 256)?;
 
 ### Using Views
 
-Views implement `BufferSource`, so they work anywhere a `Buffer` does — `set_vertex_buffer`, `set_index_buffer`, `write_data`, `clear`, and bindless binding:
+Views implement `BufferSource`, so they work anywhere a `Buffer` does — `set_vertex_buffer`, `set_index_buffer`, `write_data`, `clear`, and scheme parcel binding:
 
 ```rust
 let view_handle = view.handle(ResourceAccess::Read).unwrap();
