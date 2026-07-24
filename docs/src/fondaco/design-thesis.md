@@ -4,13 +4,13 @@ Why Goldy exists, and how it differs from a conventional GPU library. Machine se
 
 ## Executive summary
 
-**Goldy** is a GPU runtime for the **Fondaco Machine** — merchants are sovereign over parcels (data) and express computation as **schemes** (dispatches + ownership-derived precedences). It targets modern native APIs (Vulkan 1.4+, DX12, Metal Tier 2+) with **no translation layers**, a **single shader language** (Slang), and a **scheme-first** API that sheds descriptor sets, explicit barriers, and swapchain ceremony.
+**Goldy** is a GPU runtime for the **Fondaco Machine** — programs own parcels (data) and express computation as **schemes** (dispatches + ownership-derived precedences). It targets modern native APIs (Vulkan 1.4+, DX12, Metal Tier 2+) with **no translation layers**, a **single shader language** (Slang), and a **scheme-first** API that sheds descriptor sets, explicit barriers, and swapchain ceremony.
 
 ## The Fondaco model on GPU
 
 Traditional GPU programming exposes descriptor set layouts, image layout transitions, render pass objects, pipeline layouts, and raw swapchain images with semaphores.
 
-Fondaco instead gives the merchant:
+Fondaco instead gives the program:
 
 | Concept | Role |
 |---------|------|
@@ -19,22 +19,7 @@ Fondaco instead gives the merchant:
 | **Exchange** | Mediated foreign I/O (present, readback) via linear claims |
 | **Gate** | Where the runtime may relocate, reclaim, or insert work |
 
-Goldy's public API (`Scheme`, `Parcel`, `SurfaceExchange`, `MemoryExchange`) implements this model. Internal bindless descriptor heaps are **not** part of the merchant ABI.
-
-## Layer A vs Layer B
-
-From Ralph Levien's HAL post-mortem and Goldy's load-bearing invariant ([runtime mapping §12](./goldy-runtime.md#12-abstract-the-medium-expose-cost)):
-
-> Classic HAL failed by abstracting behavior **and** cost. Modern approaches succeed by abstracting meaning and rules while exposing cost and reality.
-
-| Layer | Abstract (Goldy) | Expose (Goldy) |
-|-------|------------------|----------------|
-| **A — Medium** | Parcel identity, warehouse, residency plumbing | — |
-| **B — Cost** | — | Access patterns, occupancy, resize cost, readback path |
-
-**Layer A** examples Goldy hides: descriptor slot virtualization on reslot, transient aliasing, growable buffers with stable handles.
-
-**Layer B** examples Goldy keeps visible: `Scattered` vs `Broadcast` vs `Interpolated`, `buffer_resize_cost`, `has_zero_copy_storage_readback`, residency model per backend.
+Goldy's public API (`Scheme`, `Parcel`, `SurfaceExchange`, `MemoryExchange`) implements this model.
 
 ## Access patterns, not graphics categories
 

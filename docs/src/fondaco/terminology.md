@@ -37,19 +37,6 @@ Do not describe **Designed**, **Experimental**, or **Speculative** capabilities 
 | **Warehouse** | Runtime-imposed bound on the total extent of parcels the merchant may hold |
 | **Petition** | Structured service request filed at a yield point |
 
-### Superseded terms
-
-| Old term | Current term |
-|----------|--------------|
-| Diwan | Fondaco |
-| Program (sovereign) | Merchant |
-| Property | *(removed — parcels are the primitive)* |
-| Territory | Warehouse |
-| Boundary (machine concept) | Gate |
-| Encumbrance | *(removed — unsettled exchange claims are ledger constraints)* |
-
-Goldy's `Context::boundary_crossed` is an API name, not the machine term. The machine term is **gate**.
-
 ## Goldy API map
 
 | Fondaco term | Goldy type / concept | Notes |
@@ -72,15 +59,6 @@ Goldy's `Context::boundary_crossed` is an API name, not the machine term. The ma
 | **GraphIR** | `task_graph` | Internal scheme representation |
 | **Wave / partition analysis** | `task_graph::analysis` | Submission partitioning and transient coloring |
 | **Bindless heap** | Backends | Descriptor indexing; not public ABI |
-
-### Historical API names
-
-| Old term | Current term |
-|----------|--------------|
-| `TaskGraph` (public) | `Scheme` |
-| `ComputeGraph` | `Scheme` with compute nodes |
-| `Grant` (CPU readback) | `MemoryExchange` / `WithdrawTransaction` |
-| Raw bindless index as public API | Typed `Parcel` + scheme bindings |
 
 ## Reading order
 

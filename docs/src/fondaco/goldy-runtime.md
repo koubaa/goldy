@@ -62,14 +62,14 @@ Goldy does not preserve shader invocation identity across dispatch gates; logica
 
 ## 4. Parcels and bindless internals
 
-**Shipped.** A Goldy parcel is a **stable handle**. Merchants never author raw `(category, index)` bindless slots.
+**Shipped.** A Goldy parcel is a **stable handle**. Programs never author raw `(category, index)` bindless slots.
 
 Bindless descriptor indexing is **backend-internal**:
 
 - **Rust**: Public types are `Parcel`, `Buffer`, `Texture`, `Scheme`, exchanges. Bindless resolution happens at scheme record / submit.
 - **Slang**: Typed parameters (`Scattered<T>`, `BufRO<T>`, …). `virtual_main` generates slot packing.
 
-Merchant-visible are access-pattern **categories** (Layer B): `Scattered`, `BufRO`, `Broadcast`, `Interpolated`, `DirectSpatial`, `Filter`. See [Parcels](../programming-model/parcels.md) and [Design Thesis](./design-thesis.md).
+Program-visible are access-pattern **categories** (Layer B): `Scattered`, `BufRO`, `Broadcast`, `Interpolated`, `DirectSpatial`, `Filter`. See [Parcels](../programming-model/parcels.md) and [Design Thesis](./design-thesis.md).
 
 ### Parcel identity and reslot
 
@@ -91,7 +91,7 @@ Goldy distinguishes three quantities:
 
 | Quantity | Owner | Meaning |
 |----------|-------|---------|
-| **Logical warehouse** | Merchant + runtime | Sum of parcel extents (Fondaco warehouse) |
+| **Logical warehouse** | Program + runtime | Sum of parcel extents (Fondaco warehouse) |
 | **Committed** | Runtime | Bytes handed out (commit charge) |
 | **Resident** | OS | Bytes in the fast tier now |
 
@@ -114,7 +114,7 @@ claim.consume()?; // present
 
 - Binding does not acquire a drawable; acquire runs at submit when the partition needs it
 - `Claim::consume` is terminal
-- The merchant never passes raw GPU addresses to the compositor
+- The program never passes raw GPU addresses to the compositor
 
 **Shipped** CPU readback: `MemoryExchange` with `WithdrawTransaction` / `WithdrawClaim`. See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
@@ -166,7 +166,7 @@ Pipeline depth (in-flight submissions) is **client pacing** — surface depth, `
 
 **Designed**: `$yield` petition descriptors, promise / continuation bindless category, paged-parcel fault servicing.
 
-Portable merchants depend on typed access categories and scheme structure, not on bindless heap layout.
+Portable programs depend on typed access categories and scheme structure, not on bindless heap layout.
 
 ## 11. Where Goldy constrains the spec
 
@@ -200,13 +200,13 @@ Capability queries report backend, residency model, resize cost, zero-copy readb
 | Dispatch | Kernel launch, draw / dispatch command |
 | Script | Slang shader |
 | Parcel | `Buffer` / `Texture` handle |
-| Merchant | Client of the runtime |
+| Merchant | Program |
 | Exchange | `SurfaceExchange`, `MemoryExchange` |
 | Claim (exchange) | `Claim`, `WithdrawClaim` |
 | Gate | Fence epoch, `boundary_crossed` |
 | Warehouse | `BudgetPolicy`, `VramAllocator` |
 | Ledger | Cross-submit sync analysis |
 
-Analogues are not equivalences. A scheme is the merchant's computation, not merely a scheduling artifact. An exchange preserves merchant sovereignty over parcels; a raw swapchain handle does not.
+Analogues are not equivalences. A scheme is the program's computation, not merely a scheduling artifact. An exchange preserves program sovereignty over parcels; a raw swapchain handle does not.
 
 Full vocabulary: [Terminology](./terminology.md).

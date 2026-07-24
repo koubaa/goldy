@@ -79,7 +79,7 @@ cargo run --features examples --example triangle --release
 ## Architecture
 
 ```
-Merchant (schemes + parcels)
+Program (schemes + parcels)
         │
         ▼
    Scheme / GraphIR  ←── wave & partition analysis, retention
