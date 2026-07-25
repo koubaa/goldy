@@ -248,6 +248,11 @@ name = "solid_cube"
 path = "examples/solid_cube.rs"
 required-features = ["examples"]
 
+[[example]]
+name = "frogger"
+path = "examples/frogger.rs"
+required-features = ["examples"]
+
 [[bin]]
 name = "update-screenshots"
 path = "tools/update_screenshots.rs"

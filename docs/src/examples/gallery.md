@@ -1,6 +1,6 @@
 # Examples Gallery
 
-Goldy ships with **21 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on shipped backends (Vulkan 1.4+, DX12, Metal Tier 2+). CUDA and WebGPU backends are in progress; Tenstorrent is planned.
+Goldy ships with **22 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on shipped backends (Vulkan 1.4+, DX12, Metal Tier 2+). CUDA and WebGPU backends are in progress; Tenstorrent is planned.
 
 ## Running Examples
 
@@ -63,6 +63,7 @@ Classic rendering techniques: depth testing, textures, instancing, and 3D projec
 | Example | What it demonstrates | Source |
 |---------|---------------------|--------|
 | **`digital_clock`** | 7-segment clock display. | [`digital_clock.rs`](https://github.com/koubaa/goldy/blob/main/examples/digital_clock.rs) |
+| **`frogger`** | Retro Frogger: CPU game loop, hop controls, cars/logs/homes; instanced colored quads via `MemoryExchange` deposit. | [`frogger.rs`](https://github.com/koubaa/goldy/blob/main/examples/frogger.rs) |
 | **`starfield`** | 3D starfield with depth. | [`starfield.rs`](https://github.com/koubaa/goldy/blob/main/examples/starfield.rs) |
 | **`particles`** | Rain/snow particle system. | [`particles.rs`](https://github.com/koubaa/goldy/blob/main/examples/particles.rs) |
 | **`multi_window`** | Multiple windows sharing one device. | [`multi_window.rs`](https://github.com/koubaa/goldy/blob/main/examples/multi_window.rs) |

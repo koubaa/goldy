@@ -12,7 +12,7 @@ pub fn render_pipeline_for_surface(
     surface: &SurfaceExchange,
     desc: RenderPipelineDesc,
 ) -> anyhow::Result<RenderPipeline> {
-    Ok(RenderPipeline::new(
+    RenderPipeline::new(
         device,
         shader,
         shader,
@@ -20,7 +20,7 @@ pub fn render_pipeline_for_surface(
             target_format: surface.format(),
             ..desc
         },
-    )?)
+    )
 }
 
 /// Run limit in seconds from `GOLDY_EXAMPLE_TIMEOUT` or `EXAMPLE_TIMEOUT`.
