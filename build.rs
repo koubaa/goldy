@@ -160,8 +160,7 @@ fn main() {
             manifest.version, platform_dir
         );
 
-        if let Err(e) =
-            download_slang_to_vendored(&out_bin_dir, platform_dir, &manifest.version, &platform_info.files)
+        if let Err(e) = download_slang_to_vendored(&out_bin_dir, platform_dir, &manifest.version, &platform_info.files)
         {
             println!("cargo:warning=Failed to download Slang: {}", e);
             println!("cargo:warning=Run: cd slang && ./download.sh");
