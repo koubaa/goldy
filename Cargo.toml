@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "python", "ffi", "ffi-client", "derive"]
+members = [".", "python", "ffi", "ffi-client", "derive", "shader_ir"]
 resolver = "2"
 
 [package]
@@ -20,6 +20,7 @@ exclude = [
     ".github/",
     "cpp/",
     "derive/",
+    "shader_ir/",
     "docker/",
     "docs/",
     "dotnet/",
@@ -40,6 +41,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-cl
 
 [dependencies]
 goldy_derive = { version = "0.2.0", path = "derive" }
+goldy_shader_ir = { version = "0.2.0", path = "shader_ir" }
 
 # Vulkan bindings (native only)
 ash = { version = "0.38", optional = true }
@@ -261,6 +263,10 @@ harness = false
 
 [[test]]
 name = "scheme_compute_integration"
+harness = false
+
+[[test]]
+name = "rust_compute_kernels"
 harness = false
 
 [[test]]

@@ -12,6 +12,7 @@
 
 - [Parcels](./programming-model/parcels.md)
 - [Virtual Entry Points](./programming-model/virtual-entry-points.md)
+- [Rust Compute Kernels](./programming-model/rust-kernels.md)
 - [Slang in One Source](./programming-model/slang.md)
 
 # Compute Workflows

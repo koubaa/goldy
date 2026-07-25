@@ -4,6 +4,10 @@
 //! Downloads Slang if vendored binaries are not present.
 //! Reads from slang/manifest.json for version and file lists.
 
+// Newer clippy editions flag mechanical format-arg inlining in this script;
+// keep the existing style stable across toolchains.
+#![allow(clippy::uninlined_format_args)]
+
 use std::env;
 use std::fs;
 use std::io;

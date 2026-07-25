@@ -1,0 +1,14 @@
+[package]
+name = "goldy_shader_ir"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Language-independent shader IR and KernelAbi for Goldy Rust→Slang frontends"
+repository = "https://github.com/koubaa/goldy"
+homepage = "https://koubaa.github.io/goldy/"
+documentation = "https://docs.rs/goldy_shader_ir"
+readme = "README.md"
+keywords = ["gpu", "graphics", "shader", "ir"]
+categories = ["graphics"]
+
+[dependencies]

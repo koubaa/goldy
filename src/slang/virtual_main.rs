@@ -40,6 +40,197 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
+use goldy_shader_ir::{
+    AccessKind, BuiltinMask, ElementType, KernelDef, KernelParam, ParamCategory, ScalarType, SourceMap,
+};
+
+// ---------------------------------------------------------------------------
+// Public API — structured KernelAbi bridge
+// ---------------------------------------------------------------------------
+
+/// Build an [`EntryDef`] for wrapper emission from structured [`KernelDef`] metadata.
+///
+/// The Rust frontend and raw Slang parser both converge here so native PushLayout /
+/// frame-table wrappers stay shared.
+pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
+    let mut params: Vec<ParamItem> = def
+        .params
+        .iter()
+        .map(|p| {
+            let (kind, ty) = match p.category {
+                ParamCategory::BufferRead => (ParamKind::Resource, p.slang_param_type()),
+                ParamCategory::BufferReadWrite | ParamCategory::BufferWrite => {
+                    (ParamKind::Resource, p.slang_param_type())
+                }
+                ParamCategory::Uniform => (ParamKind::Broadcast, p.slang_type.clone()),
+                ParamCategory::Scalar => (ParamKind::Scalar, p.slang_type.clone()),
+            };
+            ParamItem::Single(Param {
+                name: p.name.clone(),
+                ty,
+                kind,
+            })
+        })
+        .collect();
+
+    if def.builtins.global_id {
+        params.push(ParamItem::Single(Param {
+            name: "_goldy_gid".into(),
+            ty: "ThreadId".into(),
+            kind: ParamKind::SystemValue(SvKind::DispatchThreadId),
+        }));
+    }
+    if def.builtins.local_id {
+        params.push(ParamItem::Single(Param {
+            name: "_goldy_lid".into(),
+            ty: "GroupThreadId".into(),
+            kind: ParamKind::SystemValue(SvKind::GroupThreadId),
+        }));
+    }
+    if def.builtins.workgroup_id {
+        params.push(ParamItem::Single(Param {
+            name: "_goldy_wid".into(),
+            ty: "GroupId".into(),
+            kind: ParamKind::SystemValue(SvKind::GroupId),
+        }));
+    }
+
+    let [x, y, z] = def.workgroup_size;
+    EntryDef {
+        stage: Stage::Compute,
+        fn_name: def.entry.clone(),
+        return_type: "void".into(),
+        return_semantic: None,
+        params,
+        numthreads: Some((x, y, z)),
+        goldy_attr_range: 0..0,
+        numthreads_attr_range: None,
+        fn_name_range: 0..0,
+        return_semantic_range: None,
+    }
+}
+
+/// Emit the native `[shader("compute")]` wrapper from structured ABI metadata.
+pub fn emit_wrapper_from_kernel_def(def: &KernelDef) -> String {
+    emit_wrapper(&entry_def_from_kernel_def(def))
+}
+
+/// Extract a structured [`KernelDef`] from a simple `[goldy_compute]` source unit.
+///
+/// Returns `None` when the source has no compute entry, multiple entries, or
+/// preprocessor-conditional parameter lists (those stay on the string parser path).
+pub fn try_kernel_def_from_source(source: &str) -> Option<KernelDef> {
+    let entries = find_all_entries(source);
+    if entries.len() != 1 || entries[0].stage != Stage::Compute {
+        return None;
+    }
+    let entry = &entries[0];
+    if entries_have_conditionals(entry) {
+        return None;
+    }
+    let (params, builtins) = params_from_entry(entry)?;
+    let workgroup_size = entry.numthreads.map(|(x, y, z)| [x, y, z]).unwrap_or([64, 1, 1]);
+    Some(KernelDef::new(
+        source.to_string(),
+        entry.fn_name.clone(),
+        workgroup_size,
+        params,
+        builtins,
+        SourceMap::default(),
+    ))
+}
+
+fn entries_have_conditionals(entry: &EntryDef) -> bool {
+    entry.params.iter().any(|p| matches!(p, ParamItem::Conditional { .. }))
+}
+
+fn params_from_entry(entry: &EntryDef) -> Option<(Vec<KernelParam>, BuiltinMask)> {
+    let mut params = Vec::new();
+    let mut builtins = BuiltinMask::NONE;
+    for item in &entry.params {
+        let ParamItem::Single(p) = item else {
+            return None;
+        };
+        match &p.kind {
+            ParamKind::SystemValue(SvKind::DispatchThreadId) => builtins.global_id = true,
+            ParamKind::SystemValue(SvKind::GroupThreadId) => builtins.local_id = true,
+            ParamKind::SystemValue(SvKind::GroupId) => builtins.workgroup_id = true,
+            ParamKind::SystemValue(_) => {}
+            ParamKind::PassThrough => return None,
+            ParamKind::Resource => {
+                let ty = p.ty.trim();
+                if let Some(inner) = strip_wrapper(ty, "BufRO<") {
+                    params.push(KernelParam {
+                        name: p.name.clone(),
+                        category: ParamCategory::BufferRead,
+                        access: Some(AccessKind::Read),
+                        scalar: None,
+                        slang_type: inner.to_string(),
+                        stride_bytes: element_stride(inner),
+                    });
+                } else {
+                    let inner = strip_wrapper(ty, "Scattered<")?;
+                    params.push(KernelParam {
+                        name: p.name.clone(),
+                        category: ParamCategory::BufferReadWrite,
+                        access: Some(AccessKind::ReadWrite),
+                        scalar: None,
+                        slang_type: inner.to_string(),
+                        stride_bytes: element_stride(inner),
+                    });
+                }
+            }
+            ParamKind::Broadcast => {
+                params.push(KernelParam {
+                    name: p.name.clone(),
+                    category: ParamCategory::Uniform,
+                    access: Some(AccessKind::Read),
+                    scalar: None,
+                    slang_type: p.ty.clone(),
+                    stride_bytes: None,
+                });
+            }
+            ParamKind::Scalar => {
+                let scalar = match p.ty.as_str() {
+                    "uint" => ScalarType::U32,
+                    "int" => ScalarType::I32,
+                    "float" => ScalarType::F32,
+                    "bool" => ScalarType::Bool,
+                    _ => return None, // vectors / double not a sound single-word ABI yet
+                };
+                params.push(KernelParam::scalar_param(p.name.clone(), scalar));
+            }
+        }
+    }
+    Some((params, builtins))
+}
+
+fn strip_wrapper<'a>(ty: &'a str, prefix: &str) -> Option<&'a str> {
+    if ty.starts_with(prefix) && ty.ends_with('>') {
+        Some(&ty[prefix.len()..ty.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn element_stride(slang_ty: &str) -> Option<u32> {
+    match slang_ty {
+        "uint" | "int" | "float" | "bool" => Some(4),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)] // used by docs / future GpuType lowering
+fn element_type_from_slang(slang_ty: &str) -> Option<ElementType> {
+    match slang_ty {
+        "uint" => Some(ElementType::U32),
+        "int" => Some(ElementType::I32),
+        "float" => Some(ElementType::F32),
+        "bool" => Some(ElementType::Bool),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

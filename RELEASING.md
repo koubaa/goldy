@@ -47,24 +47,30 @@ Follow the sections below for each package manager.
 
 ### Publish
 
-Publish **`goldy_derive` first** (proc-macro crate), then **`goldy`**. Keep their `version` fields in sync in `derive/Cargo.toml` and the root `Cargo.toml`.
+Publish **`goldy_shader_ir` first**, then **`goldy_derive`**, then **`goldy`**.
+Keep their `version` fields in sync in `shader_ir/Cargo.toml`, `derive/Cargo.toml`,
+and the root `Cargo.toml`.
 
 ```bash
-# 1. Proc-macro crate (no separate GitHub release needed)
+# 1. Shared KernelAbi / shader IR
+cargo publish -p goldy_shader_ir
+
+# 2. Proc-macro crate (depends on goldy_shader_ir)
 cargo publish -p goldy_derive
 
-# 2. Core library (depends on goldy_derive on crates.io)
+# 3. Core library (depends on goldy_derive + goldy_shader_ir on crates.io)
 cargo publish -p goldy
 
-# 3. FFI library — not published to crates.io (`publish = false`);
+# 4. FFI library — not published to crates.io (`publish = false`);
 #    distribute via GitHub release / vcpkg / Conan / language bindings
 ```
 
-The root `Cargo.toml` lists `goldy_derive` with both `path` and `version` so local builds use the workspace crate and `cargo publish` resolves the dependency from the registry.
+The root `Cargo.toml` lists `goldy_derive` / `goldy_shader_ir` with both `path` and `version`
+so local builds use the workspace crates and `cargo publish` resolves dependencies from the registry.
 
 ### Version Files
-- `Cargo.toml` (goldy) - Update `version = "X.Y.Z"` and bump `goldy_derive` dependency version to match
-- `derive/Cargo.toml` - Same `version = "X.Y.Z"` as goldy for releases
+- `Cargo.toml` (goldy) - Update `version = "X.Y.Z"` and bump `goldy_derive` / `goldy_shader_ir` dependency versions to match
+- `derive/Cargo.toml` / `shader_ir/Cargo.toml` - Same `version = "X.Y.Z"` as goldy for releases
 
 ---
 
@@ -244,8 +250,9 @@ When releasing a new version, update these files:
 
 | File | Field |
 |------|-------|
-| `Cargo.toml` | `version` (+ `goldy_derive` dependency version) |
+| `Cargo.toml` | `version` (+ `goldy_derive` / `goldy_shader_ir` dependency versions) |
 | `derive/Cargo.toml` | `version` (must match goldy) |
+| `shader_ir/Cargo.toml` | `version` (must match goldy) |
 | `ffi/Cargo.toml` | `version` (`publish = false`) |
 | `ffi-client/Cargo.toml` | `version` (`publish = false`) |
 | `python/Cargo.toml` | `version` (`publish = false`) |
@@ -256,7 +263,8 @@ When releasing a new version, update these files:
 | `dotnet/Goldy/Goldy.csproj` | `<Version>` |
 | `CHANGELOG.md` | Add release notes |
 
-crates.io publish order: **`goldy_derive` first**, then **`goldy`**. Packaging `goldy` resolves `goldy_derive` from the registry, so the derive crate must already be live.
+crates.io publish order: **`goldy_shader_ir`**, then **`goldy_derive`**, then **`goldy`**.
+Packaging resolves those crates from the registry, so each dependency must already be live.
 
 ---
 
