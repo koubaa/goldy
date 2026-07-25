@@ -21,6 +21,7 @@ pub mod error;
 pub mod frame_orchestrator;
 pub(crate) mod frame_table;
 pub(crate) mod handles;
+pub mod kernel;
 pub mod pipeline;
 pub(crate) mod render_target;
 pub mod sampler;
@@ -78,8 +79,14 @@ pub use device::{
     Adapter, AdapterInfo, BufferHeapStats, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
     RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
 };
+pub use goldy_derive::compute;
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
+pub use kernel::gpu;
+pub use kernel::{
+    prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
+    KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
+};
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};

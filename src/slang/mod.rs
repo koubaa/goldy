@@ -51,6 +51,7 @@ pub use compiler::{
     StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;
+pub use virtual_main::{emit_wrapper_from_kernel_def, entry_def_from_kernel_def, try_kernel_def_from_source};
 
 /// Parse `[numthreads(x, y, z)]` from Slang shader source.
 ///

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Rust compute kernels (issue #78, initial design)** — `#[goldy::compute]` proc-macro
+  lowers a restricted GPU dialect to canonical `[goldy_compute]` Slang plus structured
+  `KernelDef` / `KernelParam` ABI metadata (`goldy_shader_ir`). Host API:
+  `Kernel::prepare` (lazy compile/cache) and typed `record(...).over_1d` / `.groups`.
+- Shared `KernelAbi` bridge for virtual-main: `try_kernel_def_from_source`,
+  `emit_wrapper_from_kernel_def` so Rust and raw Slang paths share frame-table wrappers.
+- `goldy_buf_len` helper for portable buffer `.len()` lowering on SPIR-V/DX12.
+- Docs: [Rust Compute Kernels](docs/src/programming-model/rust-kernels.md);
+  `GOLDY_DUMP_RUST_KERNELS` dump env var.
+
 ## [0.2.0] - 2026-07-23
 
 Fondaco Machine rewrite. This is a **breaking** release relative to 0.1.0 — the

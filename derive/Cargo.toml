@@ -3,7 +3,7 @@ name = "goldy_derive"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Derive macros for goldy (LayoutCheckable, StructuredBufferElement, etc.)"
+description = "Derive macros for goldy (compute kernels, LayoutCheckable, StructuredBufferElement, etc.)"
 repository = "https://github.com/koubaa/goldy"
 homepage = "https://koubaa.github.io/goldy/"
 documentation = "https://docs.rs/goldy_derive"
@@ -18,3 +18,4 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+goldy_shader_ir = { version = "0.2.0", path = "../shader_ir" }

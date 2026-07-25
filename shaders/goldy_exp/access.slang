@@ -362,6 +362,35 @@ public typealias ByteAddress = ByteAddressView;
 /// Pass directly to texture `.Sample(filter, uv)` calls.
 public typealias Filter = SamplerState;
 
+/// Element count for a structured buffer (`buf.len()` in the Rust GPU dialect).
+///
+/// Implemented via `GetDimensions` on SPIR-V / DX12. Metal / CUDA / WebGPU
+/// prototypes do not expose a portable length on pointer descriptors — pass an
+/// explicit `u32` count scalar on those backends for now.
+public uint goldy_buf_len<T>(Scattered<T> buf)
+{
+#if defined(__METAL__) || defined(__CUDA__) || defined(__WGSL__)
+    return 0xFFFFFFFFu;
+#else
+    uint count;
+    uint stride;
+    buf.GetDimensions(count, stride);
+    return count;
+#endif
+}
+
+public uint goldy_buf_len<T>(BufRO<T> buf)
+{
+#if defined(__METAL__) || defined(__CUDA__) || defined(__WGSL__)
+    return 0xFFFFFFFFu;
+#else
+    uint count;
+    uint stride;
+    buf.GetDimensions(count, stride);
+    return count;
+#endif
+}
+
 // =============================================================================
 // System-value wrapper types — for use with [goldy_*] virtual entry points.
 //

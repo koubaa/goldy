@@ -2,6 +2,33 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
+mod compute;
+
+/// Attribute macro for Goldy compute kernels written in a restricted Rust GPU dialect.
+///
+/// Expands to a module named after the function containing `Kernel::prepare` /
+/// typed `record`, plus canonical `[goldy_compute]` Slang and structured ABI
+/// metadata. See `goldy::kernel` and the programming-model docs.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[goldy::compute(workgroup_size = [256, 1, 1])]
+/// fn saxpy(x: &[f32], y: &mut [f32], a: f32) {
+///     let i = goldy::gpu::global_id().x;
+///     if i < y.len() {
+///         y[i] = a * x[i] + y[i];
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn compute(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match compute::expand(attr.into(), item.into()) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
 /// Marker trait for types safe to pass to [`goldy::Device::alloc_buffer_with_data`].
 ///
 /// Add this alongside `bytemuck::Pod` on `#[repr(C)]` structs used as GPU buffer elements.
