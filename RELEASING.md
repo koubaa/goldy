@@ -250,8 +250,9 @@ When releasing a new version, update these files:
 
 | File | Field |
 |------|-------|
-| `Cargo.toml` | `version` (+ `goldy_derive` dependency version) |
+| `Cargo.toml` | `version` (+ `goldy_derive` / `goldy_shader_ir` dependency versions) |
 | `derive/Cargo.toml` | `version` (must match goldy) |
+| `shader_ir/Cargo.toml` | `version` (must match goldy) |
 | `ffi/Cargo.toml` | `version` (`publish = false`) |
 | `ffi-client/Cargo.toml` | `version` (`publish = false`) |
 | `python/Cargo.toml` | `version` (`publish = false`) |
