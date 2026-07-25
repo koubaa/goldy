@@ -3558,7 +3558,8 @@ mod imp {
 
     /// Steady state for a worker observed by a *topology-visible* foreign reader/writer:
     /// one bootstrap record plus exactly one topology/prologue refresh, then resubmits.
-    fn assert_worker_cross_reader_steady_state(worker: &Scheme, frames: u32) {
+    fn assert_worker_cross_reader_steady_state(worker: &Scheme, frames: u64) {
+        // `frames` is only consumed by the non-Metal resubmit assertion below.
         let _ = frames;
         assert_eq!(
             worker.replay_stats().records,
@@ -3580,7 +3581,8 @@ mod imp {
 
     /// Steady state for a worker observed only by *topology-invisible* `grant_read` leases:
     /// a single bootstrap record, zero topology refreshes, resubmits forever after.
-    fn assert_worker_grant_invisible(worker: &Scheme, frames: u32) {
+    fn assert_worker_grant_invisible(worker: &Scheme, frames: u64) {
+        // `frames` is only consumed by the non-Metal resubmit assertion below.
         let _ = frames;
         assert_eq!(
             worker.replay_stats().records,
@@ -3612,7 +3614,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             cross_retention_run_worker_then_reader(&mut worker, &mut reader, &grant, &ctx);
         }
@@ -3631,7 +3633,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
         }
@@ -3650,7 +3652,7 @@ mod imp {
             .bind_withdraw(&mut scheme, &buffers.shared)
             .expect("withdraw");
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             let mut frame = scheme.submit().expect("submit");
             let _loan = grant
@@ -3687,7 +3689,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 8;
+        const FRAMES: u64 = 8;
         for _ in 0..FRAMES {
             cross_retention_run_worker_then_reader(&mut worker, &mut reader, &grant, &ctx);
         }
@@ -3705,7 +3707,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 8;
+        const FRAMES: u64 = 8;
         for _ in 0..FRAMES {
             cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
         }
@@ -3722,7 +3724,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let mut foreign_writer = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
             foreign_writer.submit().expect("foreign writer submit");
@@ -3750,7 +3752,7 @@ mod imp {
             let buffers = cross_retention_buffers(&device);
             let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
             let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
-            const FRAMES: u32 = 4;
+            const FRAMES: u64 = 4;
             for _ in 0..FRAMES {
                 if reader_first {
                     reader.submit().expect("copy reader submit");
@@ -3800,7 +3802,7 @@ mod imp {
         let (mut reader_a, _dst_a) = cross_retention_copy_reader(&ctx, &buffers.shared);
         let (mut reader_b, _dst_b) = cross_retention_copy_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
             reader_a.submit().expect("reader_a submit");
@@ -3870,7 +3872,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &worker_buffers);
         let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &reader_buffers.shared);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
         }
@@ -3941,7 +3943,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
             let mut frame = reader.submit().expect("reader submit");
@@ -3966,7 +3968,7 @@ mod imp {
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         for _ in 0..FRAMES {
             cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
         }
@@ -4040,7 +4042,7 @@ mod imp {
         let mut worker = cross_retention_texture_writer(&ctx, &pipeline, &texture);
         let (mut reader, grant) = cross_retention_texture_reader(&ctx, &texture);
 
-        const FRAMES: u32 = 4;
+        const FRAMES: u64 = 4;
         let mut last_pixels = Vec::new();
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");

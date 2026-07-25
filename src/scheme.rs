@@ -1571,7 +1571,10 @@ impl Scheme {
             if topo_dirty {
                 self.topology_dirty.store(false, Ordering::Release);
             }
-        } else if part_result.all_from_cache() {
+        } else if part_result.resubmit_hits > 0 {
+            // Require an actual partition-level cache hit. `all_from_cache()` is also
+            // true when CB replay is disabled (fresh encodes leave `records == 0`),
+            // and those must not count as retention hits.
             #[cfg(not(feature = "metal"))]
             {
                 self.stats.resubmit_hits += 1;
@@ -3055,7 +3058,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn is_settled_true_before_first_reference() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
         let parcel = retained_buffer(&mut pool);
         assert!(parcel.is_settled(), "never-referenced parcel is settled");
     }
@@ -3068,7 +3070,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
-        let mut frame = scheme.submit().unwrap();
+        let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
         assert_eq!(TimelineValue::from(frame.handle()), tv);
@@ -3081,7 +3083,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
-        let mut frame = scheme.submit().unwrap();
+        let frame = scheme.submit().unwrap();
         frame.wait(&ctx).unwrap();
         assert!(ctx.gpu_progress() >= frame.timeline_value());
     }
@@ -3092,10 +3094,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device.clone());
         let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
-        let mut frame = scheme.submit().unwrap();
+        let frame = scheme.submit().unwrap();
         assert!(frame.timeline_value() > 0, "submit must return a frame token");
         // Non-blocking: a second submit must succeed without waiting on the first frame.
-        let mut frame2 = scheme.submit().unwrap();
+        let frame2 = scheme.submit().unwrap();
         assert!(frame2.timeline_value() >= frame.timeline_value());
         frame2.wait(&ctx).unwrap();
     }
@@ -3115,13 +3117,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let mut frame1 = scheme.submit().unwrap();
+        let frame1 = scheme.submit().unwrap();
         assert_eq!(
             parcel.last_referenced_on(ctx.backend_handle()),
             Some(frame1.timeline_value())
         );
 
-        let mut frame2 = scheme.submit().unwrap();
+        let frame2 = scheme.submit().unwrap();
         assert!(
             frame2.timeline_value() >= frame1.timeline_value(),
             "timeline must be monotonic"
@@ -3157,13 +3159,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
-        let mut frame1 = scheme.submit().unwrap();
+        let frame1 = scheme.submit().unwrap();
         assert_eq!(
             scheme.leases[0].last_referenced_on(ctx.backend_handle()),
             Some(frame1.timeline_value())
         );
 
-        let mut frame2 = scheme.submit().unwrap();
+        let frame2 = scheme.submit().unwrap();
         assert!(frame2.timeline_value() >= frame1.timeline_value());
         assert_eq!(
             scheme.leases[0].last_referenced_on(ctx.backend_handle()),
@@ -3560,7 +3562,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &parcel)
             .expect("grant");
-        let mut frame = scheme.submit().expect("submit");
+        let frame = scheme.submit().expect("submit");
         let (allocs_after_submit, frees_before) = mock_readback_counts(&device);
         assert_eq!(allocs_after_submit, 1, "submit allocates one staging buffer");
         drop(scheme);
@@ -4523,7 +4525,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let _present = register_exchange_with_copy(&mut scheme, &lease);
         let before = mock_present_count(&device);
-        let mut submission = scheme.submit().expect("submit");
+        let submission = scheme.submit().expect("submit");
         drop(submission);
         assert_eq!(mock_present_count(&device), before, "discarded claim must not present");
     }
@@ -4958,7 +4960,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let present = register_exchange_with_copy(&mut scheme, &lease);
 
-        let mut submission = scheme.submit().expect("submit");
+        let submission = scheme.submit().expect("submit");
         // No read grants → finish_submit_frame keeps the present-partition tv as
         // the submission timeline; the acquired frame must carry the same stamp
         // so Present waits on that epoch rather than timeline_next-1.
@@ -5194,7 +5196,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
 
         let key = ResourceKey::Texture(tex.gpu_handle());
-        let mut submission = scheme.submit().expect("submit");
+        let submission = scheme.submit().expect("submit");
         let resolved_tv = {
             let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
             assert_eq!(stamp.pending.lock().unwrap().len(), 1);
@@ -5246,7 +5248,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             "lease_render_target must register an RT stamp for present WAR"
         );
 
-        let mut submission = scheme.submit().expect("submit");
+        let submission = scheme.submit().expect("submit");
         let resolved_tv = {
             let stamp = scheme.submit_state.resource_stamps().get(&key).expect("rt stamp");
             assert_eq!(
@@ -5374,7 +5376,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
         let key = ResourceKey::Texture(tex.gpu_handle());
 
-        let mut submission = scheme.submit().expect("submit");
+        let submission = scheme.submit().expect("submit");
         let poll = {
             let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
             stamp.pending.lock().unwrap()[0].poll()
