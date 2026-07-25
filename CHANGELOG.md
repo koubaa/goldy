@@ -59,7 +59,7 @@ public programming model.
 ### Packaging
 
 - crates.io packages exclude binding trees (`python/`, `ffi/`, `dotnet/`, `cpp/`, …)
-- Publish order: `goldy_derive`, then `goldy`
+- Publish order: `goldy_shader_ir`, then `goldy_derive`, then `goldy`
 
 ## [0.1.0] - 2026-01-11
 
