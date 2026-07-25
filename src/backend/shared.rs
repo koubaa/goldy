@@ -73,6 +73,7 @@ impl PushLayout {
     ///
     /// Useful for Metal `set_bytes` and any backend that needs a `*const u8`.
     /// Prefer `bytemuck::bytes_of(layout)` when `bytemuck` is already in scope.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
@@ -294,6 +295,7 @@ impl<K, V> DeferredQueue<K, V> {
     /// Unlike [`Self::drain_up_to`], this does not require `K: PartialOrd` — used when a
     /// single entry's readiness depends on a multi-part requirement (e.g. a per-context
     /// `(ContextHandle, u64)` snapshot) rather than one totally-ordered threshold.
+    #[cfg(feature = "vulkan")]
     pub fn drain_where<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<V> {
         self.drain_where_with_keys(ready).into_iter().map(|(_, v)| v).collect()
     }

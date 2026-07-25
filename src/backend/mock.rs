@@ -201,12 +201,19 @@ struct MockSampler {
     bindless_index: u32,
 }
 
+/// Simulated swapchain depth for present-slot retention keys.
+///
+/// Real backends rotate a fixed `frame_slot` set (`MAX_FRAMES_IN_FLIGHT`); mock
+/// must do the same so present-aware retention can warm variants and resubmit.
+const MOCK_SWAPCHAIN_IMAGES: u32 = 2;
+
 #[allow(dead_code)]
 struct MockSurface {
     device_handle: DeviceHandle,
     width: u32,
     height: u32,
     format: TextureFormat,
+    /// Next `frame_slot` / image index in `0..MOCK_SWAPCHAIN_IMAGES`.
     next_image: SwapchainImageHandle,
     current_texture_handle: Option<TextureHandle>,
     pending_frame_compute: Vec<GpuCommand>,
@@ -1257,7 +1264,7 @@ impl GpuBackend for MockBackend {
                 width: 800, // Default size
                 height: 600,
                 format: self.default_surface_format, // Use configured format
-                next_image: 1,
+                next_image: 0,
                 current_texture_handle: None,
                 pending_frame_compute: Vec::new(),
             },
@@ -1278,8 +1285,8 @@ impl GpuBackend for MockBackend {
             .get_mut(&surface)
             .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
 
-        let image = surf.next_image;
-        surf.next_image += 1;
+        let frame_slot = surf.next_image as u32;
+        surf.next_image = ((frame_slot + 1) % MOCK_SWAPCHAIN_IMAGES) as SwapchainImageHandle;
         surf.pending_frame_compute.clear();
 
         let tex_handle = self.next_texture_handle;
@@ -1309,17 +1316,17 @@ impl GpuBackend for MockBackend {
         self.push_context_signal(
             ctx,
             crate::signal::Signal::SwapchainAcquired {
-                image_index: image as u32,
+                image_index: frame_slot,
             },
         );
 
         Ok((
             FrameToken {
                 surface,
-                image,
+                image: frame_slot as SwapchainImageHandle,
                 context: ctx,
-                frame_slot: image as u32,
-                present_slot: image as u32,
+                frame_slot,
+                present_slot: frame_slot,
             },
             tex_handle,
         ))
