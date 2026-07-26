@@ -48,7 +48,7 @@ ash = { version = "0.38", optional = true }
 
 # Portable WebGPU backend (compute-only prototype)
 wgpu = { version = "28", optional = true }
-pollster = { version = "0.4", optional = true }
+pollster = { version = "1.0", optional = true }
 
 # CUDA Driver API backend (compute-only prototype)
 cudarc = { version = "0.19", optional = true, default-features = false, features = [
