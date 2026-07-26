@@ -47,7 +47,7 @@ goldy_shader_ir = { version = "0.2.0", path = "shader_ir" }
 ash = { version = "0.38", optional = true }
 
 # Portable WebGPU backend (compute-only prototype)
-wgpu = { version = "28", optional = true }
+wgpu = { version = "30", optional = true }
 pollster = { version = "0.4", optional = true }
 
 # CUDA Driver API backend (compute-only prototype)
