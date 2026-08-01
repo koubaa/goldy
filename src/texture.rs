@@ -35,7 +35,9 @@ impl TextureCopyFootprint {
 }
 
 /// Low-level GPU texture allocation (internal to Goldy).
-#[derive(Clone)]
+///
+/// [`Clone`] is intentionally a non-owning [`Self::borrow`]: bitwise-cloning an
+/// owning backing would make two drops call `destroy_texture` on the same handle.
 pub(crate) struct TextureBacking {
     _device: Option<Device>,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
@@ -50,6 +52,12 @@ pub(crate) struct TextureBacking {
     bindless_sampled: Option<u32>,
     /// Accounting deed for observer + allocator notification on drop.
     deed: Option<ParcelDeed>,
+}
+
+impl Clone for TextureBacking {
+    fn clone(&self) -> Self {
+        self.borrow()
+    }
 }
 
 impl TextureBacking {
@@ -330,12 +338,9 @@ impl TextureBacking {
 
     /// Create a non-owning view of this texture.
     ///
-    /// The returned `Texture` shares the same GPU resource and handle but does
-    /// **not** destroy the underlying resource when dropped. Use this when you
-    /// need to hand a reference into a system (e.g. a bind map) that may drop
-    /// it before the original owner is done — for example to avoid a
-    /// use-after-free when the bind map entry is evicted while the caller still
-    /// holds the original `Texture`.
+    /// The returned backing shares the same GPU resource and handle but does
+    /// **not** destroy the underlying resource when dropped. [`Clone`] is the
+    /// same operation — never bitwise-copy an owning backing.
     pub fn borrow(&self) -> Self {
         Self {
             _device: self._device.clone(),
@@ -440,6 +445,38 @@ mod tests {
         assert_eq!(texture.height(), 256);
         assert_eq!(texture.format(), TextureFormat::Rgba8Unorm);
         assert_eq!(texture.byte_size(), 256 * 256 * 4);
+    }
+
+    #[test]
+    fn texture_backing_clone_is_non_owning() {
+        let device = create_test_device();
+        let texture = TextureBacking::new(
+            &device,
+            16,
+            16,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        )
+        .unwrap();
+        assert!(texture.is_owned());
+        let handle = texture.gpu_handle();
+
+        let clone = texture.clone();
+        assert!(!clone.is_owned());
+        assert_eq!(clone.gpu_handle(), handle);
+        drop(clone);
+
+        // Owning original still alive after non-owning clone drop.
+        assert!(texture.is_owned());
+        assert_eq!(texture.gpu_handle(), handle);
+        assert!(device
+            .inner
+            .backend
+            .lock()
+            .unwrap()
+            .texture_bindless_index(handle)
+            .is_some());
     }
 
     #[test]
