@@ -3,10 +3,13 @@
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA `StructuredBuffer` ABI (`{T* data; size_t count}`)
 //! interleaved with bare `uniform uint` scalars from [`GpuCommand::BindResourcesRaw::user`].
-//! Registry keys in [`GpuCommand::BindResourcesRaw`] are resolved in shader
-//! parameter order — there is no bindless heap or frame-table routing.
+//! Single-dispatch registry keys come from [`GpuCommand::BindResourcesRaw`]; batched
+//! dispatches resolve keys from [`GpuCommand::FrameTableStaging`] in shader
+//! parameter order — there is no bindless heap or device-side frame-table routing.
 
 use super::*;
+use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
+use crate::frame_table::dispatch_table_base_word_index;
 use crate::slang::virtual_main::CudaLaunchArgKind;
 use crate::types::{BufferResizeCost, DeviceType};
 use anyhow::{Context as _, Result};
@@ -382,21 +385,237 @@ impl CudaBackend {
         dst_offset: u64,
         size: u64,
     ) -> Result<()> {
-        // Host staging keeps the PoC simple under Mutex/view aliasing constraints.
-        let mut host = vec![0u8; size as usize];
-        {
-            let memory = src.memory.lock().unwrap();
-            let src_view = memory
-                .try_slice((src.offset + src_offset) as usize..(src.offset + src_offset + size) as usize)
-                .context("CUDA: copy source out of bounds")?;
-            stream.memcpy_dtoh(&src_view, &mut host).context("CUDA: copy DtoH")?;
+        if size == 0 {
+            return Ok(());
         }
-        {
-            let mut memory = dst.memory.lock().unwrap();
-            let mut dst_view = memory
-                .try_slice_mut((dst.offset + dst_offset) as usize..(dst.offset + dst_offset + size) as usize)
+        if src.device != dst.device {
+            anyhow::bail!("CUDA: copy across devices is not supported");
+        }
+        if src_offset + size > src.size {
+            anyhow::bail!("CUDA: copy source range exceeds logical buffer size");
+        }
+        if dst_offset + size > dst.size {
+            anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
+        }
+
+        let src_abs = src.offset + src_offset;
+        let dst_abs = dst.offset + dst_offset;
+        let byte_len = size as usize;
+
+        if Arc::ptr_eq(&src.memory, &dst.memory) {
+            // Same allocation: avoid simultaneous &/&mut CudaSlice views. A device temp
+            // keeps both overlapping and non-overlapping self-copies memmove-safe.
+            let mut temp = stream
+                .alloc_zeros::<u8>(byte_len)
+                .context("CUDA: alloc overlapping-copy scratch")?;
+            {
+                let memory = src.memory.lock().unwrap();
+                let src_view = memory
+                    .try_slice(src_abs as usize..src_abs as usize + byte_len)
+                    .context("CUDA: copy source out of bounds")?;
+                stream
+                    .memcpy_dtod(&src_view, &mut temp)
+                    .context("CUDA: same-alloc copy to scratch")?;
+            }
+            {
+                let mut memory = dst.memory.lock().unwrap();
+                let mut dst_view = memory
+                    .try_slice_mut(dst_abs as usize..dst_abs as usize + byte_len)
+                    .context("CUDA: copy destination out of bounds")?;
+                stream
+                    .memcpy_dtod(&temp, &mut dst_view)
+                    .context("CUDA: same-alloc copy from scratch")?;
+            }
+            return Ok(());
+        }
+
+        // Distinct allocations: lock in pointer order to avoid AB/BA deadlocks.
+        let src_arc = Arc::clone(&src.memory);
+        let dst_arc = Arc::clone(&dst.memory);
+        let src_ptr = Arc::as_ptr(&src_arc);
+        let dst_ptr = Arc::as_ptr(&dst_arc);
+        if src_ptr < dst_ptr {
+            let src_guard = src_arc.lock().unwrap();
+            let mut dst_guard = dst_arc.lock().unwrap();
+            let src_view = src_guard
+                .try_slice(src_abs as usize..src_abs as usize + byte_len)
+                .context("CUDA: copy source out of bounds")?;
+            let mut dst_view = dst_guard
+                .try_slice_mut(dst_abs as usize..dst_abs as usize + byte_len)
                 .context("CUDA: copy destination out of bounds")?;
-            stream.memcpy_htod(&host, &mut dst_view).context("CUDA: copy HtoD")?;
+            stream
+                .memcpy_dtod(&src_view, &mut dst_view)
+                .context("CUDA: device-to-device copy failed")?;
+        } else {
+            let mut dst_guard = dst_arc.lock().unwrap();
+            let src_guard = src_arc.lock().unwrap();
+            let src_view = src_guard
+                .try_slice(src_abs as usize..src_abs as usize + byte_len)
+                .context("CUDA: copy source out of bounds")?;
+            let mut dst_view = dst_guard
+                .try_slice_mut(dst_abs as usize..dst_abs as usize + byte_len)
+                .context("CUDA: copy destination out of bounds")?;
+            stream
+                .memcpy_dtod(&src_view, &mut dst_view)
+                .context("CUDA: device-to-device copy failed")?;
+        }
+        Ok(())
+    }
+
+    fn launch_compute(
+        &self,
+        stream: &Arc<CudaStream>,
+        pipeline: &CudaComputePipeline,
+        indices: &[u32],
+        user: &[u32],
+        workgroups: (u32, u32, u32),
+    ) -> Result<()> {
+        let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
+        let cfg = LaunchConfig {
+            grid_dim: workgroups,
+            block_dim: (
+                pipeline.workgroup_size[0],
+                pipeline.workgroup_size[1],
+                pipeline.workgroup_size[2],
+            ),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: argument order/types match the Slang CUDA entry signature.
+        unsafe {
+            let mut builder = stream.launch_builder(&pipeline.function);
+            for arg in &launch_args {
+                match arg {
+                    CudaLaunchArg::Buffer(buffer) => {
+                        builder.arg(buffer);
+                    }
+                    CudaLaunchArg::Scalar(word) => {
+                        builder.arg(word);
+                    }
+                }
+            }
+            builder.launch(cfg).context("CUDA: cuLaunchKernel failed")?;
+        }
+        Ok(())
+    }
+
+    fn launch_layout_buffer_count(launch_layout: &[CudaLaunchArgKind]) -> Option<usize> {
+        if launch_layout.is_empty() {
+            None
+        } else {
+            Some(
+                launch_layout
+                    .iter()
+                    .filter(|kind| matches!(kind, CudaLaunchArgKind::Buffer))
+                    .count(),
+            )
+        }
+    }
+
+    fn launch_layout_scalar_count(launch_layout: &[CudaLaunchArgKind]) -> usize {
+        launch_layout
+            .iter()
+            .filter(|kind| matches!(kind, CudaLaunchArgKind::Scalar))
+            .count()
+    }
+
+    fn execute_dispatch_batch(
+        &self,
+        stream: &Arc<CudaStream>,
+        pipeline: &CudaComputePipeline,
+        frame_table: Option<&[u32]>,
+        arg_data: &[u8],
+        count: u32,
+    ) -> Result<()> {
+        let entry_count = count as usize;
+        if entry_count == 0 {
+            return Ok(());
+        }
+        let needed = entry_count
+            .checked_mul(DISPATCH_BATCH_STRIDE)
+            .context("CUDA: DispatchBatch stride overflow")?;
+        anyhow::ensure!(
+            arg_data.len() >= needed,
+            "CUDA: DispatchBatch arg_data len {} < {} entries × stride {}",
+            arg_data.len(),
+            entry_count,
+            DISPATCH_BATCH_STRIDE
+        );
+
+        let mut bases = Vec::with_capacity(entry_count);
+        for i in 0..entry_count {
+            let base = i * DISPATCH_BATCH_STRIDE;
+            let layout: PushLayout = *bytemuck::from_bytes(&arg_data[base..base + TOTAL_PUSH_BYTES]);
+            bases.push(layout._reserved[dispatch_table_base_word_index()]);
+        }
+
+        let n_buffers = match Self::launch_layout_buffer_count(&pipeline.launch_layout) {
+            Some(n) => n,
+            None => {
+                // Plain (non-[goldy_compute]) kernels: infer buffer arity from the
+                // contiguous frame-table bases allocated for this batch (count >= 2).
+                anyhow::ensure!(
+                    entry_count >= 2,
+                    "CUDA: DispatchBatch with empty launch layout requires at least 2 entries"
+                );
+                let delta = bases[1]
+                    .checked_sub(bases[0])
+                    .context("CUDA: invalid frame-table bases")?;
+                for window in bases.windows(2) {
+                    anyhow::ensure!(
+                        window[1].saturating_sub(window[0]) == delta,
+                        "CUDA: DispatchBatch frame-table bases are not uniformly spaced ({bases:?})"
+                    );
+                }
+                delta as usize
+            }
+        };
+        let n_scalars = Self::launch_layout_scalar_count(&pipeline.launch_layout);
+
+        if n_buffers > 0 {
+            let table =
+                frame_table.context("CUDA: DispatchBatch requires FrameTableStaging when bindings are present")?;
+            for (i, &table_base) in bases.iter().enumerate() {
+                let start = table_base as usize;
+                let end = start
+                    .checked_add(n_buffers)
+                    .context("CUDA: frame-table range overflow")?;
+                anyhow::ensure!(
+                    end <= table.len(),
+                    "CUDA: DispatchBatch entry {i} frame-table range [{start}, {end}) exceeds staging len {}",
+                    table.len()
+                );
+            }
+        } else if n_scalars == 0 && !pipeline.launch_layout.is_empty() {
+            // goldy entry with only system-value params — nothing to bind.
+        }
+
+        for i in 0..entry_count {
+            let base = i * DISPATCH_BATCH_STRIDE;
+            let layout: PushLayout = *bytemuck::from_bytes(&arg_data[base..base + TOTAL_PUSH_BYTES]);
+            let wg_off = base + TOTAL_PUSH_BYTES;
+            let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
+            let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
+            let wg_z = u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into().unwrap());
+
+            let indices: &[u32] = if n_buffers == 0 {
+                &[]
+            } else {
+                let table = frame_table.expect("validated above");
+                let start = bases[i] as usize;
+                &table[start..start + n_buffers]
+            };
+            let user = if n_scalars == 0 {
+                &[][..]
+            } else {
+                anyhow::ensure!(
+                    n_scalars <= MAX_USER_SLOTS,
+                    "CUDA: DispatchBatch entry {i} expects {n_scalars} scalars (max {MAX_USER_SLOTS})"
+                );
+                &layout.user[..n_scalars]
+            };
+
+            self.launch_compute(stream, pipeline, indices, user, (wg_x, wg_y, wg_z))
+                .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?;
         }
         Ok(())
     }
@@ -415,15 +634,15 @@ impl CudaBackend {
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
         let mut current_user: Vec<u32> = Vec::new();
+        let mut frame_table: Option<Arc<[u32]>> = None;
 
         for command in commands {
             match command {
                 GpuCommand::SetPipeline(pipeline) => current_pipeline = Some(*pipeline),
                 GpuCommand::BindResourcesRaw { indices, user, .. } => {
-                    if user.len() > crate::backend::shared::MAX_USER_SLOTS {
+                    if user.len() > MAX_USER_SLOTS {
                         anyhow::bail!(
-                            "CUDA: at most {} scalar user params per dispatch, got {}",
-                            crate::backend::shared::MAX_USER_SLOTS,
+                            "CUDA: at most {MAX_USER_SLOTS} scalar user params per dispatch, got {}",
                             user.len()
                         );
                     }
@@ -441,36 +660,13 @@ impl CudaBackend {
                         .compute_pipelines
                         .get(&pipeline_handle)
                         .context("CUDA: invalid compute pipeline")?;
-                    let launch_args = self.build_launch_args(
+                    self.launch_compute(
                         &stream,
-                        &pipeline.launch_layout,
+                        pipeline,
                         &current_indices,
                         &current_user,
+                        (*workgroups_x, *workgroups_y, *workgroups_z),
                     )?;
-                    let cfg = LaunchConfig {
-                        grid_dim: (*workgroups_x, *workgroups_y, *workgroups_z),
-                        block_dim: (
-                            pipeline.workgroup_size[0],
-                            pipeline.workgroup_size[1],
-                            pipeline.workgroup_size[2],
-                        ),
-                        shared_mem_bytes: 0,
-                    };
-                    // SAFETY: argument order/types match the Slang CUDA entry signature.
-                    unsafe {
-                        let mut builder = stream.launch_builder(&pipeline.function);
-                        for arg in &launch_args {
-                            match arg {
-                                CudaLaunchArg::Buffer(buffer) => {
-                                    builder.arg(buffer);
-                                }
-                                CudaLaunchArg::Scalar(word) => {
-                                    builder.arg(word);
-                                }
-                            }
-                        }
-                        builder.launch(cfg).context("CUDA: cuLaunchKernel failed")?;
-                    }
                 }
                 GpuCommand::DispatchIndirect { .. } => {
                     anyhow::bail!(
@@ -501,11 +697,19 @@ impl CudaBackend {
                         .clone_meta();
                     Self::copy_buffer_region(&stream, &src_buf, *src_offset, &dst_buf, *dst_offset, *size)?;
                 }
-                GpuCommand::FrameTableStaging { .. } | GpuCommand::ResourceBarrier { .. } => {
-                    // Direct parameter binding; same-stream ordering is sufficient for the PoC.
+                GpuCommand::FrameTableStaging { data } => {
+                    frame_table = Some(Arc::clone(data));
                 }
-                GpuCommand::DispatchBatch { .. } => {
-                    anyhow::bail!("CUDA: native dispatch batching is not supported")
+                GpuCommand::ResourceBarrier { .. } => {
+                    // Same-stream FIFO ordering is sufficient for the compute-only PoC.
+                }
+                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                    let pipeline_handle = current_pipeline.context("CUDA: DispatchBatch without a compute pipeline")?;
+                    let pipeline = self
+                        .compute_pipelines
+                        .get(&pipeline_handle)
+                        .context("CUDA: invalid compute pipeline")?;
+                    self.execute_dispatch_batch(&stream, pipeline, frame_table.as_deref(), arg_data.as_ref(), *count)?;
                 }
                 GpuCommand::WriteTexture { .. }
                 | GpuCommand::WriteTextureRegion { .. }
@@ -947,34 +1151,26 @@ impl GpuBackend for CudaBackend {
         }
         let stream = Arc::clone(&self.device(device)?.stream);
         let capacity = new_size.max(4);
-        let replacement = Arc::new(Mutex::new(
-            stream
-                .alloc_zeros::<u8>(capacity as usize)
-                .context("CUDA: resize alloc")?,
-        ));
+        let mut replacement = stream
+            .alloc_zeros::<u8>(capacity as usize)
+            .context("CUDA: resize alloc")?;
         if preserve_contents {
             let copy_size = old.size.min(new_size);
             if copy_size > 0 {
-                let mut host = vec![0u8; copy_size as usize];
-                {
-                    let memory = old.memory.lock().unwrap();
-                    let src = memory
-                        .try_slice(old.offset as usize..(old.offset + copy_size) as usize)
-                        .context("CUDA: resize src")?;
-                    stream.memcpy_dtoh(&src, &mut host).context("CUDA: resize DtoH")?;
-                }
-                {
-                    let mut memory = replacement.lock().unwrap();
-                    let mut dst = memory
-                        .try_slice_mut(0..copy_size as usize)
-                        .context("CUDA: resize dst")?;
-                    stream.memcpy_htod(&host, &mut dst).context("CUDA: resize HtoD")?;
-                }
-                stream.synchronize().context("CUDA: resize sync")?;
+                let memory = old.memory.lock().unwrap();
+                let src = memory
+                    .try_slice(old.offset as usize..(old.offset + copy_size) as usize)
+                    .context("CUDA: resize src")?;
+                let mut dst = replacement
+                    .try_slice_mut(0..copy_size as usize)
+                    .context("CUDA: resize dst")?;
+                stream
+                    .memcpy_dtod(&src, &mut dst)
+                    .context("CUDA: resize device-to-device copy")?;
             }
         }
         let target = self.buffers.get_mut(&buffer).expect("validated above");
-        target.memory = replacement;
+        target.memory = Arc::new(Mutex::new(replacement));
         target.offset = 0;
         target.size = new_size;
         target.capacity = capacity;
@@ -1727,5 +1923,460 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
         let ptx = compile_cache_key(src, ShaderTarget::Ptx, &eps, &[], &[], &[], OptimizationLevel::Default);
         let wgsl = compile_cache_key(src, ShaderTarget::Wgsl, &eps, &[], &[], &[], OptimizationLevel::Default);
         assert_ne!(ptx, wgsl);
+    }
+
+    // ─── M2: multi-node command coverage ───────────────────────────────────
+
+    const M2_FILL_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, uint value, ThreadId id) {
+    data[id.x] = value;
+}
+"#;
+
+    const M2_DOUBLE_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
+    output[id.x] = input[id.x] * 2;
+}
+"#;
+
+    const M2_ADD_TEN_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] + 10;
+}
+"#;
+
+    const M2_IN_PLACE_DOUBLE_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
+}
+"#;
+
+    const M2_COPY_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
+    output[id.x] = input[id.x];
+}
+"#;
+
+    const M2_SUM_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> a, Scattered<uint> b, Scattered<uint> out, ThreadId id) {
+    out[id.x] = a[id.x] + b[id.x];
+}
+"#;
+
+    const M2_FILL_INDEX_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = id.x;
+}
+"#;
+
+    #[test]
+    fn scheme_same_pipeline_batch_two_fills() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let shader = crate::ShaderModule::from_slang(&device, M2_FILL_SHADER)?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("fill_a", &pipeline)
+            .with_parcel(&a, crate::NodeAccess::Write)
+            .with_param(7u32)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("fill_b", &pipeline)
+            .with_parcel(&b, crate::NodeAccess::Write)
+            .with_param(9u32)
+            .dispatch(1, 1, 1);
+        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
+        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+        let mut submission = scheme.submit()?;
+        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
+        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        assert!(bytemuck::cast_slice::<u8, u32>(&bytes_a).iter().all(|&v| v == 7));
+        assert!(bytemuck::cast_slice::<u8, u32>(&bytes_b).iter().all(|&v| v == 9));
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_graph_linear_chain() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
+        let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let double_pipe =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_DOUBLE_SHADER)?)?;
+        let add_pipe =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_ADD_TEN_SHADER)?)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("double", &double_pipe)
+            .with_parcel(&src, crate::NodeAccess::Read)
+            .with_parcel(&dst, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("add_ten", &add_pipe)
+            .with_parcel(&dst, crate::NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &dst)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
+            assert_eq!(val, (i as u32) * 2 + 10, "element {i}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_graph_independent_dispatches() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        // Distinct pipeline objects so analysis emits two Dispatch commands, not DispatchBatch.
+        let fill_a = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_FILL_SHADER)?)?;
+        let fill_b = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_FILL_SHADER)?)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("fill_a", &fill_a)
+            .with_parcel(&a, crate::NodeAccess::Write)
+            .with_param(42u32)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("fill_b", &fill_b)
+            .with_parcel(&b, crate::NodeAccess::Write)
+            .with_param(99u32)
+            .dispatch(1, 1, 1);
+        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
+        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+        let mut submission = scheme.submit()?;
+        assert!(
+            bytemuck::cast_slice::<u8, u32>(&withdraw_a.claim(&mut submission)?.consume()?)
+                .iter()
+                .all(|&v| v == 42)
+        );
+        assert!(
+            bytemuck::cast_slice::<u8, u32>(&withdraw_b.claim(&mut submission)?.consume()?)
+                .iter()
+                .all(|&v| v == 99)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_graph_diamond_dependency() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let src = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let y = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let z = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let out = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let fill = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, M2_FILL_INDEX_SHADER)?,
+        )?;
+        let double =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_DOUBLE_SHADER)?)?;
+        let sum = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_SUM_SHADER)?)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("fill_src", &fill)
+            .with_parcel(&src, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("double_to_y", &double)
+            .with_parcel(&src, crate::NodeAccess::Read)
+            .with_parcel(&y, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("double_to_z", &double)
+            .with_parcel(&src, crate::NodeAccess::Read)
+            .with_parcel(&z, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("sum_yz", &sum)
+            .with_parcel(&y, crate::NodeAccess::Read)
+            .with_parcel(&z, crate::NodeAccess::Read)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
+            assert_eq!(val, (i as u32) * 4, "element {i}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_clear_then_dispatch() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let buf = pool.acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)?;
+        let pipe = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_ADD_TEN_SHADER)?)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme.clear_parcel(&buf, 0, 64 * 4)?;
+        scheme
+            .node("add_ten", &pipe)
+            .with_parcel(&buf, crate::NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buf)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert!(bytemuck::cast_slice::<u8, u32>(&bytes).iter().all(|&v| v == 10));
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_write_copy_dispatch_chain() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
+        let mid = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
+        let copy = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_COPY_SHADER)?)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme.copy_buffer_parcel(&src, 0, &mid, 0, 64 * 4)?;
+        scheme
+            .node("copy_mid_to_dst", &copy)
+            .with_parcel(&mid, crate::NodeAccess::Read)
+            .with_parcel(&dst, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &dst)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
+            assert_eq!(val, i as u32, "element {i}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_buffer_view_copy_and_isolation() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        const N: usize = 64;
+        let src: Vec<u32> = (1..=N as u32).collect();
+        let dst = vec![0u32; N];
+        let cells = pool.acquire_record([
+            crate::ordinal(crate::Init::data(&src)),
+            crate::ordinal(crate::Init::data(&dst)),
+        ])?;
+        let copy = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_COPY_SHADER)?)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("copy_fields", &copy)
+            .with_parcel(&cells[0], crate::NodeAccess::Read)
+            .with_parcel(&cells[1], crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[1])?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), src.as_slice());
+
+        // Isolation: doubling one field must leave the sibling untouched.
+        let sentinel = vec![100u32; N];
+        let work: Vec<u32> = (1..=N as u32).collect();
+        let cells = pool.acquire_record([
+            crate::ordinal(crate::Init::data(&sentinel)),
+            crate::ordinal(crate::Init::data(&work)),
+        ])?;
+        let double = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, M2_IN_PLACE_DOUBLE_SHADER)?,
+        )?;
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("double_work", &double)
+            .with_parcel(&cells[1], crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let grant_sentinel = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[0])?;
+        let grant_work = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[1])?;
+        let mut submission = scheme.submit()?;
+        assert!(
+            bytemuck::cast_slice::<u8, u32>(&grant_sentinel.claim(&mut submission)?.consume()?)
+                .iter()
+                .all(|&v| v == 100)
+        );
+        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&grant_work.claim(&mut submission)?.consume()?)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(val, (i as u32 + 1) * 2, "work[{i}]");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn overlapping_self_copy_is_memmove_safe() -> Result<()> {
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA overlapping copy test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            32,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        // [1,2,3,4,5,6,7,8] → copy first 16 bytes onto offset 8 (overlap).
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4, 5, 6, 7, 8]))?;
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: buffer,
+                src_offset: 0,
+                dst: buffer,
+                dst_offset: 8,
+                size: 16,
+            }],
+            None,
+        )?;
+        let readback = backend.alloc_readback_buffer(device, 32)?;
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: buffer,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 32,
+            }],
+            None,
+        )?;
+        let mut bytes = [0u8; 32];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[1, 2, 1, 2, 3, 4, 7, 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn resize_buffer_preserves_contents_on_device() -> Result<()> {
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA resize test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[10u32, 20, 30, 40]))?;
+        backend.resize_buffer(device, buffer, 32, true)?;
+        assert_eq!(backend.buffer_size(buffer), 32);
+        assert!(backend.buffer_capacity(buffer) >= 32);
+
+        let readback = backend.alloc_readback_buffer(device, 32)?;
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: buffer,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 32,
+            }],
+            None,
+        )?;
+        let mut bytes = [0u8; 32];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        let words = bytemuck::cast_slice::<u8, u32>(&bytes);
+        assert_eq!(&words[..4], &[10, 20, 30, 40]);
+        // Newly grown tail is zero-filled by alloc_zeros.
+        assert_eq!(&words[4..], &[0, 0, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_clear_parcel_partial_preserves_edges() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        const N: usize = 64;
+        let mut init = Vec::with_capacity(N);
+        for i in 0..N {
+            if i < 16 {
+                init.push(0xAAAA_AAAAu32);
+            } else if i < 48 {
+                init.push(0xBBBB_BBBBu32);
+            } else {
+                init.push(0xCCCC_CCCCu32);
+            }
+        }
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let buf = pool.acquire_buffer_with_data(&init, BufferKind::Scattered)?;
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme.clear_parcel(&buf, 16 * 4, 32 * 4)?;
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buf)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let words = bytemuck::cast_slice::<u8, u32>(&bytes);
+        assert!(words[..16].iter().all(|&v| v == 0xAAAA_AAAA));
+        assert!(words[16..48].iter().all(|&v| v == 0));
+        assert!(words[48..].iter().all(|&v| v == 0xCCCC_CCCC));
+        Ok(())
     }
 }
