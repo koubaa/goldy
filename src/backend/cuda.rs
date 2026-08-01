@@ -1,11 +1,13 @@
 //! Compute-only CUDA backend prototype.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
-//! arguments use Slang's CUDA `StructuredBuffer` ABI (`{T* data; size_t count}`).
+//! arguments use Slang's CUDA `StructuredBuffer` ABI (`{T* data; size_t count}`)
+//! interleaved with bare `uniform uint` scalars from [`GpuCommand::BindResourcesRaw::user`].
 //! Registry keys in [`GpuCommand::BindResourcesRaw`] are resolved in shader
 //! parameter order — there is no bindless heap or frame-table routing.
 
 use super::*;
+use crate::slang::virtual_main::CudaLaunchArgKind;
 use crate::types::{BufferResizeCost, DeviceType};
 use anyhow::{Context as _, Result};
 use cudarc::driver::{
@@ -105,6 +107,14 @@ struct CudaComputePipeline {
     function: CudaFunction,
     workgroup_size: [u32; 3],
     slot_access: Vec<Option<ResourceAccess>>,
+    /// Author param order for `[goldy_compute]`; empty for plain Slang compute (all-buffer fallback).
+    launch_layout: Vec<CudaLaunchArgKind>,
+}
+
+/// Host-side values pushed to `cuLaunchKernel` in shader parameter order.
+enum CudaLaunchArg {
+    Buffer(CudaBufferArg),
+    Scalar(u32),
 }
 
 impl CudaBackend {
@@ -194,7 +204,10 @@ impl CudaBackend {
         Ok(handle)
     }
 
-    fn compile_compute_ptx(&self, shader: &CudaShader) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3])> {
+    fn compile_compute_ptx(
+        &self,
+        shader: &CudaShader,
+    ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
         ensure_cuda_toolkit_on_path();
         let compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
         let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
@@ -203,6 +216,8 @@ impl CudaBackend {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
+        let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source)
+            .map_err(|error| anyhow::anyhow!("CUDA launch layout failed: {error}"))?;
         let cuda_source = crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source)
             .map_err(|error| anyhow::anyhow!("CUDA shader lowering failed: {error}"))?;
         let workgroup_size = crate::slang::parse_numthreads(&shader.source).unwrap_or([1, 1, 1]);
@@ -236,7 +251,7 @@ impl CudaBackend {
                 })
             })
             .collect();
-        Ok((ptx, access, workgroup_size))
+        Ok((ptx, access, workgroup_size, launch_layout))
     }
 
     fn buffer_arg(&self, stream: &Arc<CudaStream>, buffer: &CudaBuffer) -> Result<CudaBufferArg> {
@@ -252,6 +267,83 @@ impl CudaBackend {
             (buffer.size / stride) as usize
         };
         Ok(CudaBufferArg { data: ptr, count })
+    }
+
+    fn resolve_buffer_arg(&self, stream: &Arc<CudaStream>, binding: usize, index: u32) -> Result<CudaBufferArg> {
+        let handle = self
+            .buffer_slots
+            .get(&index)
+            .with_context(|| format!("CUDA: binding {binding} references unknown registry key {index}"))?;
+        let buffer = self
+            .buffers
+            .get(handle)
+            .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
+        self.buffer_arg(stream, buffer)
+    }
+
+    /// Build launch args in shader parameter order.
+    ///
+    /// Empty `launch_layout` means plain (non-`[goldy_compute]`) Slang: one buffer arg
+    /// per registry index and no scalars.
+    fn build_launch_args(
+        &self,
+        stream: &Arc<CudaStream>,
+        launch_layout: &[CudaLaunchArgKind],
+        indices: &[u32],
+        user: &[u32],
+    ) -> Result<Vec<CudaLaunchArg>> {
+        if launch_layout.is_empty() {
+            if !user.is_empty() {
+                anyhow::bail!(
+                    "CUDA: scalar user params require a [goldy_compute] entry; got {} user word(s)",
+                    user.len()
+                );
+            }
+            let mut args = Vec::with_capacity(indices.len());
+            for (binding, index) in indices.iter().copied().enumerate() {
+                args.push(CudaLaunchArg::Buffer(self.resolve_buffer_arg(stream, binding, index)?));
+            }
+            return Ok(args);
+        }
+
+        let expected_buffers = launch_layout
+            .iter()
+            .filter(|kind| matches!(kind, CudaLaunchArgKind::Buffer))
+            .count();
+        let expected_scalars = launch_layout
+            .iter()
+            .filter(|kind| matches!(kind, CudaLaunchArgKind::Scalar))
+            .count();
+        if indices.len() != expected_buffers {
+            anyhow::bail!(
+                "CUDA: dispatch bound {} buffer(s) but shader expects {expected_buffers}",
+                indices.len()
+            );
+        }
+        if user.len() != expected_scalars {
+            anyhow::bail!(
+                "CUDA: dispatch provided {} scalar user word(s) but shader expects {expected_scalars}",
+                user.len()
+            );
+        }
+
+        let mut args = Vec::with_capacity(launch_layout.len());
+        let mut index_i = 0usize;
+        let mut user_i = 0usize;
+        for kind in launch_layout {
+            match kind {
+                CudaLaunchArgKind::Buffer => {
+                    let index = indices[index_i];
+                    args.push(CudaLaunchArg::Buffer(self.resolve_buffer_arg(stream, index_i, index)?));
+                    index_i += 1;
+                }
+                CudaLaunchArgKind::Scalar => {
+                    args.push(CudaLaunchArg::Scalar(user[user_i]));
+                    user_i += 1;
+                }
+            }
+        }
+        Ok(args)
     }
 
     fn write_buffer_region(stream: &Arc<CudaStream>, buffer: &CudaBuffer, offset: u64, data: &[u8]) -> Result<()> {
@@ -322,17 +414,21 @@ impl CudaBackend {
 
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
+        let mut current_user: Vec<u32> = Vec::new();
 
         for command in commands {
             match command {
                 GpuCommand::SetPipeline(pipeline) => current_pipeline = Some(*pipeline),
                 GpuCommand::BindResourcesRaw { indices, user, .. } => {
-                    if !user.is_empty() {
+                    if user.len() > crate::backend::shared::MAX_USER_SLOTS {
                         anyhow::bail!(
-                            "CUDA: user scalar dispatch parameters are not implemented; use a bound broadcast buffer"
+                            "CUDA: at most {} scalar user params per dispatch, got {}",
+                            crate::backend::shared::MAX_USER_SLOTS,
+                            user.len()
                         );
                     }
                     current_indices.clone_from(indices);
+                    current_user.clone_from(user);
                 }
                 GpuCommand::Dispatch {
                     workgroups_x,
@@ -345,17 +441,12 @@ impl CudaBackend {
                         .compute_pipelines
                         .get(&pipeline_handle)
                         .context("CUDA: invalid compute pipeline")?;
-                    let mut args = Vec::with_capacity(current_indices.len());
-                    for (binding, index) in current_indices.iter().copied().enumerate() {
-                        let handle = self.buffer_slots.get(&index).with_context(|| {
-                            format!("CUDA: binding {binding} references unknown registry key {index}")
-                        })?;
-                        let buffer = self
-                            .buffers
-                            .get(handle)
-                            .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
-                        args.push(self.buffer_arg(&stream, buffer)?);
-                    }
+                    let launch_args = self.build_launch_args(
+                        &stream,
+                        &pipeline.launch_layout,
+                        &current_indices,
+                        &current_user,
+                    )?;
                     let cfg = LaunchConfig {
                         grid_dim: (*workgroups_x, *workgroups_y, *workgroups_z),
                         block_dim: (
@@ -368,8 +459,15 @@ impl CudaBackend {
                     // SAFETY: argument order/types match the Slang CUDA entry signature.
                     unsafe {
                         let mut builder = stream.launch_builder(&pipeline.function);
-                        for arg in &args {
-                            builder.arg(arg);
+                        for arg in &launch_args {
+                            match arg {
+                                CudaLaunchArg::Buffer(buffer) => {
+                                    builder.arg(buffer);
+                                }
+                                CudaLaunchArg::Scalar(word) => {
+                                    builder.arg(word);
+                                }
+                            }
                         }
                         builder.launch(cfg).context("CUDA: cuLaunchKernel failed")?;
                     }
@@ -1111,7 +1209,7 @@ impl GpuBackend for CudaBackend {
         if shader.device != device {
             anyhow::bail!("CUDA: shader belongs to another device");
         }
-        let (ptx, slot_access, workgroup_size) = self.compile_compute_ptx(shader)?;
+        let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader)?;
         let gpu = self.device(device)?;
         let module = gpu
             .ctx
@@ -1130,6 +1228,7 @@ impl GpuBackend for CudaBackend {
                 function,
                 workgroup_size,
                 slot_access,
+                launch_layout,
             },
         );
         Ok(handle)
@@ -1332,6 +1431,258 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         let mut submission = scheme.submit()?;
         let bytes = withdraw.claim(&mut submission)?.consume()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
+        Ok(())
+    }
+
+    fn try_cuda_device() -> Result<Option<Arc<crate::Device>>> {
+        match CudaBackend::new() {
+            Ok(backend) => Ok(Some(Arc::new(crate::Device::from_backend(Box::new(backend))?))),
+            Err(error) => {
+                eprintln!("skipping CUDA scheme test: {error:#}");
+                Ok(None)
+            }
+        }
+    }
+
+    const WITH_PARAM_UINT_SLANG: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+
+    #[test]
+    fn scheme_with_param_uint_roundtrip() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
+        let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        const EXPECTED: u32 = 42;
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("uniform_uint", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(EXPECTED)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[EXPECTED]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_with_param_uint_zero() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let out = pool.acquire_buffer_with_data(&[0xDEAD_BEEFu32], BufferKind::Scattered)?;
+        let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("uniform_zero", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(0u32)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_with_param_uint_max() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
+        let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("uniform_max", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(u32::MAX)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[u32::MAX]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_with_param_float_reinterpret() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
+        let shader = crate::ShaderModule::from_slang(
+            &device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<float> out, float value, ThreadId id) {
+    out[0] = value;
+}
+"#,
+        )?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        #[allow(clippy::approx_constant)]
+        let value: f32 = 3.14159;
+        let bits = value.to_bits();
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("uniform_float", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(bits)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[bits]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_with_param_two_scalars() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let out = pool.acquire_buffer_sized::<u32>(2, BufferKind::Scattered, BufferFlags::empty())?;
+        let shader = crate::ShaderModule::from_slang(
+            &device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
+    out[0] = a;
+    out[1] = b;
+}
+"#,
+        )?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        const A: u32 = 0xABCD;
+        const B: u32 = 0x1234;
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("uniform_two", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(A)
+            .with_param(B)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[A, B]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_with_param_after_two_buffers() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        const N: usize = 64;
+        let input: Vec<u32> = (0..N as u32).collect();
+        let inp = pool.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
+        let out = pool.acquire_buffer_sized::<u32>(N as u64, BufferKind::Scattered, BufferFlags::empty())?;
+        let shader = crate::ShaderModule::from_slang(
+            &device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id) {
+    out[id.x] = inp[id.x] + offset;
+}
+"#,
+        )?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        const OFFSET: u32 = 100;
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("uniform_offset", &pipeline)
+            .with_parcel(&inp, crate::NodeAccess::Read)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(OFFSET)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let expected: Vec<u32> = input.iter().map(|v| v + OFFSET).collect();
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), expected.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_broadcast_parcel_struct_mul() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Params {
+            mul: u32,
+        }
+        impl crate::StructuredBufferElement for Params {}
+        let cfg = pool.acquire_buffer_with_data(&[Params { mul: 3 }], BufferKind::Broadcast)?;
+        let values = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
+        let shader = crate::ShaderModule::from_slang(
+            &device,
+            r#"
+import goldy_exp;
+
+struct Params { uint mul; };
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
+    values[id.x] = values[id.x] * cfg.mul;
+}
+"#,
+        )?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("broadcast_mul", &pipeline)
+            .with_parcel(&cfg, crate::NodeAccess::Read)
+            .with_parcel(&values, crate::NodeAccess::ReadWrite)
+            .dispatch(4, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &values)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[3, 6, 9, 12]);
         Ok(())
     }
 
