@@ -310,7 +310,9 @@ impl Clone for Parcel {
                     offset: *offset,
                     len: *len,
                 },
-                ParcelBacking::Texture(t) => ParcelBacking::Texture(t.clone()),
+                // Non-owning view only — never clone an owning TextureBacking, or Drop
+                // on the clone would destroy_texture while the original Texture lives.
+                ParcelBacking::Texture(t) => ParcelBacking::Texture(t.borrow()),
             },
             stamp: self.stamp.clone_shared_cells(),
             bookkeeping: None,
@@ -893,15 +895,12 @@ pub struct Texture {
 }
 
 impl Clone for Texture {
+    /// Non-owning view of the same GPU texture (equivalent to [`Texture::borrow`]).
+    ///
+    /// Dropping the clone does **not** destroy the GPU resource or mark the shared
+    /// stamp dead. Only the owning [`Texture`] (or an explicit handoff extract) does.
     fn clone(&self) -> Self {
-        Self {
-            parcel: self.parcel.clone(),
-            bookkeeping: None,
-            home_device: self.home_device.clone(),
-            // Non-owning view: Drop must not kill the shared stamp. Only the owning
-            // Texture (or an explicit handoff extract) marks the stamp dead.
-            handoff: true,
-        }
+        self.borrow()
     }
 }
 
@@ -1033,9 +1032,10 @@ impl Texture {
 
     /// Non-owning view sharing this texture's parcel stamp.
     ///
-    /// Dropping the view does **not** mark the stamp dead; only the owning [`Texture`] does.
+    /// Dropping the view does **not** destroy the GPU resource or mark the stamp dead;
+    /// only the owning [`Texture`] does. [`Clone`] for [`Texture`] is the same operation.
     pub fn borrow(&self) -> Self {
-        let backing = self.parcel.grant_texture_keepalive().expect("texture parcel").borrow();
+        let backing = self.parcel.grant_texture_keepalive().expect("texture parcel");
         Self {
             parcel: self.parcel.clone_stamp_with_texture(backing),
             bookkeeping: None,
@@ -1298,8 +1298,11 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
     use crate::device::Device;
+    use crate::exchange::MemoryExchange;
     use crate::retained_pool::RetainedPool;
+    use crate::scheme::Scheme;
     use crate::timeline::{PromiseState, Settle, TimelinePromise};
+    use crate::types::{TextureFlags, TextureFormat, TextureKind};
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -1311,6 +1314,43 @@ mod tests {
             .acquire_record([field("x", Init::zeros::<u32>(4))])
             .expect("buffer");
         buffer.whole().clone()
+    }
+
+    #[test]
+    fn texture_clone_must_not_destroy_original_on_drop() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(device.clone());
+        let tex = pool
+            .acquire_texture(
+                64,
+                48,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST | TextureFlags::RENDER_TARGET,
+                None,
+            )
+            .unwrap();
+
+        assert!(tex.is_owned());
+        let view = tex.clone();
+        assert!(!view.is_owned());
+        assert_eq!(tex.gpu_handle(), view.gpu_handle());
+
+        // Simulate "cache last presented frame" then replace it next frame.
+        let mut held = Some(tex.clone());
+        drop(held.take()); // drops previous clone — must not destroy_texture
+        held = Some(tex.clone());
+        drop(held);
+        drop(view);
+
+        // Original tex is still in scope and must still resolve in the backend.
+        let mut scheme = Scheme::new(&ctx);
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &tex)
+            .expect("bind");
+        let mut submission = scheme.submit().expect("submit should not see destroyed src texture");
+        let _ = grant.claim(&mut submission).unwrap().consume().unwrap();
     }
 
     #[test]
