@@ -287,7 +287,7 @@ pub(crate) fn allocate_timeline_value(timeline_next: &AtomicU64) -> u64 {
 }
 
 /// Highest timeline value pre-allocated on this device (may still be in the worker queue).
-#[cfg(any(feature = "vulkan", feature = "dx12"))]
+#[cfg(any(feature = "vulkan", feature = "dx12", feature = "cuda"))]
 pub(crate) fn submission_horizon(timeline_next: &AtomicU64) -> u64 {
     timeline_next.load(Ordering::Acquire).saturating_sub(1)
 }

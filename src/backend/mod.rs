@@ -58,8 +58,12 @@ pub(crate) mod submission_worker;
 /// Helpers for relocating reuse waits and deferred host writes to the submission worker.
 pub(crate) mod host_sidecar;
 
-/// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
-#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
+/// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12, CUDA).
+#[cfg(any(
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    feature = "cuda"
+))]
 pub(crate) mod signal_fence;
 
 use crate::types::{
@@ -720,6 +724,7 @@ pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
     all(feature = "metal", target_os = "macos"),
+    feature = "cuda",
 ))]
 pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHandle) {
     if let Some(handle) = backend.detach_context_for_destroy(ctx) {

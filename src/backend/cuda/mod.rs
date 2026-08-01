@@ -6,9 +6,16 @@
 //! Single-dispatch registry keys come from [`GpuCommand::BindResourcesRaw`]; batched
 //! dispatches resolve keys from [`GpuCommand::FrameTableStaging`] in shader
 //! parameter order — there is no bindless heap or device-side frame-table routing.
+//!
+//! Submits are host-asynchronous: each context owns a CUDA stream, each timeline
+//! value owns a completion event, and a per-device [`SubmissionWorker`] records work.
+
+mod pending_submit;
+mod timeline;
 
 use super::*;
 use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
+use crate::backend::submission_worker::{self, SubmissionWorker};
 use crate::frame_table::dispatch_table_base_word_index;
 use crate::slang::virtual_main::CudaLaunchArgKind;
 use crate::types::{BufferResizeCost, DeviceType};
@@ -17,15 +24,21 @@ use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg,
 };
 use cudarc::nvrtc::Ptx;
-use std::collections::HashMap;
+use pending_submit::{CudaOp, CudaPendingSubmit};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use timeline::{EventLedger, LedgerEntry};
+
+/// Soft cap on concurrent submission contexts per CUDA device.
+const MAX_CUDA_SUBMISSION_CONTEXTS: u32 = 32;
 
 /// Slang CUDA structured-buffer descriptor: `{ T* data; size_t count }`.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CudaBufferArg {
+pub(super) struct CudaBufferArg {
     data: u64,
     count: usize,
 }
@@ -41,6 +54,7 @@ pub(crate) struct CudaBackend {
     buffer_slots: HashMap<u32, BufferHandle>,
     shaders: HashMap<ShaderHandle, CudaShader>,
     compute_pipelines: HashMap<ComputePipelineHandle, CudaComputePipeline>,
+    retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -51,37 +65,116 @@ pub(crate) struct CudaBackend {
 
 struct CudaDevice {
     ctx: Arc<CudaContext>,
-    stream: Arc<CudaStream>,
+    /// Stream used for host-driven alloc / immediate buffer APIs.
+    alloc_stream: Arc<CudaStream>,
+    submission_worker: Arc<SubmissionWorker>,
     next_timeline: Arc<AtomicU64>,
     retired: Arc<AtomicU64>,
+    event_ledger: EventLedger,
+    deletion_queue: Arc<Mutex<Vec<CudaDeferredDrop>>>,
 }
 
-struct CudaSubmitContext {
+pub(super) struct CudaSubmitContext {
+    handle: ContextHandle,
     device: DeviceHandle,
+    stream: Arc<CudaStream>,
     completed: AtomicU64,
+    last_emitted: AtomicU64,
     signal_queue: crate::signal::SignalQueue,
+    device_retired: Arc<AtomicU64>,
+    event_ledger: EventLedger,
+    deletion_queue: Arc<Mutex<Vec<CudaDeferredDrop>>>,
+    fence_shutdown: Arc<AtomicBool>,
+    fence_thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+enum CudaDeferredDrop {
+    Buffer {
+        retire_at: u64,
+        #[allow(dead_code)]
+        memory: Arc<Mutex<CudaSlice<u8>>>,
+    },
+    Pipeline {
+        retire_at: u64,
+        #[allow(dead_code)]
+        module: Arc<CudaModule>,
+        #[allow(dead_code)]
+        function: CudaFunction,
+    },
 }
 
 struct CudaProgress {
     context: Arc<CudaSubmitContext>,
+    event_ledger: EventLedger,
 }
 
 impl ContextGpuProgress for CudaProgress {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        timeline::poll_retire_events(
+            &self.event_ledger,
+            &self.context.completed,
+            self.context.handle,
+            &self.context.device_retired,
+            &self.context.signal_queue,
+            &self.context.last_emitted,
+        );
         self.context.completed.load(Ordering::Acquire)
     }
 }
 
-struct CudaDestroyContext;
+struct CudaDestroyContext {
+    stream: Arc<CudaStream>,
+    worker: Arc<SubmissionWorker>,
+    fence_shutdown: Arc<AtomicBool>,
+    fence_thread: Option<JoinHandle<()>>,
+}
 
 impl ContextDestroyHandle for CudaDestroyContext {
     fn wait(&self) -> Result<()> {
-        Ok(())
+        let _ = self.worker.flush();
+        self.stream.synchronize().context("CUDA: context destroy stream sync")
     }
 
     fn finish(self: Box<Self>) -> Result<()> {
+        crate::backend::signal_fence::join_fence_poller(&self.fence_shutdown, self.fence_thread);
         Ok(())
     }
+}
+
+struct CudaDeferredDeletionFlush {
+    context: Arc<CudaSubmitContext>,
+}
+
+impl ContextDeferredDeletionFlush for CudaDeferredDeletionFlush {
+    fn flush(&self) {
+        timeline::poll_retire_events(
+            &self.context.event_ledger,
+            &self.context.completed,
+            self.context.handle,
+            &self.context.device_retired,
+            &self.context.signal_queue,
+            &self.context.last_emitted,
+        );
+        drain_deletion_queue_up_to(
+            &self.context.deletion_queue,
+            self.context.device_retired.load(Ordering::Acquire),
+        );
+    }
+}
+
+fn drain_deletion_queue_up_to(queue: &Mutex<Vec<CudaDeferredDrop>>, retired: u64) {
+    let mut guard = queue.lock().unwrap();
+    let mut kept = Vec::new();
+    for entry in guard.drain(..) {
+        let retire_at = match &entry {
+            CudaDeferredDrop::Buffer { retire_at, .. } | CudaDeferredDrop::Pipeline { retire_at, .. } => *retire_at,
+        };
+        if retire_at > retired {
+            kept.push(entry);
+        }
+        // else drop entry (and its Arc payload) here
+    }
+    *guard = kept;
 }
 
 struct CudaBuffer {
@@ -115,7 +208,7 @@ struct CudaComputePipeline {
 }
 
 /// Host-side values pushed to `cuLaunchKernel` in shader parameter order.
-enum CudaLaunchArg {
+pub(super) enum CudaLaunchArg {
     Buffer(CudaBufferArg),
     Scalar(u32),
 }
@@ -148,6 +241,7 @@ impl CudaBackend {
             buffer_slots: HashMap::new(),
             shaders: HashMap::new(),
             compute_pipelines: HashMap::new(),
+            retained_graphs: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
@@ -165,6 +259,26 @@ impl CudaBackend {
         self.contexts.get(&handle).context("CUDA: invalid context handle")
     }
 
+    fn sync_device_streams_for_immediate_api(&mut self, device: DeviceHandle) -> Result<()> {
+        let worker = Arc::clone(&self.device(device)?.submission_worker);
+        worker.flush()?;
+        for context in self.contexts.values().filter(|context| context.device == device) {
+            context
+                .stream
+                .synchronize()
+                .context("CUDA: sync context stream for immediate API")?;
+            timeline::poll_retire_events(
+                &context.event_ledger,
+                &context.completed,
+                context.handle,
+                &context.device_retired,
+                &context.signal_queue,
+                &context.last_emitted,
+            );
+        }
+        Ok(())
+    }
+
     fn unsupported<T>(operation: &str) -> Result<T> {
         anyhow::bail!("CUDA compute-only backend does not support {operation}")
     }
@@ -179,7 +293,7 @@ impl CudaBackend {
         let capacity = capacity.max(logical_size).max(4);
         let gpu = self.device(device)?;
         let memory = Arc::new(Mutex::new(
-            gpu.stream
+            gpu.alloc_stream
                 .alloc_zeros::<u8>(capacity as usize)
                 .context("CUDA: alloc buffer")?,
         ));
@@ -377,6 +491,7 @@ impl CudaBackend {
         stream.memset_zeros(&mut view).context("CUDA: memset failed")
     }
 
+    #[allow(dead_code)]
     fn copy_buffer_region(
         stream: &Arc<CudaStream>,
         src: &CudaBuffer,
@@ -462,6 +577,7 @@ impl CudaBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn launch_compute(
         &self,
         stream: &Arc<CudaStream>,
@@ -518,17 +634,21 @@ impl CudaBackend {
             .count()
     }
 
-    fn execute_dispatch_batch(
+    fn materialize_dispatch_batch(
         &self,
         stream: &Arc<CudaStream>,
-        pipeline: &CudaComputePipeline,
+        pipeline_handle: ComputePipelineHandle,
         frame_table: Option<&[u32]>,
         arg_data: &[u8],
         count: u32,
-    ) -> Result<()> {
+    ) -> Result<Vec<CudaOp>> {
+        let pipeline = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .context("CUDA: invalid compute pipeline")?;
         let entry_count = count as usize;
         if entry_count == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let needed = entry_count
             .checked_mul(DISPATCH_BATCH_STRIDE)
@@ -551,8 +671,6 @@ impl CudaBackend {
         let n_buffers = match Self::launch_layout_buffer_count(&pipeline.launch_layout) {
             Some(n) => n,
             None => {
-                // Plain (non-[goldy_compute]) kernels: infer buffer arity from the
-                // contiguous frame-table bases allocated for this batch (count >= 2).
                 anyhow::ensure!(
                     entry_count >= 2,
                     "CUDA: DispatchBatch with empty launch layout requires at least 2 entries"
@@ -585,10 +703,9 @@ impl CudaBackend {
                     table.len()
                 );
             }
-        } else if n_scalars == 0 && !pipeline.launch_layout.is_empty() {
-            // goldy entry with only system-value params — nothing to bind.
         }
 
+        let mut ops = Vec::with_capacity(entry_count);
         for i in 0..entry_count {
             let base = i * DISPATCH_BATCH_STRIDE;
             let layout: PushLayout = *bytemuck::from_bytes(&arg_data[base..base + TOTAL_PUSH_BYTES]);
@@ -597,40 +714,71 @@ impl CudaBackend {
             let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
             let wg_z = u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into().unwrap());
 
-            let indices: &[u32] = if n_buffers == 0 {
-                &[]
+            let indices: Vec<u32> = if n_buffers == 0 {
+                Vec::new()
             } else {
                 let table = frame_table.expect("validated above");
                 let start = bases[i] as usize;
-                &table[start..start + n_buffers]
+                table[start..start + n_buffers].to_vec()
             };
             let user = if n_scalars == 0 {
-                &[][..]
+                Vec::new()
             } else {
                 anyhow::ensure!(
                     n_scalars <= MAX_USER_SLOTS,
                     "CUDA: DispatchBatch entry {i} expects {n_scalars} scalars (max {MAX_USER_SLOTS})"
                 );
-                &layout.user[..n_scalars]
+                layout.user[..n_scalars].to_vec()
             };
 
-            self.launch_compute(stream, pipeline, indices, user, (wg_x, wg_y, wg_z))
-                .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?;
+            ops.push(
+                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z))
+                    .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
+            );
         }
-        Ok(())
+        Ok(ops)
     }
 
-    fn submit_commands(
-        &mut self,
-        ctx: ContextHandle,
-        commands: &[GpuCommand],
-    ) -> Result<crate::timeline::TimelineValue> {
-        let context = Arc::clone(self.context(ctx)?);
-        let device_handle = context.device;
-        let stream = Arc::clone(&self.device(device_handle)?.stream);
-        let next_timeline = Arc::clone(&self.device(device_handle)?.next_timeline);
-        let retired = Arc::clone(&self.device(device_handle)?.retired);
+    fn materialize_launch(
+        &self,
+        stream: &Arc<CudaStream>,
+        pipeline_handle: ComputePipelineHandle,
+        indices: &[u32],
+        user: &[u32],
+        workgroups: (u32, u32, u32),
+    ) -> Result<CudaOp> {
+        let pipeline = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .context("CUDA: invalid compute pipeline")?;
+        let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
+        let mut keep_alive = Vec::new();
+        for (binding, index) in indices.iter().copied().enumerate() {
+            let handle = self.buffer_slots.get(&index).with_context(|| {
+                format!("CUDA: binding {binding} references unknown registry key {index}")
+            })?;
+            let buffer = self
+                .buffers
+                .get(handle)
+                .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
+            keep_alive.push(Arc::clone(&buffer.memory));
+        }
+        let function = pipeline
+            .module
+            .load_function("cs_main")
+            .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
+        Ok(CudaOp::Launch {
+            function,
+            module: Arc::clone(&pipeline.module),
+            workgroup_size: pipeline.workgroup_size,
+            grid: workgroups,
+            args: launch_args,
+            keep_alive,
+        })
+    }
 
+    fn materialize_ops(&self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+        let mut ops = Vec::new();
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
         let mut current_user: Vec<u32> = Vec::new();
@@ -656,17 +804,13 @@ impl CudaBackend {
                     ..
                 } => {
                     let pipeline_handle = current_pipeline.context("CUDA: dispatch without a compute pipeline")?;
-                    let pipeline = self
-                        .compute_pipelines
-                        .get(&pipeline_handle)
-                        .context("CUDA: invalid compute pipeline")?;
-                    self.launch_compute(
-                        &stream,
-                        pipeline,
+                    ops.push(self.materialize_launch(
+                        stream,
+                        pipeline_handle,
                         &current_indices,
                         &current_user,
                         (*workgroups_x, *workgroups_y, *workgroups_z),
-                    )?;
+                    )?);
                 }
                 GpuCommand::DispatchIndirect { .. } => {
                     anyhow::bail!(
@@ -676,11 +820,27 @@ impl CudaBackend {
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let buffer = self.buffers.get(buffer).context("CUDA: invalid clear buffer")?;
-                    Self::clear_buffer_region(&stream, buffer, *offset, *size)?;
+                    let clear_size = if *size == 0 {
+                        buffer.size.saturating_sub(*offset)
+                    } else {
+                        *size
+                    };
+                    ops.push(CudaOp::Clear {
+                        memory: Arc::clone(&buffer.memory),
+                        abs_offset: buffer.offset + *offset,
+                        size: clear_size,
+                    });
                 }
                 GpuCommand::WriteBuffer { buffer, offset, data } => {
                     let buffer = self.buffers.get(buffer).context("CUDA: invalid write buffer")?;
-                    Self::write_buffer_region(&stream, buffer, *offset, data)?;
+                    if *offset + data.len() as u64 > buffer.size {
+                        anyhow::bail!("CUDA: write exceeds logical buffer size");
+                    }
+                    ops.push(CudaOp::Write {
+                        memory: Arc::clone(&buffer.memory),
+                        abs_offset: buffer.offset + *offset,
+                        data: data.to_vec(),
+                    });
                 }
                 GpuCommand::CopyBuffer {
                     src,
@@ -689,27 +849,39 @@ impl CudaBackend {
                     dst_offset,
                     size,
                 } => {
-                    let src_buf = self.buffers.get(src).context("CUDA: invalid copy source")?.clone_meta();
-                    let dst_buf = self
-                        .buffers
-                        .get(dst)
-                        .context("CUDA: invalid copy destination")?
-                        .clone_meta();
-                    Self::copy_buffer_region(&stream, &src_buf, *src_offset, &dst_buf, *dst_offset, *size)?;
+                    let src_buf = self.buffers.get(src).context("CUDA: invalid copy source")?;
+                    let dst_buf = self.buffers.get(dst).context("CUDA: invalid copy destination")?;
+                    if src_buf.device != dst_buf.device {
+                        anyhow::bail!("CUDA: copy across devices is not supported");
+                    }
+                    if *src_offset + *size > src_buf.size {
+                        anyhow::bail!("CUDA: copy source range exceeds logical buffer size");
+                    }
+                    if *dst_offset + *size > dst_buf.size {
+                        anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
+                    }
+                    ops.push(CudaOp::Copy {
+                        src: Arc::clone(&src_buf.memory),
+                        src_abs: src_buf.offset + *src_offset,
+                        dst: Arc::clone(&dst_buf.memory),
+                        dst_abs: dst_buf.offset + *dst_offset,
+                        size: *size,
+                    });
                 }
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table = Some(Arc::clone(data));
                 }
-                GpuCommand::ResourceBarrier { .. } => {
-                    // Same-stream FIFO ordering is sufficient for the compute-only PoC.
-                }
+                GpuCommand::ResourceBarrier { .. } => {}
                 GpuCommand::DispatchBatch { arg_data, count, .. } => {
                     let pipeline_handle = current_pipeline.context("CUDA: DispatchBatch without a compute pipeline")?;
-                    let pipeline = self
-                        .compute_pipelines
-                        .get(&pipeline_handle)
-                        .context("CUDA: invalid compute pipeline")?;
-                    self.execute_dispatch_batch(&stream, pipeline, frame_table.as_deref(), arg_data.as_ref(), *count)?;
+                    let batch_ops = self.materialize_dispatch_batch(
+                        stream,
+                        pipeline_handle,
+                        frame_table.as_deref(),
+                        arg_data.as_ref(),
+                        *count,
+                    )?;
+                    ops.extend(batch_ops);
                 }
                 GpuCommand::WriteTexture { .. }
                 | GpuCommand::WriteTextureRegion { .. }
@@ -721,14 +893,90 @@ impl CudaBackend {
                 }
             }
         }
+        Ok(ops)
+    }
 
-        stream.synchronize().context("CUDA: stream synchronize failed")?;
+    fn submit_commands(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let context = Arc::clone(self.context(ctx)?);
+        let device_handle = context.device;
+        let device = self.device(device_handle)?;
+        let stream = Arc::clone(&context.stream);
+        let worker = Arc::clone(&device.submission_worker);
+        let next_timeline = Arc::clone(&device.next_timeline);
+        let event_ledger = Arc::clone(&device.event_ledger);
+        let cuda_ctx = Arc::clone(&device.ctx);
 
-        let value = next_timeline.fetch_add(1, Ordering::AcqRel);
-        context.completed.store(value, Ordering::Release);
-        retired.fetch_max(value, Ordering::AcqRel);
-        context.signal_queue.push_boundary_crossed(value);
-        Ok(value)
+        worker.check_error()?;
+
+        let fence_value = submission_worker::allocate_timeline_value(&next_timeline);
+        let completion_event = Arc::new(
+            cuda_ctx
+                .new_event(None)
+                .context("CUDA: create completion event failed")?,
+        );
+        event_ledger.lock().unwrap().insert(
+            fence_value,
+            LedgerEntry {
+                context: ctx,
+                event: Arc::clone(&completion_event),
+                recorded: false,
+            },
+        );
+
+        let mut stream_waits = Vec::new();
+        let mut host_waits = Vec::new();
+        let mut deferred_writes = Vec::new();
+        if let Some(sync) = sync {
+            for epoch in &sync.waits {
+                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value)
+                    .with_context(|| {
+                        format!(
+                            "CUDA: cross-context wait missing event for context {:?} value {}",
+                            epoch.context, epoch.value
+                        )
+                    })?;
+                stream_waits.push(event);
+            }
+            for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
+                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value)
+                    .with_context(|| {
+                        format!(
+                            "CUDA: host wait missing event for context {:?} value {}",
+                            epoch.context, epoch.value
+                        )
+                    })?;
+                host_waits.push(event);
+            }
+            deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |handle| {
+                let buffer = self
+                    .buffers
+                    .get(&handle)
+                    .with_context(|| format!("CUDA: deferred write invalid buffer {handle}"))?;
+                Ok((Arc::clone(&buffer.memory), buffer.offset))
+            })?;
+        }
+
+        let effective = commands_with_sync_prologue(commands, sync);
+        let ops = self.materialize_ops(&stream, &effective)?;
+
+        let pending = CudaPendingSubmit {
+            stream,
+            context,
+            fence_value,
+            completion_event,
+            event_ledger,
+            stream_waits,
+            host_waits,
+            deferred_writes,
+            ops,
+        };
+        worker.enqueue(fence_value, Box::new(pending))?;
+        Ok(fence_value)
     }
 }
 
@@ -796,24 +1044,61 @@ impl GpuBackendSubmitSession for CudaBackend {
 impl GpuBackendTimelineWait for CudaBackend {
     fn take_timeline_submission_epoch_wait(
         &self,
-        _ctx: ContextHandle,
-        _value: crate::timeline::TimelineValue,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
     ) -> Result<Option<submission_worker::SubmissionEpochWait>> {
-        Ok(None)
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device_handle = self.context_device(ctx);
+        let Some(device) = self.devices.get(&device_handle) else {
+            return Ok(None);
+        };
+        let horizon = submission_worker::submission_horizon(&device.next_timeline);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(submission_worker::SubmissionEpochWait::new(
+            Arc::clone(&device.submission_worker),
+            value,
+            horizon,
+        )))
     }
 
     fn take_timeline_blocking_wait(
         &self,
-        _ctx: ContextHandle,
-        _value: crate::timeline::TimelineValue,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
     ) -> Result<Option<Box<dyn TimelineBlockingWait>>> {
-        Ok(None)
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device_handle = self.context_device(ctx);
+        let device = self.device(device_handle)?;
+        let event = timeline::lookup_event(&device.event_ledger, ctx, value)
+            .with_context(|| format!("CUDA: no completion event for context {ctx} value {value}"))?;
+        Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
     }
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
+        let context = Arc::clone(self.context(ctx)?);
+        let device_handle = context.device;
+        if let Some(device) = self.devices.get(&device_handle) {
+            device.submission_worker.flush()?;
+        }
+        timeline::poll_retire_events(
+            &context.event_ledger,
+            &context.completed,
+            context.handle,
+            &context.device_retired,
+            &context.signal_queue,
+            &context.last_emitted,
+        );
         if self.gpu_progress(ctx) < value {
             anyhow::bail!("CUDA: timeline value {value} was not submitted on context {ctx}");
         }
+        let retired = context.device_retired.load(Ordering::Acquire);
+        drain_deletion_queue_up_to(&context.deletion_queue, retired);
         Ok(())
     }
 }
@@ -854,7 +1139,7 @@ impl GpuBackend for CudaBackend {
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_decommit_supported: false,
-            host_sidecar_on_submit_worker: false,
+            host_sidecar_on_submit_worker: true,
             split_compute_partitions_on_barrier_cost: false,
             fuse_upload_with_compute_partitions: true,
             ..crate::device::DeviceCapabilities::default()
@@ -865,26 +1150,38 @@ impl GpuBackend for CudaBackend {
         ensure_cuda_toolkit_on_path();
         let ctx = CudaContext::new(adapter_id as usize)
             .with_context(|| format!("CUDA: create device for adapter {adapter_id}"))?;
-        let stream = ctx.default_stream();
+        let alloc_stream = ctx.default_stream();
         let handle = self.next_device;
         self.next_device += 1;
         self.devices.insert(
             handle,
             CudaDevice {
                 ctx,
-                stream,
+                alloc_stream,
+                submission_worker: Arc::new(SubmissionWorker::new(submission_worker::SUBMISSION_QUEUE_CAPACITY)),
                 next_timeline: Arc::new(AtomicU64::new(1)),
                 retired: Arc::new(AtomicU64::new(0)),
+                event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
+                deletion_queue: Arc::new(Mutex::new(Vec::new())),
             },
         );
         Ok(handle)
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
-        if let Some(gpu) = self.devices.remove(&device) {
-            let _ = gpu.stream.synchronize();
+        let contexts: Vec<_> = self
+            .contexts
+            .iter()
+            .filter_map(|(handle, context)| (context.device == device).then_some(*handle))
+            .collect();
+        for ctx in contexts {
+            let _ = destroy_context_mut(self, ctx);
         }
-        self.contexts.retain(|_, context| context.device != device);
+        if let Some(gpu) = self.devices.remove(&device) {
+            let _ = gpu.submission_worker.flush();
+            let _ = gpu.alloc_stream.synchronize();
+            gpu.submission_worker.shutdown();
+        }
         self.buffers.retain(|_, buffer| buffer.device != device);
         self.shaders.retain(|_, shader| shader.device != device);
         self.compute_pipelines.retain(|_, pipeline| pipeline.device != device);
@@ -896,47 +1193,115 @@ impl GpuBackend for CudaBackend {
     }
 
     fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
-        self.device(device)?
-            .stream
+        let worker = Arc::clone(&self.device(device)?.submission_worker);
+        let alloc_stream = Arc::clone(&self.device(device)?.alloc_stream);
+        worker.flush()?;
+        for context in self.contexts.values().filter(|context| context.device == device) {
+            context
+                .stream
+                .synchronize()
+                .context("CUDA: context stream synchronize failed")?;
+            timeline::poll_retire_events(
+                &context.event_ledger,
+                &context.completed,
+                context.handle,
+                &context.device_retired,
+                &context.signal_queue,
+                &context.last_emitted,
+            );
+        }
+        alloc_stream
             .synchronize()
-            .context("CUDA: device wait idle failed")
+            .context("CUDA: device wait idle failed")?;
+        Ok(())
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
-        self.device(device)?;
-        if self.contexts.values().any(|context| context.device == device) {
-            anyhow::bail!("CUDA prototype supports one submission context per device");
+        let existing = self.contexts.values().filter(|context| context.device == device).count() as u32;
+        if existing >= MAX_CUDA_SUBMISSION_CONTEXTS {
+            anyhow::bail!(
+                "CUDA: submission context limit reached ({MAX_CUDA_SUBMISSION_CONTEXTS} per device)"
+            );
         }
+        let (stream, event_ledger, device_retired, deletion_queue) = {
+            let gpu = self.device(device)?;
+            (
+                gpu.ctx.new_stream().context("CUDA: create context stream failed")?,
+                Arc::clone(&gpu.event_ledger),
+                Arc::clone(&gpu.retired),
+                Arc::clone(&gpu.deletion_queue),
+            )
+        };
         let handle = self.next_context;
         self.next_context += 1;
-        self.contexts.insert(
+        let fence_shutdown = Arc::new(AtomicBool::new(false));
+        let context = Arc::new(CudaSubmitContext {
             handle,
-            Arc::new(CudaSubmitContext {
-                device,
-                completed: AtomicU64::new(0),
-                signal_queue: crate::signal::SignalQueue::new(),
-            }),
-        );
+            device,
+            stream,
+            completed: AtomicU64::new(0),
+            last_emitted: AtomicU64::new(0),
+            signal_queue: crate::signal::SignalQueue::new(),
+            device_retired,
+            event_ledger: Arc::clone(&event_ledger),
+            deletion_queue,
+            fence_shutdown: Arc::clone(&fence_shutdown),
+            fence_thread: Mutex::new(None),
+        });
+
+        let poller_context = Arc::clone(&context);
+        let poller_ledger = Arc::clone(&event_ledger);
+        let shutdown = Arc::clone(&fence_shutdown);
+        let handle_thread = std::thread::spawn(move || {
+            while !shutdown.load(Ordering::Relaxed) {
+                timeline::poll_retire_events(
+                    &poller_ledger,
+                    &poller_context.completed,
+                    poller_context.handle,
+                    &poller_context.device_retired,
+                    &poller_context.signal_queue,
+                    &poller_context.last_emitted,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        *context.fence_thread.lock().unwrap() = Some(handle_thread);
+
+        self.contexts.insert(handle, context);
         Ok(handle)
     }
 
     fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>> {
-        self.contexts.remove(&ctx)?;
-        Some(Box::new(CudaDestroyContext))
+        let context = self.contexts.remove(&ctx)?;
+        self.retained_graphs.retain(|(c, _), _| *c != ctx);
+        let worker = self
+            .devices
+            .get(&context.device)
+            .map(|device| Arc::clone(&device.submission_worker));
+        let fence_thread = context.fence_thread.lock().unwrap().take();
+        context.fence_shutdown.store(true, Ordering::Relaxed);
+        Some(Box::new(CudaDestroyContext {
+            stream: Arc::clone(&context.stream),
+            worker: worker.unwrap_or_else(|| Arc::new(SubmissionWorker::new(1))),
+            fence_shutdown: Arc::clone(&context.fence_shutdown),
+            fence_thread,
+        }))
     }
 
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>> {
-        self.contexts
-            .contains_key(&ctx)
-            .then(|| Arc::new(NoOpDeferredDeletionFlush) as Arc<dyn ContextDeferredDeletionFlush>)
+        Some(Arc::new(CudaDeferredDeletionFlush {
+            context: Arc::clone(self.contexts.get(&ctx)?),
+        }))
     }
 
     fn clone_context_gpu_progress(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextGpuProgress>> {
+        let context = Arc::clone(self.contexts.get(&ctx)?);
         Some(Arc::new(CudaProgress {
-            context: Arc::clone(self.contexts.get(&ctx)?),
+            event_ledger: Arc::clone(&context.event_ledger),
+            context,
         }))
     }
 
@@ -976,12 +1341,25 @@ impl GpuBackend for CudaBackend {
             if let Some(slot) = buffer.slot {
                 self.buffer_slots.remove(&slot);
             }
+            if let Some(device) = self.devices.get(&buffer.device) {
+                let retire_at = submission_worker::submission_horizon(&device.next_timeline);
+                device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Buffer {
+                    retire_at,
+                    memory: buffer.memory,
+                });
+            }
         }
     }
 
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+        self.sync_device_streams_for_immediate_api(
+            self.buffers
+                .get(&buffer)
+                .map(|buffer| buffer.device)
+                .context("CUDA: invalid buffer handle")?,
+        )?;
         let buffer = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
-        let stream = Arc::clone(&self.device(buffer.device)?.stream);
+        let stream = Arc::clone(&self.device(buffer.device)?.alloc_stream);
         Self::write_buffer_region(&stream, buffer, offset, data)
     }
 
@@ -989,7 +1367,7 @@ impl GpuBackend for CudaBackend {
         let gpu = self.device(device)?;
         let capacity = size.max(4);
         let memory = Arc::new(Mutex::new(
-            gpu.stream
+            gpu.alloc_stream
                 .alloc_zeros::<u8>(capacity as usize)
                 .context("CUDA: alloc readback")?,
         ));
@@ -1019,7 +1397,17 @@ impl GpuBackend for CudaBackend {
         if output.len() as u64 > buffer.size {
             anyhow::bail!("CUDA: read exceeds readback buffer size");
         }
-        let stream = Arc::clone(&self.device(buffer.device)?.stream);
+        let device = buffer.device;
+        // Ensure any context-stream copy into this staging buffer has retired.
+        let worker = Arc::clone(&self.device(device)?.submission_worker);
+        worker.flush()?;
+        for context in self.contexts.values().filter(|context| context.device == device) {
+            context
+                .stream
+                .synchronize()
+                .context("CUDA: readback context stream sync failed")?;
+        }
+        let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let memory = buffer.memory.lock().unwrap();
         let view = memory
             .try_slice(buffer.offset as usize..(buffer.offset as usize + output.len()))
@@ -1063,7 +1451,8 @@ impl GpuBackend for CudaBackend {
     }
 
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
-        let stream = Arc::clone(&self.device(device)?.stream);
+        self.sync_device_streams_for_immediate_api(device)?;
+        let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let target = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
         Self::clear_buffer_region(&stream, target, offset, size)
     }
@@ -1149,7 +1538,8 @@ impl GpuBackend for CudaBackend {
         if old.device != device {
             anyhow::bail!("CUDA: buffer belongs to another device");
         }
-        let stream = Arc::clone(&self.device(device)?.stream);
+        self.sync_device_streams_for_immediate_api(device)?;
+        let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let capacity = new_size.max(4);
         let mut replacement = stream
             .alloc_zeros::<u8>(capacity as usize)
@@ -1329,23 +1719,53 @@ impl GpuBackend for CudaBackend {
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
-        self.contexts
-            .get(&ctx)
-            .map(|context| context.completed.load(Ordering::Acquire))
-            .unwrap_or(0)
+        let Some(context) = self.contexts.get(&ctx) else {
+            return 0;
+        };
+        timeline::poll_retire_events(
+            &context.event_ledger,
+            &context.completed,
+            context.handle,
+            &context.device_retired,
+            &context.signal_queue,
+            &context.last_emitted,
+        );
+        context.completed.load(Ordering::Acquire)
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
-        self.devices
-            .get(&device)
-            .map(|device| device.retired.load(Ordering::Acquire))
-            .unwrap_or(0)
+        let Some(device) = self.devices.get(&device) else {
+            return 0;
+        };
+        timeline::advance_device_retired(&device.event_ledger, &device.retired);
+        device.retired.load(Ordering::Acquire)
     }
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        self.device_wait_idle(device)?;
-        if self.device_timeline_retired(device) < value {
-            anyhow::bail!("CUDA: timeline value {value} has not been submitted");
+        if value == 0 {
+            return Ok(());
+        }
+        let gpu = self.device(device)?;
+        gpu.submission_worker
+            .wait_submitted_if_scheduled(value, submission_worker::submission_horizon(&gpu.next_timeline))?;
+        let event = {
+            let ledger = gpu.event_ledger.lock().unwrap();
+            ledger
+                .get(&value)
+                .map(|entry| Arc::clone(&entry.event))
+                .with_context(|| format!("CUDA: timeline value {value} has not been submitted"))?
+        };
+        event.synchronize().context("CUDA: device_wait_until event sync failed")?;
+        timeline::advance_device_retired(&gpu.event_ledger, &gpu.retired);
+        for context in self.contexts.values().filter(|context| context.device == device) {
+            timeline::poll_retire_events(
+                &context.event_ledger,
+                &context.completed,
+                context.handle,
+                &context.device_retired,
+                &context.signal_queue,
+                &context.last_emitted,
+            );
         }
         Ok(())
     }
@@ -1355,10 +1775,19 @@ impl GpuBackend for CudaBackend {
         ctx: ContextHandle,
         _progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::QueuedSignal> {
-        self.contexts
-            .get(&ctx)
-            .map(|context| crate::signal::drain_all_queued_signals(&context.signal_queue))
-            .unwrap_or_default()
+        if let Some(context) = self.contexts.get(&ctx) {
+            timeline::poll_retire_events(
+                &context.event_ledger,
+                &context.completed,
+                context.handle,
+                &context.device_retired,
+                &context.signal_queue,
+                &context.last_emitted,
+            );
+            crate::signal::drain_all_queued_signals(&context.signal_queue)
+        } else {
+            Vec::new()
+        }
     }
 
     fn submit_standalone(
@@ -1367,21 +1796,34 @@ impl GpuBackend for CudaBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        if let Some(sync) = sync {
-            for epoch in sync
-                .waits
-                .iter()
-                .chain(sync.cpu_waits.iter())
-                .chain(sync.host_observed_waits.iter())
-            {
-                self.device_wait_until(self.context_device(ctx), epoch.value)?;
-            }
-            for write in &sync.deferred_host_writes {
-                self.write_buffer(write.buffer, write.offset, &write.data)?;
-            }
-        }
-        let effective = commands_with_sync_prologue(commands, sync);
-        self.submit_commands(ctx, &effective)
+        self.submit_commands(ctx, commands, sync)
+    }
+
+    fn submit_graph_and_retain(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.retained_graphs.insert((ctx, key), commands.to_vec());
+        self.submit_graph(ctx, commands, sync)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        let Some(commands) = self.retained_graphs.get(&(ctx, key)).cloned() else {
+            return Ok(None);
+        };
+        self.submit_graph(ctx, &commands, sync).map(Some)
+    }
+
+    fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
+        self.retained_graphs.remove(&(ctx, key));
     }
 
     fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
@@ -1431,7 +1873,16 @@ impl GpuBackend for CudaBackend {
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
-        self.compute_pipelines.remove(&pipeline);
+        if let Some(pipeline) = self.compute_pipelines.remove(&pipeline) {
+            if let Some(device) = self.devices.get(&pipeline.device) {
+                let retire_at = submission_worker::submission_horizon(&device.next_timeline);
+                device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Pipeline {
+                    retire_at,
+                    module: pipeline.module,
+                    function: pipeline.function,
+                });
+            }
+        }
     }
 
     fn compute_pipeline_slot_access(&self, pipeline: ComputePipelineHandle) -> Vec<Option<ResourceAccess>> {
@@ -1462,7 +1913,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn max_submission_contexts(&self, _device: DeviceHandle) -> u32 {
-        1
+        MAX_CUDA_SUBMISSION_CONTEXTS
     }
 }
 
@@ -1497,6 +1948,17 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     output[id.x] = input[id.x] * 2;
 }
 "#;
+
+    fn wait_for(backend: &mut CudaBackend, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
+        if let Some(wait) = backend.take_timeline_submission_epoch_wait(ctx, value)? {
+            wait.wait()?;
+        }
+        if let Some(wait) = backend.take_timeline_blocking_wait(ctx, value)? {
+            wait.block()?;
+        }
+        backend.finish_timeline_wait(ctx, value)?;
+        Ok(())
+    }
 
     fn run_compute_dispatch_and_readback(shader_source: &str) -> Result<()> {
         let mut backend = match CudaBackend::new() {
@@ -1543,10 +2005,15 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             ],
             None,
         )?;
+        assert!(
+            backend.gpu_progress(ctx) < submitted || backend.gpu_progress(ctx) == submitted,
+            "progress must not exceed the submitted timeline value"
+        );
+        wait_for(&mut backend, ctx, submitted)?;
         assert_eq!(backend.gpu_progress(ctx), submitted);
 
         let readback = backend.alloc_readback_buffer(device, 16)?;
-        backend.submit_standalone(
+        let copied = backend.submit_standalone(
             ctx,
             &[GpuCommand::CopyBuffer {
                 src: buffer,
@@ -1557,6 +2024,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             }],
             None,
         )?;
+        wait_for(&mut backend, ctx, copied)?;
         let mut bytes = [0u8; 16];
         backend.read_readback_buffer(readback, &mut bytes)?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
@@ -2346,6 +2814,96 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         assert_eq!(&words[..4], &[10, 20, 30, 40]);
         // Newly grown tail is zero-filled by alloc_zeros.
         assert_eq!(&words[4..], &[0, 0, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn async_submit_wait_until_advances_progress() -> Result<()> {
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA async timeline test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_SLANG,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("double"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let submitted = backend.submit_standalone(
+            ctx,
+            &[
+                GpuCommand::SetPipeline(pipeline),
+                GpuCommand::BindResourcesRaw {
+                    indices: vec![slot],
+                    user: vec![],
+                    frame_table_base: 0,
+                },
+                GpuCommand::Dispatch {
+                    label: Some("double"),
+                    workgroups_x: 4,
+                    workgroups_y: 1,
+                    workgroups_z: 1,
+                },
+            ],
+            None,
+        )?;
+        // Submit must return a timeline value without requiring GPU completion first.
+        assert!(submitted >= 1);
+        wait_for(&mut backend, ctx, submitted)?;
+        assert_eq!(backend.gpu_progress(ctx), submitted);
+        assert!(backend.device_timeline_retired(device) >= submitted);
+        Ok(())
+    }
+
+    #[test]
+    fn two_contexts_submit_and_complete_independently() -> Result<()> {
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
+        };
+        let ctx_a = device.create_context()?;
+        let ctx_b = device.create_context()?;
+        let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let buf_a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
+        let buf_b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
+
+        let mut scheme_a = crate::Scheme::new(&ctx_a);
+        scheme_a
+            .node("a", &pipeline)
+            .with_parcel(&buf_a, crate::NodeAccess::ReadWrite)
+            .dispatch(4, 1, 1);
+        let withdraw_a = crate::MemoryExchange::new(&ctx_a).bind_withdraw(&mut scheme_a, &buf_a)?;
+        let mut submission_a = scheme_a.submit()?;
+
+        let mut scheme_b = crate::Scheme::new(&ctx_b);
+        scheme_b
+            .node("b", &pipeline)
+            .with_parcel(&buf_b, crate::NodeAccess::ReadWrite)
+            .dispatch(4, 1, 1);
+        let withdraw_b = crate::MemoryExchange::new(&ctx_b).bind_withdraw(&mut scheme_b, &buf_b)?;
+        let mut submission_b = scheme_b.submit()?;
+
+        let bytes_a = withdraw_a.claim(&mut submission_a)?.consume()?;
+        let bytes_b = withdraw_b.claim(&mut submission_b)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[20, 40, 60, 80]);
         Ok(())
     }
 

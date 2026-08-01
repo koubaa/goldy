@@ -5,15 +5,15 @@ mod submission;
 #[path = "common/upload.rs"]
 mod upload;
 
-#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
 mod imp {
     use crate::submission::submission_context;
     use crate::upload::write_to_parcel;
     use goldy::{
         types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
-        BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, Parcel,
-        RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
-        WithdrawTransaction,
+        BackendType, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
+        Parcel, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
+        Submission, WithdrawTransaction,
     };
     use std::sync::Arc;
 
@@ -4111,6 +4111,7 @@ mod imp {
 
     pub fn run() {
         let device = make_device();
+        let is_cuda = device.backend_type() == BackendType::Cuda;
 
         let mut trials = Vec::new();
         macro_rules! trial {
@@ -4120,6 +4121,13 @@ mod imp {
                     $f(&device);
                     Ok(())
                 }));
+            }};
+        }
+        macro_rules! trial_skip_cuda {
+            ($f:ident) => {{
+                if !is_cuda {
+                    trial!($f);
+                }
             }};
         }
 
@@ -4152,8 +4160,8 @@ mod imp {
         trial!(scheme_cpu_readable_compute_write_and_read);
         trial!(scheme_cpu_readable_write_to_parcel_roundtrip);
         trial!(scheme_scattered_typed_variable_assignment);
-        trial!(scheme_compute_write_to_texture);
-        trial!(scheme_with_parcel_raw_texture);
+        trial_skip_cuda!(scheme_compute_write_to_texture);
+        trial_skip_cuda!(scheme_with_parcel_raw_texture);
         trial!(scheme_wave_inclusive_scan_uniform_64);
         trial!(scheme_wave_inclusive_scan_ramp_64);
         trial!(scheme_wave_inclusive_scan_uniform_256);
@@ -4161,7 +4169,7 @@ mod imp {
         trial!(scheme_workgroup_inclusive_scan_uint_correct);
         trial!(scheme_workgroup_broadcast_correct);
         trial!(scheme_workgroup_upper_bound_linear);
-        trial!(scheme_texture_dual_view_round_trip);
+        trial_skip_cuda!(scheme_texture_dual_view_round_trip);
         trial!(scheme_two_contexts_both_submit_and_complete);
         trial!(scheme_two_contexts_reclaim_independently);
         trial!(scheme_deposit_buffer_reuse_across_submissions);
@@ -4173,33 +4181,33 @@ mod imp {
         trial!(scheme_uniform_scalar_after_two_buffer_params);
         trial!(scheme_buffer_view_copy_between_sub_regions);
         trial!(scheme_buffer_view_isolation);
-        trial!(scheme_compute_dispatch_indirect);
-        trial!(scheme_dispatch_indirect_invalid_buffer);
-        trial!(scheme_dispatch_indirect_wrong_type_rejected);
-        trial!(scheme_stress_zeros_then_indirect_dispatch);
+        trial_skip_cuda!(scheme_compute_dispatch_indirect);
+        trial_skip_cuda!(scheme_dispatch_indirect_invalid_buffer);
+        trial_skip_cuda!(scheme_dispatch_indirect_wrong_type_rejected);
+        trial_skip_cuda!(scheme_stress_zeros_then_indirect_dispatch);
         trial!(scheme_stress_alternating_write_dispatch);
         trial!(scheme_clear_parcel_full);
         trial!(scheme_clear_parcel_partial_preserves_edges);
         trial!(scheme_clear_parcel_size_zero_fills_to_end);
-        trial!(scheme_clear_parcel_requires_buffer_parcel);
+        trial_skip_cuda!(scheme_clear_parcel_requires_buffer_parcel);
         trial!(scheme_copy_buffer_parcel_basic);
         trial!(scheme_copy_buffer_parcel_partial_with_offsets);
-        trial!(scheme_copy_buffer_parcel_rejects_texture_src);
-        trial!(scheme_copy_buffer_parcel_rejects_texture_dst);
+        trial_skip_cuda!(scheme_copy_buffer_parcel_rejects_texture_src);
+        trial_skip_cuda!(scheme_copy_buffer_parcel_rejects_texture_dst);
         trial!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
         trial!(scheme_cpu_writable_staging_write_then_copy);
         trial!(scheme_cpu_writable_staging_update_each_frame);
-        trial!(scheme_write_texture_round_trip);
-        trial!(scheme_write_texture_wrong_size_returns_error);
-        trial!(scheme_write_texture_marks_scheme_dirty);
-        trial!(scheme_write_texture_region_round_trip);
-        trial!(scheme_write_texture_region_oob_returns_error);
-        trial!(scheme_write_texture_region_multiple_non_overlapping);
-        trial!(scheme_copy_buffer_to_texture_parcel_full_texture);
-        trial!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
-        trial!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
-        trial!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
-        trial!(scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles);
+        trial_skip_cuda!(scheme_write_texture_round_trip);
+        trial_skip_cuda!(scheme_write_texture_wrong_size_returns_error);
+        trial_skip_cuda!(scheme_write_texture_marks_scheme_dirty);
+        trial_skip_cuda!(scheme_write_texture_region_round_trip);
+        trial_skip_cuda!(scheme_write_texture_region_oob_returns_error);
+        trial_skip_cuda!(scheme_write_texture_region_multiple_non_overlapping);
+        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_full_texture);
+        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
+        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
+        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
+        trial_skip_cuda!(scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles);
         trial!(cross_scheme_grant_read_reader_is_topology_invisible);
         trial!(cross_scheme_copy_reader_forces_one_topology_record);
         trial!(single_scheme_write_then_readback_records_once);
@@ -4213,8 +4221,8 @@ mod imp {
         trial!(cross_scheme_grant_then_copy_reader_boundary);
         trial!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
         trial!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
-        trial!(cross_scheme_texture_readback_retained_loop_records_twice);
-        trial!(scheme_return_transient_texture_invalidates_retained_scheme);
+        trial_skip_cuda!(cross_scheme_texture_readback_retained_loop_records_twice);
+        trial_skip_cuda!(scheme_return_transient_texture_invalidates_retained_scheme);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);
@@ -4227,6 +4235,6 @@ mod imp {
 }
 
 fn main() {
-    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
     imp::run();
 }
