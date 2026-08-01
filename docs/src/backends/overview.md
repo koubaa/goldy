@@ -194,6 +194,8 @@ The Metal backend uses the `metal` crate (native Metal, not MoltenVK):
 
 Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API. Slang compiles to PTX; dispatches use the CUDA launch model. Graphics, surfaces, and exchanges are not yet supported. Enable with the `cuda` Cargo feature.
 
+With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnostics: PTX JIT error/info logs on module load, host-side launch-limit checks, StructuredBuffer ABI checks, and per-op stream synchronize with labeled errors. It may set `CUDA_LAUNCH_BLOCKING=1` when unset. Deep memory/race checking still requires external [`compute-sanitizer`](https://docs.nvidia.com/compute-sanitizer/), not `GOLDY_VALIDATION`.
+
 ### WebGPU Backend (in progress)
 
 Cross-platform prototype built on [wgpu](https://github.com/gfx-rs/wgpu). Intended for broader portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature. Not yet at parity with the shipped Vulkan/DX12/Metal backends.

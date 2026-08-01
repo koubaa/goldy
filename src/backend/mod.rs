@@ -76,13 +76,19 @@ use std::sync::Arc;
 /// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
 /// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
 /// Vulkan enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation;
-/// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset.
+/// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset;
+/// CUDA enables Driver diagnostics (PTX JIT logs, eager sync, launch-limit checks) and may set
+/// `CUDA_LAUNCH_BLOCKING=1` when unset.
 ///
 /// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `api`, `all`, …).
 ///
 /// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
 /// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
-#[cfg(any(feature = "vulkan", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    feature = "vulkan",
+    feature = "cuda",
+    all(feature = "metal", target_os = "macos"),
+))]
 #[must_use]
 pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()

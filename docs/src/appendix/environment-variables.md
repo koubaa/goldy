@@ -14,13 +14,13 @@ Goldy reads several environment variables at runtime for backend selection, vali
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `GOLDY_VALIDATION` | Comma/semicolon/whitespace-separated list: `api`, `layout`, `layouts`, `all`; or `1` / `true` / `yes` | *(not set)* | Enable validation categories. `api` enables GPU API validation (Vulkan validation layers, Metal shader validation). `layout` enables Rust/Slang struct layout and buffer stride checks. `all` enables both. The shorthand `1` / `true` / `yes` enables **GPU API only** (layout stays opt-in). |
+| `GOLDY_VALIDATION` | Comma/semicolon/whitespace-separated list: `api`, `layout`, `layouts`, `all`; or `1` / `true` / `yes` | *(not set)* | Enable validation categories. `api` enables GPU API validation (Vulkan validation layers, Metal shader validation, CUDA Driver diagnostics: PTX JIT logs, eager stream sync, launch-limit checks). `layout` enables Rust/Slang struct layout and buffer stride checks. `all` enables both (plus timeline/scheme where applicable). The shorthand `1` / `true` / `yes` enables **GPU API only** (layout stays opt-in). Deep CUDA memory/race checking is **not** covered — use external `compute-sanitizer`. |
 | `GOLDY_VALIDATE_LAYOUTS` | `1`, `true`, `yes` | *(not set)* | Legacy toggle for layout validation only. Equivalent to `GOLDY_VALIDATION=layout`. |
 
 ### Validation Examples
 
 ```bash
-# GPU API validation only (Vulkan validation layers, Metal shader validation)
+# GPU API validation (Vulkan layers, Metal shader validation, CUDA Driver diagnostics)
 GOLDY_VALIDATION=api cargo run --example triangle
 
 # Layout + stride checks only
@@ -31,6 +31,9 @@ GOLDY_VALIDATION=all cargo run --example triangle
 
 # Shorthand for GPU API only
 GOLDY_VALIDATION=1 cargo run --example triangle
+
+# CUDA with API validation (JIT logs, eager sync, launch limits)
+GOLDY_BACKEND=cuda GOLDY_VALIDATION=api cargo test --features cuda
 ```
 
 ## DX12-Specific
@@ -74,3 +77,4 @@ Goldy also respects these non-Goldy environment variables:
 | `VK_LAYER_PATH` | Vulkan | Standard Vulkan loader variable for locating validation layer manifests. |
 | `MTL_SHADER_VALIDATION` | Metal | When `GOLDY_VALIDATION` enables API validation and this variable is unset, Goldy sets it to `1` before creating the first Metal device. If you set it yourself, Goldy does not override it. |
 | `METAL_CAPTURE_ENABLED` | Metal | Required for programmatic GPU capture outside Xcode. Goldy sets this to `1` automatically when `GOLDY_METAL_CAPTURE` is set (if unset). |
+| `CUDA_LAUNCH_BLOCKING` | CUDA | When `GOLDY_VALIDATION` enables API validation and this variable is unset, Goldy sets it to `1` before CUDA driver init. If you set it yourself, Goldy does not override it. Forces synchronous kernel launches so errors surface at the launch site. |

@@ -32,6 +32,7 @@ pub(super) struct MaterializedHostWrite {
 
 pub(super) enum CudaOp {
     Launch {
+        label: Option<&'static str>,
         function: CudaFunction,
         #[allow(dead_code)]
         module: Arc<CudaModule>,
@@ -60,6 +61,15 @@ pub(super) enum CudaOp {
     },
 }
 
+pub(super) fn maybe_validate_sync(stream: &Arc<CudaStream>, op: &str) -> Result<()> {
+    if !crate::backend::goldy_validation_enabled() {
+        return Ok(());
+    }
+    stream
+        .synchronize()
+        .with_context(|| format!("CUDA validation: {op} synchronize failed"))
+}
+
 impl PendingSubmit for CudaPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         for event in &self.host_waits {
@@ -75,6 +85,7 @@ impl PendingSubmit for CudaPendingSubmit {
             self.stream
                 .memcpy_htod(write.data.as_ref(), &mut view)
                 .context("CUDA: deferred host write HtoD failed")?;
+            maybe_validate_sync(&self.stream, "deferred host write")?;
         }
         for event in &self.stream_waits {
             self.stream
@@ -85,12 +96,14 @@ impl PendingSubmit for CudaPendingSubmit {
         for op in &self.ops {
             match op {
                 CudaOp::Launch {
+                    label,
                     function,
                     workgroup_size,
                     grid,
                     args,
                     ..
                 } => {
+                    let where_ = label.unwrap_or("<unnamed>");
                     let cfg = LaunchConfig {
                         grid_dim: *grid,
                         block_dim: (workgroup_size[0], workgroup_size[1], workgroup_size[2]),
@@ -109,8 +122,11 @@ impl PendingSubmit for CudaPendingSubmit {
                                 }
                             }
                         }
-                        builder.launch(cfg).context("CUDA: cuLaunchKernel failed")?;
+                        builder
+                            .launch(cfg)
+                            .with_context(|| format!("CUDA: cuLaunchKernel failed for dispatch '{where_}'"))?;
                     }
+                    maybe_validate_sync(&self.stream, &format!("dispatch '{where_}'"))?;
                 }
                 CudaOp::Clear {
                     memory,
@@ -124,6 +140,7 @@ impl PendingSubmit for CudaPendingSubmit {
                         .try_slice_mut(start..end)
                         .context("CUDA: clear range out of bounds")?;
                     self.stream.memset_zeros(&mut view).context("CUDA: memset failed")?;
+                    maybe_validate_sync(&self.stream, "ClearBuffer")?;
                 }
                 CudaOp::Write {
                     memory,
@@ -139,6 +156,7 @@ impl PendingSubmit for CudaPendingSubmit {
                     self.stream
                         .memcpy_htod(data, &mut view)
                         .context("CUDA: HtoD write failed")?;
+                    maybe_validate_sync(&self.stream, "WriteBuffer")?;
                 }
                 CudaOp::Copy {
                     src,
@@ -148,6 +166,7 @@ impl PendingSubmit for CudaPendingSubmit {
                     size,
                 } => {
                     execute_copy(&self.stream, src, *src_abs, dst, *dst_abs, *size)?;
+                    maybe_validate_sync(&self.stream, "CopyBuffer")?;
                 }
             }
         }
@@ -199,7 +218,7 @@ fn execute_copy(
             let mut memory = dst.lock().unwrap();
             let mut dst_view = memory
                 .try_slice_mut(dst_abs as usize..dst_abs as usize + byte_len)
-                .context("CUDA: copy destination out of bounds")?;
+                .context("CUDA: same-alloc copy from scratch")?;
             stream
                 .memcpy_dtod(&temp, &mut dst_view)
                 .context("CUDA: same-alloc copy from scratch")?;

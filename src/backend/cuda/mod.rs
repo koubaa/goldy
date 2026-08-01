@@ -26,14 +26,27 @@ use cudarc::driver::{
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit};
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use timeline::{EventLedger, LedgerEntry};
 
 /// Soft cap on concurrent submission contexts per CUDA device.
 const MAX_CUDA_SUBMISSION_CONTEXTS: u32 = 32;
+
+static CUDA_VALIDATION_INIT: Once = Once::new();
+
+/// Cached device launch limits queried once at [`CudaBackend::create_device`].
+#[derive(Clone, Copy, Debug)]
+struct CudaDeviceLimits {
+    max_grid_dim_x: u32,
+    max_grid_dim_y: u32,
+    max_grid_dim_z: u32,
+    max_threads_per_block: u32,
+    max_shared_memory_per_block: u32,
+}
 
 /// Slang CUDA structured-buffer descriptor: `{ T* data; size_t count }`.
 #[repr(C)]
@@ -72,6 +85,7 @@ struct CudaDevice {
     retired: Arc<AtomicU64>,
     event_ledger: EventLedger,
     deletion_queue: Arc<Mutex<Vec<CudaDeferredDrop>>>,
+    limits: CudaDeviceLimits,
 }
 
 pub(super) struct CudaSubmitContext {
@@ -202,6 +216,8 @@ struct CudaComputePipeline {
     module: Arc<CudaModule>,
     function: CudaFunction,
     workgroup_size: [u32; 3],
+    /// From `CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK` at pipeline create.
+    max_threads_per_block: u32,
     slot_access: Vec<Option<ResourceAccess>>,
     /// Author param order for `[goldy_compute]`; empty for plain Slang compute (all-buffer fallback).
     launch_layout: Vec<CudaLaunchArgKind>,
@@ -216,6 +232,15 @@ pub(super) enum CudaLaunchArg {
 impl CudaBackend {
     pub(crate) fn new() -> Result<Self> {
         ensure_cuda_toolkit_on_path();
+        // `CUDA_LAUNCH_BLOCKING` must be set before driver work begins. Use a
+        // process-wide Once so parallel test threads do not race on `set_var`.
+        CUDA_VALIDATION_INIT.call_once(|| {
+            if crate::backend::goldy_validation_enabled() && std::env::var_os("CUDA_LAUNCH_BLOCKING").is_none() {
+                // SAFETY: called exactly once per process, before device enumeration below.
+                unsafe { std::env::set_var("CUDA_LAUNCH_BLOCKING", "1") };
+                tracing::info!("Set CUDA_LAUNCH_BLOCKING=1 (GOLDY_VALIDATION api)");
+            }
+        });
         cudarc::driver::result::init().context("CUDA: driver init failed")?;
         let count = CudaContext::device_count().context("CUDA: enumerate devices")?;
         if count <= 0 {
@@ -383,6 +408,23 @@ impl CudaBackend {
         } else {
             (buffer.size / stride) as usize
         };
+        if crate::backend::goldy_validation_enabled() {
+            if ptr == 0 {
+                anyhow::bail!("CUDA validation: StructuredBuffer device pointer is null");
+            }
+            let expected = if buffer.size == 0 {
+                0usize
+            } else {
+                (buffer.size / stride) as usize
+            };
+            if count != expected {
+                anyhow::bail!(
+                    "CUDA validation: StructuredBuffer count {count} != logical_size/stride {expected} \
+                     (size={}, stride={stride})",
+                    buffer.size
+                );
+            }
+        }
         Ok(CudaBufferArg { data: ptr, count })
     }
 
@@ -473,7 +515,8 @@ impl CudaBackend {
         let mut view = memory
             .try_slice_mut(start..end)
             .context("CUDA: write range out of bounds")?;
-        stream.memcpy_htod(data, &mut view).context("CUDA: HtoD write failed")
+        stream.memcpy_htod(data, &mut view).context("CUDA: HtoD write failed")?;
+        pending_submit::maybe_validate_sync(stream, "immediate WriteBuffer")
     }
 
     fn clear_buffer_region(stream: &Arc<CudaStream>, buffer: &CudaBuffer, offset: u64, size: u64) -> Result<()> {
@@ -488,7 +531,8 @@ impl CudaBackend {
         let mut view = memory
             .try_slice_mut(start..end)
             .context("CUDA: clear range out of bounds")?;
-        stream.memset_zeros(&mut view).context("CUDA: memset failed")
+        stream.memset_zeros(&mut view).context("CUDA: memset failed")?;
+        pending_submit::maybe_validate_sync(stream, "immediate ClearBuffer")
     }
 
     #[allow(dead_code)]
@@ -586,6 +630,15 @@ impl CudaBackend {
         user: &[u32],
         workgroups: (u32, u32, u32),
     ) -> Result<()> {
+        let limits = self.device(pipeline.device)?.limits;
+        validate_launch_config(
+            &limits,
+            pipeline.max_threads_per_block,
+            workgroups,
+            pipeline.workgroup_size,
+            0,
+            None,
+        )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let cfg = LaunchConfig {
             grid_dim: workgroups,
@@ -641,6 +694,7 @@ impl CudaBackend {
         frame_table: Option<&[u32]>,
         arg_data: &[u8],
         count: u32,
+        label: Option<&'static str>,
     ) -> Result<Vec<CudaOp>> {
         let pipeline = self
             .compute_pipelines
@@ -732,8 +786,15 @@ impl CudaBackend {
             };
 
             ops.push(
-                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z))
-                    .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
+                self.materialize_launch(
+                    stream,
+                    pipeline_handle,
+                    &indices,
+                    &user,
+                    (wg_x, wg_y, wg_z),
+                    label,
+                )
+                .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
             );
         }
         Ok(ops)
@@ -746,11 +807,21 @@ impl CudaBackend {
         indices: &[u32],
         user: &[u32],
         workgroups: (u32, u32, u32),
+        label: Option<&'static str>,
     ) -> Result<CudaOp> {
         let pipeline = self
             .compute_pipelines
             .get(&pipeline_handle)
             .context("CUDA: invalid compute pipeline")?;
+        let limits = self.device(pipeline.device)?.limits;
+        validate_launch_config(
+            &limits,
+            pipeline.max_threads_per_block,
+            workgroups,
+            pipeline.workgroup_size,
+            0,
+            label,
+        )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let mut keep_alive = Vec::new();
         for (binding, index) in indices.iter().copied().enumerate() {
@@ -768,6 +839,7 @@ impl CudaBackend {
             .load_function("cs_main")
             .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
         Ok(CudaOp::Launch {
+            label,
             function,
             module: Arc::clone(&pipeline.module),
             workgroup_size: pipeline.workgroup_size,
@@ -798,10 +870,10 @@ impl CudaBackend {
                     current_user.clone_from(user);
                 }
                 GpuCommand::Dispatch {
+                    label,
                     workgroups_x,
                     workgroups_y,
                     workgroups_z,
-                    ..
                 } => {
                     let pipeline_handle = current_pipeline.context("CUDA: dispatch without a compute pipeline")?;
                     ops.push(self.materialize_launch(
@@ -810,6 +882,7 @@ impl CudaBackend {
                         &current_indices,
                         &current_user,
                         (*workgroups_x, *workgroups_y, *workgroups_z),
+                        *label,
                     )?);
                 }
                 GpuCommand::DispatchIndirect { .. } => {
@@ -872,7 +945,7 @@ impl CudaBackend {
                     frame_table = Some(Arc::clone(data));
                 }
                 GpuCommand::ResourceBarrier { .. } => {}
-                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                GpuCommand::DispatchBatch { label, arg_data, count } => {
                     let pipeline_handle = current_pipeline.context("CUDA: DispatchBatch without a compute pipeline")?;
                     let batch_ops = self.materialize_dispatch_batch(
                         stream,
@@ -880,6 +953,7 @@ impl CudaBackend {
                         frame_table.as_deref(),
                         arg_data.as_ref(),
                         *count,
+                        *label,
                     )?;
                     ops.extend(batch_ops);
                 }
@@ -1031,6 +1105,162 @@ fn ensure_cuda_toolkit_on_path() {
     }
 }
 
+fn query_device_limits(ctx: &CudaContext) -> Result<CudaDeviceLimits> {
+    use cudarc::driver::sys::CUdevice_attribute;
+    let attr = |a: CUdevice_attribute| -> Result<u32> {
+        Ok(ctx.attribute(a).context("CUDA: cuDeviceGetAttribute failed")?.max(0) as u32)
+    };
+    Ok(CudaDeviceLimits {
+        max_grid_dim_x: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?,
+        max_grid_dim_y: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?,
+        max_grid_dim_z: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?,
+        max_threads_per_block: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?,
+        max_shared_memory_per_block: attr(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?,
+    })
+}
+
+/// Host-side launch-config checks when `GOLDY_VALIDATION=api` (or `all`) is set.
+fn validate_launch_config(
+    limits: &CudaDeviceLimits,
+    function_max_threads: u32,
+    grid: (u32, u32, u32),
+    block: [u32; 3],
+    shared_mem_bytes: u32,
+    label: Option<&'static str>,
+) -> Result<()> {
+    if !crate::backend::goldy_validation_enabled() {
+        return Ok(());
+    }
+    validate_launch_config_unchecked(limits, function_max_threads, grid, block, shared_mem_bytes, label)
+}
+
+/// Unconditional launch-config checks (used by api validation and unit tests).
+fn validate_launch_config_unchecked(
+    limits: &CudaDeviceLimits,
+    function_max_threads: u32,
+    grid: (u32, u32, u32),
+    block: [u32; 3],
+    shared_mem_bytes: u32,
+    label: Option<&'static str>,
+) -> Result<()> {
+    let where_ = label.unwrap_or("<unnamed>");
+    let (gx, gy, gz) = grid;
+    if gx == 0 || gy == 0 || gz == 0 {
+        anyhow::bail!("CUDA validation: dispatch '{where_}' has zero grid dim ({gx},{gy},{gz})");
+    }
+    if gx > limits.max_grid_dim_x || gy > limits.max_grid_dim_y || gz > limits.max_grid_dim_z {
+        anyhow::bail!(
+            "CUDA validation: dispatch '{where_}' grid ({gx},{gy},{gz}) exceeds device max \
+             ({},{},{})",
+            limits.max_grid_dim_x,
+            limits.max_grid_dim_y,
+            limits.max_grid_dim_z
+        );
+    }
+    let [bx, by, bz] = block;
+    if bx == 0 || by == 0 || bz == 0 {
+        anyhow::bail!("CUDA validation: dispatch '{where_}' has zero block dim ({bx},{by},{bz})");
+    }
+    let threads = bx as u64 * by as u64 * bz as u64;
+    let max_fn = function_max_threads.max(1);
+    let max_dev = limits.max_threads_per_block.max(1);
+    if threads > max_fn as u64 {
+        anyhow::bail!(
+            "CUDA validation: dispatch '{where_}' block threads {threads} exceeds function max {max_fn}"
+        );
+    }
+    if threads > max_dev as u64 {
+        anyhow::bail!(
+            "CUDA validation: dispatch '{where_}' block threads {threads} exceeds device max {max_dev}"
+        );
+    }
+    if shared_mem_bytes > limits.max_shared_memory_per_block {
+        anyhow::bail!(
+            "CUDA validation: dispatch '{where_}' shared_mem {shared_mem_bytes} exceeds device max {}",
+            limits.max_shared_memory_per_block
+        );
+    }
+    Ok(())
+}
+
+fn c_string_log(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).trim().to_owned()
+}
+
+/// When api validation is on: JIT with error/info logs via `cuModuleLoadDataEx`, unload, then
+/// load through cudarc's safe `load_module` (no public `CudaModule` constructor).
+fn load_ptx_module(ctx: &Arc<CudaContext>, ptx: &str) -> Result<Arc<CudaModule>> {
+    if crate::backend::goldy_validation_enabled() {
+        load_ptx_module_validated(ctx, ptx)?;
+    }
+    ctx.load_module(Ptx::from_src(ptx.to_owned()))
+        .context("CUDA: cuModuleLoadData failed")
+}
+
+/// Probe-load PTX with JIT log buffers; unload on success. Failures include driver log text.
+fn load_ptx_module_validated(ctx: &Arc<CudaContext>, ptx: &str) -> Result<()> {
+    use cudarc::driver::sys::{
+        cuModuleLoadDataEx, cuModuleUnload, CUjit_option, CUmodule, CUresult,
+    };
+    use std::mem::MaybeUninit;
+    use std::os::raw::c_void;
+
+    ctx.bind_to_thread().context("CUDA: bind context for PTX JIT validation")?;
+    let c_src = CString::new(ptx).context("CUDA: PTX source contains interior NUL")?;
+
+    let mut error_log = vec![0u8; 16 * 1024];
+    let mut info_log = vec![0u8; 16 * 1024];
+    let error_size = error_log.len();
+    let info_size = info_log.len();
+    let verbose: usize = 1;
+    let line_info: usize = 1;
+
+    let mut options = [
+        CUjit_option::CU_JIT_ERROR_LOG_BUFFER,
+        CUjit_option::CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
+        CUjit_option::CU_JIT_INFO_LOG_BUFFER,
+        CUjit_option::CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
+        CUjit_option::CU_JIT_LOG_VERBOSE,
+        CUjit_option::CU_JIT_GENERATE_LINE_INFO,
+    ];
+    let mut values: [*mut c_void; 6] = [
+        error_log.as_mut_ptr().cast(),
+        error_size as *mut c_void,
+        info_log.as_mut_ptr().cast(),
+        info_size as *mut c_void,
+        verbose as *mut c_void,
+        line_info as *mut c_void,
+    ];
+
+    let mut module = MaybeUninit::<CUmodule>::uninit();
+    let status = unsafe {
+        cuModuleLoadDataEx(
+            module.as_mut_ptr(),
+            c_src.as_ptr().cast(),
+            options.len() as u32,
+            options.as_mut_ptr(),
+            values.as_mut_ptr(),
+        )
+    };
+    let error_text = c_string_log(&error_log);
+    let info_text = c_string_log(&info_log);
+    if status != CUresult::CUDA_SUCCESS {
+        anyhow::bail!(
+            "CUDA: PTX JIT failed ({status:?})\nerror log:\n{error_text}\ninfo log:\n{info_text}"
+        );
+    }
+    let module = unsafe { module.assume_init() };
+    let unload = unsafe { cuModuleUnload(module) };
+    if unload != CUresult::CUDA_SUCCESS {
+        anyhow::bail!("CUDA: cuModuleUnload after validated JIT failed ({unload:?})");
+    }
+    if !info_text.is_empty() {
+        tracing::debug!("CUDA PTX JIT info log:\n{info_text}");
+    }
+    Ok(())
+}
+
 impl GpuBackendSubmitSession for CudaBackend {
     fn clone_context_submit_session(
         &self,
@@ -1150,6 +1380,8 @@ impl GpuBackend for CudaBackend {
         ensure_cuda_toolkit_on_path();
         let ctx = CudaContext::new(adapter_id as usize)
             .with_context(|| format!("CUDA: create device for adapter {adapter_id}"))?;
+        let limits = query_device_limits(&ctx)
+            .with_context(|| format!("CUDA: query device limits for adapter {adapter_id}"))?;
         let alloc_stream = ctx.default_stream();
         let handle = self.next_device;
         self.next_device += 1;
@@ -1163,6 +1395,7 @@ impl GpuBackend for CudaBackend {
                 retired: Arc::new(AtomicU64::new(0)),
                 event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
                 deletion_queue: Arc::new(Mutex::new(Vec::new())),
+                limits,
             },
         );
         Ok(handle)
@@ -1849,13 +2082,14 @@ impl GpuBackend for CudaBackend {
         }
         let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader)?;
         let gpu = self.device(device)?;
-        let module = gpu
-            .ctx
-            .load_module(Ptx::from_src(ptx))
-            .context("CUDA: cuModuleLoadData failed")?;
+        let module = load_ptx_module(&gpu.ctx, &ptx)?;
         let function = module
             .load_function("cs_main")
             .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
+        let max_threads_per_block = function
+            .max_threads_per_block()
+            .context("CUDA: query CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK failed")?
+            .max(0) as u32;
         let handle = self.next_compute_pipeline;
         self.next_compute_pipeline += 1;
         self.compute_pipelines.insert(
@@ -1865,6 +2099,7 @@ impl GpuBackend for CudaBackend {
                 module,
                 function,
                 workgroup_size,
+                max_threads_per_block,
                 slot_access,
                 launch_layout,
             },
@@ -2936,5 +3171,79 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         assert!(words[16..48].iter().all(|&v| v == 0));
         assert!(words[48..].iter().all(|&v| v == 0xCCCC_CCCC));
         Ok(())
+    }
+
+    #[test]
+    fn validated_ptx_load_rejects_invalid_ptx_with_jit_log() -> Result<()> {
+        ensure_cuda_toolkit_on_path();
+        let ctx = match CudaContext::new(0) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                eprintln!("skipping CUDA JIT validation test: {error:#}");
+                return Ok(());
+            }
+        };
+        let err = match load_ptx_module_validated(&ctx, "this is not valid PTX !!!") {
+            Ok(()) => {
+                panic!("expected invalid PTX to fail JIT validation");
+            }
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            err.contains("PTX JIT failed") || err.contains("error log") || err.contains("JIT"),
+            "expected JIT failure diagnostics, got:\n{err}"
+        );
+        // Error log from the driver should be non-trivial for garbage PTX.
+        assert!(
+            err.len() > 32,
+            "expected non-empty JIT diagnostic text, got:\n{err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn launch_config_validation_rejects_oversize_grid() {
+        let limits = CudaDeviceLimits {
+            max_grid_dim_x: 1024,
+            max_grid_dim_y: 1024,
+            max_grid_dim_z: 64,
+            max_threads_per_block: 1024,
+            max_shared_memory_per_block: 48 * 1024,
+        };
+        let err = validate_launch_config_unchecked(
+            &limits,
+            1024,
+            (u32::MAX, 1, 1),
+            [1, 1, 1],
+            0,
+            Some("too_wide"),
+        )
+        .expect_err("oversize grid must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("too_wide") && msg.contains("exceeds device max"),
+            "unexpected error: {msg}"
+        );
+
+        let err = validate_launch_config_unchecked(
+            &limits,
+            256,
+            (1, 1, 1),
+            [512, 1, 1],
+            0,
+            Some("fat_block"),
+        )
+        .expect_err("oversize block must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fat_block") && msg.contains("exceeds function max"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn goldy_validation_api_gate_compiles_for_cuda() {
+        // Ensures `feature = "cuda"` keeps `goldy_validation_enabled` linked.
+        let _ = crate::backend::goldy_validation_enabled();
     }
 }
