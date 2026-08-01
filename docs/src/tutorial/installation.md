@@ -30,10 +30,10 @@ cargo add goldy
 | `webgpu` | no | WebGPU backend (in progress; via wgpu; does not imply `graphics`) |
 | `instrumentation` | yes | Structured tracing via `tracing-subscriber` (zero-cost when disabled) |
 
-`graphics` is implied by the native backends. Textures and samplers remain available without it for GPGPU workloads. A CUDA compute-only build:
+`graphics` is implied by the native backends. Textures and samplers remain available without it for GPGPU workloads. CUDA is not a platform default; it auto-selects only in `--no-default-features --features cuda` builds (otherwise set `GOLDY_BACKEND=cuda`):
 
 ```bash
-cargo test --no-default-features --features cuda
+cargo test --no-default-features --features cuda --test scheme_compute_integration
 ```
 
 Platform-inappropriate features are no-ops — enabling `metal` on Linux or `dx12` on macOS compiles cleanly but does nothing.

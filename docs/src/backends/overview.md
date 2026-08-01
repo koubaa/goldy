@@ -192,7 +192,11 @@ The Metal backend uses the `metal` crate (native Metal, not MoltenVK):
 
 ### CUDA Backend (in progress)
 
-Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API. Slang compiles to PTX; dispatches use the CUDA launch model. Graphics, surfaces, and exchanges are not yet supported. Enable with the `cuda` Cargo feature.
+Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API. Slang compiles to PTX; dispatches use the CUDA launch model. Does not imply the `graphics` feature (no raster, surfaces, or presentation). Buffer schemes, uploads/readbacks, and timelines work; textures/samplers and indirect dispatch are deferred. Enable with the `cuda` Cargo feature (`--no-default-features --features cuda` auto-selects CUDA; in default builds use `GOLDY_BACKEND=cuda`):
+
+```bash
+cargo test --no-default-features --features cuda --test scheme_compute_integration
+```
 
 With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnostics: PTX JIT error/info logs on module load, host-side launch-limit checks, StructuredBuffer ABI checks, and per-op stream synchronize with labeled errors. It may set `CUDA_LAUNCH_BLOCKING=1` when unset. Deep memory/race checking still requires external [`compute-sanitizer`](https://docs.nvidia.com/compute-sanitizer/), not `GOLDY_VALIDATION`.
 

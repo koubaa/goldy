@@ -44,10 +44,15 @@ them keeps the full graphics+compute API.
 Textures and samplers remain available **without** `graphics` — they are part of
 the GPGPU compute surface (storage images, sampling, copies, deposits/withdrawals).
 
-`cuda` and `webgpu` do **not** imply `graphics`. A compute-only CUDA build:
+`cuda` and `webgpu` do **not** imply `graphics` and are **not** platform defaults
+(Metal / DX12 / Vulkan remain the defaults in normal builds). When you compile
+**only** `cuda` or `webgpu` — no native backend — `Instance::new()` selects that
+backend automatically. In a default multi-backend build, opt in with
+`GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu`.
 
 ```bash
-cargo test --no-default-features --features cuda
+# CUDA compute gate (buffer schemes; textures/indirect deferred as ignored)
+cargo test --no-default-features --features cuda --test scheme_compute_integration
 ```
 
 ### Dependency Exclusion
@@ -190,5 +195,8 @@ If no backend feature is enabled for the current platform, `Instance::new()`
 returns an error:
 
 ```
-No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature
+No GPU backend available — enable 'vulkan', 'dx12', 'metal', 'cuda', or 'webgpu'
 ```
+
+In a default build (Vulkan + DX12 + Metal), use `GOLDY_BACKEND=cuda` or
+`GOLDY_BACKEND=webgpu` to opt into the in-progress compute prototypes.

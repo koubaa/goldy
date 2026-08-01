@@ -4109,6 +4109,12 @@ mod imp {
         );
     }
 
+    /// Buffer-compute gate for all shipped backends, including CUDA-only builds:
+    /// `cargo test --no-default-features --features cuda --test scheme_compute_integration`
+    ///
+    /// CUDA deliberately defers texture/sampler GPGPU (still part of the public compute
+    /// API without the `graphics` feature) and indirect dispatch (M5). Those trials are
+    /// registered as ignored with a `cuda-deferred` kind so the suite stays explicit.
     pub fn run() {
         let device = make_device();
         let is_cuda = device.backend_type() == BackendType::Cuda;
@@ -4123,9 +4129,16 @@ mod imp {
                 }));
             }};
         }
-        macro_rules! trial_skip_cuda {
-            ($f:ident) => {{
-                if !is_cuda {
+        // Register the trial normally, or as ignored on CUDA with an explicit reason.
+        macro_rules! trial_cuda_deferred {
+            ($f:ident, $reason:literal) => {{
+                if is_cuda {
+                    trials.push(
+                        libtest_mimic::Trial::test(stringify!($f), || Ok(()))
+                            .with_kind(concat!("cuda-deferred: ", $reason))
+                            .with_ignored_flag(true),
+                    );
+                } else {
                     trial!($f);
                 }
             }};
@@ -4160,8 +4173,8 @@ mod imp {
         trial!(scheme_cpu_readable_compute_write_and_read);
         trial!(scheme_cpu_readable_write_to_parcel_roundtrip);
         trial!(scheme_scattered_typed_variable_assignment);
-        trial_skip_cuda!(scheme_compute_write_to_texture);
-        trial_skip_cuda!(scheme_with_parcel_raw_texture);
+        trial_cuda_deferred!(scheme_compute_write_to_texture, "textures");
+        trial_cuda_deferred!(scheme_with_parcel_raw_texture, "textures");
         trial!(scheme_wave_inclusive_scan_uniform_64);
         trial!(scheme_wave_inclusive_scan_ramp_64);
         trial!(scheme_wave_inclusive_scan_uniform_256);
@@ -4169,7 +4182,7 @@ mod imp {
         trial!(scheme_workgroup_inclusive_scan_uint_correct);
         trial!(scheme_workgroup_broadcast_correct);
         trial!(scheme_workgroup_upper_bound_linear);
-        trial_skip_cuda!(scheme_texture_dual_view_round_trip);
+        trial_cuda_deferred!(scheme_texture_dual_view_round_trip, "textures");
         trial!(scheme_two_contexts_both_submit_and_complete);
         trial!(scheme_two_contexts_reclaim_independently);
         trial!(scheme_deposit_buffer_reuse_across_submissions);
@@ -4181,33 +4194,36 @@ mod imp {
         trial!(scheme_uniform_scalar_after_two_buffer_params);
         trial!(scheme_buffer_view_copy_between_sub_regions);
         trial!(scheme_buffer_view_isolation);
-        trial_skip_cuda!(scheme_compute_dispatch_indirect);
-        trial_skip_cuda!(scheme_dispatch_indirect_invalid_buffer);
-        trial_skip_cuda!(scheme_dispatch_indirect_wrong_type_rejected);
-        trial_skip_cuda!(scheme_stress_zeros_then_indirect_dispatch);
+        trial_cuda_deferred!(scheme_compute_dispatch_indirect, "indirect");
+        trial_cuda_deferred!(scheme_dispatch_indirect_invalid_buffer, "indirect");
+        trial_cuda_deferred!(scheme_dispatch_indirect_wrong_type_rejected, "indirect");
+        trial_cuda_deferred!(scheme_stress_zeros_then_indirect_dispatch, "indirect");
         trial!(scheme_stress_alternating_write_dispatch);
         trial!(scheme_clear_parcel_full);
         trial!(scheme_clear_parcel_partial_preserves_edges);
         trial!(scheme_clear_parcel_size_zero_fills_to_end);
-        trial_skip_cuda!(scheme_clear_parcel_requires_buffer_parcel);
+        trial_cuda_deferred!(scheme_clear_parcel_requires_buffer_parcel, "textures");
         trial!(scheme_copy_buffer_parcel_basic);
         trial!(scheme_copy_buffer_parcel_partial_with_offsets);
-        trial_skip_cuda!(scheme_copy_buffer_parcel_rejects_texture_src);
-        trial_skip_cuda!(scheme_copy_buffer_parcel_rejects_texture_dst);
+        trial_cuda_deferred!(scheme_copy_buffer_parcel_rejects_texture_src, "textures");
+        trial_cuda_deferred!(scheme_copy_buffer_parcel_rejects_texture_dst, "textures");
         trial!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
         trial!(scheme_cpu_writable_staging_write_then_copy);
         trial!(scheme_cpu_writable_staging_update_each_frame);
-        trial_skip_cuda!(scheme_write_texture_round_trip);
-        trial_skip_cuda!(scheme_write_texture_wrong_size_returns_error);
-        trial_skip_cuda!(scheme_write_texture_marks_scheme_dirty);
-        trial_skip_cuda!(scheme_write_texture_region_round_trip);
-        trial_skip_cuda!(scheme_write_texture_region_oob_returns_error);
-        trial_skip_cuda!(scheme_write_texture_region_multiple_non_overlapping);
-        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_full_texture);
-        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
-        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
-        trial_skip_cuda!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
-        trial_skip_cuda!(scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles);
+        trial_cuda_deferred!(scheme_write_texture_round_trip, "textures");
+        trial_cuda_deferred!(scheme_write_texture_wrong_size_returns_error, "textures");
+        trial_cuda_deferred!(scheme_write_texture_marks_scheme_dirty, "textures");
+        trial_cuda_deferred!(scheme_write_texture_region_round_trip, "textures");
+        trial_cuda_deferred!(scheme_write_texture_region_oob_returns_error, "textures");
+        trial_cuda_deferred!(scheme_write_texture_region_multiple_non_overlapping, "textures");
+        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_full_texture, "textures");
+        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_oob_returns_error, "textures");
+        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src, "textures");
+        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained, "textures");
+        trial_cuda_deferred!(
+            scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles,
+            "textures"
+        );
         trial!(cross_scheme_grant_read_reader_is_topology_invisible);
         trial!(cross_scheme_copy_reader_forces_one_topology_record);
         trial!(single_scheme_write_then_readback_records_once);
@@ -4221,8 +4237,8 @@ mod imp {
         trial!(cross_scheme_grant_then_copy_reader_boundary);
         trial!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
         trial!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
-        trial_skip_cuda!(cross_scheme_texture_readback_retained_loop_records_twice);
-        trial_skip_cuda!(scheme_return_transient_texture_invalidates_retained_scheme);
+        trial_cuda_deferred!(cross_scheme_texture_readback_retained_loop_records_twice, "textures");
+        trial_cuda_deferred!(scheme_return_transient_texture_invalidates_retained_scheme, "textures");
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);

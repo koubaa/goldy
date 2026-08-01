@@ -1653,10 +1653,17 @@ pub(crate) trait GpuBackend:
 /// The backend can be overridden at runtime by setting the `GOLDY_BACKEND`
 /// environment variable to one of: `vulkan`, `dx12`, `metal`, `webgpu`, `cuda`.
 ///
-/// Without the override, the platform default is used:
+/// Without the override, the platform default is used when a native backend is
+/// compiled in:
 /// - macOS: Metal
-/// - Windows: DX12  
+/// - Windows: DX12
 /// - Linux: Vulkan
+///
+/// CUDA and WebGPU are **not** platform defaults. They are selected automatically
+/// only when the build enables `cuda` or `webgpu` **and** no native backend
+/// (`vulkan`, `dx12`, `metal`) is compiled in — e.g.
+/// `--no-default-features --features cuda`. In a normal default build, use
+/// `GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu` to opt in.
 pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     // Check for runtime override via environment variable
     if let Ok(backend_str) = std::env::var("GOLDY_BACKEND") {
@@ -1704,14 +1711,42 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
         Ok(Box::new(vulkan::VulkanBackend::new()?))
     }
 
+    // Compute-only prototypes: only when no native graphics backend is compiled in.
+    #[cfg(all(
+        feature = "cuda",
+        not(all(feature = "metal", target_os = "macos")),
+        not(all(feature = "dx12", target_os = "windows")),
+        not(feature = "vulkan")
+    ))]
+    {
+        tracing::info!("Creating CUDA backend (compute-only build, no native backend compiled in)");
+        Ok(Box::new(cuda::CudaBackend::new()?))
+    }
+
+    #[cfg(all(
+        feature = "webgpu",
+        not(feature = "cuda"),
+        not(all(feature = "metal", target_os = "macos")),
+        not(all(feature = "dx12", target_os = "windows")),
+        not(feature = "vulkan")
+    ))]
+    {
+        tracing::info!("Creating WebGPU backend (compute-only build, no native backend compiled in)");
+        Ok(Box::new(webgpu::WebGpuBackend::new()?))
+    }
+
     // No backend available
     #[cfg(not(any(
         all(feature = "metal", target_os = "macos"),
         all(feature = "dx12", target_os = "windows"),
-        feature = "vulkan"
+        feature = "vulkan",
+        feature = "cuda",
+        feature = "webgpu"
     )))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature")
+        anyhow::bail!(
+            "No GPU backend available — enable 'vulkan', 'dx12', 'metal', 'cuda', or 'webgpu'"
+        )
     }
 }
 

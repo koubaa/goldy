@@ -54,6 +54,10 @@ jobs:
       - name: Clippy (vulkan)
         run: cargo clippy --features vulkan -- -D warnings
 
+      # Compile-only: CUDA feature set without `graphics` (clippy debt tracked separately)
+      - name: Check (cuda compute-only)
+        run: cargo check --no-default-features --features cuda
+
   # Unit tests with mock backend (no GPU needed)
   test-mock:
     name: Mock Backend Tests
