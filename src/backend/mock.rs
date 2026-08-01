@@ -525,6 +525,7 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl crate::backend::GpuBackendPresentSplit for MockBackend {
     fn take_present_gpu_work(
         &mut self,
@@ -574,10 +575,12 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
     }
 }
 
+#[cfg(feature = "graphics")]
 struct MockPresentGpuWork {
     frame: FrameToken,
 }
 
+#[cfg(feature = "graphics")]
 impl crate::backend::PresentGpuWork for MockPresentGpuWork {
     fn run(self: Box<Self>) -> Result<crate::backend::PresentFinishState> {
         Ok(crate::backend::PresentFinishState {
@@ -1064,6 +1067,7 @@ impl GpuBackend for MockBackend {
     }
 
     #[cfg(test)]
+    #[cfg(feature = "graphics")]
     fn test_surface_present_count(&self) -> usize {
         self.surface_present_count
     }
@@ -1116,6 +1120,7 @@ impl GpuBackend for MockBackend {
         self.shaders.remove(&shader);
     }
 
+    #[cfg(feature = "graphics")]
     fn create_pipeline(
         &mut self,
         device: DeviceHandle,
@@ -1137,10 +1142,12 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
+    #[cfg(feature = "graphics")]
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
         self.pipelines.remove(&pipeline);
     }
 
+    #[cfg(feature = "graphics")]
     fn create_pipeline_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -1162,6 +1169,7 @@ impl GpuBackend for MockBackend {
     }
 
     // RenderTarget API
+    #[cfg(feature = "graphics")]
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -1197,6 +1205,7 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
+    #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
         device: DeviceHandle,
@@ -1243,6 +1252,7 @@ impl GpuBackend for MockBackend {
     }
 
     // Surface API (mock implementation)
+    #[cfg(feature = "graphics")]
     fn create_surface(
         &mut self,
         device: DeviceHandle,
@@ -1274,11 +1284,13 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
+    #[cfg(feature = "graphics")]
     fn destroy_surface(&mut self, surface: SurfaceHandle) {
         self.surfaces.remove(&surface);
         self.surface_pending_acquire.remove(&surface);
     }
 
+    #[cfg(feature = "graphics")]
     fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
         let surf = self
             .surfaces
@@ -1332,6 +1344,7 @@ impl GpuBackend for MockBackend {
         ))
     }
 
+    #[cfg(feature = "graphics")]
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         let surf = self
             .surfaces
@@ -1346,6 +1359,7 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
+    #[cfg(feature = "graphics")]
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
         self.surfaces
             .get(&surface)
@@ -1353,6 +1367,7 @@ impl GpuBackend for MockBackend {
             .unwrap_or((0, 0))
     }
 
+    #[cfg(feature = "graphics")]
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat {
         self.surfaces
             .get(&surface)
@@ -1632,15 +1647,23 @@ impl GpuBackend for MockBackend {
                     color_load,
                     commands: render_cmds,
                 } => {
-                    if !batch.is_empty() {
-                        #[allow(unused_assignments)]
-                        {
-                            last_tv = self.submit_standalone(ctx, &batch, sync)?;
+                    #[cfg(feature = "graphics")]
+                    {
+                        if !batch.is_empty() {
+                            #[allow(unused_assignments)]
+                            {
+                                last_tv = self.submit_standalone(ctx, &batch, sync)?;
+                            }
+                            batch.clear();
                         }
-                        batch.clear();
+                        self.render_to_target(device, *target, *color_load, render_cmds)?;
+                        last_tv = self.submit_standalone(ctx, &[], sync)?;
                     }
-                    self.render_to_target(device, *target, *color_load, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[], sync)?;
+                    #[cfg(not(feature = "graphics"))]
+                    {
+                        let _ = (target, color_load, render_cmds);
+                        anyhow::bail!("render graph commands require the `graphics` feature");
+                    }
                 }
             }
         }
@@ -1674,6 +1697,7 @@ impl GpuBackend for MockBackend {
         self.submit_graph(ctx, &commands, sync).map(Some)
     }
 
+    #[cfg(feature = "graphics")]
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         let device = self
             .surfaces
@@ -1732,12 +1756,15 @@ impl GpuBackend for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "graphics")]
     use crate::backend::GpuBackendPresentSplit;
 
+    #[cfg(feature = "graphics")]
     fn mock_pending_acquire(backend: &MockBackend, surface: SurfaceHandle) -> u32 {
         backend.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_present(backend: &mut MockBackend, frame: FrameToken, submit_tv: u64) {
         let work = backend.take_present_gpu_work(frame, submit_tv).unwrap();
         let finish = work.run().unwrap();
@@ -1761,6 +1788,7 @@ mod tests {
         assert!(!backend.is_device_valid(device));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_render_target_creation() {
         let mut backend = MockBackend::new();
@@ -1774,6 +1802,7 @@ mod tests {
         assert_eq!(backend.targets_created[0], (800, 600, TextureFormat::Rgba8Unorm));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_render_without_readback() {
         let mut backend = MockBackend::new();
@@ -1791,6 +1820,7 @@ mod tests {
         assert_eq!(backend.recorded_commands.len(), 1);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_multiple_renders_same_target() {
         let mut backend = MockBackend::new();
@@ -1816,6 +1846,7 @@ mod tests {
         assert_eq!(backend.targets_created.len(), 1);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_indexed_drawing_commands() {
         use crate::types::IndexFormat;
@@ -1890,6 +1921,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_indexed_drawing_with_offset() {
         use crate::types::IndexFormat;
@@ -1947,6 +1979,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_surface_format_default() {
         let mut backend = MockBackend::new();
@@ -1980,6 +2013,7 @@ mod tests {
         assert_eq!(backend.surface_format(surface), TextureFormat::Bgra8UnormSrgb);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_surface_format_configurable() {
         let mut backend = MockBackend::new();
@@ -2015,6 +2049,7 @@ mod tests {
         assert_eq!(backend.surface_format(surface), TextureFormat::Rgba8Unorm);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_surface_format_multiple_formats() {
         // Test that different surfaces can have different formats
@@ -2166,6 +2201,7 @@ mod tests {
         assert_eq!(backend.sampler_bindless_index(999), None);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_bind_resources_command_recording() {
         let mut backend = MockBackend::new();
@@ -2202,6 +2238,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_bind_resources_raw_command_recording() {
         let mut backend = MockBackend::new();
@@ -2274,6 +2311,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn submit_graph_does_not_cpu_wait() {
         let mut backend = MockBackend::new();
@@ -2313,6 +2351,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn acquire_release_pairs_on_mock() {
         struct MockWindow;
@@ -2361,6 +2400,7 @@ mod tests {
         }));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn surface_frame_signals_stay_on_presenting_context() {
         struct MockWindow;
@@ -2407,6 +2447,7 @@ mod tests {
         assert!(backend.poll_signals(ctx_b, backend.gpu_progress(ctx_b)).is_empty());
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn counter_zero_after_resize() {
         struct MockWindow;

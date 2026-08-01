@@ -22,12 +22,19 @@ cargo add goldy
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `vulkan` | yes | Vulkan 1.4+ backend (Linux, Windows) |
-| `dx12` | yes | DirectX 12 backend (Windows) |
-| `metal` | yes | Metal Tier 2+ backend (macOS) |
-| `cuda` | no | CUDA backend (in progress; NVIDIA compute) |
-| `webgpu` | no | WebGPU backend (in progress; via wgpu) |
+| `vulkan` | yes | Vulkan 1.4+ backend (Linux, Windows); implies `graphics` |
+| `dx12` | yes | DirectX 12 backend (Windows); implies `graphics` |
+| `metal` | yes | Metal Tier 2+ backend (macOS); implies `graphics` |
+| `graphics` | yes | Raster pipelines, render targets, surfaces, and presentation |
+| `cuda` | no | CUDA backend (in progress; NVIDIA compute; does not imply `graphics`) |
+| `webgpu` | no | WebGPU backend (in progress; via wgpu; does not imply `graphics`) |
 | `instrumentation` | yes | Structured tracing via `tracing-subscriber` (zero-cost when disabled) |
+
+`graphics` is implied by the native backends. Textures and samplers remain available without it for GPGPU workloads. A CUDA compute-only build:
+
+```bash
+cargo test --no-default-features --features cuda
+```
 
 Platform-inappropriate features are no-ops — enabling `metal` on Linux or `dx12` on macOS compiles cleanly but does nothing.
 

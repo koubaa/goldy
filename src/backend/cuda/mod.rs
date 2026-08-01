@@ -1333,6 +1333,7 @@ impl GpuBackendTimelineWait for CudaBackend {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl GpuBackendPresentSplit for CudaBackend {
     fn take_present_gpu_work(
         &mut self,
@@ -1831,6 +1832,7 @@ impl GpuBackend for CudaBackend {
         self.shaders.remove(&shader);
     }
 
+    #[cfg(feature = "graphics")]
     fn create_pipeline(
         &mut self,
         _device: DeviceHandle,
@@ -1843,8 +1845,10 @@ impl GpuBackend for CudaBackend {
         Self::unsupported("graphics pipelines")
     }
 
+    #[cfg(feature = "graphics")]
     fn destroy_pipeline(&mut self, _pipeline: PipelineHandle) {}
 
+    #[cfg(feature = "graphics")]
     fn create_pipeline_with_depth(
         &mut self,
         _device: DeviceHandle,
@@ -1858,6 +1862,7 @@ impl GpuBackend for CudaBackend {
         Self::unsupported("graphics pipelines")
     }
 
+    #[cfg(feature = "graphics")]
     fn create_render_target_with_depth(
         &mut self,
         _device: DeviceHandle,
@@ -1869,6 +1874,7 @@ impl GpuBackend for CudaBackend {
         Self::unsupported("render targets")
     }
 
+    #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
         _device: DeviceHandle,
@@ -1927,6 +1933,7 @@ impl GpuBackend for CudaBackend {
         None
     }
 
+    #[cfg(feature = "graphics")]
     fn create_surface(
         &mut self,
         _device: DeviceHandle,
@@ -1937,16 +1944,20 @@ impl GpuBackend for CudaBackend {
         Self::unsupported("surfaces")
     }
 
+    #[cfg(feature = "graphics")]
     fn destroy_surface(&mut self, _surface: SurfaceHandle) {}
 
+    #[cfg(feature = "graphics")]
     fn surface_resize(&mut self, _surface: SurfaceHandle, _width: u32, _height: u32) -> Result<()> {
         Self::unsupported("surfaces")
     }
 
+    #[cfg(feature = "graphics")]
     fn surface_size(&self, _surface: SurfaceHandle) -> (u32, u32) {
         (0, 0)
     }
 
+    #[cfg(feature = "graphics")]
     fn surface_format(&self, _surface: SurfaceHandle) -> TextureFormat {
         TextureFormat::Bgra8UnormSrgb
     }
@@ -2059,10 +2070,12 @@ impl GpuBackend for CudaBackend {
         self.retained_graphs.remove(&(ctx, key));
     }
 
+    #[cfg(feature = "graphics")]
     fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
         Self::unsupported("frames")
     }
 
+    #[cfg(feature = "graphics")]
     fn submit_frame(&mut self, _frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
         Self::unsupported("frames")
     }

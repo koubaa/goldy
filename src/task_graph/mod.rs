@@ -11,14 +11,18 @@ mod ir;
 pub mod record;
 
 pub use graph::ShaderResourceSlot;
-pub(crate) use graph::{DeferredPresentAcquire, IrSubmitState, PartitionSubmitResult, ResolvedPresentSlot};
+#[cfg(feature = "graphics")]
+pub(crate) use graph::{DeferredPresentAcquire, ResolvedPresentSlot};
+pub(crate) use graph::{IrSubmitState, PartitionSubmitResult};
 pub use ir::NodeAccess;
 pub(crate) use ir::{BarrierSet, BarrierUsage, GraphIR};
 // Re-exported for backend barrier lowering (vulkan/dx12); unused with --no-default-features.
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 #[allow(unused_imports)]
 pub(crate) use ir::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
-pub use record::{ComputeNodeRecord, RenderPassRecord};
+pub use record::ComputeNodeRecord;
+#[cfg(feature = "graphics")]
+pub use record::RenderPassRecord;
 
 use crate::backend::{BufferHandle, TextureHandle};
 
@@ -33,12 +37,18 @@ pub struct TransientTextureId(pub u32);
 /// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
 /// of a `SwapchainOutput` binding. Replaced by the real UAV bindless index when
 /// a surface resolves swapchain backing at submit time.
+#[cfg(feature = "graphics")]
 pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
+#[cfg(not(feature = "graphics"))]
+pub(crate) const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 
 /// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
 /// of a `ResourceId::PresentLease` binding. Replaced by the real UAV bindless
 /// index when the swapchain pool resolves backing at submit time.
+#[cfg(feature = "graphics")]
 pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
+#[cfg(not(feature = "graphics"))]
+pub(crate) const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
 
 /// Identifies a GPU resource within a task graph.
 ///

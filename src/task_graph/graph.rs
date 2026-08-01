@@ -2465,6 +2465,7 @@ mod slice_retention_tests {
     }
 
     /// Fresh path: offscreen render uses `submit_graph`, not standalone.
+    #[cfg(feature = "graphics")]
     #[test]
     fn fresh_render_segment_uses_graph_submit() {
         let device = mock_device();

@@ -67,9 +67,11 @@ pub(crate) mod host_sidecar;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BufferFlags, BufferKind, DepthFormat, DepthStencilState, IndexFormat, PresentMode, PrimitiveTopology,
-    ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
+    BackendType, BufferFlags, BufferKind, IndexFormat, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags,
+    TextureFormat, TextureKind,
 };
+#[cfg(feature = "graphics")]
+use crate::types::{DepthFormat, DepthStencilState, PresentMode, PrimitiveTopology, VertexBufferLayout};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -366,6 +368,7 @@ where
 }
 
 /// Opaque token tying surface work to an acquired swapchain frame.
+#[cfg(feature = "graphics")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FrameToken {
     pub surface: SurfaceHandle,
@@ -784,6 +787,7 @@ impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
 }
 
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
+#[cfg(feature = "graphics")]
 #[allow(dead_code)] // fields read by present-split impls behind backend feature flags
 pub(crate) struct PresentFinishState {
     pub frame: FrameToken,
@@ -805,6 +809,7 @@ pub(crate) struct PresentFinishState {
 
 /// GPU-side present work (copy + queue present) cloned out of the backend under the
 /// global lock so [`crate::surface::Frame::present`] can drop it during execution.
+#[cfg(feature = "graphics")]
 pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
 }
@@ -937,6 +942,7 @@ impl ContextSubmitSession for LockedSubmitSession {
 
 /// Split present hooks used by [`crate::surface::Frame::present`] to drop the
 /// global backend lock during copy + WSI present.
+#[cfg(feature = "graphics")]
 pub(crate) trait GpuBackendPresentSplit {
     fn take_present_gpu_work(
         &mut self,
@@ -950,6 +956,18 @@ pub(crate) trait GpuBackendPresentSplit {
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue>;
 }
+
+#[cfg(feature = "graphics")]
+trait GpuBackendGraphics: GpuBackendPresentSplit {}
+
+#[cfg(feature = "graphics")]
+impl<T: GpuBackendPresentSplit + ?Sized> GpuBackendGraphics for T {}
+
+#[cfg(not(feature = "graphics"))]
+trait GpuBackendGraphics {}
+
+#[cfg(not(feature = "graphics"))]
+impl<T: ?Sized> GpuBackendGraphics for T {}
 
 /// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
 /// to drop the global backend lock during blocking GPU waits.
@@ -975,7 +993,7 @@ pub(crate) trait GpuBackendTimelineWait {
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
 pub(crate) trait GpuBackend:
-    Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit + GpuBackendSubmitSession
+    Send + Sync + GpuBackendTimelineWait + GpuBackendGraphics + GpuBackendSubmitSession
 {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
@@ -1131,7 +1149,7 @@ pub(crate) trait GpuBackend:
 
     /// Mock-backend surface present counter (tests only).
     #[doc(hidden)]
-    #[cfg(test)]
+    #[cfg(all(test, feature = "graphics"))]
     fn test_surface_present_count(&self) -> usize {
         let _ = self;
         0
@@ -1226,6 +1244,7 @@ pub(crate) trait GpuBackend:
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
     // Pipeline management
+    #[cfg(feature = "graphics")]
     fn create_pipeline(
         &mut self,
         device: DeviceHandle,
@@ -1235,9 +1254,11 @@ pub(crate) trait GpuBackend:
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle>;
+    #[cfg(feature = "graphics")]
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
     // Pipeline with depth stencil state
+    #[cfg(feature = "graphics")]
     #[allow(clippy::too_many_arguments)]
     fn create_pipeline_with_depth(
         &mut self,
@@ -1252,6 +1273,7 @@ pub(crate) trait GpuBackend:
 
     // RenderTarget API - GPU-only; no CPU readback
     /// Create a render target with an optional depth buffer.
+    #[cfg(feature = "graphics")]
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -1260,6 +1282,7 @@ pub(crate) trait GpuBackend:
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
+    #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
         device: DeviceHandle,
@@ -1319,6 +1342,7 @@ pub(crate) trait GpuBackend:
     /// Create a surface for presenting to a window.
     /// The window handle is platform-specific (HWND on Windows, wl_surface on Wayland, NSView on macOS).
     /// When `depth_format` is `Some`, a depth buffer is created for depth testing (e.g. 3D rendering).
+    #[cfg(feature = "graphics")]
     fn create_surface(
         &mut self,
         device: DeviceHandle,
@@ -1328,20 +1352,25 @@ pub(crate) trait GpuBackend:
     ) -> Result<SurfaceHandle>;
 
     /// Destroy a surface.
+    #[cfg(feature = "graphics")]
     fn destroy_surface(&mut self, surface: SurfaceHandle);
 
     /// Resize the surface (recreates swapchain).
+    #[cfg(feature = "graphics")]
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()>;
 
     /// Get the current surface dimensions.
+    #[cfg(feature = "graphics")]
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32);
 
     /// Get the texture format used by a surface's swapchain.
     /// Use this to ensure your render pipeline matches the surface format.
+    #[cfg(feature = "graphics")]
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
 
     /// Set the present mode for a surface.
     /// Returns an error if the mode is not supported by the backend.
+    #[cfg(feature = "graphics")]
     fn surface_set_present_mode(&mut self, _surface: SurfaceHandle, _mode: PresentMode) -> Result<()> {
         Ok(())
     }
@@ -1418,14 +1447,22 @@ pub(crate) trait GpuBackend:
                     color_load,
                     commands: render_cmds,
                 } => {
-                    if !batch.is_empty() {
-                        last_tv = self.submit_standalone(ctx, &batch, sync)?;
-                        self.wait_until(ctx, last_tv)?;
-                        batch.clear();
+                    #[cfg(feature = "graphics")]
+                    {
+                        if !batch.is_empty() {
+                            last_tv = self.submit_standalone(ctx, &batch, sync)?;
+                            self.wait_until(ctx, last_tv)?;
+                            batch.clear();
+                        }
+                        let device = self.context_device(ctx);
+                        self.render_to_target(device, *target, *color_load, render_cmds)?;
+                        last_tv = self.submit_standalone(ctx, &[], sync)?;
                     }
-                    let device = self.context_device(ctx);
-                    self.render_to_target(device, *target, *color_load, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[], sync)?;
+                    #[cfg(not(feature = "graphics"))]
+                    {
+                        let _ = (target, color_load, render_cmds);
+                        anyhow::bail!("render graph commands require the `graphics` feature");
+                    }
                 }
             }
         }
@@ -1482,6 +1519,7 @@ pub(crate) trait GpuBackend:
     ///
     /// `ctx` is the submission context that owns this surface's timeline; frame
     /// submit/present and swapchain signals are routed through it.
+    #[cfg(feature = "graphics")]
     fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)>;
 
     /// Submit all recorded GPU work for this frame bracket. Does not present.
@@ -1489,6 +1527,7 @@ pub(crate) trait GpuBackend:
     /// Returns the timeline value signaled when the frame's compute (and transfer) work
     /// completes on the GPU. When no work was recorded, returns the latest completed
     /// or scheduled compute timeline appropriate for the backend.
+    #[cfg(feature = "graphics")]
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue>;
 
     // Compute pipeline management
@@ -1523,6 +1562,7 @@ pub(crate) trait GpuBackend:
     }
 
     /// Like [`Self::compute_pipeline_slot_access`] but for a graphics pipeline.
+    #[cfg(feature = "graphics")]
     fn render_pipeline_slot_access(&self, _pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
         Vec::new()
     }

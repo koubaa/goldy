@@ -83,8 +83,8 @@ bincode = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 zstd = "0.13"
 
-# Windowing / Surface support
-raw-window-handle = "0.6"
+# Windowing / Surface support (graphics feature)
+raw-window-handle = { version = "0.6", optional = true }
 winit = { version = "0.30", optional = true }
 
 # DX12 dependencies (Windows only)
@@ -124,12 +124,15 @@ nv-flip = "0.1"
 png = "0.18"
 
 [features]
-# Default enables all platform-appropriate backends
+# Default enables all platform-appropriate backends plus graphics
 # On macOS: metal is used, on Windows: dx12/vulkan, on Linux: vulkan
-default = ["vulkan", "metal", "dx12", "instrumentation"]
-vulkan = ["dep:ash"]
-dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core"]
-metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types", "dep:block"]
+default = ["vulkan", "metal", "dx12", "instrumentation", "graphics"]
+# Raster, surfaces, render/present APIs. Native backends imply this.
+# Textures and samplers stay available without this feature (GPGPU).
+graphics = ["dep:raw-window-handle"]
+vulkan = ["dep:ash", "graphics"]
+dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics"]
+metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types", "dep:block", "graphics"]
 webgpu = ["dep:wgpu", "dep:pollster"]
 # NVIDIA CUDA compute-only prototype (Slang → PTX → Driver API)
 cuda = ["dep:cudarc"]
@@ -137,8 +140,8 @@ cuda = ["dep:cudarc"]
 update-screenshots = ["dep:image"]
 # Structured instrumentation with named observation points (zero-cost when disabled)
 instrumentation = ["dep:tracing-subscriber"]
-# Interactive `examples/*.rs` (winit); avoids compiling winit for tests / lib-only builds
-examples = ["dep:winit"]
+# Interactive `examples/*.rs` (winit); requires graphics for surfaces/present
+examples = ["dep:winit", "graphics"]
 # Tracy profiler integration — connect the Tracy GUI for live CPU/GPU timeline profiling.
 # Zero-cost when disabled; when enabled, only collects when a profiler connects (on-demand).
 tracy = ["dep:tracy-client", "tracy-client/enable", "tracy-client/ondemand", "tracy-client/broadcast", "tracy-client/system-tracing", "tracy-client/context-switch-tracing"]

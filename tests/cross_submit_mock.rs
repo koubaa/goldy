@@ -6,9 +6,11 @@ use goldy::test_support::{
     mock_recorded_waits, mock_reset_tracking, mock_retained_resubmit_count,
 };
 use goldy::{
-    BufferKind, ComputePipeline, Context, Device, MemoryExchange, NodeAccess, Parcel, RenderPipeline,
-    RenderPipelineDesc, RetainedPool, Scheme, ShaderModule, TextureFormat,
+    BufferKind, ComputePipeline, Context, Device, MemoryExchange, NodeAccess, Parcel, RetainedPool, Scheme,
+    ShaderModule,
 };
+#[cfg(feature = "graphics")]
+use goldy::{RenderPipeline, RenderPipelineDesc, TextureFormat};
 
 fn mock_ctx(device: &Device) -> Context {
     device.create_context().expect("context")
@@ -316,6 +318,7 @@ fn war_retained_resubmit_against_scheduled_read_needs_no_live_wait() {
     );
 }
 
+#[cfg(feature = "graphics")]
 fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
     mock_recorded_graph_syncs(device)
 }
@@ -325,6 +328,7 @@ fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
 /// The render pass itself does nothing interesting (clear + draw 0 verts), but registering
 /// the parcel is enough to put a `ResourceSync` in the ledger so the cross-submit analysis
 /// produces a non-None `SubmitSync` for the submission.
+#[cfg(feature = "graphics")]
 fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline) -> Scheme {
     let mut s = Scheme::new(ctx);
     let rt = s
@@ -362,6 +366,7 @@ fn stamp_monotonicity_never_regresses() {
     assert!(later >= epoch);
 }
 
+#[cfg(feature = "graphics")]
 #[test]
 fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     // Regression test for the standalone/graph legacy-acquire asymmetry.

@@ -5,12 +5,20 @@
 
 use super::ir::{DispatchDim, NodeAccess, ResourceBinding};
 use super::ResourceId;
+#[cfg(feature = "graphics")]
 use crate::backend::RenderCommand;
-use crate::buffer::{Allocation, BufferSource, BufferView};
+#[cfg(feature = "graphics")]
+use crate::buffer::{Allocation, BufferSource};
+use crate::buffer::BufferView;
 use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
+#[cfg(feature = "graphics")]
 use crate::pipeline::RenderPipeline;
-use crate::types::{IndexFormat, ResourceAccess, ResourceHandle};
+#[cfg(feature = "graphics")]
+use crate::types::IndexFormat;
+use crate::types::ResourceAccess;
+#[cfg(feature = "graphics")]
+use crate::types::ResourceHandle;
 use std::sync::Arc;
 
 /// Deferred push-constant slot for [`RenderPassRecord`].
@@ -18,12 +26,14 @@ use std::sync::Arc;
 /// Both the read (SRV) and read-write (UAV) handles are captured up front;
 /// the correct one is selected at [`RenderPassRecord::set_pipeline`] time by
 /// consulting the pipeline's reflected slot kinds.
+#[cfg(feature = "graphics")]
 struct PendingRenderSlot {
     graph_access: NodeAccess,
     read_handle: Option<ResourceHandle>,
     uav_handle: Option<ResourceHandle>,
 }
 
+#[cfg(feature = "graphics")]
 impl PendingRenderSlot {
     fn from_parcel(parcel: &crate::Parcel, access: NodeAccess) -> Self {
         Self {
@@ -58,6 +68,7 @@ impl PendingRenderSlot {
 }
 
 /// Accumulates one offscreen render-pass node before [`Self::commit_scheme`].
+#[cfg(feature = "graphics")]
 pub struct RenderPassRecord {
     label: &'static str,
     target: crate::backend::RenderTargetHandle,
@@ -69,6 +80,7 @@ pub struct RenderPassRecord {
     pending_push_constants: Vec<PendingRenderSlot>,
 }
 
+#[cfg(feature = "graphics")]
 impl RenderPassRecord {
     pub fn with_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.stamp_targets.push(parcel.stamp_handle());

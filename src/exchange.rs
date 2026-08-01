@@ -11,18 +11,25 @@
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
-use crate::scheme::{Lease, LeaseRenderTarget, Scheme, Submission, Transaction};
+use crate::scheme::{Scheme, Submission};
+#[cfg(feature = "graphics")]
+use crate::scheme::{Lease, LeaseRenderTarget, Transaction};
+#[cfg(feature = "graphics")]
 use crate::surface::Frame as SurfaceFrame;
+#[cfg(feature = "graphics")]
 use crate::swapchain_pool::{PresentLease, SwapchainPool};
 use crate::texture::TextureCopyFootprint;
+#[cfg(feature = "graphics")]
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
 use crate::Buffer;
 use crate::Texture;
+#[cfg(feature = "graphics")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ops::Deref;
 use std::sync::Arc;
 
 /// Object-safe per-submission foreign handoff (surface present today).
+#[cfg(feature = "graphics")]
 pub(crate) trait ClaimImpl: Send {
     fn consume(self: Box<Self>) -> Result<(), GoldyError>;
     fn discard(self: Box<Self>) -> Result<(), GoldyError>;
@@ -35,10 +42,12 @@ pub(crate) trait ClaimImpl: Send {
 }
 
 /// Surface present claim: owns the acquired drawable until consume/discard/drop.
+#[cfg(feature = "graphics")]
 pub(crate) struct SurfaceClaimImpl {
     frame: Option<SurfaceFrame>,
 }
 
+#[cfg(feature = "graphics")]
 impl SurfaceClaimImpl {
     pub(crate) fn new(frame: SurfaceFrame) -> Self {
         Self { frame: Some(frame) }
@@ -50,6 +59,7 @@ impl SurfaceClaimImpl {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl ClaimImpl for SurfaceClaimImpl {
     fn consume(mut self: Box<Self>) -> Result<(), GoldyError> {
         let frame = self
@@ -78,6 +88,7 @@ impl ClaimImpl for SurfaceClaimImpl {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl Drop for SurfaceClaimImpl {
     fn drop(&mut self) {
         // Raw claim values may be dropped on submit failure after publish construction
@@ -89,10 +100,12 @@ impl Drop for SurfaceClaimImpl {
 }
 
 /// Erased linear claim for one submission's surface present handoff.
+#[cfg(feature = "graphics")]
 pub struct Claim {
     pub(crate) implementation: Option<Box<dyn ClaimImpl>>,
 }
 
+#[cfg(feature = "graphics")]
 impl Claim {
     pub(crate) fn from_impl(implementation: Box<dyn ClaimImpl>) -> Self {
         Self {
@@ -121,6 +134,7 @@ impl Claim {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl Drop for Claim {
     fn drop(&mut self) {
         if let Some(claim) = self.implementation.take() {
@@ -129,6 +143,7 @@ impl Drop for Claim {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl std::fmt::Debug for Claim {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Claim")
@@ -138,10 +153,12 @@ impl std::fmt::Debug for Claim {
 }
 
 /// Window-surface exchange: binds a scheme source to a drawable destination.
+#[cfg(feature = "graphics")]
 pub struct SurfaceExchange {
     pool: SwapchainPool,
 }
 
+#[cfg(feature = "graphics")]
 impl SurfaceExchange {
     /// Create a surface exchange bound to `window` on `context`.
     ///
@@ -267,6 +284,7 @@ impl SurfaceExchange {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl Transaction {
     /// Scheme-unique present binding id for this transaction.
     pub fn binding_id(&self) -> u32 {

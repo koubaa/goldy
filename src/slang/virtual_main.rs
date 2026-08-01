@@ -846,7 +846,12 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
 /// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
 /// use this so the hashed text matches the compiled text.
 pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
-    if source.contains("[goldy_compute]") || source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]") {
+    let has_compute = source.contains("[goldy_compute]");
+    #[cfg(feature = "graphics")]
+    let has_graphics_stage = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
+    #[cfg(not(feature = "graphics"))]
+    let has_graphics_stage = false;
+    if has_compute || has_graphics_stage {
         Cow::Owned(transform_virtual_main(source))
     } else {
         Cow::Borrowed(source)
@@ -992,7 +997,9 @@ pub struct EntryDef {
 
 const GOLDY_STAGES: &[(&str, Stage)] = &[
     ("goldy_compute", Stage::Compute),
+    #[cfg(feature = "graphics")]
     ("goldy_vertex", Stage::Vertex),
+    #[cfg(feature = "graphics")]
     ("goldy_fragment", Stage::Fragment),
 ];
 
@@ -2284,6 +2291,7 @@ void cs_main(Scattered<uint> data, ThreadId id, uint base) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn vertex_transform() {
         let src = r#"import goldy_exp;
@@ -2302,6 +2310,7 @@ VSOutput vs_main(Scattered<QuadInstance> instances, VertexId vid, InstanceId iid
         assert!(result.contains("_goldy_user_vs_main"), "Missing renamed fn");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn fragment_transform_removes_return_semantic() {
         let src = r#"import goldy_exp;
@@ -2322,6 +2331,7 @@ float4 fs_main(Broadcast<MyUniforms> uniforms, VaryingInput input) : SV_Target {
         assert!(!decl_line.contains(": SV_Target"), "User fn should not have SV_Target");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn multiple_entries_same_file() {
         let src = r#"import goldy_exp;
@@ -2344,6 +2354,7 @@ VSOutput vs_main(Scattered<float4> verts, VertexId vid) {
         assert_eq!(goldy_count, 0, "All [goldy_*] attrs should be removed");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn passthrough_param_kept() {
         let src = r#"import goldy_exp;
@@ -2435,6 +2446,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn fragment_with_is_front_face() {
         let src = r#"import goldy_exp;
@@ -2480,6 +2492,7 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn fragment_bare_struct_is_broadcast_not_passthrough() {
         // In a fragment shader with a resource struct and a varying, the struct
@@ -2503,6 +2516,7 @@ float4 fs_main(TimeUniforms cfg, FullscreenVarying input) : SV_Target {
         assert!(result.contains("FullscreenVarying _pt0"), "Missing passthrough param");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn vertex_shader_last_struct_is_passthrough() {
         // In a vertex shader, the last unknown struct is the vertex input (PassThrough).
@@ -2617,6 +2631,7 @@ void cs_main(Scattered<uint> rw, BufRO<uint> ro, ThreadId id) {}
         assert_eq!(kinds[1], Some(BindlessSlotKind::ReadOnlySrv));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn categories_fragment_takes_precedence() {
         use crate::types::ResourceCategory;
