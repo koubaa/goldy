@@ -9,7 +9,7 @@ Goldy is published to multiple package registries:
 | Language | Package Manager | Registry | Automated |
 |----------|-----------------|----------|-----------|
 | Rust | Cargo | [crates.io](https://crates.io/crates/goldy) | ❌ Manual |
-| Python | pip | [PyPI](https://pypi.org/project/goldy/) | ❌ Manual |
+| Python | pip | [PyPI](https://pypi.org/project/goldy/) | ✅ On GitHub release |
 | C++ | vcpkg | [microsoft/vcpkg](https://github.com/microsoft/vcpkg) | ❌ Manual PR |
 | C++ | Conan | [conan-center-index](https://github.com/conan-io/conan-center-index) | ❌ Manual PR |
 | .NET | NuGet | [nuget.org](https://www.nuget.org/packages/Goldy/) | ✅ On push to main |
@@ -70,23 +70,32 @@ The root `Cargo.toml` lists `goldy_derive` with both `path` and `version` so loc
 
 ## Python (PyPI)
 
-### Prerequisites
-- PyPI account with API token
-- `maturin` installed: `pip install maturin`
+### Automated Publishing
 
-### Publish
+The `publish.yml` workflow builds wheels for Linux (x86_64, aarch64), Windows,
+macOS (x86_64, aarch64), and sdist, then uploads to PyPI when a GitHub release
+is published. Authentication uses PyPI Trusted Publishers (no API token in CI).
+
+Wheels embed Slang (~100–160 MB on some platforms). PyPI file-size limit for
+`goldy` is **175 MB** ([limit request #11613](https://github.com/pypi/support/issues/11613)).
+
+### Republishing missing wheels
+
+If a release upload partially failed (for example before the size limit was
+raised), re-run from Actions:
+
+1. **Publish to PyPI** → **Run workflow**
+2. Check **Upload built wheels to PyPI**
+3. Run workflow (builds all platforms, uploads with `skip-existing`)
+
+### Manual publish (single platform)
 
 ```bash
 cd python
-
-# Build wheels for current platform
+python build-slang.py
 maturin build --release
-
-# Upload to PyPI
 maturin publish
 ```
-
-For cross-platform wheels, use the CI workflow or build on each platform.
 
 ### Version Files
 - `python/Cargo.toml` - Update `version = "X.Y.Z"`
