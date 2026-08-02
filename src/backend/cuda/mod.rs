@@ -1757,6 +1757,37 @@ impl CudaBackend {
         Ok(last_tv)
     }
 
+    /// True when an empty Ops submit's sync only references DX12 fence ledger entries
+    /// (or has no CUDA-side host work). Such submits need no CUDA completion event.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn empty_ops_sync_is_dx12_fence_only(
+        &self,
+        ctx: ContextHandle,
+        sync: Option<&SubmitSync>,
+    ) -> Result<bool> {
+        let Some(sync) = sync else {
+            return Ok(true);
+        };
+        if !sync.cpu_waits.is_empty()
+            || !sync.host_observed_waits.is_empty()
+            || !sync.deferred_host_writes.is_empty()
+        {
+            return Ok(false);
+        }
+        if sync.waits.is_empty() {
+            return Ok(true);
+        }
+        let device_handle = self.context(ctx)?.device;
+        let ledger = &self.device(device_handle)?.event_ledger;
+        for epoch in &sync.waits {
+            match timeline::lookup_completion(ledger, epoch.context, epoch.value) {
+                Some(LedgerCompletion::Dx12Fence { .. }) => {}
+                Some(LedgerCompletion::CudaEvent(_)) | None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     fn enqueue_submit(
         &mut self,
         ctx: ContextHandle,
@@ -1793,6 +1824,15 @@ impl CudaBackend {
                 || !sync.deferred_host_writes.is_empty()
         });
         if matches!(&body, CudaSubmitBody::Ops(ops) if ops.is_empty()) && !sync_needs_work {
+            self.graph_stats.empty_submits_elided.fetch_add(1, Ordering::Relaxed);
+            return Ok(self.gpu_progress(ctx));
+        }
+        // Empty body + DX12-fence-only waits: nothing runs on the CUDA stream, so a
+        // completion event / stream join is pure overhead (raster-direct present path).
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if matches!(&body, CudaSubmitBody::Ops(ops) if ops.is_empty())
+            && self.empty_ops_sync_is_dx12_fence_only(ctx, sync)?
+        {
             self.graph_stats.empty_submits_elided.fetch_add(1, Ordering::Relaxed);
             return Ok(self.gpu_progress(ctx));
         }
@@ -3379,7 +3419,10 @@ impl GpuBackend for CudaBackend {
         if let Some(target) = direct_present_target {
             self.retained
                 .insert((ctx, key), RetainedEntry::PresentRenderTarget(target));
-            return self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(Vec::new()));
+            // No CUDA stream work / completion event — present uses the DX12 fence ledger.
+            // Sync waits on prior DX12 present fences are redundant with queue/raster ordering.
+            let _ = sync;
+            return Ok(self.gpu_progress(ctx));
         }
 
         if !core.is_empty()
