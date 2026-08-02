@@ -66,6 +66,8 @@ cargo test --no-default-features --features cuda --test scheme_compute_integrati
 cargo check --no-default-features --features cuda,graphics,dx12
 GOLDY_BACKEND=cuda cargo run --example compute_to_surface --features examples
 cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_raster
+cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_presentation
+cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_surface_lifecycle
 ```
 
 ### Dependency Exclusion

@@ -23,6 +23,7 @@ use crate::backend::{
 use anyhow::{bail, Context as _, Result};
 use cudarc::driver::{sys, CudaContext, CudaEvent, CudaStream};
 use raw_window_handle::RawWindowHandle;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT, HANDLE};
@@ -259,13 +260,72 @@ pub(super) fn surface_resize(
         .get(&surface)
         .context("CUDA/DX12: invalid surface")?
         .device;
+    {
+        let state = backend.surfaces.get(&surface).unwrap();
+        if state.width == width && state.height == height {
+            return Ok(());
+        }
+    }
 
-    // Take scratch slots, wait CUDA+DX12 idle, then drop CUDA views before external memory.
+    let resize_t0 = std::time::Instant::now();
+    backend.graph_stats.surface_resizes.fetch_add(1, Ordering::Relaxed);
+
+    // Snapshot surface fence high-water before taking scratch slots so the idle
+    // drain can wait on cuda_complete / dx12_complete / slot_fence values.
+    let fence_high = {
+        let state = backend.surfaces.get(&surface).unwrap();
+        let mut high = 0u64;
+        for v in &state.slot_fence {
+            high = high.max(*v);
+        }
+        for slot in state.scratch.iter().flatten() {
+            high = high.max(slot.cuda_complete).max(slot.dx12_complete);
+        }
+        high
+    };
+
+    // Take scratch slots, drain surface-scoped GPU work, then drop CUDA views before
+    // external memory. Retained partitions that still reference destroyed scratch are
+    // evicted; unrelated CUDA graphs stay warm across resize.
     let old_slots: Vec<ScratchSlot> = {
         let state = backend.surfaces.get_mut(&surface).unwrap();
         state.scratch.iter_mut().filter_map(|s| s.take()).collect()
     };
-    wait_device_idle_for_surface(backend, device)?;
+    let destroyed_handles: Vec<TextureHandle> =
+        old_slots.iter().map(|s| s.texture_handle).collect();
+    let destroyed_slots: Vec<u32> = destroyed_handles
+        .iter()
+        .filter_map(|h| {
+            backend.textures.get(h).and_then(|tex| {
+                let mut slots = Vec::new();
+                if let Some(s) = tex.storage_slot {
+                    slots.push(s);
+                }
+                if let Some(s) = tex.sampled_slot {
+                    slots.push(s);
+                }
+                (!slots.is_empty()).then_some(slots)
+            })
+        })
+        .flatten()
+        .collect();
+
+    let idle_t0 = std::time::Instant::now();
+    wait_surface_resources_idle(backend, device, fence_high)?;
+    let idle_ns = idle_t0.elapsed().as_nanos() as u64;
+    backend
+        .graph_stats
+        .surface_resize_idle_ns
+        .fetch_add(idle_ns, Ordering::Relaxed);
+
+    // Evict while scratch textures are still in `backend.textures` so Graph pin
+    // identity checks can resolve Arc pointers.
+    let teardown_t0 = std::time::Instant::now();
+    let evicted = evict_retained_touching_scratch(backend, &destroyed_handles, &destroyed_slots);
+    backend
+        .graph_stats
+        .surface_resize_evictions
+        .fetch_add(evicted, Ordering::Relaxed);
     for slot in old_slots {
         let h = slot.texture_handle;
         if let Some(resource) = backend.textures.remove(&h) {
@@ -279,13 +339,11 @@ pub(super) fn surface_resize(
         }
         drop(slot);
     }
-    // Retained CUDA graphs may embed destroyed surf objects from old scratch.
-    let stale_keys: Vec<(ContextHandle, u64)> = backend.retained.keys().copied().collect();
-    for (ctx, key) in stale_keys {
-        if backend.retained.remove(&(ctx, key)).is_some() {
-            backend.enqueue_evict_retained(ctx, key);
-        }
-    }
+    let teardown_ns = teardown_t0.elapsed().as_nanos() as u64;
+    backend
+        .graph_stats
+        .surface_resize_teardown_ns
+        .fetch_add(teardown_ns, Ordering::Relaxed);
 
     let state = backend.surfaces.get_mut(&surface).unwrap();
     state.backbuffers.clear();
@@ -332,7 +390,115 @@ pub(super) fn surface_resize(
     state.current_image_index = None;
     state.slot_fence = [0; MAX_FRAMES];
     state.backbuffer_in_common = [true; MAX_FRAMES];
+
+    tracing::info!(
+        width,
+        height,
+        idle_ns,
+        teardown_ns,
+        evicted,
+        total_ns = resize_t0.elapsed().as_nanos() as u64,
+        "CUDA/DX12: surface_resize complete"
+    );
     Ok(())
+}
+
+/// Evict retained partitions that still reference destroyed surface scratch.
+///
+/// Present writes use imported D3D12 scratch and are not CUDA-graph-capturable, so
+/// `RetainedEntry::Graph` normally has no scratch pins. Command-replay entries may
+/// still embed destroyed texture handles or registry slot indices — those must go.
+/// Unrelated retained compute graphs are left intact across resize.
+fn evict_retained_touching_scratch(
+    backend: &mut CudaBackend,
+    destroyed_handles: &[TextureHandle],
+    destroyed_slots: &[u32],
+) -> u64 {
+    use crate::backend::{GpuCommand, GraphCommand};
+    use std::collections::HashSet;
+
+    if destroyed_handles.is_empty() && destroyed_slots.is_empty() {
+        return 0;
+    }
+    let handles: HashSet<TextureHandle> = destroyed_handles.iter().copied().collect();
+    let slots: HashSet<u32> = destroyed_slots.iter().copied().collect();
+    let destroyed_ptrs: HashSet<*const super::texture::CudaTextureResource> = destroyed_handles
+        .iter()
+        .filter_map(|h| backend.textures.get(h).map(|t| Arc::as_ptr(t)))
+        .collect();
+
+    let touches = |entry: &super::RetainedEntry| -> bool {
+        match entry {
+            super::RetainedEntry::Commands(commands) => commands.iter().any(|cmd| match cmd {
+                GraphCommand::Compute(gc) => match gc {
+                    GpuCommand::WriteTexture { texture, .. }
+                    | GpuCommand::WriteTextureRegion { texture, .. }
+                    | GpuCommand::CopyRenderTarget { dst: texture, .. }
+                    | GpuCommand::CopyBufferToTexture { dst: texture, .. }
+                    | GpuCommand::CopyTextureToReadback { src: texture, .. } => {
+                        handles.contains(texture)
+                    }
+                    GpuCommand::CopyTexture { src, dst } => {
+                        handles.contains(src) || handles.contains(dst)
+                    }
+                    GpuCommand::BindResourcesRaw { indices, .. } => {
+                        indices.iter().any(|i| slots.contains(i))
+                    }
+                    GpuCommand::FrameTableStaging { data } => data.iter().any(|w| slots.contains(w)),
+                    GpuCommand::ResourceBarrier { textures, .. } => {
+                        textures.iter().any(|(h, _)| handles.contains(h))
+                    }
+                    _ => false,
+                },
+                GraphCommand::Render { .. } => false,
+            }),
+            super::RetainedEntry::Graph => false,
+        }
+    };
+
+    let mut stale: Vec<(ContextHandle, u64)> = backend
+        .retained
+        .iter()
+        .filter_map(|(&(ctx, key), entry)| touches(entry).then_some((ctx, key)))
+        .collect();
+
+    // Belt-and-suspenders: if a captured graph somehow pinned imported scratch, evict it.
+    if !destroyed_ptrs.is_empty() {
+        for (&(ctx, key), entry) in backend.retained.iter() {
+            if !matches!(entry, super::RetainedEntry::Graph) {
+                continue;
+            }
+            let Some(context) = backend.contexts.get(&ctx) else {
+                continue;
+            };
+            let Some(device) = backend.devices.get(&context.device) else {
+                continue;
+            };
+            let Ok(registry) = device.graph_registry.lock() else {
+                continue;
+            };
+            if let Some(part) = registry.get(ctx, key) {
+                if part
+                    .textures
+                    .iter()
+                    .any(|t| destroyed_ptrs.contains(&Arc::as_ptr(t)))
+                {
+                    stale.push((ctx, key));
+                }
+            }
+        }
+    }
+
+    stale.sort_unstable();
+    stale.dedup();
+    let mut n = 0u64;
+    for (ctx, key) in stale {
+        if backend.retained.remove(&(ctx, key)).is_some() {
+            backend.enqueue_evict_retained(ctx, key);
+            n += 1;
+        }
+    }
+    n
 }
 
 pub(super) fn begin_frame(
@@ -878,8 +1044,57 @@ fn companion_ref(backend: &CudaBackend, device: DeviceHandle) -> Result<&Dx12Com
         .context("CUDA: DX12 companion not available (requires cuda+graphics+dx12 on Windows)")
 }
 
-/// Drain CUDA submission + all device streams and the DX12 companion before
-/// destroying imported scratch (tex/surf objects and external memory).
+/// Drain GPU work that may still reference this surface's imported scratch / present slots.
+///
+/// Narrower than a full device idle: flush the submission worker, synchronize CUDA streams
+/// that can write scratch or publish present completion, then CPU-wait the companion fence
+/// through `fence_high` (caller-supplied max of slot / scratch completes) plus companion
+/// init/raster fences — without signaling a fresh fence for unrelated DX12 work.
+fn wait_surface_resources_idle(
+    backend: &mut CudaBackend,
+    device: DeviceHandle,
+    mut fence_high: u64,
+) -> Result<()> {
+    let (worker, present_stream, companion) = {
+        let gpu = backend.device(device)?;
+        let companion = gpu.dx12.as_ref().map(Arc::clone);
+        if let Some(c) = companion.as_ref() {
+            fence_high = fence_high
+                .max(c.init_fence.load(Ordering::Acquire))
+                .max(c.raster_fence.load(Ordering::Acquire));
+        }
+        (
+            Arc::clone(&gpu.submission_worker),
+            companion.as_ref().map(|c| Arc::clone(&c.present_stream)),
+            companion,
+        )
+    };
+    worker
+        .flush()
+        .context("CUDA/DX12: flush submission worker before surface teardown")?;
+    for context in backend.contexts.values().filter(|c| c.device == device) {
+        context
+            .stream
+            .synchronize()
+            .context("CUDA/DX12: context stream synchronize before surface teardown")?;
+    }
+    if let Some(stream) = present_stream {
+        stream
+            .synchronize()
+            .context("CUDA/DX12: present stream synchronize before surface teardown")?;
+    }
+    if let Some(companion) = companion {
+        if fence_high > 0 {
+            companion
+                .cpu_wait(fence_high)
+                .context("CUDA/DX12: companion fence wait before surface teardown")?;
+        }
+    }
+    Ok(())
+}
+
+/// Full CUDA + DX12 drain used when destroying a surface or replacing a size-mismatched
+/// scratch outside `surface_resize` (no per-surface fence high-water available yet).
 fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle) -> Result<()> {
     let (worker, alloc_stream, present_stream, companion) = {
         let gpu = backend.device(device)?;

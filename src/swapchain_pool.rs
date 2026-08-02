@@ -202,8 +202,14 @@ impl SwapchainPool {
             return Ok(());
         }
         let mut surface = self.inner.surface.write().unwrap();
+        let (old_w, old_h) = surface.size();
         surface.resize(width, height)?;
-        self.inner.bump_generation();
+        let (new_w, new_h) = surface.size();
+        // Only invalidate retained variants / claims when the swapchain actually changed.
+        // Same-size and zero-size no-ops must not bump generation (interactive resize churn).
+        if (new_w, new_h) != (old_w, old_h) {
+            self.inner.bump_generation();
+        }
         Ok(())
     }
 

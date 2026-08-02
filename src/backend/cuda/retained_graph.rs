@@ -11,13 +11,21 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Process-visible counters for capture / launch / fallback / eviction.
+/// Process-visible counters for capture / launch / fallback / eviction / resize.
 #[derive(Debug, Default)]
 pub(super) struct CudaGraphStats {
     pub captures: AtomicU64,
     pub launches: AtomicU64,
     pub fallbacks: AtomicU64,
     pub evictions: AtomicU64,
+    /// Number of structural surface resizes that actually rebuilt the swapchain.
+    pub surface_resizes: AtomicU64,
+    /// Cumulative nanoseconds spent in CUDA+DX12 surface idle drains.
+    pub surface_resize_idle_ns: AtomicU64,
+    /// Cumulative nanoseconds spent destroying imported scratch + CUDA views.
+    pub surface_resize_teardown_ns: AtomicU64,
+    /// Number of retained partitions evicted because they touched destroyed scratch.
+    pub surface_resize_evictions: AtomicU64,
 }
 
 impl CudaGraphStats {
@@ -27,6 +35,10 @@ impl CudaGraphStats {
             launches: self.launches.load(Ordering::Relaxed),
             fallbacks: self.fallbacks.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
+            surface_resizes: self.surface_resizes.load(Ordering::Relaxed),
+            surface_resize_idle_ns: self.surface_resize_idle_ns.load(Ordering::Relaxed),
+            surface_resize_teardown_ns: self.surface_resize_teardown_ns.load(Ordering::Relaxed),
+            surface_resize_evictions: self.surface_resize_evictions.load(Ordering::Relaxed),
         }
     }
 
@@ -35,6 +47,10 @@ impl CudaGraphStats {
         self.launches.store(0, Ordering::Relaxed);
         self.fallbacks.store(0, Ordering::Relaxed);
         self.evictions.store(0, Ordering::Relaxed);
+        self.surface_resizes.store(0, Ordering::Relaxed);
+        self.surface_resize_idle_ns.store(0, Ordering::Relaxed);
+        self.surface_resize_teardown_ns.store(0, Ordering::Relaxed);
+        self.surface_resize_evictions.store(0, Ordering::Relaxed);
     }
 }
 
@@ -44,6 +60,10 @@ pub(super) struct CudaGraphStatsSnapshot {
     pub launches: u64,
     pub fallbacks: u64,
     pub evictions: u64,
+    pub surface_resizes: u64,
+    pub surface_resize_idle_ns: u64,
+    pub surface_resize_teardown_ns: u64,
+    pub surface_resize_evictions: u64,
 }
 
 /// Worker-owned graph + GraphExec pair (mirrors cudarc's [`CudaGraph`] with a public
@@ -128,6 +148,10 @@ impl GraphRegistry {
 
     pub fn get_mut(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<&mut CudaRetainedPartition> {
         self.graphs.get_mut(&(ctx, key))
+    }
+
+    pub fn get(&self, ctx: crate::backend::ContextHandle, key: u64) -> Option<&CudaRetainedPartition> {
+        self.graphs.get(&(ctx, key))
     }
 
     pub fn remove(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<CudaRetainedPartition> {
