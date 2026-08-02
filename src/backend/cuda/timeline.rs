@@ -2,7 +2,7 @@
 
 use super::ContextHandle;
 use crate::backend::TimelineBlockingWait;
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use cudarc::driver::CudaEvent;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,6 +112,30 @@ impl TimelineBlockingWait for CudaTimelineBlockingWait {
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(self.event.is_complete())
+    }
+}
+
+/// Wait handle for a timeline value that was never submitted (no ledger event).
+///
+/// [`block_timeout`](TimelineBlockingWait::block_timeout) always reports timeout so
+/// `wait_until_timeout` can return [`crate::error::GoldyError::SubmitTimeout`] like DX12
+/// fence waits on a never-signaled value. [`block`](TimelineBlockingWait::block) errors.
+pub(super) struct CudaAbsentTimelineWait {
+    pub context: ContextHandle,
+    pub value: u64,
+}
+
+impl TimelineBlockingWait for CudaAbsentTimelineWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        bail!(
+            "CUDA: no completion event for context {} value {}",
+            self.context,
+            self.value
+        )
+    }
+
+    fn block_timeout(self: Box<Self>, _timeout_ms: u32) -> Result<bool> {
+        Ok(false)
     }
 }
 

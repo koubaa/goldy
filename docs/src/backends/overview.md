@@ -198,6 +198,8 @@ Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API. Slang comp
 cargo test --no-default-features --features cuda --test scheme_compute_integration
 ```
 
+Retainable kernel-only partitions are captured into CUDA graphs on first submit and relaunched on clean resubmits. Uploads, clears, and copies stay on the stream command-replay path. Dynamic waits and completion events remain outside the captured graph. Stream capture is skipped when `CUDA_LAUNCH_BLOCKING` is set (including under `GOLDY_VALIDATION=api`).
+
 With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnostics: PTX JIT error/info logs on module load, host-side launch-limit checks, StructuredBuffer ABI checks, and per-op stream synchronize with labeled errors. It may set `CUDA_LAUNCH_BLOCKING=1` when unset. Deep memory/race checking still requires external [`compute-sanitizer`](https://docs.nvidia.com/compute-sanitizer/), not `GOLDY_VALIDATION`.
 
 ### WebGPU Backend (in progress)

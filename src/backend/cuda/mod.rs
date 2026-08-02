@@ -9,8 +9,15 @@
 //!
 //! Submits are host-asynchronous: each context owns a CUDA stream, each timeline
 //! value owns a completion event, and a per-device [`SubmissionWorker`] records work.
+//!
+//! Retainable compute partitions whose bodies are kernel-launch-only are captured into
+//! CUDA graphs on first submit (`submit_graph_and_retain`) and relaunched on cache hits
+//! (`try_resubmit_retained`). Uploads, clears, copies, and other graph-unsafe ops fall
+//! back to Goldy command-list replay. Dynamic waits, deferred host writes, and completion
+//! events stay outside the captured graph.
 
 mod pending_submit;
+mod retained_graph;
 mod timeline;
 
 use super::*;
@@ -24,7 +31,8 @@ use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg,
 };
 use cudarc::nvrtc::Ptx;
-use pending_submit::{CudaOp, CudaPendingSubmit};
+use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
+use retained_graph::{CudaGraphStats, GraphRegistry};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -32,6 +40,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use timeline::{EventLedger, LedgerEntry};
+
+/// Logical retained entry under the backend lock (graphs themselves live on the worker).
+enum RetainedEntry {
+    /// Partition was captured; worker registry holds the [`cudarc::driver::CudaGraph`].
+    Graph,
+    /// Graph-unsafe partition: replay stored Goldy commands each resubmit.
+    Commands(Vec<GraphCommand>),
+}
 
 /// Soft cap on concurrent submission contexts per CUDA device.
 const MAX_CUDA_SUBMISSION_CONTEXTS: u32 = 32;
@@ -67,7 +83,8 @@ pub(crate) struct CudaBackend {
     buffer_slots: HashMap<u32, BufferHandle>,
     shaders: HashMap<ShaderHandle, CudaShader>,
     compute_pipelines: HashMap<ComputePipelineHandle, CudaComputePipeline>,
-    retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
+    retained: HashMap<(ContextHandle, u64), RetainedEntry>,
+    graph_stats: Arc<CudaGraphStats>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -85,6 +102,9 @@ struct CudaDevice {
     retired: Arc<AtomicU64>,
     event_ledger: EventLedger,
     deletion_queue: Arc<Mutex<Vec<CudaDeferredDrop>>>,
+    /// Worker-owned CUDA GraphExec registry (serialized via the submission worker).
+    graph_registry: Arc<Mutex<GraphRegistry>>,
+    graph_stats: Arc<CudaGraphStats>,
     limits: CudaDeviceLimits,
 }
 
@@ -102,7 +122,7 @@ pub(super) struct CudaSubmitContext {
     fence_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
-enum CudaDeferredDrop {
+pub(super) enum CudaDeferredDrop {
     Buffer {
         retire_at: u64,
         #[allow(dead_code)]
@@ -266,7 +286,8 @@ impl CudaBackend {
             buffer_slots: HashMap::new(),
             shaders: HashMap::new(),
             compute_pipelines: HashMap::new(),
-            retained_graphs: HashMap::new(),
+            retained: HashMap::new(),
+            graph_stats: Arc::new(CudaGraphStats::default()),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
@@ -274,6 +295,11 @@ impl CudaBackend {
             next_shader: 1,
             next_compute_pipeline: 1,
         })
+    }
+
+    #[cfg(test)]
+    fn graph_stats(&self) -> Arc<CudaGraphStats> {
+        Arc::clone(&self.graph_stats)
     }
 
     fn device(&self, handle: DeviceHandle) -> Result<&CudaDevice> {
@@ -976,6 +1002,31 @@ impl CudaBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
+        let effective = commands_with_sync_prologue(commands, sync);
+        let stream = Arc::clone(&self.context(ctx)?.stream);
+        let ops = self.materialize_ops(&stream, &effective)?;
+        self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
+    }
+
+    fn flatten_graph_commands(commands: &[GraphCommand]) -> Result<Vec<GpuCommand>> {
+        let mut out = Vec::with_capacity(commands.len());
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => out.push(c.clone()),
+                GraphCommand::Render { .. } => {
+                    anyhow::bail!("CUDA compute-only backend: render graph commands are not supported")
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn enqueue_submit(
+        &mut self,
+        ctx: ContextHandle,
+        sync: Option<&SubmitSync>,
+        body: CudaSubmitBody,
+    ) -> Result<crate::timeline::TimelineValue> {
         let context = Arc::clone(self.context(ctx)?);
         let device_handle = context.device;
         let device = self.device(device_handle)?;
@@ -1035,9 +1086,6 @@ impl CudaBackend {
             })?;
         }
 
-        let effective = commands_with_sync_prologue(commands, sync);
-        let ops = self.materialize_ops(&stream, &effective)?;
-
         let pending = CudaPendingSubmit {
             stream,
             context,
@@ -1047,10 +1095,32 @@ impl CudaBackend {
             stream_waits,
             host_waits,
             deferred_writes,
-            ops,
+            body,
         };
         worker.enqueue(fence_value, Box::new(pending))?;
         Ok(fence_value)
+    }
+
+    fn enqueue_evict_retained(&mut self, ctx: ContextHandle, key: u64) {
+        let Some(context) = self.contexts.get(&ctx).cloned() else {
+            return;
+        };
+        let Some(device) = self.devices.get(&context.device) else {
+            return;
+        };
+        let retire_fallback = submission_worker::submission_horizon(&device.next_timeline);
+        let job = pending_submit::CudaEvictRetained {
+            ctx,
+            key,
+            registry: Arc::clone(&device.graph_registry),
+            stats: Arc::clone(&device.graph_stats),
+            device_retired: Arc::clone(&device.retired),
+            retire_fallback,
+        };
+        // Best-effort: eviction is ordered after prior launches on the same worker.
+        if let Err(error) = device.submission_worker.enqueue(0, Box::new(job)) {
+            tracing::warn!(?error, ctx, key, "CUDA: failed to enqueue retained-graph eviction");
+        }
     }
 }
 
@@ -1305,9 +1375,15 @@ impl GpuBackendTimelineWait for CudaBackend {
         }
         let device_handle = self.context_device(ctx);
         let device = self.device(device_handle)?;
-        let event = timeline::lookup_event(&device.event_ledger, ctx, value)
-            .with_context(|| format!("CUDA: no completion event for context {ctx} value {value}"))?;
-        Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
+        match timeline::lookup_event(&device.event_ledger, ctx, value) {
+            Some(event) => Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event }))),
+            // Match DX12: waiting on a never-submitted value still yields a timeout-capable
+            // wait object (not an immediate Err that used to deadlock under classify+lock).
+            None => Ok(Some(Box::new(timeline::CudaAbsentTimelineWait {
+                context: ctx,
+                value,
+            }))),
+        }
     }
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
@@ -1396,6 +1472,8 @@ impl GpuBackend for CudaBackend {
                 retired: Arc::new(AtomicU64::new(0)),
                 event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
                 deletion_queue: Arc::new(Mutex::new(Vec::new())),
+                graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
+                graph_stats: Arc::clone(&self.graph_stats),
                 limits,
             },
         );
@@ -1507,11 +1585,29 @@ impl GpuBackend for CudaBackend {
 
     fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>> {
         let context = self.contexts.remove(&ctx)?;
-        self.retained_graphs.retain(|(c, _), _| *c != ctx);
+        let keys: Vec<u64> = self
+            .retained
+            .keys()
+            .filter_map(|(c, k)| (*c == ctx).then_some(*k))
+            .collect();
+        for key in keys {
+            self.retained.remove(&(ctx, key));
+        }
         let worker = self
             .devices
             .get(&context.device)
             .map(|device| Arc::clone(&device.submission_worker));
+        if let Some(device) = self.devices.get(&context.device) {
+            let retire_fallback = submission_worker::submission_horizon(&device.next_timeline);
+            let job = pending_submit::CudaEvictContextGraphs {
+                ctx,
+                registry: Arc::clone(&device.graph_registry),
+                stats: Arc::clone(&device.graph_stats),
+                device_retired: Arc::clone(&device.retired),
+                retire_fallback,
+            };
+            let _ = device.submission_worker.enqueue(0, Box::new(job));
+        }
         let fence_thread = context.fence_thread.lock().unwrap().take();
         context.fence_shutdown.store(true, Ordering::Relaxed);
         Some(Box::new(CudaDestroyContext {
@@ -2050,8 +2146,41 @@ impl GpuBackend for CudaBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.retained_graphs.insert((ctx, key), commands.to_vec());
-        self.submit_graph(ctx, commands, sync)
+        // Evict any previous artifact for this key before recording a replacement.
+        if self.retained.remove(&(ctx, key)).is_some() {
+            self.enqueue_evict_retained(ctx, key);
+        }
+
+        let gpu_commands = Self::flatten_graph_commands(commands)?;
+        let effective = commands_with_sync_prologue(&gpu_commands, sync);
+        let stream = Arc::clone(&self.context(ctx)?.stream);
+        let ops = self.materialize_ops(&stream, &effective)?;
+
+        if pending_submit::ops_are_graph_safe(&ops) && !retained_graph::cuda_launch_blocking_active() {
+            let device_handle = self.context(ctx)?.device;
+            let device = self.device(device_handle)?;
+            let body = CudaSubmitBody::CaptureAndLaunch {
+                key,
+                ops,
+                registry: Arc::clone(&device.graph_registry),
+                stats: Arc::clone(&device.graph_stats),
+            };
+            self.retained.insert((ctx, key), RetainedEntry::Graph);
+            tracing::trace!(key, "CUDA: capturing retainable partition into CudaGraph");
+            self.enqueue_submit(ctx, sync, body)
+        } else {
+            self.graph_stats
+                .fallbacks
+                .fetch_add(1, Ordering::Relaxed);
+            self.retained
+                .insert((ctx, key), RetainedEntry::Commands(commands.to_vec()));
+            tracing::trace!(
+                key,
+                blocking = retained_graph::cuda_launch_blocking_active(),
+                "CUDA: retainable partition uses command-replay fallback"
+            );
+            self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
+        }
     }
 
     fn try_resubmit_retained(
@@ -2060,14 +2189,38 @@ impl GpuBackend for CudaBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let Some(commands) = self.retained_graphs.get(&(ctx, key)).cloned() else {
-            return Ok(None);
-        };
-        self.submit_graph(ctx, &commands, sync).map(Some)
+        match self.retained.get(&(ctx, key)) {
+            Some(RetainedEntry::Graph) => {
+                let device_handle = self.context(ctx)?.device;
+                let device = self.device(device_handle)?;
+                let body = CudaSubmitBody::LaunchRetained {
+                    key,
+                    registry: Arc::clone(&device.graph_registry),
+                    stats: Arc::clone(&device.graph_stats),
+                };
+                tracing::trace!(key, "CUDA: launching retained CudaGraph");
+                self.enqueue_submit(ctx, sync, body).map(Some)
+            }
+            Some(RetainedEntry::Commands(commands)) => {
+                let commands = commands.clone();
+                let gpu_commands = Self::flatten_graph_commands(&commands)?;
+                let effective = commands_with_sync_prologue(&gpu_commands, sync);
+                let stream = Arc::clone(&self.context(ctx)?.stream);
+                let ops = self.materialize_ops(&stream, &effective)?;
+                self.graph_stats
+                    .fallbacks
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::trace!(key, "CUDA: replaying retained GraphCommands");
+                self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops)).map(Some)
+            }
+            None => Ok(None),
+        }
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
-        self.retained_graphs.remove(&(ctx, key));
+        if self.retained.remove(&(ctx, key)).is_some() {
+            self.enqueue_evict_retained(ctx, key);
+        }
     }
 
     #[cfg(feature = "graphics")]
@@ -2349,6 +2502,23 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     fn try_cuda_device() -> Result<Option<Arc<crate::Device>>> {
         match CudaBackend::new() {
             Ok(backend) => Ok(Some(Arc::new(crate::Device::from_backend(Box::new(backend))?))),
+            Err(error) => {
+                eprintln!("skipping CUDA scheme test: {error:#}");
+                Ok(None)
+            }
+        }
+    }
+
+    fn try_cuda_device_with_stats() -> Result<Option<(Arc<crate::Device>, Arc<CudaGraphStats>)>> {
+        match CudaBackend::new() {
+            Ok(backend) => {
+                let stats = backend.graph_stats();
+                stats.reset();
+                Ok(Some((
+                    Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                    stats,
+                )))
+            }
             Err(error) => {
                 eprintln!("skipping CUDA scheme test: {error:#}");
                 Ok(None)
@@ -3258,5 +3428,226 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     fn goldy_validation_api_gate_compiles_for_cuda() {
         // Ensures `feature = "cuda"` keeps `goldy_validation_enabled` linked.
         let _ = crate::backend::goldy_validation_enabled();
+    }
+
+    #[test]
+    fn retained_partition_captures_once_then_graph_launches() -> Result<()> {
+        let Some((device, stats)) = try_cuda_device_with_stats()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
+        let pipeline = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?,
+        )?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("double", &pipeline)
+            .with_parcel(&buffer, crate::NodeAccess::ReadWrite)
+            .dispatch(4, 1, 1);
+
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buffer)?;
+        let mut submission = scheme.submit()?;
+        let bytes1 = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
+
+        let after_first = stats.snapshot();
+        assert!(
+            after_first.captures >= 1,
+            "first retainable submit should capture at least one graph: {after_first:?}"
+        );
+        assert!(
+            after_first.launches >= 1,
+            "first retainable submit should launch the captured graph: {after_first:?}"
+        );
+        let captures_after_first = after_first.captures;
+        let launches_after_first = after_first.launches;
+
+        // Stable resubmit without rebinding withdraw (would dirty IR).
+        let mut submission = scheme.submit()?;
+        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
+
+        let after_second = stats.snapshot();
+        assert_eq!(
+            after_second.captures, captures_after_first,
+            "stable resubmit must not recapture: first={after_first:?} second={after_second:?}"
+        );
+        assert!(
+            after_second.launches > launches_after_first,
+            "stable resubmit must graph-launch: first={after_first:?} second={after_second:?}"
+        );
+        assert_eq!(
+            scheme.replay_stats().records, 1,
+            "stable resubmit should not re-record the partition"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_param_change_recaptures_distinct_partition() -> Result<()> {
+        let Some((device, stats)) = try_cuda_device_with_stats()? else {
+            return Ok(());
+        };
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
+        let pipeline = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?,
+        )?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("fill", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(7u32)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        assert_eq!(
+            bytemuck::cast_slice::<u8, u32>(&withdraw.claim(&mut submission)?.consume()?)[0],
+            7
+        );
+        let captures_after_first = stats.snapshot().captures;
+        assert!(captures_after_first >= 1);
+
+        // Mutate scalar param → dirty scheme → new partition fingerprint / recapture.
+        scheme
+            .node("fill", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(9u32)
+            .dispatch(1, 1, 1);
+        // Rebuilding the node above may not clear prior nodes; use a fresh scheme instead.
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("fill", &pipeline)
+            .with_parcel(&out, crate::NodeAccess::Write)
+            .with_param(9u32)
+            .dispatch(1, 1, 1);
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+        let mut submission = scheme.submit()?;
+        assert_eq!(
+            bytemuck::cast_slice::<u8, u32>(&withdraw.claim(&mut submission)?.consume()?)[0],
+            9
+        );
+        assert!(
+            stats.snapshot().captures > captures_after_first,
+            "distinct scalar binding should produce a new capture"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upload_write_commands_use_command_fallback_not_graph_capture() -> Result<()> {
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA fallback retention test: {error:#}");
+                return Ok(());
+            }
+        };
+        let stats = backend.graph_stats();
+        stats.reset();
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        let commands = [GraphCommand::Compute(GpuCommand::WriteBuffer {
+            buffer,
+            offset: 0,
+            data: Arc::<[u8]>::from(bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec()),
+        })];
+        let tv = backend.submit_graph_and_retain(ctx, &commands, 0xDEAD_F001, None)?;
+        wait_for(&mut backend, ctx, tv)?;
+        let snap = stats.snapshot();
+        assert_eq!(snap.captures, 0, "WriteBuffer must not capture: {snap:?}");
+        assert!(
+            snap.fallbacks >= 1,
+            "WriteBuffer retain path should count as fallback: {snap:?}"
+        );
+
+        // Resubmit still works via command replay.
+        let tv = backend
+            .try_resubmit_retained(ctx, 0xDEAD_F001, None)?
+            .context("expected retained fallback entry")?;
+        wait_for(&mut backend, ctx, tv)?;
+        assert!(stats.snapshot().fallbacks >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn destroy_context_evicts_retained_graphs() -> Result<()> {
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA eviction test: {error:#}");
+                return Ok(());
+            }
+        };
+        let stats = backend.graph_stats();
+        stats.reset();
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_SLANG,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("double"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let commands = [
+            GraphCommand::Compute(GpuCommand::SetPipeline(pipeline)),
+            GraphCommand::Compute(GpuCommand::BindResourcesRaw {
+                indices: vec![slot],
+                user: vec![],
+                frame_table_base: 0,
+            }),
+            GraphCommand::Compute(GpuCommand::Dispatch {
+                label: Some("double"),
+                workgroups_x: 4,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            }),
+        ];
+        const KEY: u64 = 0xE11C7;
+        let tv = backend.submit_graph_and_retain(ctx, &commands, KEY, None)?;
+        wait_for(&mut backend, ctx, tv)?;
+        assert!(stats.snapshot().captures >= 1);
+
+        backend.evict_retained(ctx, KEY);
+        backend.device_wait_idle(device)?;
+        assert!(
+            stats.snapshot().evictions >= 1,
+            "evict_retained + idle should destroy the graph: {:?}",
+            stats.snapshot()
+        );
+
+        // Resubmit after eviction must miss and return None.
+        assert!(backend.try_resubmit_retained(ctx, KEY, None)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn ops_are_graph_safe_rejects_empty() {
+        assert!(!pending_submit::ops_are_graph_safe(&[]));
     }
 }

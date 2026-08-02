@@ -397,6 +397,7 @@ mod heap_tests {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn texture_allocation_survives_pressure_with_gpu_work() {
         let device = make_device();
@@ -716,6 +717,7 @@ mod heap_tests {
     // Mixed buffer and texture pressure
     // ===========================================================================
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn mixed_buffer_and_texture_allocation_survives_30_frames() {
         let device = make_device();
