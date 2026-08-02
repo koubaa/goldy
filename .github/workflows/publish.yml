@@ -210,9 +210,44 @@ jobs:
       - name: List distribution files
         run: ls -la dist/
 
+      - name: Skip files already on PyPI
+        run: |
+          python3 <<'PY'
+          import glob
+          import json
+          import os
+          import urllib.request
+
+          with urllib.request.urlopen("https://pypi.org/pypi/goldy/json") as resp:
+              data = json.load(resp)
+
+          existing = {
+              file["filename"]
+              for release in data.get("releases", {}).values()
+              for file in release
+          }
+
+          removed = []
+          for path in glob.glob("dist/*"):
+              name = os.path.basename(path)
+              if name in existing:
+                  os.remove(path)
+                  removed.append(name)
+
+          if removed:
+              print("Already on PyPI (skipped):")
+              for name in sorted(removed):
+                  print(f"  {name}")
+
+          remaining = sorted(os.path.basename(p) for p in glob.glob("dist/*"))
+          print(f"Uploading {len(remaining)} file(s):")
+          for name in remaining:
+              print(f"  {name}")
+          if not remaining:
+              print("Nothing new to upload.")
+          PY
+
       - name: Publish to PyPI
+        if: hashFiles('dist/**') != ''
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          # Safe when republishing after partial uploads (e.g. file-size limit).
-          skip-existing: true
 
