@@ -1961,6 +1961,14 @@ impl GpuBackend for CudaBackend {
     fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
         let worker = Arc::clone(&self.device(device)?.submission_worker);
         let alloc_stream = Arc::clone(&self.device(device)?.alloc_stream);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let (present_stream, dx12) = {
+            let gpu = self.device(device)?;
+            (
+                gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
+                gpu.dx12.as_ref().map(Arc::clone),
+            )
+        };
         worker.flush()?;
         for context in self.contexts.values().filter(|context| context.device == device) {
             context
@@ -1976,7 +1984,17 @@ impl GpuBackend for CudaBackend {
                 &context.last_emitted,
             );
         }
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(stream) = present_stream {
+            stream
+                .synchronize()
+                .context("CUDA: present stream synchronize failed")?;
+        }
         alloc_stream.synchronize().context("CUDA: device wait idle failed")?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = dx12 {
+            companion.wait_idle()?;
+        }
         Ok(())
     }
 

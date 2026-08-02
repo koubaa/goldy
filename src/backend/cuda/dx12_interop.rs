@@ -25,16 +25,20 @@ pub(super) const SURFACE_COMPUTE_FORMAT: TextureFormat = TextureFormat::Rgba32Fl
 pub(super) const SWAPCHAIN_DXGI_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 
 /// One shareable float4 UAV texture with a CUDA surface view.
+///
+/// Field order is load-bearing: Rust drops fields in declaration order, so
+/// [`cuda_texture`] (tex/surf objects) must precede [`import`] (mapped mipmapped
+/// array / external memory), which must precede [`d3d12_resource`].
 pub(super) struct SharedScratchTexture {
     pub width: u32,
     pub height: u32,
-    pub d3d12_resource: ID3D12Resource,
-    #[allow(dead_code)]
-    pub allocation_size: u64,
+    pub cuda_texture: Arc<CudaTextureResource>,
     /// Keeps the external memory + mipmapped array alive for the CUDA texture view.
     #[allow(dead_code)]
     pub import: CudaImportedTexture,
-    pub cuda_texture: Arc<CudaTextureResource>,
+    pub d3d12_resource: ID3D12Resource,
+    #[allow(dead_code)]
+    pub allocation_size: u64,
     /// BGRA8 UAV used as compute-blit destination before CopyResource → backbuffer.
     pub blit_target: ID3D12Resource,
 }
@@ -135,10 +139,10 @@ impl SharedScratchTexture {
         Ok(Self {
             width,
             height,
+            cuda_texture,
+            import,
             d3d12_resource,
             allocation_size,
-            import,
-            cuda_texture,
             blit_target,
         })
     }

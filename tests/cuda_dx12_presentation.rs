@@ -1,6 +1,9 @@
 //! CUDA + DX12 presentation companion tests (Windows).
 //!
-//! GPU-dependent cases skip cleanly when no NVIDIA adapter / DX12 companion is present.
+//! Skip only when no CUDA backend/adapters exist, or when a Win32 window cannot be
+//! created (headless). If CUDA adapters are present under `cuda+graphics+dx12`,
+//! companion attach and present must succeed — soft-skipping those failures would
+//! hide regressions on capable CI machines.
 
 #![cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
 
@@ -100,20 +103,14 @@ fn cuda_device_attaches_dx12_companion_or_skips() {
         eprintln!("skip: no CUDA backend / adapters");
         return;
     };
-    let adapter = match instance.request_adapter(&RequestAdapterOptions::default()) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("skip: request_adapter failed: {e:#}");
-            return;
-        }
-    };
-    let device = match adapter.request_device(&DeviceDescriptor::default()) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("skip: CUDA↔DX12 companion attach failed (expected on WARP/TCC): {e:#}");
-            return;
-        }
-    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter must be available when CUDA backends enumerate");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach under cuda+graphics+dx12 on a matching NVIDIA adapter"),
+    );
     assert_eq!(device.backend_type(), BackendType::Cuda);
     let _ctx = device.create_context().expect("create_context");
 }
@@ -124,23 +121,22 @@ fn cuda_compute_to_present_multi_frame() {
         eprintln!("skip: no CUDA backend / adapters");
         return;
     };
-    let Ok(adapter) = instance.request_adapter(&RequestAdapterOptions::default()) else {
-        eprintln!("skip: no adapter");
-        return;
-    };
-    let Ok(device) = adapter.request_device(&DeviceDescriptor::default()) else {
-        eprintln!("skip: no DX12 companion");
-        return;
-    };
-    let device = Arc::new(device);
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach under cuda+graphics+dx12"),
+    );
     assert_eq!(device.backend_type(), BackendType::Cuda);
     let ctx = device.create_context().expect("context");
 
     let Ok(window) = TestWindow::create(128, 128) else {
-        eprintln!("skip: CreateWindowExW failed");
+        eprintln!("skip: CreateWindowExW failed (headless / no interactive session)");
         return;
     };
-    let surface = match SurfaceExchange::new_with_depth(
+    let surface = SurfaceExchange::new_with_depth(
         &ctx,
         &window,
         2,
@@ -148,21 +144,10 @@ fn cuda_compute_to_present_multi_frame() {
             present_mode: PresentMode::Immediate,
             depth_format: None,
         },
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("skip: surface create failed: {e:#}");
-            return;
-        }
-    };
+    )
+    .expect("surface create");
 
-    let shader = match ShaderModule::from_slang(&device, FILL_SHADER) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("skip: shader compile failed: {e:#}");
-            return;
-        }
-    };
+    let shader = ShaderModule::from_slang(&device, FILL_SHADER).expect("shader compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
     for frame_i in 0..3u32 {

@@ -189,10 +189,11 @@ pub(super) fn destroy_surface(backend: &mut CudaBackend, surface: SurfaceHandle)
     let Some(mut state) = backend.surfaces.remove(&surface) else {
         return;
     };
-    if let Some(gpu) = backend.devices.get(&state.device) {
-        if let Some(companion) = gpu.dx12.as_ref() {
-            let _ = companion.wait_idle();
-        }
+    let device = state.device;
+    // CUDA may still be writing imported scratch; drain CUDA + DX12 before destroying
+    // tex/surf objects and external memory.
+    if let Err(e) = wait_device_idle_for_surface(backend, device) {
+        tracing::error!("CUDA/DX12: destroy_surface idle wait failed: {e:#}");
     }
     // Drop CUDA tex/surf objects before imported external memory (strict interop order).
     let tex_handles: Vec<_> = state
@@ -259,19 +260,19 @@ pub(super) fn surface_resize(
         .context("CUDA/DX12: invalid surface")?
         .device;
 
-    // Take scratch slots, wait idle, then drop CUDA views before external memory.
+    // Take scratch slots, wait CUDA+DX12 idle, then drop CUDA views before external memory.
     let old_slots: Vec<ScratchSlot> = {
         let state = backend.surfaces.get_mut(&surface).unwrap();
         state.scratch.iter_mut().filter_map(|s| s.take()).collect()
     };
-    {
-        let companion = companion_ref(backend, device)?;
-        companion.wait_idle()?;
-    }
+    wait_device_idle_for_surface(backend, device)?;
     for slot in old_slots {
         let h = slot.texture_handle;
         if let Some(resource) = backend.textures.remove(&h) {
             if let Some(sid) = resource.storage_slot {
+                backend.texture_slots.remove(&sid);
+            }
+            if let Some(sid) = resource.sampled_slot {
                 backend.texture_slots.remove(&sid);
             }
             drop(resource);
@@ -526,6 +527,11 @@ pub(super) fn take_present_gpu_work(
         worker
             .enqueue(0, Box::new(handoff))
             .context("CUDA/DX12: enqueue present handoff failed")?;
+        // PresentGpuWork::wait_queue needs the CUDA→DX12 fence signal; flush so the handoff
+        // cannot still be queued behind unrelated worker jobs when DXGI work starts.
+        worker
+            .flush()
+            .context("CUDA/DX12: flush present handoff before GPU work")?;
         signal_value
     } else {
         0
@@ -627,6 +633,12 @@ pub(super) fn finish_present(
                 .push(crate::signal::Signal::SwapchainReturned { image_index: image_index as u32 });
         }
     }
+    if !finish.present_ok {
+        bail!(
+            "CUDA/DX12: Present failed after copy submit (return_fence {} recorded for reuse)",
+            finish.return_fence
+        );
+    }
     Ok(finish.present_timeline)
 }
 
@@ -654,6 +666,9 @@ impl PendingSubmit for CudaPresentHandoff {
             self.stream.cu_stream(),
             self.signal_value,
         )?;
+        self.stream
+            .synchronize()
+            .context("CUDA/DX12: synchronize handoff fence signal")?;
         Ok(())
     }
 }
@@ -716,18 +731,22 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         self.companion
             .execute_and_signal(&[Some(cmd)], return_fence)?;
 
-        let (sync_interval, flags) = present_args(self.present_mode, self.allow_tearing);
-        let hr = unsafe { self.swapchain.Present(sync_interval, flags) };
-        if hr.is_err() {
-            bail!("CUDA/DX12: Present failed: {hr:?}");
-        }
-
-        // Publish present/copy completion on the Goldy timeline (not the DX12 fence counter).
-        // CPU-wait the companion fence so we know the copy retired, then record on the
-        // dedicated present stream (avoids racing the submission worker's context stream).
+        // Wait for the copy to retire before DXGI Present (flip model requires rendering done).
         self.companion
             .cpu_wait(return_fence)
             .context("CUDA/DX12: wait for present-copy fence")?;
+
+        let (sync_interval, flags) = present_args(self.present_mode, self.allow_tearing);
+        let hr = unsafe { self.swapchain.Present(sync_interval, flags) };
+        // Present may fail after the copy is already submitted. Always retire
+        // `return_fence` so allocator / scratch reuse stays guarded via finish_present.
+        let present_ok = hr.is_ok();
+        if !present_ok {
+            tracing::error!("CUDA/DX12: Present failed: {hr:?} (retiring copy fence {return_fence})");
+        }
+
+        // Publish present/copy completion on the Goldy timeline (not the DX12 fence counter).
+        // Record on the dedicated present stream (avoids racing the submission worker's context stream).
         cuda_wait_fence(
             &self.companion.cuda_ctx,
             self.companion.cuda_semaphore,
@@ -761,7 +780,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             frame_compute_timeline: None,
             signal_timeline: None,
             render_pass_submitted: false,
-            present_ok: true,
+            present_ok,
         })
     }
 }
@@ -790,6 +809,8 @@ fn ensure_scratch(
         return Ok(handle);
     }
     if let Some((old, false)) = reuse {
+        // Size mismatch: drain GPU before destroying the imported scratch.
+        wait_device_idle_for_surface(backend, device)?;
         if let Some(slot) = backend
             .surfaces
             .get_mut(&surface)
@@ -801,6 +822,9 @@ fn ensure_scratch(
             // Drop CUDA views before external memory.
             if let Some(resource) = backend.textures.remove(&old) {
                 if let Some(slot_id) = resource.storage_slot {
+                    backend.texture_slots.remove(&slot_id);
+                }
+                if let Some(slot_id) = resource.sampled_slot {
                     backend.texture_slots.remove(&slot_id);
                 }
                 drop(resource);
@@ -852,6 +876,43 @@ fn companion_ref(backend: &CudaBackend, device: DeviceHandle) -> Result<&Dx12Com
     gpu.dx12
         .as_deref()
         .context("CUDA: DX12 companion not available (requires cuda+graphics+dx12 on Windows)")
+}
+
+/// Drain CUDA submission + all device streams and the DX12 companion before
+/// destroying imported scratch (tex/surf objects and external memory).
+fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle) -> Result<()> {
+    let (worker, alloc_stream, present_stream, companion) = {
+        let gpu = backend.device(device)?;
+        (
+            Arc::clone(&gpu.submission_worker),
+            Arc::clone(&gpu.alloc_stream),
+            gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
+            gpu.dx12.as_ref().map(Arc::clone),
+        )
+    };
+    worker
+        .flush()
+        .context("CUDA/DX12: flush submission worker before surface teardown")?;
+    for context in backend.contexts.values().filter(|c| c.device == device) {
+        context
+            .stream
+            .synchronize()
+            .context("CUDA/DX12: context stream synchronize before surface teardown")?;
+    }
+    if let Some(stream) = present_stream {
+        stream
+            .synchronize()
+            .context("CUDA/DX12: present stream synchronize before surface teardown")?;
+    }
+    alloc_stream
+        .synchronize()
+        .context("CUDA/DX12: alloc stream synchronize before surface teardown")?;
+    if let Some(companion) = companion {
+        companion
+            .wait_idle()
+            .context("CUDA/DX12: companion wait_idle before surface teardown")?;
+    }
+    Ok(())
 }
 
 fn present_args(mode: crate::types::PresentMode, allow_tearing: bool) -> (u32, DXGI_PRESENT) {
