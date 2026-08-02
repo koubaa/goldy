@@ -44,8 +44,10 @@ pub(crate) mod cuda;
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
     BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle,
+    SamplerHandle, ShaderHandle, TextureHandle,
 };
+#[cfg(feature = "graphics")]
+pub(crate) use crate::handles::{SurfaceHandle, SwapchainImageHandle};
 pub(crate) use crate::texture::TextureCopyFootprint;
 
 /// Shared primitives reused across Vulkan, DX12, and Metal backends, and by
@@ -59,11 +61,7 @@ pub(crate) mod submission_worker;
 pub(crate) mod host_sidecar;
 
 /// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12, CUDA).
-#[cfg(any(
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    feature = "cuda"
-))]
+#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"), feature = "cuda"))]
 pub(crate) mod signal_fence;
 
 use crate::types::{
@@ -86,11 +84,7 @@ use std::sync::Arc;
 ///
 /// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
 /// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
-#[cfg(any(
-    feature = "vulkan",
-    feature = "cuda",
-    all(feature = "metal", target_os = "macos"),
-))]
+#[cfg(any(feature = "vulkan", feature = "cuda", all(feature = "metal", target_os = "macos"),))]
 #[must_use]
 pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
@@ -1744,9 +1738,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
         feature = "webgpu"
     )))]
     {
-        anyhow::bail!(
-            "No GPU backend available — enable 'vulkan', 'dx12', 'metal', 'cuda', or 'webgpu'"
-        )
+        anyhow::bail!("No GPU backend available — enable 'vulkan', 'dx12', 'metal', 'cuda', or 'webgpu'")
     }
 }
 

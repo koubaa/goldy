@@ -7,9 +7,9 @@ use super::ir::{DispatchDim, NodeAccess, ResourceBinding};
 use super::ResourceId;
 #[cfg(feature = "graphics")]
 use crate::backend::RenderCommand;
+use crate::buffer::BufferView;
 #[cfg(feature = "graphics")]
 use crate::buffer::{Allocation, BufferSource};
-use crate::buffer::BufferView;
 use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
 #[cfg(feature = "graphics")]

@@ -3001,10 +3001,7 @@ void cs_main(Interpolated<float4> tex, Filter samp, DirectSpatial<float4> img, T
             result.contains("uniform Interpolated<float4> _goldy_cuda_binding_0"),
             "{result}"
         );
-        assert!(
-            result.contains("uniform Filter _goldy_cuda_binding_1"),
-            "{result}"
-        );
+        assert!(result.contains("uniform Filter _goldy_cuda_binding_1"), "{result}");
         assert!(
             result.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_2"),
             "{result}"

@@ -9,8 +9,7 @@ use crate::timeline::TimelineValue;
 use crate::types::DispatchShape;
 use anyhow::{Context as _, Result};
 use cudarc::driver::{
-    CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig,
-    PushKernelArg,
+    CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg,
 };
 use std::sync::{Arc, Mutex};
 
@@ -337,9 +336,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 let mut view = guard
                     .try_slice_mut(start..end)
                     .context("CUDA: write range out of bounds")?;
-                stream
-                    .memcpy_htod(data, &mut view)
-                    .context("CUDA: HtoD write failed")?;
+                stream.memcpy_htod(data, &mut view).context("CUDA: HtoD write failed")?;
                 if validate {
                     maybe_validate_sync(stream, "WriteBuffer")?;
                 }
@@ -365,16 +362,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 data,
                 src_row_pitch,
             } => {
-                super::texture::memcpy_htod_array(
-                    stream,
-                    texture,
-                    *x,
-                    *y,
-                    *width,
-                    *height,
-                    data,
-                    *src_row_pitch,
-                )?;
+                super::texture::memcpy_htod_array(stream, texture, *x, *y, *width, *height, data, *src_row_pitch)?;
                 if validate {
                     maybe_validate_sync(stream, "WriteTexture")?;
                 }
@@ -394,16 +382,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     let (base, _sync) = memory.device_ptr(stream);
                     base + *src_abs
                 };
-                super::texture::memcpy_dtod_array(
-                    stream,
-                    src_ptr,
-                    *src_row_pitch,
-                    texture,
-                    *x,
-                    *y,
-                    *width,
-                    *height,
-                )?;
+                super::texture::memcpy_dtod_array(stream, src_ptr, *src_row_pitch, texture, *x, *y, *width, *height)?;
                 if validate {
                     maybe_validate_sync(stream, "CopyBufferToTexture")?;
                 }
@@ -592,14 +571,7 @@ fn launch_indirect_fallback(
             max_grid.2
         );
     }
-    super::validate_launch_config(
-        &limits,
-        max_threads_per_block,
-        grid,
-        workgroup_size,
-        0,
-        label,
-    )?;
+    super::validate_launch_config(&limits, max_threads_per_block, grid, workgroup_size, 0, label)?;
     launch_direct(stream, label, function, workgroup_size, grid, args, validate)
 }
 
@@ -620,8 +592,7 @@ pub(super) fn finalize_indirect_capture(
             CudaOp::LaunchIndirect { node_slot, .. } => {
                 // Updater is kernel_ordinal; consumer is kernel_ordinal + 1.
                 let consumer_ordinal = kernel_ordinal + 1;
-                let dev_node =
-                    retained_graph::make_kernel_node_device_updatable(cu_graph, consumer_ordinal)?;
+                let dev_node = retained_graph::make_kernel_node_device_updatable(cu_graph, consumer_ordinal)?;
                 let mut slot = node_slot.lock().unwrap();
                 stream
                     .memcpy_htod(&[dev_node as u64], &mut *slot)
@@ -635,9 +606,7 @@ pub(super) fn finalize_indirect_capture(
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
             | CudaOp::CopyTextureToBuffer { .. } => {
-                anyhow::bail!(
-                    "CUDA: finalize_indirect_capture called on a graph-unsafe op set"
-                );
+                anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
             }
         }
     }
@@ -783,22 +752,15 @@ impl PendingSubmit for CudaPendingSubmit {
                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 maybe_validate_sync(&self.stream, "graph launch after capture")?;
             }
-            CudaSubmitBody::LaunchRetained {
-                key,
-                registry,
-                stats,
-            } => {
+            CudaSubmitBody::LaunchRetained { key, registry, stats } => {
                 let ctx = self.context.handle;
                 {
                     let mut guard = registry.lock().unwrap();
                     guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
-                    let partition = guard.get_mut(ctx, key).with_context(|| {
-                        format!("CUDA: retained graph missing for context {ctx} key {key:#x}")
-                    })?;
-                    partition
-                        .graph
-                        .launch()
-                        .context("CUDA: cuGraphLaunch failed")?;
+                    let partition = guard
+                        .get_mut(ctx, key)
+                        .with_context(|| format!("CUDA: retained graph missing for context {ctx} key {key:#x}"))?;
+                    partition.graph.launch().context("CUDA: cuGraphLaunch failed")?;
                     partition.last_launch_tv = self.fence_value;
                 }
                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -834,9 +796,7 @@ impl PendingSubmit for CudaEvictRetained {
         if let Some(partition) = guard.remove(self.ctx, self.key) {
             let retire_at = partition.last_launch_tv.max(self.retire_fallback);
             guard.defer_drop(retire_at, partition);
-            self.stats
-                .evictions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.stats.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -858,9 +818,7 @@ impl PendingSubmit for CudaEvictContextGraphs {
         for partition in guard.remove_context(self.ctx) {
             let retire_at = partition.last_launch_tv.max(self.retire_fallback);
             guard.defer_drop(retire_at, partition);
-            self.stats
-                .evictions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.stats.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -949,10 +907,7 @@ pub(super) fn buffer_device_arg(
     let (ptr, _sync) = view.device_ptr(stream);
     let stride = element_stride.unwrap_or(1).max(1) as u64;
     let count = if size == 0 { 0 } else { (size / stride) as usize };
-    Ok((
-        CudaBufferArg { data: ptr, count },
-        Arc::clone(memory),
-    ))
+    Ok((CudaBufferArg { data: ptr, count }, Arc::clone(memory)))
 }
 
 pub(super) fn materialize_deferred_writes(

@@ -717,6 +717,7 @@ impl PartitionSubmitResult {
     ///
     /// With replay disabled this is always true (fresh encodes do not count as records),
     /// so Scheme topology reregistration stays gated on IR dirtiness alone.
+    #[cfg(feature = "graphics")]
     pub fn all_from_cache(&self) -> bool {
         self.records == 0
     }

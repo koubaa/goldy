@@ -1846,7 +1846,14 @@ mod imp {
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let tex = pool
-            .acquire_texture(W, H, format, TextureKind::DirectInterpolated, TextureFlags::empty(), None)
+            .acquire_texture(
+                W,
+                H,
+                format,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+                None,
+            )
             .expect("texture");
         let out = pool
             .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
@@ -3390,8 +3397,9 @@ mod imp {
         );
         // Tight (pitch=0) uploads are standalone (`waves_can_retain` → false), so CUDA
         // never produces a retention hit. Vulkan/DX12 historically counted a hit here;
-        // keep that assert off Metal and CUDA.
-        if !matches!(device.backend_type(), BackendType::Cuda | BackendType::Metal) {
+        // keep that assert off Metal (field absent) and CUDA (runtime).
+        #[cfg(not(feature = "metal"))]
+        if !matches!(device.backend_type(), BackendType::Cuda) {
             assert_eq!(
                 scheme.replay_stats().resubmit_hits,
                 1,
@@ -3480,6 +3488,7 @@ mod imp {
                     1,
                     "CUDA pitched upload should record once (no layout settle)"
                 );
+                #[cfg(not(feature = "metal"))]
                 assert_eq!(
                     scheme.replay_stats().resubmit_hits,
                     2,
@@ -3493,6 +3502,7 @@ mod imp {
                     2,
                     "initial record + one re-record when destination texture layout settles"
                 );
+                #[cfg(not(feature = "metal"))]
                 assert_eq!(
                     scheme.replay_stats().resubmit_hits,
                     1,

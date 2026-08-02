@@ -21,13 +21,19 @@ pub(crate) struct MockBackend {
     next_buffer_handle: BufferHandle,
     shaders: HashMap<ShaderHandle, MockShader>,
     next_shader_handle: ShaderHandle,
+    #[cfg(feature = "graphics")]
     pipelines: HashMap<PipelineHandle, MockPipeline>,
+    #[cfg(feature = "graphics")]
     next_pipeline_handle: PipelineHandle,
     compute_pipelines: HashMap<ComputePipelineHandle, MockComputePipeline>,
     next_compute_pipeline_handle: ComputePipelineHandle,
+    #[cfg(feature = "graphics")]
     render_targets: HashMap<RenderTargetHandle, MockRenderTarget>,
+    #[cfg(feature = "graphics")]
     next_render_target_handle: RenderTargetHandle,
+    #[cfg(feature = "graphics")]
     surfaces: HashMap<SurfaceHandle, MockSurface>,
+    #[cfg(feature = "graphics")]
     next_surface_handle: SurfaceHandle,
     textures: HashMap<TextureHandle, MockTexture>,
     next_texture_handle: TextureHandle,
@@ -75,12 +81,14 @@ pub(crate) struct MockBackend {
     /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
+    #[cfg(feature = "graphics")]
     pub default_surface_format: TextureFormat,
     /// When true, fresh/replay planners fuse upload partitions with the following compute
     /// partition (Metal Scheme path tests).
     pub fuse_upload_with_compute_partitions: bool,
     /// Device-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
+    #[cfg(feature = "graphics")]
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
     contexts: HashMap<ContextHandle, Arc<Mutex<MockContextState>>>,
     next_context_id: ContextHandle,
@@ -159,6 +167,7 @@ struct MockShader {
     source: String,
 }
 
+#[cfg(feature = "graphics")]
 #[allow(dead_code)]
 struct MockPipeline {
     device_handle: DeviceHandle,
@@ -169,6 +178,7 @@ struct MockComputePipeline {
     device_handle: DeviceHandle,
 }
 
+#[cfg(feature = "graphics")]
 #[allow(dead_code)]
 struct MockRenderTarget {
     device_handle: DeviceHandle,
@@ -205,8 +215,10 @@ struct MockSampler {
 ///
 /// Real backends rotate a fixed `frame_slot` set (`MAX_FRAMES_IN_FLIGHT`); mock
 /// must do the same so present-aware retention can warm variants and resubmit.
+#[cfg(feature = "graphics")]
 const MOCK_SWAPCHAIN_IMAGES: u32 = 2;
 
+#[cfg(feature = "graphics")]
 #[allow(dead_code)]
 struct MockSurface {
     device_handle: DeviceHandle,
@@ -236,13 +248,19 @@ impl MockBackend {
             next_buffer_handle: 1,
             shaders: HashMap::new(),
             next_shader_handle: 1,
+            #[cfg(feature = "graphics")]
             pipelines: HashMap::new(),
+            #[cfg(feature = "graphics")]
             next_pipeline_handle: 1,
             compute_pipelines: HashMap::new(),
             next_compute_pipeline_handle: 1,
+            #[cfg(feature = "graphics")]
             render_targets: HashMap::new(),
+            #[cfg(feature = "graphics")]
             next_render_target_handle: 1,
+            #[cfg(feature = "graphics")]
             surfaces: HashMap::new(),
+            #[cfg(feature = "graphics")]
             next_surface_handle: 1,
             textures: HashMap::new(),
             next_texture_handle: 1,
@@ -267,9 +285,11 @@ impl MockBackend {
             readback_alloc_count: 0,
             readback_free_count: 0,
             buffer_view_create_count: 0,
+            #[cfg(feature = "graphics")]
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             fuse_upload_with_compute_partitions: false,
             device_retired_floor: HashMap::new(),
+            #[cfg(feature = "graphics")]
             surface_pending_acquire: HashMap::new(),
             contexts: HashMap::new(),
             next_context_id: 1,
@@ -312,6 +332,7 @@ impl MockBackend {
         }
     }
 
+    #[cfg(feature = "graphics")]
     fn push_context_signal(&self, ctx: ContextHandle, signal: crate::signal::Signal) {
         self.context_state(ctx).signal_queue.push(signal);
     }
@@ -327,6 +348,7 @@ impl MockBackend {
     }
 
     /// Present-at-submit path: enqueue on the FIFO worker so ordering matches real backends.
+    #[cfg(feature = "graphics")]
     fn enqueue_mock_submit(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
         let device = self.context_device(ctx);
         let dev = self
@@ -662,8 +684,10 @@ impl GpuBackend for MockBackend {
         // Clean up resources owned by this device
         self.buffers.retain(|_, b| b.device_handle != device);
         self.shaders.retain(|_, s| s.device_handle != device);
+        #[cfg(feature = "graphics")]
         self.pipelines.retain(|_, p| p.device_handle != device);
         self.compute_pipelines.retain(|_, p| p.device_handle != device);
+        #[cfg(feature = "graphics")]
         self.render_targets.retain(|_, t| t.device_handle != device);
         self.textures.retain(|_, t| t.device_handle != device);
         self.samplers.retain(|_, s| s.device_handle != device);

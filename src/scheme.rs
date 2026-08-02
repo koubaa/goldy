@@ -8,9 +8,9 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand};
 #[cfg(feature = "graphics")]
 use crate::backend::RenderCommand;
+use crate::backend::{BufferHandle, GpuCommand};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
@@ -25,20 +25,20 @@ use crate::task_graph::cross_submit::ResourceKey;
 #[cfg(feature = "graphics")]
 use crate::task_graph::cross_submit::ResourceKeyMap;
 #[cfg(feature = "graphics")]
+use crate::task_graph::DeferredPresentAcquire;
+use crate::task_graph::IrSubmitState;
+#[cfg(feature = "graphics")]
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
 #[cfg(feature = "graphics")]
-use crate::task_graph::DeferredPresentAcquire;
-use crate::task_graph::IrSubmitState;
-use crate::task_graph::{
-    DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, PRESENT_LEASE_SLOT_PLACEHOLDER,
-};
-#[cfg(feature = "graphics")]
 use crate::task_graph::ShaderResourceSlot;
+#[cfg(feature = "graphics")]
+use crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
+use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::texture::TextureCopyFootprint;
+use crate::timeline::TimelineValue;
 #[cfg(feature = "graphics")]
 use crate::timeline::{PromiseResolver, TimelinePromise};
-use crate::timeline::TimelineValue;
 use crate::types::{
     BufferFlags, DispatchShape, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
 };
@@ -220,8 +220,12 @@ impl From<SubmissionHandle> for TimelineValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ClaimKey {
     #[cfg(feature = "graphics")]
-    Present { present_idx: u32 },
-    Withdraw { withdraw_idx: u32 },
+    Present {
+        present_idx: u32,
+    },
+    Withdraw {
+        withdraw_idx: u32,
+    },
 }
 
 /// Stable erased present relationship recorded in one [`Scheme`].
@@ -306,9 +310,7 @@ impl fmt::Debug for Submission {
             .field("settled", &self.is_settled());
         #[cfg(feature = "graphics")]
         debug.field("present_claims", &self.present_claims.len());
-        debug
-            .field("withdraw_claims", &self.withdraw_claims.len())
-            .finish()
+        debug.field("withdraw_claims", &self.withdraw_claims.len()).finish()
     }
 }
 
@@ -1848,20 +1850,13 @@ impl Scheme {
             present_claims.push(Mutex::new(claim));
         }
 
-        self.finish_submit(
-            tv_dispatch,
-            present_claims,
-            claim_bindings,
-            claim_generations,
-        )
+        self.finish_submit(tv_dispatch, present_claims, claim_bindings, claim_generations)
     }
 
     fn finish_submit(
         &mut self,
         tv_dispatch: TimelineValue,
-        #[cfg(feature = "graphics")] present_claims: Vec<
-            Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>,
-        >,
+        #[cfg(feature = "graphics")] present_claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
         #[cfg(feature = "graphics")] claim_bindings: Vec<u32>,
         #[cfg(feature = "graphics")] claim_generations: Vec<u64>,
     ) -> Result<Submission, GoldyError> {
@@ -2724,21 +2719,24 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     fn push_dispatch_node(self, dispatch: DispatchDim) {
-        let present_bindings = self
-            .bindings
-            .iter()
-            .filter(|b| matches!(b.resource, ResourceId::PresentLease(_)))
-            .count();
-        let present_slots = self
-            .resource_slots
-            .iter()
-            .filter(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
-            .count();
-        debug_assert_eq!(
-            present_bindings, present_slots,
-            "present lease bindings must align with PRESENT_LEASE_SLOT_PLACEHOLDER entries (label={})",
-            self.label
-        );
+        #[cfg(feature = "graphics")]
+        {
+            let present_bindings = self
+                .bindings
+                .iter()
+                .filter(|b| matches!(b.resource, ResourceId::PresentLease(_)))
+                .count();
+            let present_slots = self
+                .resource_slots
+                .iter()
+                .filter(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
+                .count();
+            debug_assert_eq!(
+                present_bindings, present_slots,
+                "present lease bindings must align with PRESENT_LEASE_SLOT_PLACEHOLDER entries (label={})",
+                self.label
+            );
+        }
         // Do not assert resource_slots.len() >= bindings.len(): samplers add slots
         // without bindings, and with_buffer_dependency adds bindings without slots.
         // Present placeholders are resolved by declaration order, not binding index.

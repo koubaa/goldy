@@ -84,6 +84,7 @@ impl ParcelStamp {
         self.sync.lock().unwrap().merged()
     }
 
+    #[cfg(feature = "graphics")]
     pub(crate) fn push_pending(&self, promise: TimelinePromise) {
         self.pending.lock().unwrap().push(promise);
     }
@@ -936,6 +937,7 @@ impl Texture {
         }
     }
 
+    #[cfg(feature = "graphics")]
     pub(crate) fn from_borrowed_backing(backing: TextureBacking, home_device: Weak<DeviceInner>) -> Self {
         Self {
             parcel: Parcel::from_texture(backing, home_device.clone()),
@@ -1045,6 +1047,7 @@ impl Texture {
     }
 
     /// Wrap an externally-owned GPU texture (e.g. swapchain drawable).
+    #[cfg(feature = "graphics")]
     pub(crate) fn borrowed(
         device: &crate::device::Device,
         backend: Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
@@ -1364,6 +1367,7 @@ mod tests {
         assert!(parcel.is_settled_on(&ctx));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn settle_pending_with_unresolved_promise() {
         let device = mock_device();
@@ -1389,6 +1393,7 @@ mod tests {
         assert!(!parcel.is_settled_on(&ctx));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn settle_lazy_gc_folds_resolved_promise_into_foreign_reads() {
         let device = mock_device();
@@ -1407,6 +1412,7 @@ mod tests {
         assert!(sync.last_reads.is_empty());
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn settle_lazy_gc_drops_abandoned_promise() {
         let device = mock_device();
@@ -1423,6 +1429,7 @@ mod tests {
         assert!(stamp.pending.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "graphics")]
     fn promise_state_after_abandon(stamp: &Arc<ParcelStamp>) -> PromiseState {
         stamp.pending.lock().unwrap()[0].poll()
     }

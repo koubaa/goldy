@@ -64,9 +64,9 @@ pub mod transient_pool;
 pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
-pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
 #[cfg(feature = "graphics")]
 pub use exchange::{Claim, SurfaceExchange};
+pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;

@@ -82,6 +82,7 @@ pub(crate) enum ResourceId {
     /// [`NodeKind::RenderPass`] nodes implicitly write their target; consumers
     /// such as scheme copy-to-present nodes declare
     /// an explicit `Read` binding so the scheduler orders copy after render.
+    #[cfg(feature = "graphics")]
     RenderTarget(crate::backend::RenderTargetHandle),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
     #[allow(dead_code)] // constructed in analysis tests / future transient-graph paths
@@ -93,6 +94,9 @@ pub(crate) enum ResourceId {
     ///
     /// Records a stable dependency placeholder without requiring an acquired
     /// swapchain image.  Lowered to [`ResourceId::Texture`] after acquire.
+    ///
+    /// Retained for analyzer / legacy IR matches; new schemes use [`Self::PresentLease`].
+    #[cfg(feature = "graphics")]
     #[allow(dead_code)]
     SwapchainOutput,
     /// Present binding: scheme-unique id for a swapchain-pool drawable.
@@ -103,6 +107,7 @@ pub(crate) enum ResourceId {
     ///
     /// Lowered to [`ResourceId::Texture`] when the pool acquires a backing slot
     /// at [`crate::Scheme::submit`] time.
+    #[cfg(feature = "graphics")]
     PresentLease(u32),
     /// Scheme-scoped logical deposit: late-bound CPU-writable staging parcel.
     ///
@@ -122,10 +127,13 @@ impl ResourceId {
             ResourceId::Buffer(h) => Some(h),
             ResourceId::BufferRange { parent, .. } => Some(parent),
             ResourceId::Texture(_) => None,
+            #[cfg(feature = "graphics")]
             ResourceId::RenderTarget(_) => None,
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
+            #[cfg(feature = "graphics")]
             ResourceId::SwapchainOutput => None,
+            #[cfg(feature = "graphics")]
             ResourceId::PresentLease(_) => None,
             ResourceId::Deposit(_) => None,
         }
@@ -148,7 +156,11 @@ pub(crate) struct ResolvedTransientTexture {
     pub handle: TextureHandle,
 }
 
-/// Resolved storage for the swapchain output slot.
+/// Resolved storage for the swapchain / present-lease drawable slot.
+///
+/// Fields are written by the shared present-slot seed path; reads happen when
+/// graphics present IR resolves `PresentLease` / `SwapchainOutput`.
+#[cfg_attr(not(feature = "graphics"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResolvedSwapchain {
     pub handle: TextureHandle,
@@ -177,8 +189,13 @@ pub(crate) struct ResolvedDeposit {
 pub(crate) struct SlotResolver {
     pub buffers: std::collections::HashMap<u32, ResolvedTransientBuffer>,
     pub textures: std::collections::HashMap<u32, ResolvedTransientTexture>,
+    /// Legacy surface-graph swapchain slot; only filled under `graphics`.
+    #[cfg_attr(not(feature = "graphics"), allow(dead_code))]
     pub swapchain: Option<ResolvedSwapchain>,
-    /// Per [`ResourceId::PresentLease`] id, resolved at scheme submit time.
+    /// Per present-lease binding id, resolved at scheme submit time.
+    ///
+    /// The shared submit path seeds this from [`ResolvedPresentSlot`]s even when
+    /// no present IR nodes exist (empty map); graphics present partitions read it.
     pub present_leases: std::collections::HashMap<u32, ResolvedSwapchain>,
     /// Per [`ResourceId::Deposit`] id, resolved at scheme submit time.
     pub deposits: std::collections::HashMap<u32, ResolvedDeposit>,
@@ -201,6 +218,7 @@ impl SlotResolver {
                 }
             }
             ResourceId::TransientTexture(t) => ResourceId::Texture(self.textures[&t.0].handle),
+            #[cfg(feature = "graphics")]
             ResourceId::SwapchainOutput => {
                 let sc = self
                     .swapchain
@@ -208,6 +226,7 @@ impl SlotResolver {
                     .expect("SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired");
                 ResourceId::Texture(sc.handle)
             }
+            #[cfg(feature = "graphics")]
             ResourceId::PresentLease(id) => {
                 let sc = self
                     .present_leases
@@ -255,45 +274,48 @@ impl SlotResolver {
             }
         }
 
-        let present_ids: Vec<u32> = bindings
-            .iter()
-            .filter_map(|b| match b.resource {
-                ResourceId::PresentLease(id) => Some(id),
-                _ => None,
-            })
-            .collect();
-        let mut present_iter = present_ids.into_iter();
-        for slot in &mut out {
-            if *slot != PRESENT_LEASE_SLOT_PLACEHOLDER {
-                continue;
-            }
-            let id = present_iter
-                .next()
-                .expect("SlotResolver::resolve_slots: PRESENT_LEASE_SLOT_PLACEHOLDER without PresentLease binding");
-            let sc = self
-                .present_leases
-                .get(&id)
-                .expect("SlotResolver::resolve_slots: PresentLease before pool acquire");
-            *slot = sc.uav_index;
-        }
-        debug_assert!(
-            present_iter.next().is_none(),
-            "SlotResolver::resolve_slots: PresentLease binding without PRESENT_LEASE_SLOT_PLACEHOLDER"
-        );
-
-        let has_swapchain_binding = bindings
-            .iter()
-            .any(|b| matches!(b.resource, ResourceId::SwapchainOutput));
-        if has_swapchain_binding {
+        #[cfg(feature = "graphics")]
+        {
+            let present_ids: Vec<u32> = bindings
+                .iter()
+                .filter_map(|b| match b.resource {
+                    ResourceId::PresentLease(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            let mut present_iter = present_ids.into_iter();
             for slot in &mut out {
-                if *slot != SWAPCHAIN_SLOT_PLACEHOLDER {
+                if *slot != PRESENT_LEASE_SLOT_PLACEHOLDER {
                     continue;
                 }
+                let id = present_iter
+                    .next()
+                    .expect("SlotResolver::resolve_slots: PRESENT_LEASE_SLOT_PLACEHOLDER without PresentLease binding");
                 let sc = self
-                    .swapchain
-                    .as_ref()
-                    .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
+                    .present_leases
+                    .get(&id)
+                    .expect("SlotResolver::resolve_slots: PresentLease before pool acquire");
                 *slot = sc.uav_index;
+            }
+            debug_assert!(
+                present_iter.next().is_none(),
+                "SlotResolver::resolve_slots: PresentLease binding without PRESENT_LEASE_SLOT_PLACEHOLDER"
+            );
+
+            let has_swapchain_binding = bindings
+                .iter()
+                .any(|b| matches!(b.resource, ResourceId::SwapchainOutput));
+            if has_swapchain_binding {
+                for slot in &mut out {
+                    if *slot != SWAPCHAIN_SLOT_PLACEHOLDER {
+                        continue;
+                    }
+                    let sc = self
+                        .swapchain
+                        .as_ref()
+                        .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
+                    *slot = sc.uav_index;
+                }
             }
         }
 
@@ -301,7 +323,7 @@ impl SlotResolver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "graphics"))]
 mod resolve_slots_tests {
     use super::*;
     use crate::task_graph::ir::{NodeAccess, ResourceBinding};

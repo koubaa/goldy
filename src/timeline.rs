@@ -306,6 +306,7 @@ struct PromiseCell {
 }
 
 impl PromiseCell {
+    #[cfg(feature = "graphics")]
     fn new() -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU64::new(PROMISE_PENDING),
@@ -322,6 +323,7 @@ impl PromiseCell {
         }
     }
 
+    #[cfg(feature = "graphics")]
     fn resolve(&self, tv: TimelineValue) {
         debug_assert!(tv != PROMISE_PENDING && tv != PROMISE_ABANDONED);
         if self
@@ -339,6 +341,7 @@ impl PromiseCell {
         }
     }
 
+    #[cfg(feature = "graphics")]
     fn abandon(&self) {
         if self
             .state
@@ -385,6 +388,7 @@ impl TimelinePromise {
     }
 
     /// Create a new unresolved promise pair.
+    #[cfg(feature = "graphics")]
     pub fn new() -> (Self, PromiseResolver) {
         let cell = PromiseCell::new();
         (
@@ -405,10 +409,12 @@ impl std::fmt::Debug for TimelinePromise {
 /// Write-end of a within-context timeline promise.
 ///
 /// Dropping without [`Self::resolve`] transitions the promise to [`PromiseState::Abandoned`].
+#[cfg(feature = "graphics")]
 pub struct PromiseResolver {
     cell: Arc<PromiseCell>,
 }
 
+#[cfg(feature = "graphics")]
 impl PromiseResolver {
     /// Resolve the promise with the easement-expiry timeline value (resolve-once).
     pub fn resolve(self, tv: TimelineValue) {
@@ -416,12 +422,14 @@ impl PromiseResolver {
     }
 }
 
+#[cfg(feature = "graphics")]
 impl Drop for PromiseResolver {
     fn drop(&mut self) {
         self.cell.abandon();
     }
 }
 
+#[cfg(feature = "graphics")]
 impl std::fmt::Debug for PromiseResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PromiseResolver")
@@ -514,12 +522,14 @@ mod tests {
         assert_eq!(merged.get(2), Some(20));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_new_is_pending() {
         let (promise, _resolver) = TimelinePromise::new();
         assert_eq!(promise.poll(), PromiseState::Pending);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_resolve_becomes_resolved() {
         let (promise, resolver) = TimelinePromise::new();
@@ -527,6 +537,7 @@ mod tests {
         assert_eq!(promise.poll(), PromiseState::Resolved(42));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_drop_resolver_abandons() {
         let (promise, resolver) = TimelinePromise::new();
@@ -534,6 +545,7 @@ mod tests {
         assert_eq!(promise.poll(), PromiseState::Abandoned);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_resolve_is_once() {
         let (promise, resolver) = TimelinePromise::new();
@@ -541,6 +553,7 @@ mod tests {
         assert_eq!(promise.poll(), PromiseState::Resolved(10));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_block_returns_resolved() {
         let (promise, resolver) = TimelinePromise::new();
@@ -554,6 +567,7 @@ mod tests {
         handle.join().unwrap();
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_block_returns_abandoned() {
         let (promise, resolver) = TimelinePromise::new();
@@ -567,6 +581,7 @@ mod tests {
         handle.join().unwrap();
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn promise_block_never_returns_pending() {
         let (promise, resolver) = TimelinePromise::new();

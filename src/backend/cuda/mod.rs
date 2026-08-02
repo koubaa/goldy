@@ -41,15 +41,13 @@ use cudarc::driver::{
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
 use retained_graph::{CudaGraphStats, GraphRegistry};
-use texture::{
-    memcpy_htod_array, storage_shader_compatible, CudaSamplerKey, CudaTextureResource,
-};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
+use texture::{memcpy_htod_array, storage_shader_compatible, CudaSamplerKey, CudaTextureResource};
 use timeline::{EventLedger, LedgerEntry};
 
 /// Logical retained entry under the backend lock (graphs themselves live on the worker).
@@ -563,9 +561,10 @@ impl CudaBackend {
                 CudaLaunchArgKind::Sampler => {
                     let index = indices[index_i];
                     index_i += 1;
-                    let handle = self.sampler_slots.get(&index).with_context(|| {
-                        format!("CUDA: sampler binding references unknown registry key {index}")
-                    })?;
+                    let handle = self
+                        .sampler_slots
+                        .get(&index)
+                        .with_context(|| format!("CUDA: sampler binding references unknown registry key {index}"))?;
                     let sampler = self
                         .samplers
                         .get(handle)
@@ -642,9 +641,10 @@ impl CudaBackend {
     }
 
     fn resolve_texture(&self, binding: usize, index: u32) -> Result<&Arc<CudaTextureResource>> {
-        let handle = self.texture_slots.get(&index).with_context(|| {
-            format!("CUDA: binding {binding} references unknown texture registry key {index}")
-        })?;
+        let handle = self
+            .texture_slots
+            .get(&index)
+            .with_context(|| format!("CUDA: binding {binding} references unknown texture registry key {index}"))?;
         self.textures
             .get(handle)
             .with_context(|| format!("CUDA: registry key {index} references a destroyed texture"))
@@ -950,15 +950,8 @@ impl CudaBackend {
             };
 
             ops.push(
-                self.materialize_launch(
-                    stream,
-                    pipeline_handle,
-                    &indices,
-                    &user,
-                    (wg_x, wg_y, wg_z),
-                    label,
-                )
-                .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
+                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z), label)
+                    .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
             );
         }
         Ok(ops)
@@ -1116,14 +1109,16 @@ impl CudaBackend {
         let mut textures = Vec::new();
         for (binding, index) in indices.iter().copied().enumerate() {
             if let Some(handle) = self.buffer_slots.get(&index) {
-                let buffer = self.buffers.get(handle).with_context(|| {
-                    format!("CUDA: registry key {index} references a destroyed buffer")
-                })?;
+                let buffer = self
+                    .buffers
+                    .get(handle)
+                    .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
                 buffers.push(Arc::clone(&buffer.memory));
             } else if let Some(handle) = self.texture_slots.get(&index) {
-                let texture = self.textures.get(handle).with_context(|| {
-                    format!("CUDA: registry key {index} references a destroyed texture")
-                })?;
+                let texture = self
+                    .textures
+                    .get(handle)
+                    .with_context(|| format!("CUDA: registry key {index} references a destroyed texture"))?;
                 textures.push(Arc::clone(texture));
             } else if self.sampler_slots.contains_key(&index) {
                 // Samplers are CPU-side descriptors; nothing to pin.
@@ -1170,11 +1165,7 @@ impl CudaBackend {
                         *label,
                     )?);
                 }
-                GpuCommand::DispatchIndirect {
-                    label,
-                    buffer,
-                    offset,
-                } => {
+                GpuCommand::DispatchIndirect { label, buffer, offset } => {
                     let pipeline_handle =
                         current_pipeline.context("CUDA: indirect dispatch without a compute pipeline")?;
                     ops.push(self.materialize_launch_indirect(
@@ -1305,10 +1296,7 @@ impl CudaBackend {
                     });
                 }
                 GpuCommand::CopyTexture { src, dst } => {
-                    let src_tex = self
-                        .textures
-                        .get(src)
-                        .context("CUDA: invalid CopyTexture source")?;
+                    let src_tex = self.textures.get(src).context("CUDA: invalid CopyTexture source")?;
                     let dst_tex = self
                         .textures
                         .get(dst)
@@ -1347,11 +1335,7 @@ impl CudaBackend {
                         height: *height,
                     });
                 }
-                GpuCommand::CopyTextureToReadback {
-                    src,
-                    dst,
-                    layout,
-                } => {
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let src_tex = self
                         .textures
                         .get(src)
@@ -1450,23 +1434,21 @@ impl CudaBackend {
         let mut deferred_writes = Vec::new();
         if let Some(sync) = sync {
             for epoch in &sync.waits {
-                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value)
-                    .with_context(|| {
-                        format!(
-                            "CUDA: cross-context wait missing event for context {:?} value {}",
-                            epoch.context, epoch.value
-                        )
-                    })?;
+                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value).with_context(|| {
+                    format!(
+                        "CUDA: cross-context wait missing event for context {:?} value {}",
+                        epoch.context, epoch.value
+                    )
+                })?;
                 stream_waits.push(event);
             }
             for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
-                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value)
-                    .with_context(|| {
-                        format!(
-                            "CUDA: host wait missing event for context {:?} value {}",
-                            epoch.context, epoch.value
-                        )
-                    })?;
+                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value).with_context(|| {
+                    format!(
+                        "CUDA: host wait missing event for context {:?} value {}",
+                        epoch.context, epoch.value
+                    )
+                })?;
                 host_waits.push(event);
             }
             deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |handle| {
@@ -1645,14 +1627,10 @@ fn validate_launch_config_unchecked(
     let max_fn = function_max_threads.max(1);
     let max_dev = limits.max_threads_per_block.max(1);
     if threads > max_fn as u64 {
-        anyhow::bail!(
-            "CUDA validation: dispatch '{where_}' block threads {threads} exceeds function max {max_fn}"
-        );
+        anyhow::bail!("CUDA validation: dispatch '{where_}' block threads {threads} exceeds function max {max_fn}");
     }
     if threads > max_dev as u64 {
-        anyhow::bail!(
-            "CUDA validation: dispatch '{where_}' block threads {threads} exceeds device max {max_dev}"
-        );
+        anyhow::bail!("CUDA validation: dispatch '{where_}' block threads {threads} exceeds device max {max_dev}");
     }
     if shared_mem_bytes > limits.max_shared_memory_per_block {
         anyhow::bail!(
@@ -1680,13 +1658,12 @@ fn load_ptx_module(ctx: &Arc<CudaContext>, ptx: &str) -> Result<Arc<CudaModule>>
 
 /// Probe-load PTX with JIT log buffers; unload on success. Failures include driver log text.
 fn load_ptx_module_validated(ctx: &Arc<CudaContext>, ptx: &str) -> Result<()> {
-    use cudarc::driver::sys::{
-        cuModuleLoadDataEx, cuModuleUnload, CUjit_option, CUmodule, CUresult,
-    };
+    use cudarc::driver::sys::{cuModuleLoadDataEx, cuModuleUnload, CUjit_option, CUmodule, CUresult};
     use std::mem::MaybeUninit;
     use std::os::raw::c_void;
 
-    ctx.bind_to_thread().context("CUDA: bind context for PTX JIT validation")?;
+    ctx.bind_to_thread()
+        .context("CUDA: bind context for PTX JIT validation")?;
     let c_src = CString::new(ptx).context("CUDA: PTX source contains interior NUL")?;
 
     let mut error_log = vec![0u8; 16 * 1024];
@@ -1726,9 +1703,7 @@ fn load_ptx_module_validated(ctx: &Arc<CudaContext>, ptx: &str) -> Result<()> {
     let error_text = c_string_log(&error_log);
     let info_text = c_string_log(&info_log);
     if status != CUresult::CUDA_SUCCESS {
-        anyhow::bail!(
-            "CUDA: PTX JIT failed ({status:?})\nerror log:\n{error_text}\ninfo log:\n{info_text}"
-        );
+        anyhow::bail!("CUDA: PTX JIT failed ({status:?})\nerror log:\n{error_text}\ninfo log:\n{info_text}");
     }
     let module = unsafe { module.assume_init() };
     let unload = unsafe { cuModuleUnload(module) };
@@ -1789,10 +1764,7 @@ impl GpuBackendTimelineWait for CudaBackend {
             Some(event) => Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event }))),
             // Match DX12: waiting on a never-submitted value still yields a timeout-capable
             // wait object (not an immediate Err that used to deadlock under classify+lock).
-            None => Ok(Some(Box::new(timeline::CudaAbsentTimelineWait {
-                context: ctx,
-                value,
-            }))),
+            None => Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value }))),
         }
     }
 
@@ -1867,8 +1839,8 @@ impl GpuBackend for CudaBackend {
         ensure_cuda_toolkit_on_path();
         let ctx = CudaContext::new(adapter_id as usize)
             .with_context(|| format!("CUDA: create device for adapter {adapter_id}"))?;
-        let limits = query_device_limits(&ctx)
-            .with_context(|| format!("CUDA: query device limits for adapter {adapter_id}"))?;
+        let limits =
+            query_device_limits(&ctx).with_context(|| format!("CUDA: query device limits for adapter {adapter_id}"))?;
         let major = ctx
             .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
             .context("CUDA: query compute capability major")?;
@@ -1943,18 +1915,18 @@ impl GpuBackend for CudaBackend {
                 &context.last_emitted,
             );
         }
-        alloc_stream
-            .synchronize()
-            .context("CUDA: device wait idle failed")?;
+        alloc_stream.synchronize().context("CUDA: device wait idle failed")?;
         Ok(())
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
-        let existing = self.contexts.values().filter(|context| context.device == device).count() as u32;
+        let existing = self
+            .contexts
+            .values()
+            .filter(|context| context.device == device)
+            .count() as u32;
         if existing >= MAX_CUDA_SUBMISSION_CONTEXTS {
-            anyhow::bail!(
-                "CUDA: submission context limit reached ({MAX_CUDA_SUBMISSION_CONTEXTS} per device)"
-            );
+            anyhow::bail!("CUDA: submission context limit reached ({MAX_CUDA_SUBMISSION_CONTEXTS} per device)");
         }
         let (stream, event_ledger, device_retired, deletion_queue) = {
             let gpu = self.device(device)?;
@@ -2460,20 +2432,10 @@ impl GpuBackend for CudaBackend {
         let (storage_slot, sampled_slot) = match access {
             TextureKind::Interpolated => (None, Some(self.alloc_registry_slot())),
             TextureKind::Direct => (Some(self.alloc_registry_slot()), None),
-            TextureKind::DirectInterpolated => {
-                (Some(self.alloc_registry_slot()), Some(self.alloc_registry_slot()))
-            }
+            TextureKind::DirectInterpolated => (Some(self.alloc_registry_slot()), Some(self.alloc_registry_slot())),
         };
-        let resource = CudaTextureResource::create(
-            &ctx,
-            width,
-            height,
-            format,
-            access,
-            flags,
-            storage_slot,
-            sampled_slot,
-        )?;
+        let resource =
+            CudaTextureResource::create(&ctx, width, height, format, access, flags, storage_slot, sampled_slot)?;
         let handle = self.next_texture;
         self.next_texture += 1;
         if let Some(slot) = storage_slot {
@@ -2487,10 +2449,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
-        let tex = self
-            .textures
-            .get(&texture)
-            .context("CUDA: invalid texture handle")?;
+        let tex = self.textures.get(&texture).context("CUDA: invalid texture handle")?;
         let device = {
             // Find owning device via context of the array's CudaContext — textures store ctx Arc.
             // Use any device whose ctx matches; fall back to syncing all isn't needed if we sync
@@ -2506,10 +2465,7 @@ impl GpuBackend for CudaBackend {
             .context("CUDA: texture device not found")?;
         self.sync_device_streams_for_immediate_api(device_handle)?;
         let stream = Arc::clone(&self.device(device_handle)?.alloc_stream);
-        let tex = self
-            .textures
-            .get(&texture)
-            .context("CUDA: invalid texture handle")?;
+        let tex = self.textures.get(&texture).context("CUDA: invalid texture handle")?;
         if width != tex.width || height != tex.height {
             anyhow::bail!(
                 "CUDA: write_texture size {}x{} does not match texture {}x{}",
@@ -2520,9 +2476,7 @@ impl GpuBackend for CudaBackend {
             );
         }
         memcpy_htod_array(&stream, tex, 0, 0, width, height, data, 0)?;
-        stream
-            .synchronize()
-            .context("CUDA: synchronize after write_texture")?;
+        stream.synchronize().context("CUDA: synchronize after write_texture")?;
         Ok(())
     }
 
@@ -2535,10 +2489,7 @@ impl GpuBackend for CudaBackend {
         height: u32,
         data: &[u8],
     ) -> Result<()> {
-        let tex = self
-            .textures
-            .get(&texture)
-            .context("CUDA: invalid texture handle")?;
+        let tex = self.textures.get(&texture).context("CUDA: invalid texture handle")?;
         let device_handle = self
             .devices
             .iter()
@@ -2547,10 +2498,7 @@ impl GpuBackend for CudaBackend {
             .context("CUDA: texture device not found")?;
         self.sync_device_streams_for_immediate_api(device_handle)?;
         let stream = Arc::clone(&self.device(device_handle)?.alloc_stream);
-        let tex = self
-            .textures
-            .get(&texture)
-            .context("CUDA: invalid texture handle")?;
+        let tex = self.textures.get(&texture).context("CUDA: invalid texture handle")?;
         memcpy_htod_array(&stream, tex, x, y, width, height, data, 0)?;
         stream
             .synchronize()
@@ -2574,10 +2522,11 @@ impl GpuBackend for CudaBackend {
             if let Some(device_handle) = device_handle {
                 if let Some(device) = self.devices.get(&device_handle) {
                     let retire_at = submission_worker::submission_horizon(&device.next_timeline);
-                    device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Texture {
-                        retire_at,
-                        resource,
-                    });
+                    device
+                        .deletion_queue
+                        .lock()
+                        .unwrap()
+                        .push(CudaDeferredDrop::Texture { retire_at, resource });
                 }
             }
         }
@@ -2689,7 +2638,9 @@ impl GpuBackend for CudaBackend {
                 .map(|entry| Arc::clone(&entry.event))
                 .with_context(|| format!("CUDA: timeline value {value} has not been submitted"))?
         };
-        event.synchronize().context("CUDA: device_wait_until event sync failed")?;
+        event
+            .synchronize()
+            .context("CUDA: device_wait_until event sync failed")?;
         timeline::advance_device_retired(&gpu.event_ledger, &gpu.retired);
         for context in self.contexts.values().filter(|context| context.device == device) {
             timeline::poll_retire_events(
@@ -2763,9 +2714,7 @@ impl GpuBackend for CudaBackend {
             tracing::trace!(key, "CUDA: capturing retainable partition into CudaGraph");
             self.enqueue_submit(ctx, sync, body)
         } else {
-            self.graph_stats
-                .fallbacks
-                .fetch_add(1, Ordering::Relaxed);
+            self.graph_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
             self.retained
                 .insert((ctx, key), RetainedEntry::Commands(commands.to_vec()));
             tracing::trace!(
@@ -2801,9 +2750,7 @@ impl GpuBackend for CudaBackend {
                 let effective = commands_with_sync_prologue(&gpu_commands, sync);
                 let stream = Arc::clone(&self.context(ctx)?.stream);
                 let ops = self.materialize_ops(&stream, &effective)?;
-                self.graph_stats
-                    .fallbacks
-                    .fetch_add(1, Ordering::Relaxed);
+                self.graph_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
                 tracing::trace!(key, "CUDA: replaying retained GraphCommands");
                 self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops)).map(Some)
             }
@@ -2899,11 +2846,12 @@ impl GpuBackend for CudaBackend {
 
     fn available_bindless_slots(&self, device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
         let used = match category {
-            crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::Broadcast => self
-                .buffers
-                .values()
-                .filter(|buffer| buffer.device == device && buffer.slot.is_some())
-                .count() as u32,
+            crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::Broadcast => {
+                self.buffers
+                    .values()
+                    .filter(|buffer| buffer.device == device && buffer.slot.is_some())
+                    .count() as u32
+            }
             crate::types::ResourceCategory::Texture => self
                 .textures
                 .values()
@@ -3125,10 +3073,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             Ok(backend) => {
                 let stats = backend.graph_stats();
                 stats.reset();
-                Ok(Some((
-                    Arc::new(crate::Device::from_backend(Box::new(backend))?),
-                    stats,
-                )))
+                Ok(Some((Arc::new(crate::Device::from_backend(Box::new(backend))?), stats)))
             }
             Err(error) => {
                 eprintln!("skipping CUDA scheme test: {error:#}");
@@ -3988,10 +3933,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             "expected JIT failure diagnostics, got:\n{err}"
         );
         // Error log from the driver should be non-trivial for garbage PTX.
-        assert!(
-            err.len() > 32,
-            "expected non-empty JIT diagnostic text, got:\n{err}"
-        );
+        assert!(err.len() > 32, "expected non-empty JIT diagnostic text, got:\n{err}");
         Ok(())
     }
 
@@ -4004,30 +3946,16 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             max_threads_per_block: 1024,
             max_shared_memory_per_block: 48 * 1024,
         };
-        let err = validate_launch_config_unchecked(
-            &limits,
-            1024,
-            (u32::MAX, 1, 1),
-            [1, 1, 1],
-            0,
-            Some("too_wide"),
-        )
-        .expect_err("oversize grid must fail");
+        let err = validate_launch_config_unchecked(&limits, 1024, (u32::MAX, 1, 1), [1, 1, 1], 0, Some("too_wide"))
+            .expect_err("oversize grid must fail");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("too_wide") && msg.contains("exceeds device max"),
             "unexpected error: {msg}"
         );
 
-        let err = validate_launch_config_unchecked(
-            &limits,
-            256,
-            (1, 1, 1),
-            [512, 1, 1],
-            0,
-            Some("fat_block"),
-        )
-        .expect_err("oversize block must fail");
+        let err = validate_launch_config_unchecked(&limits, 256, (1, 1, 1), [512, 1, 1], 0, Some("fat_block"))
+            .expect_err("oversize block must fail");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("fat_block") && msg.contains("exceeds function max"),
@@ -4049,10 +3977,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         let ctx = device.create_context()?;
         let mut pool = crate::RetainedPool::new(Arc::clone(&device));
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
-        let pipeline = crate::ComputePipeline::new(
-            &device,
-            &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?,
-        )?;
+        let pipeline =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
 
         let mut scheme = crate::Scheme::new(&ctx);
         scheme
@@ -4092,7 +4018,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             "stable resubmit must graph-launch: first={after_first:?} second={after_second:?}"
         );
         assert_eq!(
-            scheme.replay_stats().records, 1,
+            scheme.replay_stats().records,
+            1,
             "stable resubmit should not re-record the partition"
         );
         Ok(())
@@ -4282,20 +4209,13 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
     shape[0] = s;
 }
 "#;
-        let write_pipe = crate::ComputePipeline::new(
-            &device,
-            &crate::ShaderModule::from_slang(&device, write_shape_slang)?,
-        )?;
-        let work_pipe = crate::ComputePipeline::new(
-            &device,
-            &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?,
-        )?;
+        let write_pipe =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
+        let work_pipe =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
         let mut pool = crate::RetainedPool::new(Arc::clone(&device));
-        let shape = pool.acquire_buffer_sized::<crate::types::DispatchShape>(
-            1,
-            BufferKind::Scattered,
-            BufferFlags::empty(),
-        )?;
+        let shape =
+            pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
 
         let mut scheme = crate::Scheme::new(&ctx);
@@ -4358,20 +4278,13 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
     shape[0] = s;
 }
 "#;
-        let write_pipe = crate::ComputePipeline::new(
-            &device,
-            &crate::ShaderModule::from_slang(&device, write_shape_slang)?,
-        )?;
-        let work_pipe = crate::ComputePipeline::new(
-            &device,
-            &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?,
-        )?;
+        let write_pipe =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
+        let work_pipe =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
         let mut pool = crate::RetainedPool::new(Arc::clone(&device));
-        let shape = pool.acquire_buffer_sized::<crate::types::DispatchShape>(
-            1,
-            BufferKind::Scattered,
-            BufferFlags::empty(),
-        )?;
+        let shape =
+            pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[5u32, 6, 7, 8], BufferKind::Scattered)?;
 
         let mut scheme = crate::Scheme::new(&ctx);

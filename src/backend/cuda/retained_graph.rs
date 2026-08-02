@@ -120,37 +120,21 @@ pub(super) struct GraphRegistry {
 }
 
 impl GraphRegistry {
-    pub fn insert(
-        &mut self,
-        ctx: crate::backend::ContextHandle,
-        key: u64,
-        partition: CudaRetainedPartition,
-    ) {
+    pub fn insert(&mut self, ctx: crate::backend::ContextHandle, key: u64, partition: CudaRetainedPartition) {
         if let Some(old) = self.graphs.insert((ctx, key), partition) {
             drop(old);
         }
     }
 
-    pub fn get_mut(
-        &mut self,
-        ctx: crate::backend::ContextHandle,
-        key: u64,
-    ) -> Option<&mut CudaRetainedPartition> {
+    pub fn get_mut(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<&mut CudaRetainedPartition> {
         self.graphs.get_mut(&(ctx, key))
     }
 
-    pub fn remove(
-        &mut self,
-        ctx: crate::backend::ContextHandle,
-        key: u64,
-    ) -> Option<CudaRetainedPartition> {
+    pub fn remove(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<CudaRetainedPartition> {
         self.graphs.remove(&(ctx, key))
     }
 
-    pub fn remove_context(
-        &mut self,
-        ctx: crate::backend::ContextHandle,
-    ) -> Vec<CudaRetainedPartition> {
+    pub fn remove_context(&mut self, ctx: crate::backend::ContextHandle) -> Vec<CudaRetainedPartition> {
         let keys: Vec<_> = self
             .graphs
             .keys()

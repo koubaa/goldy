@@ -88,10 +88,7 @@ pub(super) fn cuda_include_path() -> Result<PathBuf> {
 }
 
 /// Compile and load the indirect-dispatch updater for `ctx`.
-pub(super) fn load_indirect_updater(
-    ctx: &Arc<CudaContext>,
-    compute_capability: (i32, i32),
-) -> Result<IndirectUpdater> {
+pub(super) fn load_indirect_updater(ctx: &Arc<CudaContext>, compute_capability: (i32, i32)) -> Result<IndirectUpdater> {
     let include = cuda_include_path()?;
     let (major, minor) = compute_capability;
     let arch: &'static str = match (major, minor) {

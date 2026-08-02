@@ -12,8 +12,24 @@ pub(crate) trait PendingSubmit: Send {
 }
 
 enum WorkerMessage {
-    Submit { tv: u64, work: Box<dyn PendingSubmit> },
-    Flush { done: std::sync::mpsc::Sender<Result<()>> },
+    /// Used by present-at-submit (graphics) and by real GPU backends (Vulkan/DX12/Metal/CUDA).
+    #[cfg_attr(
+        not(any(
+            feature = "graphics",
+            feature = "vulkan",
+            feature = "dx12",
+            feature = "metal",
+            feature = "cuda",
+        )),
+        allow(dead_code)
+    )]
+    Submit {
+        tv: u64,
+        work: Box<dyn PendingSubmit>,
+    },
+    Flush {
+        done: std::sync::mpsc::Sender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -79,6 +95,20 @@ impl SubmissionWorker {
         Ok(())
     }
 
+    /// Enqueue work on the FIFO worker thread.
+    ///
+    /// Dead only in mock-only builds (`--no-default-features`); real backends and
+    /// graphics present-at-submit always use this path.
+    #[cfg_attr(
+        not(any(
+            feature = "graphics",
+            feature = "vulkan",
+            feature = "dx12",
+            feature = "metal",
+            feature = "cuda",
+        )),
+        allow(dead_code)
+    )]
     pub fn enqueue(&self, tv: u64, work: Box<dyn PendingSubmit>) -> Result<()> {
         self.check_error()?;
         self.sender

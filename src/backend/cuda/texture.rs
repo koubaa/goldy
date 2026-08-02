@@ -5,9 +5,7 @@
 //! Sampler state is baked into each texture object — CUDA has no separate
 //! sampler handle.
 
-use crate::types::{
-    AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
-};
+use crate::types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind};
 use anyhow::{bail, Context as _, Result};
 use cudarc::driver::{sys, CudaContext, CudaStream};
 use std::collections::HashMap;
@@ -78,10 +76,7 @@ pub(super) fn format_info(format: TextureFormat) -> Result<CudaFormatInfo> {
 ///
 /// Initial contract: only `float4` ↔ [`TextureFormat::Rgba32Float`].
 pub(super) fn storage_shader_compatible(element: &str, format: TextureFormat) -> bool {
-    matches!(
-        (element.trim(), format),
-        ("float4", TextureFormat::Rgba32Float)
-    )
+    matches!((element.trim(), format), ("float4", TextureFormat::Rgba32Float))
 }
 
 /// Sampler configuration CUDA can represent in a single texture object.
@@ -180,8 +175,7 @@ impl CudaArray {
         format: TextureFormat,
         need_surface: bool,
     ) -> Result<Self> {
-        ctx.bind_to_thread()
-            .context("CUDA: bind context for array create")?;
+        ctx.bind_to_thread().context("CUDA: bind context for array create")?;
         let info = format_info(format)?;
         let array = if need_surface {
             let desc = sys::CUDA_ARRAY3D_DESCRIPTOR {
@@ -193,10 +187,7 @@ impl CudaArray {
                 Flags: sys::CUDA_ARRAY3D_SURFACE_LDST,
             };
             let mut array: sys::CUarray = std::ptr::null_mut();
-            check_cu(
-                unsafe { sys::cuArray3DCreate_v2(&mut array, &desc) },
-                "cuArray3DCreate",
-            )?;
+            check_cu(unsafe { sys::cuArray3DCreate_v2(&mut array, &desc) }, "cuArray3DCreate")?;
             array
         } else {
             let desc = sys::CUDA_ARRAY_DESCRIPTOR {
@@ -206,10 +197,7 @@ impl CudaArray {
                 NumChannels: info.num_channels,
             };
             let mut array: sys::CUarray = std::ptr::null_mut();
-            check_cu(
-                unsafe { sys::cuArrayCreate_v2(&mut array, &desc) },
-                "cuArrayCreate",
-            )?;
+            check_cu(unsafe { sys::cuArrayCreate_v2(&mut array, &desc) }, "cuArrayCreate")?;
             array
         };
         Ok(Self {
@@ -319,9 +307,7 @@ impl CudaTextureResource {
         let tex_desc = sampler.to_texture_desc(self.srgb);
         let mut tex_object: sys::CUtexObject = 0;
         check_cu(
-            unsafe {
-                sys::cuTexObjectCreate(&mut tex_object, &res_desc, &tex_desc, std::ptr::null())
-            },
+            unsafe { sys::cuTexObjectCreate(&mut tex_object, &res_desc, &tex_desc, std::ptr::null()) },
             "cuTexObjectCreate",
         )?;
         cache.insert(sampler, tex_object);
@@ -331,10 +317,7 @@ impl CudaTextureResource {
     /// Lazily create (or reuse) a surface object for storage access.
     pub(super) fn surf_object(&self) -> Result<sys::CUsurfObject> {
         if !matches!(self.kind, TextureKind::Direct | TextureKind::DirectInterpolated) {
-            bail!(
-                "CUDA: texture kind {:?} has no storage (surface) view",
-                self.kind
-            );
+            bail!("CUDA: texture kind {:?} has no storage (surface) view", self.kind);
         }
         let mut guard = self.surf_object.lock().unwrap();
         if let Some(existing) = *guard {
@@ -376,14 +359,7 @@ impl Drop for CudaTextureResource {
 unsafe impl Send for CudaTextureResource {}
 unsafe impl Sync for CudaTextureResource {}
 
-fn validate_region(
-    tex: &CudaTextureResource,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    data_len: usize,
-) -> Result<()> {
+fn validate_region(tex: &CudaTextureResource, x: u32, y: u32, width: u32, height: u32, data_len: usize) -> Result<()> {
     if width == 0 || height == 0 {
         bail!("CUDA: texture region must be non-empty");
     }
@@ -438,11 +414,7 @@ pub(super) fn memcpy_htod_array(
 ) -> Result<()> {
     let bpp = tex.bytes_per_pixel();
     let tight_pitch = width.saturating_mul(bpp);
-    let pitch = if src_row_pitch == 0 {
-        tight_pitch
-    } else {
-        src_row_pitch
-    };
+    let pitch = if src_row_pitch == 0 { tight_pitch } else { src_row_pitch };
     if pitch < tight_pitch {
         bail!("CUDA: src_row_pitch {pitch} < tight row bytes {tight_pitch}");
     }
@@ -488,11 +460,7 @@ pub(super) fn memcpy_dtod_array(
 ) -> Result<()> {
     let bpp = tex.bytes_per_pixel();
     let tight_pitch = width.saturating_mul(bpp);
-    let pitch = if src_row_pitch == 0 {
-        tight_pitch
-    } else {
-        src_row_pitch
-    };
+    let pitch = if src_row_pitch == 0 { tight_pitch } else { src_row_pitch };
     if pitch < tight_pitch {
         bail!("CUDA: src_row_pitch {pitch} < tight row bytes {tight_pitch}");
     }
@@ -586,11 +554,7 @@ pub(super) fn memcpy_array_to_device(
 ) -> Result<()> {
     let bpp = tex.bytes_per_pixel();
     let tight_pitch = width.saturating_mul(bpp);
-    let pitch = if dst_row_pitch == 0 {
-        tight_pitch
-    } else {
-        dst_row_pitch
-    };
+    let pitch = if dst_row_pitch == 0 { tight_pitch } else { dst_row_pitch };
     if pitch < tight_pitch {
         bail!("CUDA: dst_row_pitch {pitch} < tight row bytes {tight_pitch}");
     }
