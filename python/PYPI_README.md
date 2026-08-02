@@ -234,6 +234,10 @@ This package uses GitHub Actions with PyPI Trusted Publishers for automated rele
    `gh release create v0.1.1dev0 --title "v0.1.1dev0" --notes "..."`
 5. The publish workflow will automatically build wheels and upload to PyPI
 
+If an upload partially fails (for example PyPI file-size limits), re-run **Publish to
+PyPI** from GitHub Actions with **Upload built wheels to PyPI** checked. Already-uploaded
+files are skipped (`skip-existing`).
+
 ### Manual testing (TestPyPI)
 
 For testing before a real release, you can configure a separate Trusted Publisher for TestPyPI at https://test.pypi.org/manage/account/publishing/ and modify the workflow to publish there first.
