@@ -1,7 +1,7 @@
 //! Scheme screenshot tests.
 //!
 //! Reuses the same reference PNGs as the former TaskGraph screenshot suite.
-#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#![cfg(all(feature = "graphics", any(feature = "vulkan", feature = "dx12", feature = "metal")))]
 
 mod common;
 

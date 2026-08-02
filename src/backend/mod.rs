@@ -44,8 +44,10 @@ pub(crate) mod cuda;
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
     BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle,
+    SamplerHandle, ShaderHandle, TextureHandle,
 };
+#[cfg(feature = "graphics")]
+pub(crate) use crate::handles::{SurfaceHandle, SwapchainImageHandle};
 pub(crate) use crate::texture::TextureCopyFootprint;
 
 /// Shared primitives reused across Vulkan, DX12, and Metal backends, and by
@@ -58,27 +60,31 @@ pub(crate) mod submission_worker;
 /// Helpers for relocating reuse waits and deferred host writes to the submission worker.
 pub(crate) mod host_sidecar;
 
-/// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
-#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
+/// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12, CUDA).
+#[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"), feature = "cuda"))]
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BufferFlags, BufferKind, DepthFormat, DepthStencilState, IndexFormat, PresentMode, PrimitiveTopology,
-    ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
+    BackendType, BufferFlags, BufferKind, IndexFormat, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags,
+    TextureFormat, TextureKind,
 };
+#[cfg(feature = "graphics")]
+use crate::types::{DepthFormat, DepthStencilState, PresentMode, PrimitiveTopology, VertexBufferLayout};
 use anyhow::Result;
 use std::sync::Arc;
 
 /// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
 /// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
 /// Vulkan enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation;
-/// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset.
+/// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset;
+/// CUDA enables Driver diagnostics (PTX JIT logs, eager sync, launch-limit checks) and may set
+/// `CUDA_LAUNCH_BLOCKING=1` when unset.
 ///
 /// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `api`, `all`, …).
 ///
 /// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
 /// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
-#[cfg(any(feature = "vulkan", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(feature = "vulkan", feature = "cuda", all(feature = "metal", target_os = "macos"),))]
 #[must_use]
 pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
@@ -356,6 +362,7 @@ where
 }
 
 /// Opaque token tying surface work to an acquired swapchain frame.
+#[cfg(feature = "graphics")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FrameToken {
     pub surface: SurfaceHandle,
@@ -720,6 +727,7 @@ pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
     all(feature = "metal", target_os = "macos"),
+    feature = "cuda",
 ))]
 pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHandle) {
     if let Some(handle) = backend.detach_context_for_destroy(ctx) {
@@ -773,6 +781,7 @@ impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
 }
 
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
+#[cfg(feature = "graphics")]
 #[allow(dead_code)] // fields read by present-split impls behind backend feature flags
 pub(crate) struct PresentFinishState {
     pub frame: FrameToken,
@@ -794,6 +803,7 @@ pub(crate) struct PresentFinishState {
 
 /// GPU-side present work (copy + queue present) cloned out of the backend under the
 /// global lock so [`crate::surface::Frame::present`] can drop it during execution.
+#[cfg(feature = "graphics")]
 pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
 }
@@ -926,6 +936,7 @@ impl ContextSubmitSession for LockedSubmitSession {
 
 /// Split present hooks used by [`crate::surface::Frame::present`] to drop the
 /// global backend lock during copy + WSI present.
+#[cfg(feature = "graphics")]
 pub(crate) trait GpuBackendPresentSplit {
     fn take_present_gpu_work(
         &mut self,
@@ -939,6 +950,18 @@ pub(crate) trait GpuBackendPresentSplit {
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue>;
 }
+
+#[cfg(feature = "graphics")]
+trait GpuBackendGraphics: GpuBackendPresentSplit {}
+
+#[cfg(feature = "graphics")]
+impl<T: GpuBackendPresentSplit + ?Sized> GpuBackendGraphics for T {}
+
+#[cfg(not(feature = "graphics"))]
+trait GpuBackendGraphics {}
+
+#[cfg(not(feature = "graphics"))]
+impl<T: ?Sized> GpuBackendGraphics for T {}
 
 /// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
 /// to drop the global backend lock during blocking GPU waits.
@@ -964,7 +987,7 @@ pub(crate) trait GpuBackendTimelineWait {
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
 pub(crate) trait GpuBackend:
-    Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit + GpuBackendSubmitSession
+    Send + Sync + GpuBackendTimelineWait + GpuBackendGraphics + GpuBackendSubmitSession
 {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
@@ -1120,7 +1143,7 @@ pub(crate) trait GpuBackend:
 
     /// Mock-backend surface present counter (tests only).
     #[doc(hidden)]
-    #[cfg(test)]
+    #[cfg(all(test, feature = "graphics"))]
     fn test_surface_present_count(&self) -> usize {
         let _ = self;
         0
@@ -1215,6 +1238,7 @@ pub(crate) trait GpuBackend:
     fn destroy_shader(&mut self, shader: ShaderHandle);
 
     // Pipeline management
+    #[cfg(feature = "graphics")]
     fn create_pipeline(
         &mut self,
         device: DeviceHandle,
@@ -1224,9 +1248,11 @@ pub(crate) trait GpuBackend:
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle>;
+    #[cfg(feature = "graphics")]
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle);
 
     // Pipeline with depth stencil state
+    #[cfg(feature = "graphics")]
     #[allow(clippy::too_many_arguments)]
     fn create_pipeline_with_depth(
         &mut self,
@@ -1241,6 +1267,7 @@ pub(crate) trait GpuBackend:
 
     // RenderTarget API - GPU-only; no CPU readback
     /// Create a render target with an optional depth buffer.
+    #[cfg(feature = "graphics")]
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -1249,6 +1276,7 @@ pub(crate) trait GpuBackend:
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
+    #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
         device: DeviceHandle,
@@ -1308,6 +1336,7 @@ pub(crate) trait GpuBackend:
     /// Create a surface for presenting to a window.
     /// The window handle is platform-specific (HWND on Windows, wl_surface on Wayland, NSView on macOS).
     /// When `depth_format` is `Some`, a depth buffer is created for depth testing (e.g. 3D rendering).
+    #[cfg(feature = "graphics")]
     fn create_surface(
         &mut self,
         device: DeviceHandle,
@@ -1317,20 +1346,25 @@ pub(crate) trait GpuBackend:
     ) -> Result<SurfaceHandle>;
 
     /// Destroy a surface.
+    #[cfg(feature = "graphics")]
     fn destroy_surface(&mut self, surface: SurfaceHandle);
 
     /// Resize the surface (recreates swapchain).
+    #[cfg(feature = "graphics")]
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()>;
 
     /// Get the current surface dimensions.
+    #[cfg(feature = "graphics")]
     fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32);
 
     /// Get the texture format used by a surface's swapchain.
     /// Use this to ensure your render pipeline matches the surface format.
+    #[cfg(feature = "graphics")]
     fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat;
 
     /// Set the present mode for a surface.
     /// Returns an error if the mode is not supported by the backend.
+    #[cfg(feature = "graphics")]
     fn surface_set_present_mode(&mut self, _surface: SurfaceHandle, _mode: PresentMode) -> Result<()> {
         Ok(())
     }
@@ -1407,14 +1441,22 @@ pub(crate) trait GpuBackend:
                     color_load,
                     commands: render_cmds,
                 } => {
-                    if !batch.is_empty() {
-                        last_tv = self.submit_standalone(ctx, &batch, sync)?;
-                        self.wait_until(ctx, last_tv)?;
-                        batch.clear();
+                    #[cfg(feature = "graphics")]
+                    {
+                        if !batch.is_empty() {
+                            last_tv = self.submit_standalone(ctx, &batch, sync)?;
+                            self.wait_until(ctx, last_tv)?;
+                            batch.clear();
+                        }
+                        let device = self.context_device(ctx);
+                        self.render_to_target(device, *target, *color_load, render_cmds)?;
+                        last_tv = self.submit_standalone(ctx, &[], sync)?;
                     }
-                    let device = self.context_device(ctx);
-                    self.render_to_target(device, *target, *color_load, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[], sync)?;
+                    #[cfg(not(feature = "graphics"))]
+                    {
+                        let _ = (target, color_load, render_cmds);
+                        anyhow::bail!("render graph commands require the `graphics` feature");
+                    }
                 }
             }
         }
@@ -1471,6 +1513,7 @@ pub(crate) trait GpuBackend:
     ///
     /// `ctx` is the submission context that owns this surface's timeline; frame
     /// submit/present and swapchain signals are routed through it.
+    #[cfg(feature = "graphics")]
     fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)>;
 
     /// Submit all recorded GPU work for this frame bracket. Does not present.
@@ -1478,6 +1521,7 @@ pub(crate) trait GpuBackend:
     /// Returns the timeline value signaled when the frame's compute (and transfer) work
     /// completes on the GPU. When no work was recorded, returns the latest completed
     /// or scheduled compute timeline appropriate for the backend.
+    #[cfg(feature = "graphics")]
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue>;
 
     // Compute pipeline management
@@ -1512,6 +1556,7 @@ pub(crate) trait GpuBackend:
     }
 
     /// Like [`Self::compute_pipeline_slot_access`] but for a graphics pipeline.
+    #[cfg(feature = "graphics")]
     fn render_pipeline_slot_access(&self, _pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
         Vec::new()
     }
@@ -1602,10 +1647,17 @@ pub(crate) trait GpuBackend:
 /// The backend can be overridden at runtime by setting the `GOLDY_BACKEND`
 /// environment variable to one of: `vulkan`, `dx12`, `metal`, `webgpu`, `cuda`.
 ///
-/// Without the override, the platform default is used:
+/// Without the override, the platform default is used when a native backend is
+/// compiled in:
 /// - macOS: Metal
-/// - Windows: DX12  
+/// - Windows: DX12
 /// - Linux: Vulkan
+///
+/// CUDA and WebGPU are **not** platform defaults. They are selected automatically
+/// only when the build enables `cuda` or `webgpu` **and** no native backend
+/// (`vulkan`, `dx12`, `metal`) is compiled in — e.g.
+/// `--no-default-features --features cuda`. In a normal default build, use
+/// `GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu` to opt in.
 pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     // Check for runtime override via environment variable
     if let Ok(backend_str) = std::env::var("GOLDY_BACKEND") {
@@ -1653,14 +1705,40 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
         Ok(Box::new(vulkan::VulkanBackend::new()?))
     }
 
+    // Compute-only prototypes: only when no native graphics backend is compiled in.
+    #[cfg(all(
+        feature = "cuda",
+        not(all(feature = "metal", target_os = "macos")),
+        not(all(feature = "dx12", target_os = "windows")),
+        not(feature = "vulkan")
+    ))]
+    {
+        tracing::info!("Creating CUDA backend (compute-only build, no native backend compiled in)");
+        Ok(Box::new(cuda::CudaBackend::new()?))
+    }
+
+    #[cfg(all(
+        feature = "webgpu",
+        not(feature = "cuda"),
+        not(all(feature = "metal", target_os = "macos")),
+        not(all(feature = "dx12", target_os = "windows")),
+        not(feature = "vulkan")
+    ))]
+    {
+        tracing::info!("Creating WebGPU backend (compute-only build, no native backend compiled in)");
+        Ok(Box::new(webgpu::WebGpuBackend::new()?))
+    }
+
     // No backend available
     #[cfg(not(any(
         all(feature = "metal", target_os = "macos"),
         all(feature = "dx12", target_os = "windows"),
-        feature = "vulkan"
+        feature = "vulkan",
+        feature = "cuda",
+        feature = "webgpu"
     )))]
     {
-        anyhow::bail!("No GPU backend available - enable 'vulkan', 'dx12', or 'metal' feature")
+        anyhow::bail!("No GPU backend available — enable 'vulkan', 'dx12', 'metal', 'cuda', or 'webgpu'")
     }
 }
 

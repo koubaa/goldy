@@ -104,10 +104,13 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::Texture(x), ResourceId::Texture(y)) => x == y,
+        #[cfg(feature = "graphics")]
         (ResourceId::RenderTarget(x), ResourceId::RenderTarget(y)) => x == y,
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
+        #[cfg(feature = "graphics")]
         (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
+        #[cfg(feature = "graphics")]
         (ResourceId::PresentLease(a), ResourceId::PresentLease(b)) => a == b,
         (ResourceId::Deposit(a), ResourceId::Deposit(b)) => a == b,
         _ => false,
@@ -121,9 +124,11 @@ fn resolve_copy_destination(id: ResourceId, resolver: Option<&SlotResolver>) -> 
     };
     match resolved {
         ResourceId::Texture(h) => h,
+        #[cfg(feature = "graphics")]
         ResourceId::SwapchainOutput => {
             panic!("copy destination SwapchainOutput emitted before surface acquire")
         }
+        #[cfg(feature = "graphics")]
         ResourceId::PresentLease(_) => {
             panic!("copy destination PresentLease emitted before pool acquire")
         }
@@ -154,6 +159,7 @@ fn resolve_buffer_copy_target(
 
 /// Returns true when one node implicitly/explicitly writes a render target and
 /// the other reads the same target (e.g. [`NodeKind::RenderPass`] → copy).
+#[cfg(feature = "graphics")]
 fn render_target_access_conflict(a: &super::ir::TaskNode, b: &super::ir::TaskNode) -> bool {
     let rt_from = |node: &super::ir::TaskNode| match &node.kind {
         NodeKind::RenderPass { target, .. } => Some(*target),
@@ -177,6 +183,11 @@ fn render_target_access_conflict(a: &super::ir::TaskNode, b: &super::ir::TaskNod
     if let (Some(t1), Some(t2)) = (rt_from(a), rt_from(b)) {
         return t1 == t2;
     }
+    false
+}
+
+#[cfg(not(feature = "graphics"))]
+fn render_target_access_conflict(_a: &super::ir::TaskNode, _b: &super::ir::TaskNode) -> bool {
     false
 }
 
@@ -215,10 +226,13 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     enum GroupKey {
         Buffer(u64),
         Texture(u64),
+        #[cfg(feature = "graphics")]
         RenderTarget(u64),
         TransientBuffer(u32),
         TransientTexture(u32),
+        #[cfg(feature = "graphics")]
         SwapchainOutput,
+        #[cfg(feature = "graphics")]
         PresentLease(u32),
         Deposit(u32),
     }
@@ -228,10 +242,13 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::Buffer(h) => GroupKey::Buffer(h),
             ResourceId::BufferRange { parent, .. } => GroupKey::Buffer(parent),
             ResourceId::Texture(h) => GroupKey::Texture(h),
+            #[cfg(feature = "graphics")]
             ResourceId::RenderTarget(h) => GroupKey::RenderTarget(h),
             ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
+            #[cfg(feature = "graphics")]
             ResourceId::SwapchainOutput => GroupKey::SwapchainOutput,
+            #[cfg(feature = "graphics")]
             ResourceId::PresentLease(id) => GroupKey::PresentLease(id),
             ResourceId::Deposit(id) => GroupKey::Deposit(id),
         }
@@ -240,6 +257,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     // Map each canonical key to the set of node indices that reference it.
     let mut resource_nodes: HashMap<GroupKey, Vec<usize>> = HashMap::new();
     for (idx, node) in ir.nodes.iter().enumerate() {
+        #[cfg(feature = "graphics")]
         if let NodeKind::RenderPass { target, .. } = &node.kind {
             resource_nodes
                 .entry(GroupKey::RenderTarget(*target))
@@ -1148,6 +1166,7 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
 /// Returns false when the wave slice contains nodes that must be submitted standalone
 /// (upload payload staging, non-stable copy destinations, etc.).
 pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
+    #[cfg(feature = "graphics")]
     use super::ResourceId;
     for wave in waves {
         for &ni in &wave.node_indices {
@@ -1163,9 +1182,14 @@ pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 // is stable across submissions, so the blit CB can be reused as-is.
                 // All other destinations (e.g. SwapchainOutput) are not stable and
                 // must be submitted standalone.
+                #[cfg(feature = "graphics")]
                 NodeKind::CopyRenderTarget { dst, .. }
                     if !matches!(dst, ResourceId::PresentLease(_) | ResourceId::Texture(_)) =>
                 {
+                    return false;
+                }
+                #[cfg(not(feature = "graphics"))]
+                NodeKind::CopyRenderTarget { .. } => {
                     return false;
                 }
                 _ => {}
@@ -1327,26 +1351,42 @@ pub(crate) fn partition_waves_have_upload_slots(ir: &GraphIR, waves: &[Wave]) ->
 }
 
 fn wave_present_binding_ids(ir: &GraphIR, wave: &Wave) -> Vec<u32> {
-    let mut ids = Vec::new();
-    for &ni in &wave.node_indices {
-        for b in &ir.nodes[ni].bindings {
-            if let ResourceId::PresentLease(id) = b.resource {
-                if !ids.contains(&id) {
-                    ids.push(id);
+    #[cfg(feature = "graphics")]
+    {
+        let mut ids = Vec::new();
+        for &ni in &wave.node_indices {
+            for b in &ir.nodes[ni].bindings {
+                if let ResourceId::PresentLease(id) = b.resource {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
                 }
             }
         }
+        ids
     }
-    ids
+    #[cfg(not(feature = "graphics"))]
+    {
+        let _ = (ir, wave);
+        Vec::new()
+    }
 }
 
 fn wave_has_swapchain_output(ir: &GraphIR, wave: &Wave) -> bool {
-    wave.node_indices.iter().any(|&ni| {
-        ir.nodes[ni]
-            .bindings
-            .iter()
-            .any(|b| matches!(b.resource, ResourceId::SwapchainOutput))
-    })
+    #[cfg(feature = "graphics")]
+    {
+        wave.node_indices.iter().any(|&ni| {
+            ir.nodes[ni]
+                .bindings
+                .iter()
+                .any(|b| matches!(b.resource, ResourceId::SwapchainOutput))
+        })
+    }
+    #[cfg(not(feature = "graphics"))]
+    {
+        let _ = (ir, wave);
+        false
+    }
 }
 
 fn wave_has_present_binding(ir: &GraphIR, wave: &Wave) -> bool {

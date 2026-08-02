@@ -128,7 +128,10 @@ mod tests {
     }
 
     /// Test that PLASMA compiles via Slang for all targets
-
+    ///
+    /// Requires `graphics`: `[goldy_vertex]` / `[goldy_fragment]` virtual-main lowering is
+    /// gated on that feature (compute-only CUDA builds skip the transform).
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_plasma_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler};
@@ -252,6 +255,9 @@ mod tests {
     /// - SPIRV: goldy_broadcast<T>() compiles and routes to Goldy's bindings
     /// - DX12: goldy_broadcast<T>() compiles using DescriptorHandle
     /// - Metal: goldy_broadcast<T>() works via ParameterBlock (Tier 2 required)
+    ///
+    /// Requires `graphics` (shader uses `[goldy_vertex]` / `[goldy_fragment]`).
+    #[cfg(feature = "graphics")]
     #[test]
     fn test_access_functions_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler};

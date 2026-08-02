@@ -38,8 +38,11 @@ cbindgen = "0.29"
 
 [features]
 # Default enables all platform-appropriate backends (same as goldy)
-default = ["vulkan", "dx12", "metal"]
+default = ["vulkan", "dx12", "metal", "graphics"]
 # Backend features pass through to goldy - only selected backends are compiled
+graphics = ["goldy/graphics"]
 vulkan = ["goldy/vulkan"]
 dx12 = ["goldy/dx12"]
 metal = ["goldy/metal"]
+cuda = ["goldy/cuda"]
+webgpu = ["goldy/webgpu"]

@@ -25,7 +25,8 @@ winit = "0.30"
 raw-window-handle = "0.6"
 
 [features]
-default = ["vulkan", "dx12", "metal"]
+default = ["vulkan", "dx12", "metal", "graphics"]
+graphics = []
 vulkan = []
 dx12 = []
 metal = []

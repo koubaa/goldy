@@ -661,6 +661,120 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
     Ok(generated + "#line 1\n" + &modified)
 }
 
+/// Kind of CUDA kernel launch argument corresponding to one author-facing
+/// `[goldy_compute]` parameter (system values are omitted — they come from the
+/// launch grid, not host-passed args).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CudaLaunchArgKind {
+    /// Consumes the next `BindResourcesRaw.indices` registry key → `CudaBufferArg`.
+    Buffer,
+    /// Consumes the next registry key → `CUtexObject` (`Interpolated<T>` / `Texture2D`).
+    SampledTexture {
+        /// Inner element type string (e.g. `"float4"`).
+        element: String,
+    },
+    /// Consumes the next registry key → `CUsurfObject` (`DirectSpatial<T>` / `RWTexture2D`).
+    StorageTexture {
+        /// Inner element type string (e.g. `"float4"`).
+        element: String,
+    },
+    /// Consumes the next registry key → ignored `SamplerState` word (`Filter`).
+    ///
+    /// Slang still emits a pointer-sized kernel parameter; the host passes zero.
+    /// Filtering is baked into each `CUtexObject` from the bound sampler desc.
+    Sampler,
+    /// Consumes the next `BindResourcesRaw.user` u32 word.
+    Scalar,
+}
+
+impl CudaLaunchArgKind {
+    /// True when this kind consumes one entry from `BindResourcesRaw.indices`.
+    pub fn consumes_registry_index(&self) -> bool {
+        !matches!(self, Self::Scalar)
+    }
+}
+
+fn cuda_texture_element(ty: &str, prefix: &str) -> Result<String, String> {
+    let ty = ty.trim();
+    if ty.starts_with(prefix) && ty.ends_with('>') {
+        let inner = ty[prefix.len()..ty.len() - 1].trim();
+        if inner.is_empty() {
+            return Err(format!("CUDA texture type `{ty}` has an empty element type"));
+        }
+        Ok(inner.to_string())
+    } else {
+        Err(format!("expected `{prefix}T>`, got `{ty}`"))
+    }
+}
+
+/// Extract the CUDA launch-arg layout for the primary `[goldy_compute]` entry.
+///
+/// Order matches author parameter order with system values skipped. Empty when
+/// the source has no `[goldy_compute]` entries (plain Slang compute passthrough).
+pub fn extract_cuda_compute_launch_layout(source: &str) -> Result<Vec<CudaLaunchArgKind>, String> {
+    let entries = find_all_entries(source);
+    let Some(entry) = entries.iter().find(|e| e.stage == Stage::Compute) else {
+        return Ok(Vec::new());
+    };
+    if entries.iter().any(|e| e.stage != Stage::Compute) {
+        return Err("CUDA prototype only lowers [goldy_compute] entry points".to_string());
+    }
+
+    let mut layout = Vec::new();
+    for item in &entry.params {
+        let ParamItem::Single(param) = item else {
+            return Err("conditional parameters are not supported by the CUDA prototype".to_string());
+        };
+        match &param.kind {
+            ParamKind::Broadcast => layout.push(CudaLaunchArgKind::Buffer),
+            ParamKind::Resource => {
+                let ty = param.ty.trim();
+                if ty.starts_with("Interpolated<") {
+                    layout.push(CudaLaunchArgKind::SampledTexture {
+                        element: cuda_texture_element(ty, "Interpolated<")?,
+                    });
+                } else if ty.starts_with("DirectSpatial<") {
+                    layout.push(CudaLaunchArgKind::StorageTexture {
+                        element: cuda_texture_element(ty, "DirectSpatial<")?,
+                    });
+                } else if ty == "Filter" {
+                    layout.push(CudaLaunchArgKind::Sampler);
+                } else if ty.starts_with("Scattered<") || ty == "ByteAddress" || ty.starts_with("BufRO<") {
+                    layout.push(CudaLaunchArgKind::Buffer);
+                } else {
+                    return Err(format!("unsupported CUDA resource parameter type `{ty}`"));
+                }
+            }
+            ParamKind::Scalar => {
+                cuda_scalar_init_expr(&param.ty, "_")?;
+                layout.push(CudaLaunchArgKind::Scalar);
+            }
+            ParamKind::SystemValue(_) => {}
+            ParamKind::PassThrough => {
+                return Err(format!(
+                    "CUDA compute entry has unsupported pass-through parameter `{}`",
+                    param.name
+                ));
+            }
+        }
+    }
+    Ok(layout)
+}
+
+/// Reinterpret a `uniform uint` launch word into the author scalar type.
+fn cuda_scalar_init_expr(ty: &str, word: &str) -> Result<String, String> {
+    match ty.trim() {
+        "uint" => Ok(word.to_string()),
+        "float" => Ok(format!("asfloat({word})")),
+        "int" => Ok(format!("asint({word})")),
+        "bool" => Ok(format!("{word} != 0u")),
+        other => Err(format!(
+            "CUDA prototype only lowers single-word scalar types (uint/float/int/bool); \
+             got `{other}` — bind a broadcast buffer for wider uniforms"
+        )),
+    }
+}
+
 /// CUDA compute lowering for `[goldy_compute]` entry points.
 ///
 /// Unlike the native push-constant / bindless-heap lowering, each buffer resource
@@ -668,8 +782,14 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
 /// parameter. Slang's CUDA target lowers those to `{T* data; size_t count}`
 /// descriptors that the backend fills from `CUdeviceptr` at launch time.
 ///
+/// Textures become `uniform Texture2D` / `RWTexture2D` (→ `CUtexObject` /
+/// `CUsurfObject`); samplers become `uniform SamplerState` (pointer-sized,
+/// ignored by Slang — filtering is baked into each texture object).
+///
 /// Broadcast structs are passed as a one-element read-only structured buffer and
-/// loaded at index 0. Textures, samplers, scalars, and graphics stages are rejected.
+/// loaded at index 0. Single-word scalars (`uint`/`float`/`int`/`bool`) become
+/// `uniform uint` kernel args (Goldy `with_param` words). Multi-word scalars and
+/// graphics stages are rejected.
 pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
@@ -678,15 +798,17 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
 
     fn resource_param_ty(param: &Param) -> Result<String, String> {
         let ty = param.ty.trim();
-        if ty.starts_with("Scattered<") || ty == "ByteAddress" || ty.starts_with("BufRO<") {
+        if ty.starts_with("Scattered<")
+            || ty == "ByteAddress"
+            || ty.starts_with("BufRO<")
+            || ty.starts_with("Interpolated<")
+            || ty.starts_with("DirectSpatial<")
+            || ty == "Filter"
+        {
             Ok(ty.to_string())
         } else if matches!(param.kind, ParamKind::Broadcast) {
             // One-element read-only buffer; wrapper loads `[0]`.
             Ok(format!("StructuredBuffer<{ty}>"))
-        } else if ty.starts_with("Interpolated<") || ty.starts_with("DirectSpatial<") || ty == "Filter" {
-            Err(format!(
-                "CUDA prototype does not support texture/sampler parameter type `{ty}`"
-            ))
         } else {
             Err(format!("unsupported CUDA resource parameter type `{ty}`"))
         }
@@ -703,6 +825,7 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
         let mut call_args = Vec::new();
         let mut sv_index = 0u32;
         let mut binding = 0u32;
+        let mut user = 0u32;
 
         for item in &entry.params {
             let ParamItem::Single(param) = item else {
@@ -729,10 +852,12 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
                     sv_index += 1;
                 }
                 ParamKind::Scalar => {
-                    return Err(format!(
-                        "CUDA prototype does not yet lower scalar dispatch parameter `{}`; bind a broadcast buffer",
-                        param.name
-                    ));
+                    let word = format!("_goldy_cuda_user_{user}");
+                    let init = cuda_scalar_init_expr(&param.ty, &word)?;
+                    signature.push(format!("uniform uint {word}"));
+                    body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, init));
+                    call_args.push(param.name.clone());
+                    user += 1;
                 }
                 ParamKind::PassThrough => {
                     return Err(format!(
@@ -780,7 +905,12 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
 /// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
 /// use this so the hashed text matches the compiled text.
 pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
-    if source.contains("[goldy_compute]") || source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]") {
+    let has_compute = source.contains("[goldy_compute]");
+    #[cfg(feature = "graphics")]
+    let has_graphics_stage = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
+    #[cfg(not(feature = "graphics"))]
+    let has_graphics_stage = false;
+    if has_compute || has_graphics_stage {
         Cow::Owned(transform_virtual_main(source))
     } else {
         Cow::Borrowed(source)
@@ -926,7 +1056,9 @@ pub struct EntryDef {
 
 const GOLDY_STAGES: &[(&str, Stage)] = &[
     ("goldy_compute", Stage::Compute),
+    #[cfg(feature = "graphics")]
     ("goldy_vertex", Stage::Vertex),
+    #[cfg(feature = "graphics")]
     ("goldy_fragment", Stage::Fragment),
 ];
 
@@ -2218,6 +2350,7 @@ void cs_main(Scattered<uint> data, ThreadId id, uint base) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn vertex_transform() {
         let src = r#"import goldy_exp;
@@ -2236,6 +2369,7 @@ VSOutput vs_main(Scattered<QuadInstance> instances, VertexId vid, InstanceId iid
         assert!(result.contains("_goldy_user_vs_main"), "Missing renamed fn");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn fragment_transform_removes_return_semantic() {
         let src = r#"import goldy_exp;
@@ -2256,6 +2390,7 @@ float4 fs_main(Broadcast<MyUniforms> uniforms, VaryingInput input) : SV_Target {
         assert!(!decl_line.contains(": SV_Target"), "User fn should not have SV_Target");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn multiple_entries_same_file() {
         let src = r#"import goldy_exp;
@@ -2278,6 +2413,7 @@ VSOutput vs_main(Scattered<float4> verts, VertexId vid) {
         assert_eq!(goldy_count, 0, "All [goldy_*] attrs should be removed");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn passthrough_param_kept() {
         let src = r#"import goldy_exp;
@@ -2369,6 +2505,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn fragment_with_is_front_face() {
         let src = r#"import goldy_exp;
@@ -2414,6 +2551,7 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn fragment_bare_struct_is_broadcast_not_passthrough() {
         // In a fragment shader with a resource struct and a varying, the struct
@@ -2437,6 +2575,7 @@ float4 fs_main(TimeUniforms cfg, FullscreenVarying input) : SV_Target {
         assert!(result.contains("FullscreenVarying _pt0"), "Missing passthrough param");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn vertex_shader_last_struct_is_passthrough() {
         // In a vertex shader, the last unknown struct is the vertex input (PassThrough).
@@ -2551,6 +2690,7 @@ void cs_main(Scattered<uint> rw, BufRO<uint> ro, ThreadId id) {}
         assert_eq!(kinds[1], Some(BindlessSlotKind::ReadOnlySrv));
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn categories_fragment_takes_precedence() {
         use crate::types::ResourceCategory;
@@ -2760,21 +2900,141 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
     }
 
     #[test]
-    fn cuda_compute_rejects_scalar_and_texture() {
-        let scalar = r#"
-[goldy_compute]
-[numthreads(1, 1, 1)]
-void cs_main(Scattered<uint> values, ThreadId id, uint base) {}
-"#;
-        let err = transform_virtual_main_cuda_compute(scalar).unwrap_err();
-        assert!(err.contains("scalar"), "{err}");
+    fn cuda_compute_scalar_uint_in_signature() {
+        let src = r#"import goldy_exp;
 
-        let texture = r#"
 [goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(Interpolated<float4> tex, Filter samp, ThreadId id) {}
+void cs_main(Scattered<uint> values, uint base, ThreadId id) {
+    values[id.x] = base;
+}
 "#;
-        let err = transform_virtual_main_cuda_compute(texture).unwrap_err();
-        assert!(err.contains("texture/sampler"), "{err}");
+        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        assert!(
+            result.contains("uniform Scattered<uint> _goldy_cuda_binding_0"),
+            "{result}"
+        );
+        assert!(result.contains("uniform uint _goldy_cuda_user_0"), "{result}");
+        assert!(result.contains("uint base = _goldy_cuda_user_0;"), "{result}");
+        assert!(
+            result.contains("_goldy_user_cs_main(_goldy_cuda_binding_0, base, id)"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src).unwrap(),
+            vec![CudaLaunchArgKind::Buffer, CudaLaunchArgKind::Scalar]
+        );
+    }
+
+    #[test]
+    fn cuda_compute_scalar_between_buffers_preserves_order() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> inp, uint offset, Scattered<uint> out, ThreadId id) {
+    out[id.x] = inp[id.x] + offset;
+}
+"#;
+        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        assert!(
+            result.contains("uniform Scattered<uint> _goldy_cuda_binding_0"),
+            "{result}"
+        );
+        assert!(result.contains("uniform uint _goldy_cuda_user_0"), "{result}");
+        assert!(
+            result.contains("uniform Scattered<uint> _goldy_cuda_binding_1"),
+            "{result}"
+        );
+        assert!(
+            result.contains("_goldy_user_cs_main(_goldy_cuda_binding_0, offset, _goldy_cuda_binding_1, id)"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src).unwrap(),
+            vec![
+                CudaLaunchArgKind::Buffer,
+                CudaLaunchArgKind::Scalar,
+                CudaLaunchArgKind::Buffer
+            ]
+        );
+    }
+
+    #[test]
+    fn cuda_compute_float_scalar_uses_asfloat() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<float> out, float value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        assert!(
+            result.contains("float value = asfloat(_goldy_cuda_user_0);"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn cuda_compute_rejects_vector_scalar() {
+        let vector = r#"
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> values, uint3 base, ThreadId id) {}
+"#;
+        let err = transform_virtual_main_cuda_compute(vector).unwrap_err();
+        assert!(err.contains("single-word"), "{err}");
+    }
+
+    #[test]
+    fn cuda_compute_texture_and_sampler_layout() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Interpolated<float4> tex, Filter samp, DirectSpatial<float4> img, ThreadId id) {}
+"#;
+        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        assert!(
+            result.contains("uniform Interpolated<float4> _goldy_cuda_binding_0"),
+            "{result}"
+        );
+        assert!(result.contains("uniform Filter _goldy_cuda_binding_1"), "{result}");
+        assert!(
+            result.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_2"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src).unwrap(),
+            vec![
+                CudaLaunchArgKind::SampledTexture {
+                    element: "float4".into()
+                },
+                CudaLaunchArgKind::Sampler,
+                CudaLaunchArgKind::StorageTexture {
+                    element: "float4".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cuda_compute_broadcast_layout_is_buffer() {
+        let src = r#"import goldy_exp;
+
+struct Params { uint mul; };
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
+    values[id.x] = values[id.x] * cfg.mul;
+}
+"#;
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src).unwrap(),
+            vec![CudaLaunchArgKind::Buffer, CudaLaunchArgKind::Buffer]
+        );
     }
 }

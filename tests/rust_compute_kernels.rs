@@ -1,6 +1,12 @@
 //! Integration tests for `#[goldy::compute]` Rust→Slang kernels (issue #78).
 
-#![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#![cfg(any(
+    feature = "vulkan",
+    feature = "dx12",
+    feature = "metal",
+    feature = "cuda",
+    feature = "webgpu"
+))]
 
 #[path = "common/submission.rs"]
 mod submission;

@@ -13,5 +13,7 @@ pub(crate) type ShaderHandle = u64;
 pub(crate) type PipelineHandle = u64;
 pub(crate) type ComputePipelineHandle = u64;
 pub(crate) type RenderTargetHandle = u64;
+#[cfg(feature = "graphics")]
 pub(crate) type SurfaceHandle = u64;
+#[cfg(feature = "graphics")]
 pub(crate) type SwapchainImageHandle = u64;

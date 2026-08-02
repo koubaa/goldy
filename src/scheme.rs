@@ -8,29 +8,42 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand, RenderCommand};
+#[cfg(feature = "graphics")]
+use crate::backend::RenderCommand;
+use crate::backend::{BufferHandle, GpuCommand};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
+#[cfg(feature = "graphics")]
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
+#[cfg(feature = "graphics")]
 use crate::swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
-use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
+use crate::task_graph::cross_submit::ResourceKey;
+#[cfg(feature = "graphics")]
+use crate::task_graph::cross_submit::ResourceKeyMap;
+#[cfg(feature = "graphics")]
+use crate::task_graph::DeferredPresentAcquire;
+use crate::task_graph::IrSubmitState;
+#[cfg(feature = "graphics")]
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
-use crate::task_graph::{DeferredPresentAcquire, IrSubmitState};
-use crate::task_graph::{
-    DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
-    PRESENT_LEASE_SLOT_PLACEHOLDER,
-};
+#[cfg(feature = "graphics")]
+use crate::task_graph::ShaderResourceSlot;
+#[cfg(feature = "graphics")]
+use crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
+use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::texture::TextureCopyFootprint;
-use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
+use crate::timeline::TimelineValue;
+#[cfg(feature = "graphics")]
+use crate::timeline::{PromiseResolver, TimelinePromise};
 use crate::types::{
-    BufferFlags, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat,
-    TextureKind,
+    BufferFlags, DispatchShape, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
 };
+#[cfg(feature = "graphics")]
+use crate::types::{DepthFormat, IndexFormat};
 use crate::validation_env;
 use std::fmt;
 use std::marker::PhantomData;
@@ -206,13 +219,19 @@ impl From<SubmissionHandle> for TimelineValue {
 /// Dense index of an exchange claim slot on a [`Submission`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ClaimKey {
-    Present { present_idx: u32 },
-    Withdraw { withdraw_idx: u32 },
+    #[cfg(feature = "graphics")]
+    Present {
+        present_idx: u32,
+    },
+    Withdraw {
+        withdraw_idx: u32,
+    },
 }
 
 /// Stable erased present relationship recorded in one [`Scheme`].
 ///
 /// Reusable across submissions. Extract each submission's product with [`Self::claim`].
+#[cfg(feature = "graphics")]
 #[derive(Clone)]
 pub struct Transaction {
     pub(crate) scheme_id: u64,
@@ -223,6 +242,7 @@ pub struct Transaction {
     pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
+#[cfg(feature = "graphics")]
 impl fmt::Debug for Transaction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Transaction")
@@ -249,10 +269,13 @@ pub struct Submission {
     /// Context that submitted this work (for settlement waits).
     ctx: Context,
     /// Present claim slots (parallel to [`Self::claim_bindings`] / generations).
+    #[cfg(feature = "graphics")]
     present_claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
     /// Scheme-unique present binding id for each present claim slot.
+    #[cfg(feature = "graphics")]
     claim_bindings: Vec<u32>,
     /// Pool generation snapshotted when each present claim's drawable was acquired.
+    #[cfg(feature = "graphics")]
     claim_generations: Vec<u64>,
     /// Withdraw claim slots; taken by [`crate::exchange::WithdrawTransaction::claim`].
     withdraw_claims: Vec<Mutex<Option<crate::exchange::WithdrawSlot>>>,
@@ -268,6 +291,7 @@ impl Drop for Submission {
                 }
             }
         }
+        #[cfg(feature = "graphics")]
         for claim_mutex in &self.present_claims {
             if let Ok(mut slot) = claim_mutex.lock() {
                 if let Some(claim) = slot.take() {
@@ -280,12 +304,13 @@ impl Drop for Submission {
 
 impl fmt::Debug for Submission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Submission")
+        let mut debug = f.debug_struct("Submission");
+        debug
             .field("scheme_id", &self.handle.scheme_id())
-            .field("settled", &self.is_settled())
-            .field("present_claims", &self.present_claims.len())
-            .field("withdraw_claims", &self.withdraw_claims.len())
-            .finish()
+            .field("settled", &self.is_settled());
+        #[cfg(feature = "graphics")]
+        debug.field("present_claims", &self.present_claims.len());
+        debug.field("withdraw_claims", &self.withdraw_claims.len()).finish()
     }
 }
 
@@ -326,6 +351,7 @@ impl Submission {
         self.handle.wait(ctx)
     }
 
+    #[cfg(feature = "graphics")]
     pub(crate) fn take_present_claim(
         &mut self,
         scheme_id: u64,
@@ -393,10 +419,14 @@ impl Submission {
                 "WithdrawTransaction belongs to a different scheme than this submission"
             )));
         }
-        let ClaimKey::Withdraw { withdraw_idx } = key else {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "withdraw claim key required for memory withdrawal"
-            )));
+        let withdraw_idx = match key {
+            ClaimKey::Withdraw { withdraw_idx } => withdraw_idx,
+            #[cfg(feature = "graphics")]
+            ClaimKey::Present { .. } => {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "withdraw claim key required for memory withdrawal"
+                )));
+            }
         };
         let idx = withdraw_idx as usize;
         let claim_mutex = self.withdraw_claims.get(idx).ok_or_else(|| {
@@ -412,7 +442,7 @@ impl Submission {
     }
 
     /// Submit timeline stamped on the acquired present frame, if still held.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "graphics"))]
     pub(crate) fn present_frame_submit_timeline(&self, idx: usize) -> Option<TimelineValue> {
         let claim_mutex = self.present_claims.get(idx)?;
         let slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
@@ -426,11 +456,13 @@ impl From<&Submission> for TimelineValue {
     }
 }
 
+#[cfg(feature = "graphics")]
 struct PresentBinding {
     pool: Arc<crate::swapchain_pool::SwapchainPoolInner>,
     pool_lease_id: u32,
 }
 
+#[cfg(feature = "graphics")]
 struct PresentTransactionInfo {
     /// Scheme-unique binding id used in IR as [`ResourceId::PresentLease`].
     binding_id: u32,
@@ -440,6 +472,7 @@ struct PresentTransactionInfo {
 }
 
 /// Validate registered present exchanges against real drawable IR accesses.
+#[cfg(feature = "graphics")]
 fn validate_present_exchange_bindings(
     ir: &GraphIR,
     present_transactions: &[PresentTransactionInfo],
@@ -504,6 +537,7 @@ fn validate_present_exchange_bindings(
 }
 
 /// Parcel stamps read by a present easement for `binding_id` (copy-to-present sources).
+#[cfg(feature = "graphics")]
 fn present_easement_source_stamps(
     ir: &GraphIR,
     binding_id: u32,
@@ -538,6 +572,7 @@ fn present_easement_source_stamps(
     out
 }
 
+#[cfg(feature = "graphics")]
 fn claim_present_easement_promises(
     ir: &GraphIR,
     present_transactions: &[PresentTransactionInfo],
@@ -586,6 +621,7 @@ pub struct LeaseTexture;
 pub struct LeaseBuffer;
 
 /// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
+#[cfg(feature = "graphics")]
 pub struct LeaseRenderTarget;
 
 /// Epoch-gated pool of physical staging parcels for one logical deposit.
@@ -707,6 +743,7 @@ pub struct Scheme {
     /// N=1 backing parcels for [`Lease`] declarations, indexed by [`LeaseId`].
     leases: Vec<Parcel>,
     /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
+    #[cfg(feature = "graphics")]
     rt_leases: Vec<RenderTarget>,
     /// Epoch-gated CPU-writable staging pools for deposit declarations.
     deposits: Vec<DepositPool>,
@@ -723,8 +760,10 @@ pub struct Scheme {
     /// Memory withdrawals: N-backed staging per submission.
     withdraws: Vec<WithdrawInfo>,
     /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
+    #[cfg(feature = "graphics")]
     present_bindings: Vec<PresentBinding>,
     /// Registered present exchanges: one claim slot per transaction, keyed by dense present_idx.
+    #[cfg(feature = "graphics")]
     present_transactions: Vec<PresentTransactionInfo>,
 }
 
@@ -736,6 +775,7 @@ impl Scheme {
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
             leases: Vec::new(),
+            #[cfg(feature = "graphics")]
             rt_leases: Vec::new(),
             deposits: Vec::new(),
             dirty: true,
@@ -745,7 +785,9 @@ impl Scheme {
             next_withdraw_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             withdraws: Vec::new(),
+            #[cfg(feature = "graphics")]
             present_bindings: Vec::new(),
+            #[cfg(feature = "graphics")]
             present_transactions: Vec::new(),
         }
     }
@@ -1144,6 +1186,7 @@ impl Scheme {
     }
 
     /// Append a render pass node to the scheme IR.
+    #[cfg(feature = "graphics")]
     pub(crate) fn commit_render_pass(
         &mut self,
         label: &'static str,
@@ -1241,6 +1284,7 @@ impl Scheme {
     /// Declare a render-target lease owned by this scheme (N=1).
     ///
     /// The backing render target is held until the scheme is dropped. Structural mutation.
+    #[cfg(feature = "graphics")]
     pub fn lease_render_target(
         &mut self,
         width: u32,
@@ -1264,6 +1308,7 @@ impl Scheme {
     }
 
     /// Borrow the backing render target for a scheme-held lease.
+    #[cfg(feature = "graphics")]
     pub(crate) fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
         &self.rt_leases[lease.id.0 as usize]
     }
@@ -1337,8 +1382,14 @@ impl Scheme {
     /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
     /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
     /// CPU wait here.
+    #[cfg(feature = "graphics")]
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
         self.submit_with_acquired_presents(Vec::new())
+    }
+
+    #[cfg(not(feature = "graphics"))]
+    pub fn submit(&mut self) -> Result<Submission, GoldyError> {
+        self.submit_without_presents()
     }
 
     /// Like [`Self::submit`], but uses pre-acquired swapchain drawables.
@@ -1346,6 +1397,7 @@ impl Scheme {
     /// `acquired` must be empty (deferred acquire) or contain one entry per present
     /// grant, in grant order, with matching lease ids. Consumed claims are moved onto
     /// the [`Submission`]; leftovers are cancelled on drop.
+    #[cfg(feature = "graphics")]
     pub fn submit_with_acquired_presents(
         &mut self,
         mut acquired: Vec<AcquiredPresent>,
@@ -1617,11 +1669,110 @@ impl Scheme {
         Ok(submission)
     }
 
+    #[cfg(not(feature = "graphics"))]
+    fn submit_without_presents(&mut self) -> Result<Submission, GoldyError> {
+        if !self.submit_state.all_stamps_alive() {
+            self.submit_state.invalidate_retention();
+            return Err(GoldyError::StaleResource);
+        }
+
+        let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
+        let structurally_dirty = self.dirty;
+        if structurally_dirty || topo_dirty {
+            self.submit_state.invalidate_retention();
+        }
+
+        {
+            use crate::task_graph::cross_submit::net_access_per_resource;
+            let net = net_access_per_resource(&self.ir);
+            let ctx = self.ctx.backend_handle();
+            for (key, access) in &net {
+                if access.writes {
+                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
+                        stamp.drain_pending_for_submit_gate(ctx);
+                    }
+                }
+            }
+        }
+
+        let ir_clean = !structurally_dirty && !topo_dirty;
+        let had_replay = self.submit_state.has_cb_replay();
+        let deposit_resolutions = self.resolve_deposits_for_submit()?;
+        let mut present_slots = Vec::new();
+        let mut partial = crate::task_graph::PartitionSubmitResult::default();
+        let mut partial_tv = self.ctx.gpu_progress();
+        let (tv, part_result) = self
+            .submit_state
+            .submit_pipelined_and_retain_with_presents(
+                &self.ctx,
+                &self.ir,
+                &mut present_slots,
+                None,
+                &deposit_resolutions,
+                ir_clean,
+                &mut partial,
+                &mut partial_tv,
+            )
+            .map_err(|e| {
+                self.ctx.advance_high_water_timeline(partial_tv);
+                self.ctx.classify(e)
+            })?;
+
+        if had_replay && !self.submit_state.has_cb_replay() {
+            use crate::task_graph::cross_submit::clear_scheme_topology_registration;
+            clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
+            self.prev_topology_parcels.clear();
+            self.topology_dirty.store(false, Ordering::Release);
+        }
+
+        let ctx_h = self.ctx.backend_handle();
+        for pool in &mut self.deposits {
+            pool.stamp_pending(ctx_h, tv);
+        }
+        self.ctx.advance_high_water_timeline(tv);
+        self.dirty = false;
+
+        let retention_recorded = part_result.records > 0;
+        let recorded = retention_recorded || structurally_dirty;
+        let on_record_path =
+            self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
+        if on_record_path {
+            use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
+            let net = net_access_per_resource(&self.ir);
+            self.prev_topology_parcels = reregister_scheme_topology(
+                &net,
+                self.submit_state.resource_stamps(),
+                &self.prev_topology_parcels,
+                self.scheme_id,
+                self.ctx.backend_handle(),
+                &self.topology_dirty,
+            );
+        }
+
+        if recorded {
+            self.stats.records += 1;
+            if topo_dirty && !structurally_dirty {
+                self.stats.topology_records += 1;
+            }
+            if topo_dirty {
+                self.topology_dirty.store(false, Ordering::Release);
+            }
+        } else if part_result.resubmit_hits > 0 {
+            #[cfg(not(feature = "metal"))]
+            {
+                self.stats.resubmit_hits += 1;
+            }
+        }
+
+        self.finish_submit(tv)
+    }
+
     /// Settle high-water, source WAR, and present frames after a mid-submit failure.
     ///
     /// Bindings whose present partition already ran get an unpublished claim discarded
     /// at their copy timeline. Acquired but unsubmitted frames are cancelled. Never-
     /// acquired slots are left alone.
+    #[cfg(feature = "graphics")]
     fn cleanup_failed_present_submit(
         &self,
         e: anyhow::Error,
@@ -1662,6 +1813,7 @@ impl Scheme {
         self.ctx.classify(e)
     }
 
+    #[cfg(feature = "graphics")]
     fn finish_submit_frame(
         &mut self,
         tv_dispatch: TimelineValue,
@@ -1698,6 +1850,16 @@ impl Scheme {
             present_claims.push(Mutex::new(claim));
         }
 
+        self.finish_submit(tv_dispatch, present_claims, claim_bindings, claim_generations)
+    }
+
+    fn finish_submit(
+        &mut self,
+        tv_dispatch: TimelineValue,
+        #[cfg(feature = "graphics")] present_claims: Vec<Mutex<Option<Box<dyn crate::exchange::ClaimImpl>>>>,
+        #[cfg(feature = "graphics")] claim_bindings: Vec<u32>,
+        #[cfg(feature = "graphics")] claim_generations: Vec<u64>,
+    ) -> Result<Submission, GoldyError> {
         if self.withdraws.is_empty() {
             return Ok(Submission {
                 handle: SubmissionHandle {
@@ -1707,8 +1869,11 @@ impl Scheme {
                     }),
                 },
                 ctx: self.ctx.clone(),
+                #[cfg(feature = "graphics")]
                 present_claims,
+                #[cfg(feature = "graphics")]
                 claim_bindings,
+                #[cfg(feature = "graphics")]
                 claim_generations,
                 withdraw_claims: Vec::new(),
             });
@@ -1782,8 +1947,11 @@ impl Scheme {
                 }),
             },
             ctx: self.ctx.clone(),
+            #[cfg(feature = "graphics")]
             present_claims,
+            #[cfg(feature = "graphics")]
             claim_bindings,
+            #[cfg(feature = "graphics")]
             claim_generations,
             withdraw_claims,
         })
@@ -1793,6 +1961,7 @@ impl Scheme {
     ///
     /// Two leases from different pools that both use local id `0` receive distinct
     /// binding ids. Reusing the same lease returns the same binding.
+    #[cfg(feature = "graphics")]
     fn intern_present_binding(&mut self, lease: &PresentLease) -> u32 {
         for (i, binding) in self.present_bindings.iter().enumerate() {
             if Arc::ptr_eq(&binding.pool, &lease.pool) && binding.pool_lease_id == lease.id {
@@ -1808,6 +1977,7 @@ impl Scheme {
     }
 
     /// True when this scheme already has a present exchange transaction for `lease`.
+    #[cfg(feature = "graphics")]
     pub(crate) fn has_present_transaction_for(&self, lease: &PresentLease) -> bool {
         self.present_bindings.iter().enumerate().any(|(i, binding)| {
             Arc::ptr_eq(&binding.pool, &lease.pool)
@@ -1823,6 +1993,7 @@ impl Scheme {
     /// ordering, and settlement. Called by [`crate::SurfaceExchange`] bind helpers.
     /// Calling twice for the same lease reuses the existing transaction rather than
     /// creating a second claim slot.
+    #[cfg(feature = "graphics")]
     pub(crate) fn register_present_exchange(&mut self, lease: &PresentLease) -> Transaction {
         let binding_id = self.intern_present_binding(lease);
         let generation = lease.generation_handle();
@@ -1852,6 +2023,7 @@ impl Scheme {
     }
 
     /// Copy an offscreen render target into a present lease drawable.
+    #[cfg(feature = "graphics")]
     pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
         self.dirty = true;
         let binding_id = self.intern_present_binding(dst);
@@ -1883,6 +2055,7 @@ impl Scheme {
     /// Record this after all compute nodes that write `src`. The present slot is
     /// resolved by [`Self::submit`] at acquire time — the same partition-slot-key
     /// mechanism used by [`Self::copy_to_present`].
+    #[cfg(feature = "graphics")]
     pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
         self.dirty = true;
         let binding_id = self.intern_present_binding(dst);
@@ -1915,6 +2088,7 @@ impl Scheme {
     ///
     /// The destination must be a texture parcel with [`TextureFlags::COPY_DST`], homed on
     /// this scheme's context, and matching the render target's width, height, and format.
+    #[cfg(feature = "graphics")]
     pub fn copy_to_texture(&mut self, src: &Lease<LeaseRenderTarget>, dst: &Parcel) -> Result<(), GoldyError> {
         let src_rt = &self.rt_leases[src.id.0 as usize];
         if !dst.is_homed_on(&self.ctx) {
@@ -1976,6 +2150,7 @@ impl Scheme {
     }
 
     /// Begin recording an offscreen render pass on this scheme.
+    #[cfg(feature = "graphics")]
     pub fn render_pass<'a>(
         &'a mut self,
         label: &'static str,
@@ -2020,6 +2195,7 @@ impl Scheme {
     }
 
     /// True when the IR contains a copy-to-present blit node.
+    #[cfg(feature = "graphics")]
     #[doc(hidden)]
     pub fn test_has_copy_render_target_to_present(&self) -> bool {
         use crate::task_graph::{NodeKind, ResourceId};
@@ -2033,6 +2209,7 @@ impl Scheme {
     }
 
     /// True when any dispatch node binds a present lease.
+    #[cfg(feature = "graphics")]
     #[doc(hidden)]
     pub fn test_has_present_lease_dispatch_binding(&self) -> bool {
         use crate::task_graph::ResourceId;
@@ -2137,6 +2314,7 @@ impl Drop for Scheme {
                 ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
             }
         }
+        #[cfg(feature = "graphics")]
         self.rt_leases.clear();
     }
 }
@@ -2487,6 +2665,7 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// Inserts [`PRESENT_LEASE_SLOT_PLACEHOLDER`] at the current position in
     /// `resource_slots` so the resolver can patch it to the correct bindless index
     /// at submit time. Call order must match the shader's resource parameter order.
+    #[cfg(feature = "graphics")]
     pub fn with_present_access(mut self, lease: &PresentLease, access: NodeAccess) -> Self {
         let binding_id = self.scheme.intern_present_binding(lease);
         self.bindings.push(ResourceBinding {
@@ -2498,6 +2677,7 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     /// Declare a UAV write to a present lease (swapchain drawable).
+    #[cfg(feature = "graphics")]
     pub fn with_present(self, lease: &PresentLease) -> Self {
         self.with_present_access(lease, NodeAccess::Write)
     }
@@ -2539,21 +2719,24 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     fn push_dispatch_node(self, dispatch: DispatchDim) {
-        let present_bindings = self
-            .bindings
-            .iter()
-            .filter(|b| matches!(b.resource, ResourceId::PresentLease(_)))
-            .count();
-        let present_slots = self
-            .resource_slots
-            .iter()
-            .filter(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
-            .count();
-        debug_assert_eq!(
-            present_bindings, present_slots,
-            "present lease bindings must align with PRESENT_LEASE_SLOT_PLACEHOLDER entries (label={})",
-            self.label
-        );
+        #[cfg(feature = "graphics")]
+        {
+            let present_bindings = self
+                .bindings
+                .iter()
+                .filter(|b| matches!(b.resource, ResourceId::PresentLease(_)))
+                .count();
+            let present_slots = self
+                .resource_slots
+                .iter()
+                .filter(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
+                .count();
+            debug_assert_eq!(
+                present_bindings, present_slots,
+                "present lease bindings must align with PRESENT_LEASE_SLOT_PLACEHOLDER entries (label={})",
+                self.label
+            );
+        }
         // Do not assert resource_slots.len() >= bindings.len(): samplers add slots
         // without bindings, and with_buffer_dependency adds bindings without slots.
         // Present placeholders are resolved by declaration order, not binding index.
@@ -2574,12 +2757,14 @@ impl<'a> SchemeNodeBuilder<'a> {
 ///
 /// Read and read-write handles are captured at record time; the descriptor actually
 /// bound is chosen from pipeline reflection when the pipeline is set.
+#[cfg(feature = "graphics")]
 struct PendingPushConstant {
     graph_access: NodeAccess,
     read_handle: Option<ResourceHandle>,
     read_write_handle: Option<ResourceHandle>,
 }
 
+#[cfg(feature = "graphics")]
 impl PendingPushConstant {
     fn from_parcel(parcel: &Parcel, access: NodeAccess) -> Self {
         Self {
@@ -2619,6 +2804,7 @@ impl PendingPushConstant {
 }
 
 /// Builder for a render pass recorded on a [`Scheme`].
+#[cfg(feature = "graphics")]
 pub struct SchemeRenderPassBuilder<'a> {
     scheme: &'a mut Scheme,
     label: &'static str,
@@ -2629,6 +2815,7 @@ pub struct SchemeRenderPassBuilder<'a> {
     pending_push_constants: Vec<PendingPushConstant>,
 }
 
+#[cfg(feature = "graphics")]
 impl<'a> SchemeRenderPassBuilder<'a> {
     /// Declare a read or write dependency on a parcel deed.
     ///
@@ -2835,10 +3022,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         ComputePipeline::new(device, shader).expect("create pipeline")
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_render_shader(device: &Device) -> ShaderModule {
         ShaderModule::from_slang(device, "void main() {}").expect("compile render shader")
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_render_pipeline(device: &Device, shader: &ShaderModule) -> crate::RenderPipeline {
         crate::RenderPipeline::new(
             device,
@@ -3830,8 +4019,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     // Present-on-scheme tests
     // ------------------------------------------------------------------
 
+    #[cfg(feature = "graphics")]
     struct MockWindow;
 
+    #[cfg(feature = "graphics")]
     impl raw_window_handle::HasWindowHandle for MockWindow {
         fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
             Ok(unsafe {
@@ -3842,6 +4033,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     impl raw_window_handle::HasDisplayHandle for MockWindow {
         fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
             Ok(unsafe {
@@ -3852,21 +4044,25 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_swapchain_pool(device: &Arc<Device>) -> (Context, crate::swapchain_pool::SwapchainPool) {
         let ctx = device.create_context().unwrap();
         let pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("swapchain pool");
         (ctx, pool)
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_present_count(device: &Arc<Device>) -> usize {
         let backend = device.inner.backend.lock().unwrap();
         backend.test_surface_present_count()
     }
 
+    #[cfg(feature = "graphics")]
     fn consume_present(tx: &Transaction, submission: &mut Submission) {
         tx.claim(submission).expect("claim").consume().expect("present");
     }
 
+    #[cfg(feature = "graphics")]
     fn register_exchange_with_copy(scheme: &mut Scheme, lease: &crate::swapchain_pool::PresentLease) -> Transaction {
         let rt = scheme
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
@@ -3875,6 +4071,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.register_present_exchange(lease)
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn register_present_exchange_is_metadata_only() {
         let device = mock_device();
@@ -3895,6 +4092,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn register_present_exchange_marks_dirty() {
         let device = mock_device();
@@ -3911,6 +4109,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn bind_before_write_leaves_coarse_in_non_present_partition() {
         use crate::task_graph::analysis;
@@ -3949,6 +4148,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_unused_present_transaction() {
         let device = mock_device();
@@ -3962,6 +4162,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(err.to_string().contains("never accesses"), "unexpected error: {err}");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_unregistered_present_lease_access() {
         let device = mock_device();
@@ -3986,6 +4187,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_first_present_access_that_reads() {
         let device = mock_device();
@@ -4009,6 +4211,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_present_appends_ir_node() {
         let device = mock_device();
@@ -4034,6 +4237,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(scheme.is_dirty(), "copy_to_present must mark the scheme dirty");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_texture_appends_ir_node() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
@@ -4072,6 +4276,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(scheme.is_dirty(), "copy_to_texture must mark the scheme dirty");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_texture_rejects_buffer_parcel() {
         use crate::types::{BufferKind, TextureFormat};
@@ -4094,6 +4299,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.ir_node_count(), 0);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_texture_rejects_missing_copy_dst_flag() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
@@ -4123,6 +4329,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.ir_node_count(), 0);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_texture_rejects_dimension_mismatch() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
@@ -4155,6 +4362,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.ir_node_count(), 0);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_texture_rejects_format_mismatch() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
@@ -4187,6 +4395,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.ir_node_count(), 0);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn with_present_placeholder_in_resource_slots_when_last() {
         // Correct ordering: with_views first, then with_present.
@@ -4229,6 +4438,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn with_present_placeholder_preserved_when_with_views_follows() {
         // Regression test: with_views called AFTER with_present must preserve
@@ -4274,6 +4484,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_buf_then_present_shader(device: &Device) -> ShaderModule {
         ShaderModule::from_slang(
             device,
@@ -4292,6 +4503,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
         .expect("compile buf+present shader")
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn with_present_placeholder_at_middle_shader_slot() {
         let device = mock_device();
@@ -4321,6 +4533,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn with_present_access_records_readwrite_binding() {
         let device = mock_device();
@@ -4343,6 +4556,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(binding.access, NodeAccess::ReadWrite);
     }
 
+    #[cfg(feature = "graphics")]
     fn mock_sampler_then_present_shader(device: &Device) -> ShaderModule {
         ShaderModule::from_slang(
             device,
@@ -4360,6 +4574,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         .expect("compile sampler+present shader")
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn with_present_after_sampler_submits_and_presents() {
         // Sampler contributes a resource slot without a hazard binding, so the
@@ -4410,6 +4625,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn with_present_after_buffer_dependency_submits_and_presents() {
         // Dependency-only bindings omit shader slots, so PresentLease is binding
@@ -4461,6 +4677,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     fn scheme_lease_texture_for_test(device: &Arc<Device>, _ctx: &Context) -> crate::types::ResourceHandle {
         // Minimal helper: creates a retained texture parcel and returns a write handle.
         let mut pool = RetainedPool::new(device.clone());
@@ -4479,6 +4696,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .expect("write handle")
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_submit_increments_present_count() {
         let device = mock_device();
@@ -4495,6 +4713,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(after, before + 1, "present must fire one swapchain present");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn transaction_claim_consume_presents_once() {
         let device = mock_device();
@@ -4516,6 +4735,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert!(err.to_string().contains("already consumed"), "unexpected: {err}");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn dropping_submission_discards_untaken_claim() {
         let device = mock_device();
@@ -4530,6 +4750,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(mock_present_count(&device), before, "discarded claim must not present");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn two_pools_receive_distinct_present_bindings() {
         let device = mock_device();
@@ -4579,6 +4800,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_ne!(left_res, right_res);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn same_lease_reuses_present_binding_and_grant() {
         let device = mock_device();
@@ -4602,6 +4824,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.ir_node_count(), 0, "reuse must not append IR nodes");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn two_present_claims_consume_independently() {
         let device = mock_device();
@@ -4634,6 +4857,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(mock_present_count(&device), before + 1);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn eager_acquire_rejects_wrong_pool_with_matching_local_id() {
         let device = mock_device();
@@ -4658,6 +4882,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert!(err.to_string().contains("provenance"), "unexpected error: {err}");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn eager_acquire_mixed_provenance_cancels_without_presenting() {
         // First claim is valid; second is from the wrong pool. Validation must reject
@@ -4699,6 +4924,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn surface_exchange_bind_rejects_duplicate_for_same_lease() {
         let device = mock_device();
@@ -4726,6 +4952,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         first.claim(&mut submission).expect("claim").consume().expect("present");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn two_surfaces_bind_copy_resolve_and_claim_independently() {
         let device = mock_device();
@@ -4788,6 +5015,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn surface_claim_impl_drop_cancels_without_presenting() {
         // Raw SurfaceClaimImpl may be dropped on finish_submit_frame failure before
@@ -4805,6 +5033,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn partial_acquire_failure_discards_submitted_binding_without_present() {
         use crate::task_graph::cross_submit::ResourceKey;
@@ -4873,6 +5102,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn resize_advances_generation_and_stales_prior_claim() {
         let device = mock_device();
@@ -4913,6 +5143,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(mock_present_count(&device), before + 1);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn resize_one_surface_does_not_stale_other_transaction() {
         let device = mock_device();
@@ -4951,6 +5182,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .expect("right present");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_stamps_frame_with_present_partition_timeline() {
         let device = mock_device();
@@ -4981,6 +5213,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         consume_present(&present, &mut submission);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_second_present_errors() {
         let device = mock_device();
@@ -4996,6 +5229,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_grant_rejects_cross_scheme_submission() {
         let device = mock_device();
@@ -5015,6 +5249,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_submit_twice_presents_independently() {
         // Each submit acquires a fresh swapchain frame; both must be presentable.
@@ -5035,6 +5270,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(mock_present_count(&device), 2, "two submits → two presents");
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_scheme_records_once_per_slot() {
         // The present-aware retention path must record the first time a given
@@ -5069,6 +5305,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn dropped_frame_without_present_cancels_swapchain() {
         let device = mock_device();
@@ -5090,6 +5327,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_present_and_render_pass_partition_on_present_boundary() {
         use crate::task_graph::analysis;
@@ -5167,6 +5405,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         .expect("direct texture")
     }
 
+    #[cfg(feature = "graphics")]
     fn present_scheme_with_texture_copy(
         scheme: &mut Scheme,
         tex: &crate::Texture,
@@ -5181,6 +5420,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         scheme.register_present_exchange(lease)
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_easement_promise_resolved_at_submit_before_claim_consume() {
         use crate::task_graph::cross_submit::ResourceKey;
@@ -5219,6 +5459,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_easement_tracks_render_target_copy_source_stamp() {
         use crate::task_graph::cross_submit::ResourceKey;
@@ -5265,6 +5506,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         drop(submission);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_consume_resolves_with_copy_timeline_not_display_present() {
         use crate::task_graph::cross_submit::ResourceKey;
@@ -5306,6 +5548,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         }
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn submit_gate_folds_resolved_present_promise_into_foreign_reads() {
         use crate::task_graph::cross_submit::ResourceKey;
@@ -5345,6 +5588,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn submit_gate_does_not_block_on_unconsumed_claim() {
         let device = mock_device();
@@ -5361,6 +5605,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         consume_present(&present, &mut sub1);
     }
 
+    #[cfg(feature = "graphics")]
     #[test]
     fn texture_stamp_war_resolved_at_submit_survives_claim_discard() {
         use crate::task_graph::cross_submit::ResourceKey;
@@ -5400,6 +5645,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     /// to one ledger cell (`ResourceSync`), and a present-path submit must record the copy
     /// read on that cell so cross-frame WAR enforcement can key off `foreign_reads`
     /// (present easement is an exercised-claim / foreign read, not a scheduled `last_reads`).
+    #[cfg(feature = "graphics")]
     #[test]
     fn out_image_fine_write_and_present_copy_share_ledger_identity() {
         use crate::task_graph::cross_submit::{
@@ -5524,6 +5770,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     /// emit a live queue-wait on frame 2 against the prior frame's present-read
     /// epoch. Goldy `Scheme::submit` never touches `FrameOrchestrator`;
     /// this test isolates ledger enforcement from orchestrator slot stamping.
+    #[cfg(feature = "graphics")]
     #[test]
     fn present_war_ledger_live_wait_on_second_submit_path() {
         use crate::task_graph::cross_submit::ResourceKey;

@@ -7,7 +7,7 @@ mod submission;
 #[path = "common/upload.rs"]
 mod upload;
 
-#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
 mod imp {
     //! Cross-scheme synchronization integration tests.
     //!
@@ -645,6 +645,6 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
 }
 
 fn main() {
-    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
     imp::run();
 }

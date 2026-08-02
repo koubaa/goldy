@@ -3,7 +3,7 @@
 #[path = "common/submission.rs"]
 mod submission;
 
-#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
 mod imp {
     //! Compute pipeline integration tests (skip bucket).
     //!
@@ -489,6 +489,6 @@ mod imp {
 }
 
 fn main() {
-    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
     imp::run();
 }

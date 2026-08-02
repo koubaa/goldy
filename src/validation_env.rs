@@ -8,8 +8,10 @@
 //!   - `layout` / `layouts` — layout + stride checks
 //!   - `api` — graphics API validation (Vulkan validation layer + `VK_EXT_debug_utils` where
 //!     built; Metal `MTL_SHADER_VALIDATION=1` when `GOLDY_VALIDATION` includes `api` and the
-//!     variable is unset — set once before the first device is enumerated). For loader-only
-//!     Vulkan layers, set `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
+//!     variable is unset — set once before the first device is enumerated; CUDA Driver
+//!     diagnostics: PTX JIT logs, eager stream sync, launch-limit checks, and
+//!     `CUDA_LAUNCH_BLOCKING=1` when unset). For loader-only Vulkan layers, set
+//!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
 //!   - `scheme` / `readback` — retained-scheme withdraw staging invariants (staging pool, frame pairing)
 //!   - `all` — layout, GPU API, timeline, and scheme
@@ -95,8 +97,9 @@ pub fn layout_validation_enabled() -> bool {
     from_goldy_validation_var().layout
 }
 
-/// Vulkan Khronos validation + `VK_EXT_debug_utils`, Metal `MTL_SHADER_VALIDATION`, etc.
-#[cfg(any(feature = "vulkan", all(feature = "metal", target_os = "macos")))]
+/// Vulkan Khronos validation + `VK_EXT_debug_utils`, Metal `MTL_SHADER_VALIDATION`,
+/// CUDA Driver diagnostics (JIT logs / eager sync / launch limits), etc.
+#[cfg(any(feature = "vulkan", feature = "cuda", all(feature = "metal", target_os = "macos"),))]
 #[must_use]
 pub(crate) fn gpu_api_validation_enabled() -> bool {
     from_goldy_validation_var().gpu_api

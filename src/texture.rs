@@ -366,6 +366,7 @@ impl TextureBacking {
     ///
     /// Swapchain drawables on surfaces with compute-to-surface support are
     /// writable, so we tag them as `TextureKind::Direct` (storage image).
+    #[cfg(feature = "graphics")]
     pub(crate) fn borrowed(
         backend: Arc<Mutex<Box<dyn GpuBackend>>>,
         handle: TextureHandle,

@@ -242,13 +242,14 @@ impl Context {
         };
         let backend_mutex = &self.inner.device.inner.backend;
         if !already_complete {
+            // Do not call `classify` while holding the backend mutex: `classify` →
+            // `Device::is_device_lost` re-locks the same mutex (non-recursive → deadlock).
             let submission_wait = {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();
-                backend
-                    .take_timeline_submission_epoch_wait(ctx, value)
-                    .map_err(|e| self.classify(e))?
+                backend.take_timeline_submission_epoch_wait(ctx, value)
             };
+            let submission_wait = submission_wait.map_err(|e| self.classify(e))?;
             if let Some(wait) = submission_wait {
                 let _sw = crate::tracy_zone!("context.wait_until.submission_worker");
                 wait.wait().map_err(|e| self.classify(e))?;
@@ -257,10 +258,9 @@ impl Context {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();
                 let _prepare = crate::tracy_zone!("context.wait_until.prepare");
-                backend
-                    .take_timeline_blocking_wait(ctx, value)
-                    .map_err(|e| self.classify(e))?
+                backend.take_timeline_blocking_wait(ctx, value)
             };
+            let blocking = blocking.map_err(|e| self.classify(e))?;
             if let Some(wait) = blocking {
                 let _block = crate::tracy_zone!("context.wait_until.block");
                 wait.block().map_err(|e| self.classify(e))?;
@@ -284,13 +284,13 @@ impl Context {
         let already_complete = self.gpu_progress() >= value;
         let backend_mutex = &self.inner.device.inner.backend;
         if !already_complete {
+            // See `wait_until_context`: classify must not run under the backend lock.
             let submission_wait = {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();
-                backend
-                    .take_timeline_submission_epoch_wait(ctx, value)
-                    .map_err(|e| self.classify(e))?
+                backend.take_timeline_submission_epoch_wait(ctx, value)
             };
+            let submission_wait = submission_wait.map_err(|e| self.classify(e))?;
             if let Some(wait) = submission_wait {
                 let _sw = crate::tracy_zone!("context.wait_until.submission_worker");
                 wait.wait().map_err(|e| self.classify(e))?;
@@ -298,10 +298,9 @@ impl Context {
             let blocking = {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();
-                backend
-                    .take_timeline_blocking_wait(ctx, value)
-                    .map_err(|e| self.classify(e))?
+                backend.take_timeline_blocking_wait(ctx, value)
             };
+            let blocking = blocking.map_err(|e| self.classify(e))?;
             if let Some(wait) = blocking {
                 let _block = crate::tracy_zone!("context.wait_until.block");
                 if !wait.block_timeout(timeout_ms).map_err(|e| self.classify(e))? {

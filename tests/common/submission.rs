@@ -22,7 +22,7 @@ pub fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Device) 
         return;
     }
 
-    if device.backend_type() == BackendType::Vulkan {
+    if device.backend_type() == BackendType::Vulkan || device.backend_type() == BackendType::Cuda {
         let pool = device.max_submission_contexts().max(1) as usize;
         // Each trial may hold up to two contexts; parallel trials share one device pool.
         let cap = (pool / 2).max(1);

@@ -370,6 +370,7 @@ impl ResourceHandle {
 }
 
 /// Presentation mode controlling how frames are displayed.
+#[cfg(feature = "graphics")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PresentMode {
     /// Vsync: wait for display refresh. No tearing, capped at display Hz.
@@ -387,6 +388,7 @@ pub enum PresentMode {
 }
 
 /// Configuration for surface creation.
+#[cfg(feature = "graphics")]
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceConfig {
     /// Presentation mode (vsync strategy).

@@ -22,12 +22,15 @@ pub mod frame_orchestrator;
 pub(crate) mod frame_table;
 pub(crate) mod handles;
 pub mod kernel;
+#[cfg(feature = "graphics")]
 pub mod pipeline;
+#[cfg(feature = "graphics")]
 pub(crate) mod render_target;
 pub mod sampler;
 pub mod shader;
 pub mod shader_library;
 pub mod shaders;
+#[cfg(feature = "graphics")]
 pub(crate) mod surface;
 pub mod task_graph;
 pub mod texture;
@@ -54,21 +57,27 @@ pub mod parcel;
 pub mod retained_pool;
 pub mod scheme;
 pub mod signal;
+#[cfg(feature = "graphics")]
 pub mod swapchain_pool;
 pub(crate) mod timeline;
 pub mod transient_pool;
 pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
-pub use exchange::{
-    Claim, DepositTransaction, MemoryExchange, SurfaceExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
-};
+#[cfg(feature = "graphics")]
+pub use exchange::{Claim, SurfaceExchange};
+pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
-pub use scheme::{Lease, LeaseRenderTarget, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission, Transaction};
+pub use scheme::{Lease, ReplayStats, Scheme, Submission};
+#[cfg(feature = "graphics")]
+pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, Transaction};
+#[cfg(feature = "graphics")]
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
-pub use task_graph::{ShaderResourceSlot, PRESENT_LEASE_SLOT_PLACEHOLDER};
+pub use task_graph::ShaderResourceSlot;
+#[cfg(feature = "graphics")]
+pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
@@ -87,6 +96,7 @@ pub use kernel::{
     prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
+#[cfg(feature = "graphics")]
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
@@ -98,8 +108,10 @@ pub use texture::TextureCopyFootprint;
 
 pub use handles::{SamplerHandle, TextureHandle};
 pub use types::*;
+#[cfg(feature = "graphics")]
 pub use types::{PresentMode, SurfaceConfig};
 
+#[cfg(feature = "graphics")]
 pub use raw_window_handle;
 
 #[cfg(test)]
@@ -200,6 +212,7 @@ pub mod test_support {
     }
 
     /// Headless surface exchange backed by mock window handles (mock backend only).
+    #[cfg(feature = "graphics")]
     pub fn mock_surface_exchange(device: &Arc<Device>) -> (crate::Context, crate::SurfaceExchange) {
         struct MockWindow;
 

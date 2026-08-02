@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::backend::{BufferHandle, ContextHandle, RenderTargetHandle, SubmitSync, TextureHandle};
+#[cfg(feature = "graphics")]
+use crate::backend::RenderTargetHandle;
+use crate::backend::{BufferHandle, ContextHandle, SubmitSync, TextureHandle};
 use crate::parcel::{InteractionEdge, InteractionRole, ParcelStamp};
 use crate::task_graph::ir::{
     BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeKind, ResourceBinding, SlotUsageSet, UsageKindFlags,
@@ -56,6 +58,7 @@ pub enum ResourceKey {
     Texture(TextureHandle),
     /// Scheme-owned offscreen render target. Not shared across schemes; tracked so
     /// present-easement WAR (copy-to-present readers) can gate the next RT write.
+    #[cfg(feature = "graphics")]
     RenderTarget(RenderTargetHandle),
 }
 
@@ -65,12 +68,15 @@ impl ResourceKey {
             ResourceId::Buffer(h) => Some(Self::Buffer(h)),
             ResourceId::BufferRange { parent, offset, len } => Some(Self::BufferRange { parent, offset, len }),
             ResourceId::Texture(h) => Some(Self::Texture(h)),
+            #[cfg(feature = "graphics")]
             ResourceId::RenderTarget(h) => Some(Self::RenderTarget(h)),
             ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_) => None,
             // SwapchainOutput, PresentLease, and Deposit are owned by scheme/surface
             // infrastructure and not shared as ledger-tracked resources (upload parcels are
             // stamped directly after submit).
-            ResourceId::SwapchainOutput | ResourceId::PresentLease(_) | ResourceId::Deposit(_) => None,
+            #[cfg(feature = "graphics")]
+            ResourceId::SwapchainOutput | ResourceId::PresentLease(_) => None,
+            ResourceId::Deposit(_) => None,
         }
     }
 }
@@ -98,6 +104,7 @@ pub(crate) fn resource_keys_alias(a: ResourceKey, b: ResourceKey) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceKey::Texture(x), ResourceKey::Texture(y)) => x == y,
+        #[cfg(feature = "graphics")]
         (ResourceKey::RenderTarget(x), ResourceKey::RenderTarget(y)) => x == y,
         _ => false,
     }
@@ -289,6 +296,7 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
                 barriers.textures.push((h, usage));
             }
         }
+        #[cfg(feature = "graphics")]
         ResourceKey::RenderTarget(_) => {
             // BarrierSet has no RT slot; scheme-owned RTs rely on queue ordering for
             // same-context last_reads and on foreign_reads waits for present easement.
