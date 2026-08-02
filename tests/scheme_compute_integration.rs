@@ -4113,8 +4113,8 @@ mod imp {
     /// `cargo test --no-default-features --features cuda --test scheme_compute_integration`
     ///
     /// CUDA deliberately defers texture/sampler GPGPU (still part of the public compute
-    /// API without the `graphics` feature) and indirect dispatch (M5). Those trials are
-    /// registered as ignored with a `cuda-deferred` kind so the suite stays explicit.
+    /// API without the `graphics` feature). Those trials are registered as ignored with a
+    /// `cuda-deferred` kind so the suite stays explicit.
     pub fn run() {
         let device = make_device();
         let is_cuda = device.backend_type() == BackendType::Cuda;
@@ -4194,10 +4194,10 @@ mod imp {
         trial!(scheme_uniform_scalar_after_two_buffer_params);
         trial!(scheme_buffer_view_copy_between_sub_regions);
         trial!(scheme_buffer_view_isolation);
-        trial_cuda_deferred!(scheme_compute_dispatch_indirect, "indirect");
-        trial_cuda_deferred!(scheme_dispatch_indirect_invalid_buffer, "indirect");
-        trial_cuda_deferred!(scheme_dispatch_indirect_wrong_type_rejected, "indirect");
-        trial_cuda_deferred!(scheme_stress_zeros_then_indirect_dispatch, "indirect");
+        trial!(scheme_compute_dispatch_indirect);
+        trial!(scheme_dispatch_indirect_invalid_buffer);
+        trial!(scheme_dispatch_indirect_wrong_type_rejected);
+        trial!(scheme_stress_zeros_then_indirect_dispatch);
         trial!(scheme_stress_alternating_write_dispatch);
         trial!(scheme_clear_parcel_full);
         trial!(scheme_clear_parcel_partial_preserves_edges);

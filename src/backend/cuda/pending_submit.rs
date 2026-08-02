@@ -6,11 +6,25 @@ use super::{CudaBufferArg, CudaLaunchArg, CudaSubmitContext};
 use crate::backend::submission_worker::PendingSubmit;
 use crate::backend::{ContextHandle, DeferredHostWrite};
 use crate::timeline::TimelineValue;
+use crate::types::DispatchShape;
 use anyhow::{Context as _, Result};
 use cudarc::driver::{
-    CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig,
+    PushKernelArg,
 };
 use std::sync::{Arc, Mutex};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct U64Word(u64);
+// SAFETY: plain POD matching a device pointer / handle word.
+unsafe impl DeviceRepr for U64Word {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct U32Word(u32);
+// SAFETY: plain POD matching a CUDA `unsigned int` kernel parameter.
+unsafe impl DeviceRepr for U32Word {}
 
 /// GPU/host work recorded under the backend lock, executed without it.
 pub(super) struct CudaPendingSubmit {
@@ -62,6 +76,32 @@ pub(super) enum CudaOp {
         args: Vec<CudaLaunchArg>,
         keep_alive: Vec<Arc<Mutex<CudaSlice<u8>>>>,
     },
+    /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
+    /// path resolves the shape via DtoH on the worker stream.
+    LaunchIndirect {
+        label: Option<&'static str>,
+        function: CudaFunction,
+        module: Arc<CudaModule>,
+        workgroup_size: [u32; 3],
+        args: Vec<CudaLaunchArg>,
+        keep_alive: Vec<Arc<Mutex<CudaSlice<u8>>>>,
+        /// Absolute device address of the 12-byte [`DispatchShape`].
+        shape_ptr: u64,
+        shape_memory: Arc<Mutex<CudaSlice<u8>>>,
+        shape_abs_offset: u64,
+        /// Device slot written with `CUgraphDeviceNode` after capture finalize.
+        node_slot_ptr: u64,
+        node_slot: Arc<Mutex<CudaSlice<u64>>>,
+        /// Diagnostic status word (0 = ok, -1 = oversized, else CUDA error).
+        status_ptr: u64,
+        status_memory: Arc<Mutex<CudaSlice<i32>>>,
+        updater: CudaFunction,
+        updater_module: Arc<CudaModule>,
+        max_grid: (u32, u32, u32),
+        /// Function max threads for host-side validation on the fallback path.
+        max_threads_per_block: u32,
+        limits: super::CudaDeviceLimits,
+    },
     Clear {
         memory: Arc<Mutex<CudaSlice<u8>>>,
         abs_offset: u64,
@@ -83,14 +123,20 @@ pub(super) enum CudaOp {
 
 /// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
 ///
-/// Only kernel launches are captured initially. `memset` / `memcpy` via cudarc have been
-/// observed to invalidate `THREAD_LOCAL` stream capture on this driver stack, so clears and
-/// copies stay on the command-replay path until an explicit-graph or capture-safe copy path lands.
+/// Kernel launches (direct and indirect) are capture-safe. `memset` / `memcpy` via cudarc
+/// have been observed to invalidate `THREAD_LOCAL` stream capture on this driver stack, so
+/// clears and copies stay on the command-replay path until an explicit-graph or capture-safe
+/// copy path lands.
 pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
     if ops.is_empty() {
         return false;
     }
-    ops.iter().all(|op| matches!(op, CudaOp::Launch { .. }))
+    ops.iter()
+        .all(|op| matches!(op, CudaOp::Launch { .. } | CudaOp::LaunchIndirect { .. }))
+}
+
+pub(super) fn ops_contain_indirect(ops: &[CudaOp]) -> bool {
+    ops.iter().any(|op| matches!(op, CudaOp::LaunchIndirect { .. }))
 }
 
 pub(super) fn collect_pins(
@@ -107,6 +153,18 @@ pub(super) fn collect_pins(
             } => {
                 modules.push(Arc::clone(module));
                 buffers.extend(keep_alive.iter().cloned());
+            }
+            CudaOp::LaunchIndirect {
+                module,
+                updater_module,
+                keep_alive,
+                shape_memory,
+                ..
+            } => {
+                modules.push(Arc::clone(module));
+                modules.push(Arc::clone(updater_module));
+                buffers.extend(keep_alive.iter().cloned());
+                buffers.push(Arc::clone(shape_memory));
             }
             CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
                 buffers.push(Arc::clone(memory));
@@ -132,8 +190,11 @@ pub(super) fn maybe_validate_sync(stream: &Arc<CudaStream>, op: &str) -> Result<
 /// Execute materialized ops on `stream`.
 ///
 /// When `validate` is false, per-op stream synchronization is skipped (required during
-/// CUDA graph capture, where host sync is illegal).
+/// CUDA graph capture, where host sync is illegal). Indirect launches in capture mode
+/// record updater + placeholder consumer; the consumer is made device-updatable after
+/// `end_capture` via [`finalize_indirect_capture`].
 pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bool) -> Result<()> {
+    let capturing = !validate;
     for op in ops {
         match op {
             CudaOp::Launch {
@@ -144,31 +205,50 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 args,
                 ..
             } => {
-                let where_ = label.unwrap_or("<unnamed>");
-                let cfg = LaunchConfig {
-                    grid_dim: *grid,
-                    block_dim: (workgroup_size[0], workgroup_size[1], workgroup_size[2]),
-                    shared_mem_bytes: 0,
-                };
-                // SAFETY: argument order/types match the Slang CUDA entry signature.
-                unsafe {
-                    let mut builder = stream.launch_builder(function);
-                    for arg in args {
-                        match arg {
-                            CudaLaunchArg::Buffer(buffer) => {
-                                builder.arg(buffer);
-                            }
-                            CudaLaunchArg::Scalar(word) => {
-                                builder.arg(word);
-                            }
-                        }
-                    }
-                    builder
-                        .launch(cfg)
-                        .with_context(|| format!("CUDA: cuLaunchKernel failed for dispatch '{where_}'"))?;
-                }
-                if validate {
-                    maybe_validate_sync(stream, &format!("dispatch '{where_}'"))?;
+                launch_direct(stream, *label, function, *workgroup_size, *grid, args, validate)?;
+            }
+            CudaOp::LaunchIndirect {
+                label,
+                function,
+                workgroup_size,
+                args,
+                shape_ptr,
+                shape_memory,
+                shape_abs_offset,
+                node_slot_ptr,
+                status_ptr,
+                updater,
+                max_grid,
+                max_threads_per_block,
+                limits,
+                ..
+            } => {
+                if capturing {
+                    launch_indirect_for_capture(
+                        stream,
+                        updater,
+                        function,
+                        *workgroup_size,
+                        args,
+                        *shape_ptr,
+                        *node_slot_ptr,
+                        *status_ptr,
+                        *max_grid,
+                    )?;
+                } else {
+                    launch_indirect_fallback(
+                        stream,
+                        *label,
+                        function,
+                        *workgroup_size,
+                        args,
+                        shape_memory,
+                        *shape_abs_offset,
+                        *max_grid,
+                        *max_threads_per_block,
+                        *limits,
+                        validate,
+                    )?;
                 }
             }
             CudaOp::Clear {
@@ -220,6 +300,222 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
         }
     }
     Ok(())
+}
+
+fn launch_direct(
+    stream: &Arc<CudaStream>,
+    label: Option<&'static str>,
+    function: &CudaFunction,
+    workgroup_size: [u32; 3],
+    grid: (u32, u32, u32),
+    args: &[CudaLaunchArg],
+    validate: bool,
+) -> Result<()> {
+    let where_ = label.unwrap_or("<unnamed>");
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (workgroup_size[0], workgroup_size[1], workgroup_size[2]),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: argument order/types match the Slang CUDA entry signature.
+    unsafe {
+        let mut builder = stream.launch_builder(function);
+        for arg in args {
+            match arg {
+                CudaLaunchArg::Buffer(buffer) => {
+                    builder.arg(buffer);
+                }
+                CudaLaunchArg::Scalar(word) => {
+                    builder.arg(word);
+                }
+            }
+        }
+        builder
+            .launch(cfg)
+            .with_context(|| format!("CUDA: cuLaunchKernel failed for dispatch '{where_}'"))?;
+    }
+    if validate {
+        maybe_validate_sync(stream, &format!("dispatch '{where_}'"))?;
+    }
+    Ok(())
+}
+
+fn launch_indirect_for_capture(
+    stream: &Arc<CudaStream>,
+    updater: &CudaFunction,
+    consumer: &CudaFunction,
+    workgroup_size: [u32; 3],
+    args: &[CudaLaunchArg],
+    shape_ptr: u64,
+    node_slot_ptr: u64,
+    status_ptr: u64,
+    max_grid: (u32, u32, u32),
+) -> Result<()> {
+    // Pass baked device pointers as POD words so cudarc does not create
+    // cross-stream wait edges that invalidate THREAD_LOCAL capture.
+    let shape_arg = U64Word(shape_ptr);
+    let slot_arg = U64Word(node_slot_ptr);
+    let status_arg = U64Word(status_ptr);
+    let max_x = U32Word(max_grid.0);
+    let max_y = U32Word(max_grid.1);
+    let max_z = U32Word(max_grid.2);
+    // SAFETY: updater signature matches goldy_apply_dispatch_shape.
+    unsafe {
+        stream
+            .launch_builder(updater)
+            .arg(&shape_arg)
+            .arg(&slot_arg)
+            .arg(&max_x)
+            .arg(&max_y)
+            .arg(&max_z)
+            .arg(&status_arg)
+            .launch(LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            })
+            .context("CUDA: updater launch failed during graph capture")?;
+    }
+    // Placeholder consumer grid; the updater sets the real grid before each graph launch.
+    launch_direct(
+        stream,
+        Some("<indirect-capture>"),
+        consumer,
+        workgroup_size,
+        (1, 1, 1),
+        args,
+        false,
+    )
+}
+
+fn launch_indirect_fallback(
+    stream: &Arc<CudaStream>,
+    label: Option<&'static str>,
+    function: &CudaFunction,
+    workgroup_size: [u32; 3],
+    args: &[CudaLaunchArg],
+    shape_memory: &Arc<Mutex<CudaSlice<u8>>>,
+    shape_abs_offset: u64,
+    max_grid: (u32, u32, u32),
+    max_threads_per_block: u32,
+    limits: super::CudaDeviceLimits,
+    validate: bool,
+) -> Result<()> {
+    let where_ = label.unwrap_or("<unnamed>");
+    let mut host = [0u8; 12];
+    {
+        let memory = shape_memory.lock().unwrap();
+        let start = shape_abs_offset as usize;
+        let end = start + 12;
+        let view = memory
+            .try_slice(start..end)
+            .context("CUDA: indirect shape range out of bounds")?;
+        stream
+            .memcpy_dtoh(&view, &mut host[..])
+            .context("CUDA: indirect shape DtoH failed")?;
+    }
+    // Ensure the copy completes before reading host bytes for the launch config.
+    stream
+        .synchronize()
+        .context("CUDA: synchronize after indirect shape DtoH failed")?;
+    let shape = DispatchShape {
+        x: u32::from_le_bytes(host[0..4].try_into().unwrap()),
+        y: u32::from_le_bytes(host[4..8].try_into().unwrap()),
+        z: u32::from_le_bytes(host[8..12].try_into().unwrap()),
+    };
+    let grid = (shape.x, shape.y, shape.z);
+    if shape.x == 0 || shape.y == 0 || shape.z == 0 {
+        tracing::trace!(
+            label = where_,
+            grid = ?(shape.x, shape.y, shape.z),
+            "CUDA: indirect dispatch zero grid — no-op"
+        );
+        return Ok(());
+    }
+    if shape.x > max_grid.0 || shape.y > max_grid.1 || shape.z > max_grid.2 {
+        anyhow::bail!(
+            "CUDA: indirect dispatch '{where_}' grid ({},{},{}) exceeds device max ({},{},{})",
+            shape.x,
+            shape.y,
+            shape.z,
+            max_grid.0,
+            max_grid.1,
+            max_grid.2
+        );
+    }
+    super::validate_launch_config(
+        &limits,
+        max_threads_per_block,
+        grid,
+        workgroup_size,
+        0,
+        label,
+    )?;
+    launch_direct(stream, label, function, workgroup_size, grid, args, validate)
+}
+
+/// After stream capture, opt each indirect consumer into device-updatable mode and
+/// write the returned handles into the corresponding device slots.
+pub(super) fn finalize_indirect_capture(
+    stream: &Arc<CudaStream>,
+    cu_graph: cudarc::driver::sys::CUgraph,
+    ops: &[CudaOp],
+) -> Result<()> {
+    // Kernel-node ordinal among all captured kernel nodes.
+    let mut kernel_ordinal = 0usize;
+    for op in ops {
+        match op {
+            CudaOp::Launch { .. } => {
+                kernel_ordinal += 1;
+            }
+            CudaOp::LaunchIndirect { node_slot, .. } => {
+                // Updater is kernel_ordinal; consumer is kernel_ordinal + 1.
+                let consumer_ordinal = kernel_ordinal + 1;
+                let dev_node =
+                    retained_graph::make_kernel_node_device_updatable(cu_graph, consumer_ordinal)?;
+                let mut slot = node_slot.lock().unwrap();
+                stream
+                    .memcpy_htod(&[dev_node as u64], &mut *slot)
+                    .context("CUDA: write CUgraphDeviceNode into updater slot failed")?;
+                kernel_ordinal += 2;
+            }
+            CudaOp::Clear { .. } | CudaOp::Write { .. } | CudaOp::Copy { .. } => {
+                anyhow::bail!(
+                    "CUDA: finalize_indirect_capture called on a graph-unsafe op set"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Capture `ops` into a retained CUDA graph. When any op is [`CudaOp::LaunchIndirect`],
+/// opts consumer nodes into device-updatable mode before instantiate.
+pub(super) fn capture_partition_graph(
+    stream: &Arc<CudaStream>,
+    ops: &[CudaOp],
+) -> Result<retained_graph::OwnedCudaGraph> {
+    use cudarc::driver::sys;
+    stream
+        .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+        .context("CUDA: begin_capture failed")?;
+    let capture_result = execute_ops(stream, ops, false);
+    let end = unsafe { cudarc::driver::result::stream::end_capture(stream.cu_stream()) };
+    if let Err(error) = &capture_result {
+        let _ = stream.synchronize();
+        return Err(anyhow::anyhow!("CUDA: graph capture recording failed: {error:#}"));
+    }
+    let cu_graph = end.context("CUDA: end_capture failed")?;
+    if cu_graph.is_null() {
+        anyhow::bail!("CUDA: end_capture returned an empty graph");
+    }
+    if ops_contain_indirect(ops) {
+        if let Err(error) = finalize_indirect_capture(stream, cu_graph, ops) {
+            let _ = unsafe { cudarc::driver::result::graph::destroy(cu_graph) };
+            return Err(error).context("CUDA: graph finalize (device-updatable) failed");
+        }
+    }
+    retained_graph::instantiate_owned(stream, cu_graph)
 }
 
 fn run_dynamic_prefix(
@@ -294,9 +590,8 @@ impl PendingSubmit for CudaPendingSubmit {
             } => {
                 let ctx = self.context.handle;
                 let (buffers, modules) = collect_pins(&ops);
-                let graph = retained_graph::capture_ops_to_graph(&self.stream, || {
-                    execute_ops(&self.stream, &ops, false)
-                })?;
+                let needs_indirect = ops_contain_indirect(&ops);
+                let graph = capture_partition_graph(&self.stream, &ops)?;
                 stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 {
                     let mut guard = registry.lock().unwrap();
@@ -318,6 +613,12 @@ impl PendingSubmit for CudaPendingSubmit {
                     let partition = guard
                         .get_mut(ctx, key)
                         .context("CUDA: retained graph missing after capture")?;
+                    if needs_indirect {
+                        partition
+                            .graph
+                            .upload()
+                            .context("CUDA: cuGraphUpload failed after indirect capture")?;
+                    }
                     partition
                         .graph
                         .launch()

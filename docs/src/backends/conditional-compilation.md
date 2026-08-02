@@ -51,7 +51,7 @@ backend automatically. In a default multi-backend build, opt in with
 `GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu`.
 
 ```bash
-# CUDA compute gate (buffer schemes; textures/indirect deferred as ignored)
+# CUDA compute gate (buffer schemes + indirect; textures deferred as ignored)
 cargo test --no-default-features --features cuda --test scheme_compute_integration
 ```
 

@@ -12,12 +12,14 @@
 //!
 //! Retainable compute partitions whose bodies are kernel-launch-only are captured into
 //! CUDA graphs on first submit (`submit_graph_and_retain`) and relaunched on cache hits
-//! (`try_resubmit_retained`). Uploads, clears, copies, and other graph-unsafe ops fall
-//! back to Goldy command-list replay. Dynamic waits, deferred host writes, and completion
-//! events stay outside the captured graph.
+//! (`try_resubmit_retained`). Indirect dispatches use CUDA 13.1 device-updatable kernel
+//! nodes plus an in-graph updater; uploads, clears, copies, and other graph-unsafe ops fall
+//! back to Goldy command-list replay (with a worker-side DtoH resolve for indirect grids).
+//! Dynamic waits, deferred host writes, and completion events stay outside the captured graph.
 
 mod pending_submit;
 mod retained_graph;
+mod runtime_module;
 mod timeline;
 
 use super::*;
@@ -43,7 +45,7 @@ use timeline::{EventLedger, LedgerEntry};
 
 /// Logical retained entry under the backend lock (graphs themselves live on the worker).
 enum RetainedEntry {
-    /// Partition was captured; worker registry holds the [`cudarc::driver::CudaGraph`].
+    /// Partition was captured; worker registry holds the [`OwnedCudaGraph`](retained_graph::OwnedCudaGraph).
     Graph,
     /// Graph-unsafe partition: replay stored Goldy commands each resubmit.
     Commands(Vec<GraphCommand>),
@@ -56,12 +58,12 @@ static CUDA_VALIDATION_INIT: Once = Once::new();
 
 /// Cached device launch limits queried once at [`CudaBackend::create_device`].
 #[derive(Clone, Copy, Debug)]
-struct CudaDeviceLimits {
-    max_grid_dim_x: u32,
-    max_grid_dim_y: u32,
-    max_grid_dim_z: u32,
-    max_threads_per_block: u32,
-    max_shared_memory_per_block: u32,
+pub(super) struct CudaDeviceLimits {
+    pub max_grid_dim_x: u32,
+    pub max_grid_dim_y: u32,
+    pub max_grid_dim_z: u32,
+    pub max_threads_per_block: u32,
+    pub max_shared_memory_per_block: u32,
 }
 
 /// Slang CUDA structured-buffer descriptor: `{ T* data; size_t count }`.
@@ -106,6 +108,8 @@ struct CudaDevice {
     graph_registry: Arc<Mutex<GraphRegistry>>,
     graph_stats: Arc<CudaGraphStats>,
     limits: CudaDeviceLimits,
+    /// NVRTC-compiled updater for device-updatable indirect dispatch.
+    indirect_updater: Arc<runtime_module::IndirectUpdater>,
 }
 
 pub(super) struct CudaSubmitContext {
@@ -262,6 +266,7 @@ impl CudaBackend {
             }
         });
         cudarc::driver::result::init().context("CUDA: driver init failed")?;
+        ensure_cuda_driver_at_least_13_1()?;
         let count = CudaContext::device_count().context("CUDA: enumerate devices")?;
         if count <= 0 {
             anyhow::bail!("CUDA: no devices found");
@@ -875,6 +880,118 @@ impl CudaBackend {
         })
     }
 
+    fn materialize_launch_indirect(
+        &self,
+        stream: &Arc<CudaStream>,
+        pipeline_handle: ComputePipelineHandle,
+        indices: &[u32],
+        user: &[u32],
+        shape_buffer: BufferHandle,
+        shape_offset: u64,
+        label: Option<&'static str>,
+    ) -> Result<CudaOp> {
+        let pipeline = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .context("CUDA: invalid compute pipeline")?;
+        let shape_buf = self
+            .buffers
+            .get(&shape_buffer)
+            .context("CUDA: invalid indirect shape buffer")?;
+        if shape_offset
+            .checked_add(12)
+            .filter(|end| *end <= shape_buf.size)
+            .is_none()
+        {
+            anyhow::bail!(
+                "CUDA: indirect shape range [{shape_offset}, {}) exceeds buffer size {}",
+                shape_offset + 12,
+                shape_buf.size
+            );
+        }
+        let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
+        let mut keep_alive = Vec::new();
+        for (binding, index) in indices.iter().copied().enumerate() {
+            let handle = self.buffer_slots.get(&index).with_context(|| {
+                format!("CUDA: binding {binding} references unknown registry key {index}")
+            })?;
+            let buffer = self
+                .buffers
+                .get(handle)
+                .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
+            keep_alive.push(Arc::clone(&buffer.memory));
+        }
+        keep_alive.push(Arc::clone(&shape_buf.memory));
+
+        let shape_abs_offset = shape_buf.offset + shape_offset;
+        let shape_ptr = {
+            let memory = shape_buf.memory.lock().unwrap();
+            let (base, _sync) = memory.device_ptr(stream);
+            base + shape_abs_offset
+        };
+
+        let device = self.device(pipeline.device)?;
+        let node_slot = Arc::new(Mutex::new(
+            device
+                .alloc_stream
+                .alloc_zeros::<u64>(1)
+                .context("CUDA: alloc device-updatable node slot")?,
+        ));
+        let status_memory = Arc::new(Mutex::new(
+            device
+                .alloc_stream
+                .alloc_zeros::<i32>(1)
+                .context("CUDA: alloc indirect status word")?,
+        ));
+        let node_slot_ptr = {
+            let slot = node_slot.lock().unwrap();
+            let (ptr, _sync) = slot.device_ptr(stream);
+            ptr
+        };
+        let status_ptr = {
+            let status = status_memory.lock().unwrap();
+            let (ptr, _sync) = status.device_ptr(stream);
+            ptr
+        };
+
+        let function = pipeline
+            .module
+            .load_function("cs_main")
+            .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
+        let updater = device.indirect_updater.function.clone();
+        let updater_module = Arc::clone(&device.indirect_updater.module);
+        let max_grid = (
+            device.limits.max_grid_dim_x,
+            device.limits.max_grid_dim_y,
+            device.limits.max_grid_dim_z,
+        );
+        let limits = device.limits;
+        let max_threads_per_block = pipeline.max_threads_per_block;
+        let workgroup_size = pipeline.workgroup_size;
+        let module = Arc::clone(&pipeline.module);
+
+        Ok(CudaOp::LaunchIndirect {
+            label,
+            function,
+            module,
+            workgroup_size,
+            args: launch_args,
+            keep_alive,
+            shape_ptr,
+            shape_memory: Arc::clone(&shape_buf.memory),
+            shape_abs_offset,
+            node_slot_ptr,
+            node_slot,
+            status_ptr,
+            status_memory,
+            updater,
+            updater_module,
+            max_grid,
+            max_threads_per_block,
+            limits,
+        })
+    }
+
     fn materialize_ops(&self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
         let mut ops = Vec::new();
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
@@ -911,11 +1028,22 @@ impl CudaBackend {
                         *label,
                     )?);
                 }
-                GpuCommand::DispatchIndirect { .. } => {
-                    anyhow::bail!(
-                        "CUDA compute-only PoC does not support indirect dispatch; \
-                         use the graphics-companion fallback in the full CUDA backend"
-                    )
+                GpuCommand::DispatchIndirect {
+                    label,
+                    buffer,
+                    offset,
+                } => {
+                    let pipeline_handle =
+                        current_pipeline.context("CUDA: indirect dispatch without a compute pipeline")?;
+                    ops.push(self.materialize_launch_indirect(
+                        stream,
+                        pipeline_handle,
+                        &current_indices,
+                        &current_user,
+                        *buffer,
+                        *offset,
+                        *label,
+                    )?);
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let buffer = self.buffers.get(buffer).context("CUDA: invalid clear buffer")?;
@@ -1175,6 +1303,24 @@ fn ensure_cuda_toolkit_on_path() {
     }
 }
 
+/// CUDA 13.1 floor for device-updatable kernel nodes (`1000 * major + 10 * minor`).
+const MIN_CUDA_DRIVER_VERSION: i32 = 13010;
+
+fn ensure_cuda_driver_at_least_13_1() -> Result<()> {
+    let mut version = 0i32;
+    let r = unsafe { cudarc::driver::sys::cuDriverGetVersion(&mut version) };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        anyhow::bail!("CUDA: cuDriverGetVersion failed: {r:?}");
+    }
+    if version < MIN_CUDA_DRIVER_VERSION {
+        anyhow::bail!(
+            "CUDA: goldy requires CUDA driver 13.1+ for device-updatable graph nodes \
+             (got driver version encoding {version}; need >= {MIN_CUDA_DRIVER_VERSION})"
+        );
+    }
+    Ok(())
+}
+
 fn query_device_limits(ctx: &CudaContext) -> Result<CudaDeviceLimits> {
     use cudarc::driver::sys::CUdevice_attribute;
     let attr = |a: CUdevice_attribute| -> Result<u32> {
@@ -1190,7 +1336,7 @@ fn query_device_limits(ctx: &CudaContext) -> Result<CudaDeviceLimits> {
 }
 
 /// Host-side launch-config checks when `GOLDY_VALIDATION=api` (or `all`) is set.
-fn validate_launch_config(
+pub(super) fn validate_launch_config(
     limits: &CudaDeviceLimits,
     function_max_threads: u32,
     grid: (u32, u32, u32),
@@ -1459,6 +1605,16 @@ impl GpuBackend for CudaBackend {
             .with_context(|| format!("CUDA: create device for adapter {adapter_id}"))?;
         let limits = query_device_limits(&ctx)
             .with_context(|| format!("CUDA: query device limits for adapter {adapter_id}"))?;
+        let major = ctx
+            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+            .context("CUDA: query compute capability major")?;
+        let minor = ctx
+            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+            .context("CUDA: query compute capability minor")?;
+        let indirect_updater = Arc::new(
+            runtime_module::load_indirect_updater(&ctx, (major, minor))
+                .with_context(|| format!("CUDA: load indirect updater for adapter {adapter_id}"))?,
+        );
         let alloc_stream = ctx.default_stream();
         let handle = self.next_device;
         self.next_device += 1;
@@ -1475,6 +1631,7 @@ impl GpuBackend for CudaBackend {
                 graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
                 graph_stats: Arc::clone(&self.graph_stats),
                 limits,
+                indirect_updater,
             },
         );
         Ok(handle)
@@ -3649,5 +3806,138 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     #[test]
     fn ops_are_graph_safe_rejects_empty() {
         assert!(!pending_submit::ops_are_graph_safe(&[]));
+    }
+
+    #[test]
+    fn indirect_scheme_captures_and_relaunches_with_gpu_shape() -> Result<()> {
+        let Some((device, stats)) = try_cuda_device_with_stats()? else {
+            return Ok(());
+        };
+        stats.reset();
+        let ctx = device.create_context()?;
+        let write_shape_slang = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
+    DispatchShape s;
+    s.x = 4;
+    s.y = 1;
+    s.z = 1;
+    shape[0] = s;
+}
+"#;
+        let write_pipe = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, write_shape_slang)?,
+        )?;
+        let work_pipe = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?,
+        )?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let shape = pool.acquire_buffer_sized::<crate::types::DispatchShape>(
+            1,
+            BufferKind::Scattered,
+            BufferFlags::empty(),
+        )?;
+        let work = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("write_shape", &write_pipe)
+            .with_parcel(&shape, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("work", &work_pipe)
+            .with_parcel(&work, crate::NodeAccess::ReadWrite)
+            .dispatch_shape_parcel(&*shape)?;
+
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &work)?;
+        let mut submission = scheme.submit()?;
+        let bytes1 = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
+
+        let after_first = stats.snapshot();
+        assert!(
+            after_first.captures >= 1,
+            "indirect launch-only partition should capture: {after_first:?}"
+        );
+        let captures_after_first = after_first.captures;
+        let launches_after_first = after_first.launches;
+
+        let mut submission = scheme.submit()?;
+        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
+        let after_second = stats.snapshot();
+        assert_eq!(
+            after_second.captures, captures_after_first,
+            "stable indirect resubmit must not recapture: {after_first:?} vs {after_second:?}"
+        );
+        assert!(
+            after_second.launches > launches_after_first,
+            "stable indirect resubmit must graph-launch: {after_first:?} vs {after_second:?}"
+        );
+        assert_eq!(scheme.replay_stats().records, 1);
+        assert_eq!(scheme.replay_stats().resubmit_hits, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn indirect_with_clear_uses_command_fallback() -> Result<()> {
+        let Some((device, stats)) = try_cuda_device_with_stats()? else {
+            return Ok(());
+        };
+        stats.reset();
+        let ctx = device.create_context()?;
+        let write_shape_slang = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
+    DispatchShape s;
+    s.x = 4;
+    s.y = 1;
+    s.z = 1;
+    shape[0] = s;
+}
+"#;
+        let write_pipe = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, write_shape_slang)?,
+        )?;
+        let work_pipe = crate::ComputePipeline::new(
+            &device,
+            &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?,
+        )?;
+        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let shape = pool.acquire_buffer_sized::<crate::types::DispatchShape>(
+            1,
+            BufferKind::Scattered,
+            BufferFlags::empty(),
+        )?;
+        let work = pool.acquire_buffer_with_data(&[5u32, 6, 7, 8], BufferKind::Scattered)?;
+
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme.clear_parcel(&work, 0, 0)?;
+        scheme
+            .node("write_shape", &write_pipe)
+            .with_parcel(&shape, crate::NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("work", &work_pipe)
+            .with_parcel(&work, crate::NodeAccess::ReadWrite)
+            .dispatch_shape_parcel(&*shape)?;
+
+        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &work)?;
+        let mut submission = scheme.submit()?;
+        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0, 0, 0, 0]);
+        let snap = stats.snapshot();
+        assert_eq!(snap.captures, 0, "clear+indirect must not capture: {snap:?}");
+        assert!(snap.fallbacks >= 1, "clear+indirect should fallback: {snap:?}");
+        Ok(())
     }
 }
