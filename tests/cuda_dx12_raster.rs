@@ -7,9 +7,9 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, DeviceDescriptor, Instance, MemoryExchange, PresentMode, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
-    TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PresentMode,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -318,6 +318,128 @@ fn cuda_raster_to_present_multi_frame() {
         }
     }
     let stats = device.cuda_path_stats_for_test().expect("CUDA stats must be available");
-    assert_eq!(stats.vb_mirror_uploads, 1, "static vertex data uploads once");
-    assert_eq!(stats.dtoh_calls, 1, "static vertex data is read from CUDA once");
+    assert_eq!(stats.dtoh_calls, 0, "shared vertex data must not DtoH");
+    assert!(
+        stats.shared_vb_binds >= 1,
+        "expected shared VB binds, got {}",
+        stats.shared_vb_binds
+    );
+}
+
+const FILL_VERTS_SHADER: &str = r#"
+import goldy_exp;
+
+// Pack 3×Vertex2D as 18 floats (Rust Vertex2D is 24 bytes / 6 floats, tightly packed).
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<float> verts, ThreadId id) {
+    // v0
+    verts[0] = 0.0;  verts[1] = 0.5;
+    verts[2] = 1.0;  verts[3] = 0.0; verts[4] = 0.0; verts[5] = 1.0;
+    // v1
+    verts[6] = -0.5; verts[7] = -0.5;
+    verts[8] = 1.0;  verts[9] = 0.0; verts[10] = 0.0; verts[11] = 1.0;
+    // v2
+    verts[12] = 0.5; verts[13] = -0.5;
+    verts[14] = 1.0; verts[15] = 0.0; verts[16] = 0.0; verts[17] = 1.0;
+}
+"#;
+
+#[test]
+fn cuda_compute_generated_vertices_raster_no_dtoh() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let vs_fs = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("graphics shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &vs_fs,
+        &vs_fs,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let cs = ShaderModule::from_slang(&device, FILL_VERTS_SHADER).expect("compute shader");
+    let compute = ComputePipeline::new(&device, &cs).expect("compute pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    // Empty shared VB — compute fills it each frame.
+    let vertex_buffer = pool
+        .acquire_buffer_sized::<f32>(18, BufferKind::Scattered, goldy::BufferFlags::empty())
+        .expect("vertex buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let before = device.cuda_path_stats_for_test().expect("stats");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("gen_verts", &compute)
+        .with_parcel(&vertex_buffer, goldy::NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    assert_eq!(pixels.len(), 64 * 64 * 16);
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r > 0.5 && g < 0.25 && b < 0.25,
+        "expected red triangle from compute-generated verts at ({x},{y}), got ({r},{g},{b})"
+    );
+
+    let after = device.cuda_path_stats_for_test().expect("stats");
+    // Texture withdraw uses DtoH for pixel readback; vertex path must not.
+    assert!(
+        after.shared_vb_binds > before.shared_vb_binds,
+        "expected shared VB refresh/bind"
+    );
 }

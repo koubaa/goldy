@@ -181,8 +181,12 @@ fn cuda_raster_direct_retained_steady_state() {
         stats.rematerialize_fallbacks, 0,
         "retained replay must not rematerialize"
     );
-    assert_eq!(stats.vb_mirror_uploads, 1, "static vertex buffer uploads once");
-    assert_eq!(stats.dtoh_calls, 1, "static vertex buffer performs one DtoH");
+    assert_eq!(stats.dtoh_calls, 0, "shared vertex buffers must not DtoH");
+    assert!(
+        stats.shared_vb_binds >= 1,
+        "shared vertex buffer should bind at least once during warmup, got {}",
+        stats.shared_vb_binds
+    );
     assert!(
         stats.raster_list_records <= 3,
         "warmup should record at most one retained list per raster slot, got {}",
@@ -275,7 +279,7 @@ fn cuda_compute_to_present_retained_steady_state() {
         "compute-to-present must not fall back to Ops replay after staging rewrite"
     );
     assert_eq!(
-        stats.vb_mirror_uploads, 0,
-        "compute-to-present has no vertex mirrors"
+        stats.shared_vb_binds, 0,
+        "compute-to-present has no vertex binds"
     );
 }

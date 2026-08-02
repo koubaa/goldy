@@ -23,7 +23,7 @@ pub(super) struct CudaGraphStats {
     pub present_completion_events: AtomicU64,
     pub worker_flushes: AtomicU64,
     pub present_handoffs: AtomicU64,
-    pub vb_mirror_uploads: AtomicU64,
+    pub shared_vb_binds: AtomicU64,
     pub dtoh_calls: AtomicU64,
     pub rematerialize_fallbacks: AtomicU64,
     pub present_list_records: AtomicU64,
@@ -50,7 +50,7 @@ impl CudaGraphStats {
             present_completion_events: self.present_completion_events.load(Ordering::Relaxed),
             worker_flushes: self.worker_flushes.load(Ordering::Relaxed),
             present_handoffs: self.present_handoffs.load(Ordering::Relaxed),
-            vb_mirror_uploads: self.vb_mirror_uploads.load(Ordering::Relaxed),
+            shared_vb_binds: self.shared_vb_binds.load(Ordering::Relaxed),
             dtoh_calls: self.dtoh_calls.load(Ordering::Relaxed),
             rematerialize_fallbacks: self.rematerialize_fallbacks.load(Ordering::Relaxed),
             present_list_records: self.present_list_records.load(Ordering::Relaxed),
@@ -72,7 +72,7 @@ impl CudaGraphStats {
         self.present_completion_events.store(0, Ordering::Relaxed);
         self.worker_flushes.store(0, Ordering::Relaxed);
         self.present_handoffs.store(0, Ordering::Relaxed);
-        self.vb_mirror_uploads.store(0, Ordering::Relaxed);
+        self.shared_vb_binds.store(0, Ordering::Relaxed);
         self.dtoh_calls.store(0, Ordering::Relaxed);
         self.rematerialize_fallbacks.store(0, Ordering::Relaxed);
         self.present_list_records.store(0, Ordering::Relaxed);
@@ -95,7 +95,7 @@ pub struct CudaGraphStatsSnapshot {
     pub present_completion_events: u64,
     pub worker_flushes: u64,
     pub present_handoffs: u64,
-    pub vb_mirror_uploads: u64,
+    pub shared_vb_binds: u64,
     pub dtoh_calls: u64,
     pub rematerialize_fallbacks: u64,
     pub present_list_records: u64,
