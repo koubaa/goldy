@@ -18,6 +18,15 @@ pub(super) struct CudaGraphStats {
     pub launches: AtomicU64,
     pub fallbacks: AtomicU64,
     pub evictions: AtomicU64,
+    pub empty_submits_elided: AtomicU64,
+    pub completion_events: AtomicU64,
+    pub worker_flushes: AtomicU64,
+    pub present_handoffs: AtomicU64,
+    pub vb_mirror_uploads: AtomicU64,
+    pub dtoh_calls: AtomicU64,
+    pub rematerialize_fallbacks: AtomicU64,
+    pub present_list_records: AtomicU64,
+    pub raster_list_records: AtomicU64,
     /// Number of structural surface resizes that actually rebuilt the swapchain.
     pub surface_resizes: AtomicU64,
     /// Cumulative nanoseconds spent in CUDA+DX12 surface idle drains.
@@ -35,6 +44,15 @@ impl CudaGraphStats {
             launches: self.launches.load(Ordering::Relaxed),
             fallbacks: self.fallbacks.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
+            empty_submits_elided: self.empty_submits_elided.load(Ordering::Relaxed),
+            completion_events: self.completion_events.load(Ordering::Relaxed),
+            worker_flushes: self.worker_flushes.load(Ordering::Relaxed),
+            present_handoffs: self.present_handoffs.load(Ordering::Relaxed),
+            vb_mirror_uploads: self.vb_mirror_uploads.load(Ordering::Relaxed),
+            dtoh_calls: self.dtoh_calls.load(Ordering::Relaxed),
+            rematerialize_fallbacks: self.rematerialize_fallbacks.load(Ordering::Relaxed),
+            present_list_records: self.present_list_records.load(Ordering::Relaxed),
+            raster_list_records: self.raster_list_records.load(Ordering::Relaxed),
             surface_resizes: self.surface_resizes.load(Ordering::Relaxed),
             surface_resize_idle_ns: self.surface_resize_idle_ns.load(Ordering::Relaxed),
             surface_resize_teardown_ns: self.surface_resize_teardown_ns.load(Ordering::Relaxed),
@@ -47,6 +65,15 @@ impl CudaGraphStats {
         self.launches.store(0, Ordering::Relaxed);
         self.fallbacks.store(0, Ordering::Relaxed);
         self.evictions.store(0, Ordering::Relaxed);
+        self.empty_submits_elided.store(0, Ordering::Relaxed);
+        self.completion_events.store(0, Ordering::Relaxed);
+        self.worker_flushes.store(0, Ordering::Relaxed);
+        self.present_handoffs.store(0, Ordering::Relaxed);
+        self.vb_mirror_uploads.store(0, Ordering::Relaxed);
+        self.dtoh_calls.store(0, Ordering::Relaxed);
+        self.rematerialize_fallbacks.store(0, Ordering::Relaxed);
+        self.present_list_records.store(0, Ordering::Relaxed);
+        self.raster_list_records.store(0, Ordering::Relaxed);
         self.surface_resizes.store(0, Ordering::Relaxed);
         self.surface_resize_idle_ns.store(0, Ordering::Relaxed);
         self.surface_resize_teardown_ns.store(0, Ordering::Relaxed);
@@ -55,11 +82,20 @@ impl CudaGraphStats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct CudaGraphStatsSnapshot {
+pub struct CudaGraphStatsSnapshot {
     pub captures: u64,
     pub launches: u64,
     pub fallbacks: u64,
     pub evictions: u64,
+    pub empty_submits_elided: u64,
+    pub completion_events: u64,
+    pub worker_flushes: u64,
+    pub present_handoffs: u64,
+    pub vb_mirror_uploads: u64,
+    pub dtoh_calls: u64,
+    pub rematerialize_fallbacks: u64,
+    pub present_list_records: u64,
+    pub raster_list_records: u64,
     pub surface_resizes: u64,
     pub surface_resize_idle_ns: u64,
     pub surface_resize_teardown_ns: u64,

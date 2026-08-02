@@ -17,14 +17,12 @@ use super::dx12_companion::{cuda_wait_fence, Dx12Companion};
 use super::dx12_interop::{create_shared_texture, import_shared_texture, CudaImportedTexture};
 use super::texture::{memcpy_array_to_array, CudaTextureResource};
 use super::{CudaBackend, CudaBuffer, CudaShader};
-use crate::backend::{
-    BufferHandle, DeviceHandle, PipelineHandle, RenderCommand, RenderTargetHandle, TextureHandle,
-};
+use crate::backend::{BufferHandle, DeviceHandle, PipelineHandle, RenderCommand, RenderTargetHandle, TextureHandle};
 use crate::types::{
-    PrimitiveTopology, TargetLoad, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
-    VertexFormat,
+    PrimitiveTopology, TargetLoad, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout, VertexFormat,
 };
 use anyhow::{bail, Context as _, Result};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, RECT};
 use windows::Win32::Graphics::Direct3D12::*;
@@ -73,9 +71,98 @@ pub(super) struct Dx12VertexMirror {
     pub content_epoch: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct RasterListCache {
+    pub fingerprint: u64,
+    pub slot_idx: usize,
+    pub slot_generation: u64,
+}
+
 // SAFETY: see [`CudaGraphicsPipeline`].
 unsafe impl Send for Dx12VertexMirror {}
 unsafe impl Sync for Dx12VertexMirror {}
+
+fn raster_fingerprint(
+    backend: &CudaBackend,
+    target: RenderTargetHandle,
+    color_load: TargetLoad,
+    commands: &[RenderCommand],
+) -> Result<u64> {
+    let rt = backend
+        .render_targets
+        .get(&target)
+        .context("CUDA/DX12: invalid render target")?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    target.hash(&mut hash);
+    rt.width.hash(&mut hash);
+    rt.height.hash(&mut hash);
+    match color_load {
+        TargetLoad::Clear(color) => {
+            0u8.hash(&mut hash);
+            color.r.to_bits().hash(&mut hash);
+            color.g.to_bits().hash(&mut hash);
+            color.b.to_bits().hash(&mut hash);
+            color.a.to_bits().hash(&mut hash);
+        }
+        TargetLoad::Load => 1u8.hash(&mut hash),
+        TargetLoad::Discard => 2u8.hash(&mut hash),
+    }
+    for command in commands {
+        std::mem::discriminant(command).hash(&mut hash);
+        match command {
+            RenderCommand::SetPipeline(handle) => {
+                backend
+                    .pipelines
+                    .get(handle)
+                    .context("CUDA/DX12: invalid graphics pipeline")?;
+                handle.hash(&mut hash);
+            }
+            RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
+                let cuda_buf = backend
+                    .buffers
+                    .get(buffer)
+                    .context("CUDA/DX12: invalid vertex buffer")?;
+                slot.hash(&mut hash);
+                buffer.hash(&mut hash);
+                offset.hash(&mut hash);
+                cuda_buf.content_epoch.hash(&mut hash);
+            }
+            RenderCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => {
+                vertex_count.hash(&mut hash);
+                instance_count.hash(&mut hash);
+                first_vertex.hash(&mut hash);
+                first_instance.hash(&mut hash);
+            }
+            RenderCommand::ClearDepth(depth) => depth.to_bits().hash(&mut hash),
+            RenderCommand::SetIndexBuffer { buffer, offset, .. } => {
+                buffer.hash(&mut hash);
+                offset.hash(&mut hash);
+            }
+            RenderCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => {
+                index_count.hash(&mut hash);
+                instance_count.hash(&mut hash);
+                first_index.hash(&mut hash);
+                base_vertex.hash(&mut hash);
+                first_instance.hash(&mut hash);
+            }
+            RenderCommand::BindResources { .. }
+            | RenderCommand::BindResourcesRaw { .. }
+            | RenderCommand::BindResourcesTyped { .. } => {}
+        }
+    }
+    Ok(hash.finish())
+}
 
 fn companion<'a>(backend: &'a CudaBackend, device: DeviceHandle) -> Result<&'a Dx12Companion> {
     backend
@@ -110,21 +197,11 @@ fn vertex_format_to_dxgi(format: VertexFormat) -> DXGI_FORMAT {
 
 fn topology_to_d3d12(topology: PrimitiveTopology) -> windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY {
     match topology {
-        PrimitiveTopology::PointList => {
-            windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_POINTLIST
-        }
-        PrimitiveTopology::LineList => {
-            windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_LINELIST
-        }
-        PrimitiveTopology::LineStrip => {
-            windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_LINESTRIP
-        }
-        PrimitiveTopology::TriangleList => {
-            windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
-        }
-        PrimitiveTopology::TriangleStrip => {
-            windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP
-        }
+        PrimitiveTopology::PointList => windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_POINTLIST,
+        PrimitiveTopology::LineList => windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_LINELIST,
+        PrimitiveTopology::LineStrip => windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
+        PrimitiveTopology::TriangleList => windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+        PrimitiveTopology::TriangleStrip => windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
     }
 }
 
@@ -132,9 +209,7 @@ fn topology_type_to_d3d12(topology: PrimitiveTopology) -> D3D12_PRIMITIVE_TOPOLO
     match topology {
         PrimitiveTopology::PointList => D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
         PrimitiveTopology::LineList | PrimitiveTopology::LineStrip => D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE,
-        PrimitiveTopology::TriangleList | PrimitiveTopology::TriangleStrip => {
-            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
-        }
+        PrimitiveTopology::TriangleList | PrimitiveTopology::TriangleStrip => D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
     }
 }
 
@@ -200,9 +275,7 @@ pub(super) fn create_pipeline(
         bail!("CUDA/DX12 raster: only TriangleList is supported in the first slice (got {topology:?})");
     }
     if target_format != RASTER_COLOR_FORMAT {
-        bail!(
-            "CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} targets are supported (got {target_format:?})"
-        );
+        bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} targets are supported (got {target_format:?})");
     }
     let companion = companion(backend, device)?;
     let device_com = companion.device.clone();
@@ -235,10 +308,7 @@ pub(super) fn create_pipeline(
             } else {
                 let is_color = matches!(
                     attr.format,
-                    VertexFormat::Float32x3
-                        | VertexFormat::Float32x4
-                        | VertexFormat::Unorm8x4
-                        | VertexFormat::Uint8x4
+                    VertexFormat::Float32x3 | VertexFormat::Float32x4 | VertexFormat::Unorm8x4 | VertexFormat::Uint8x4
                 ) && attr.location == 1;
                 if is_color {
                     (c"COLOR".as_ptr() as *const u8, 0)
@@ -330,9 +400,8 @@ pub(super) fn create_pipeline(
         ..Default::default()
     };
 
-    let pipeline_state: ID3D12PipelineState =
-        unsafe { device_com.CreateGraphicsPipelineState(&pso_desc) }
-            .context("CUDA/DX12: CreateGraphicsPipelineState failed")?;
+    let pipeline_state: ID3D12PipelineState = unsafe { device_com.CreateGraphicsPipelineState(&pso_desc) }
+        .context("CUDA/DX12: CreateGraphicsPipelineState failed")?;
 
     let handle = backend.next_pipeline;
     backend.next_pipeline += 1;
@@ -366,9 +435,7 @@ pub(super) fn create_render_target(
         bail!("CUDA/DX12 raster: depth buffers are not supported in the first slice");
     }
     if color_format != RASTER_COLOR_FORMAT {
-        bail!(
-            "CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} render targets are supported (got {color_format:?})"
-        );
+        bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} render targets are supported (got {color_format:?})");
     }
     if width == 0 || height == 0 {
         bail!("CUDA/DX12 raster: render target dimensions must be non-zero");
@@ -401,14 +468,7 @@ pub(super) fn create_render_target(
     }
     .context("CUDA/DX12: CreateSharedHandle(render target) failed")?;
 
-    let import = import_shared_texture(
-        &cuda_ctx,
-        handle_nt,
-        allocation_size,
-        width,
-        height,
-        color_format,
-    )?;
+    let import = import_shared_texture(&cuda_ctx, handle_nt, allocation_size, width, height, color_format)?;
     unsafe {
         let _ = CloseHandle(handle_nt);
     }
@@ -467,10 +527,7 @@ fn ensure_vertex_mirror<'a>(
     buffer: BufferHandle,
     size: u64,
 ) -> Result<&'a mut Dx12VertexMirror> {
-    let needs_recreate = mirrors
-        .get(&buffer)
-        .map(|m| m.size < size)
-        .unwrap_or(true);
+    let needs_recreate = mirrors.get(&buffer).map(|m| m.size < size).unwrap_or(true);
     if needs_recreate {
         let heap_props = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_UPLOAD,
@@ -516,15 +573,10 @@ fn ensure_vertex_mirror<'a>(
     Ok(mirrors.get_mut(&buffer).unwrap())
 }
 
-fn upload_vertex_mirror(
-    companion: &Dx12Companion,
-    mirror: &Dx12VertexMirror,
-    host: &[u8],
-) -> Result<()> {
+fn upload_vertex_mirror(companion: &Dx12Companion, mirror: &Dx12VertexMirror, host: &[u8]) -> Result<()> {
     let _ = companion;
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-    unsafe { mirror.resource.Map(0, None, Some(&mut mapped)) }
-        .context("CUDA/DX12: Map UPLOAD VB failed")?;
+    unsafe { mirror.resource.Map(0, None, Some(&mut mapped)) }.context("CUDA/DX12: Map UPLOAD VB failed")?;
     if mapped.is_null() {
         bail!("CUDA/DX12: Map UPLOAD VB returned null");
     }
@@ -546,9 +598,7 @@ fn read_cuda_buffer_host(stream: &Arc<cudarc::driver::CudaStream>, buffer: &Cuda
     stream
         .memcpy_dtoh(&view, &mut host[..])
         .context("CUDA/DX12: DtoH vertex buffer failed")?;
-    stream
-        .synchronize()
-        .context("CUDA/DX12: synchronize after VB DtoH")?;
+    stream.synchronize().context("CUDA/DX12: synchronize after VB DtoH")?;
     Ok(host)
 }
 
@@ -585,6 +635,7 @@ pub(super) fn render_to_target(
                 .context("CUDA/DX12: companion required for raster")?,
         )
     };
+    let fingerprint = raster_fingerprint(backend, target, color_load, commands)?;
 
     // Order this draw after prior raster/present work on this target without a
     // host stall — queue Wait is enough when the prior signal has been submitted.
@@ -593,16 +644,20 @@ pub(super) fn render_to_target(
         companion.wait_queue(prior_fence)?;
     }
 
-    let (slot_idx, list) = companion.begin_raster_list()?;
+    if let Some(cache) = backend.raster_list_cache.get(&target).copied() {
+        if cache.fingerprint == fingerprint {
+            if let Some(signal) = companion.try_reuse_raster_list(cache.slot_idx, cache.slot_generation)? {
+                backend.render_targets.get_mut(&target).unwrap().last_dx12_fence = signal;
+                return Ok(());
+            }
+        }
+    }
+
+    let (slot_idx, list, slot_generation) = companion.begin_raster_list()?;
 
     let (width, height, rtv_offset, d3d12_resource) = {
         let rt = backend.render_targets.get(&target).unwrap();
-        (
-            rt.width,
-            rt.height,
-            rt.rtv_offset,
-            rt.d3d12_resource.clone(),
-        )
+        (rt.width, rt.height, rt.rtv_offset, rt.d3d12_resource.clone())
     };
 
     let to_rt = transition(
@@ -681,17 +736,20 @@ pub(super) fn render_to_target(
                 }
                 let nbytes = cuda_buf.size - offset;
                 let epoch = cuda_buf.content_epoch;
-                let mirror = ensure_vertex_mirror(
-                    &companion,
-                    &mut backend.vb_mirrors,
-                    *buffer,
-                    nbytes,
-                )?;
+                let mirror = ensure_vertex_mirror(&companion, &mut backend.vb_mirrors, *buffer, nbytes)?;
                 if mirror.content_epoch != epoch {
                     // Content changed (or first use): DtoH once into the UPLOAD mirror.
                     let host = read_cuda_buffer_host(&alloc_stream, &cuda_buf)?;
+                    backend
+                        .graph_stats
+                        .dtoh_calls
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let host_slice = &host[*offset as usize..];
                     upload_vertex_mirror(&companion, mirror, host_slice)?;
+                    backend
+                        .graph_stats
+                        .vb_mirror_uploads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     mirror.content_epoch = epoch;
                 }
                 let view = D3D12_VERTEX_BUFFER_VIEW {
@@ -735,9 +793,21 @@ pub(super) fn render_to_target(
     unsafe { list.ResourceBarrier(&[to_common]) };
 
     let signal = companion.finish_raster_list(slot_idx)?;
+    backend
+        .graph_stats
+        .raster_list_records
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
     }
+    backend.raster_list_cache.insert(
+        target,
+        RasterListCache {
+            fingerprint,
+            slot_idx,
+            slot_generation,
+        },
+    );
     Ok(())
 }
 
@@ -779,12 +849,7 @@ pub(super) fn copy_render_target(
 
     if fence > 0 {
         let companion = companion(backend, device)?;
-        cuda_wait_fence(
-            &companion.cuda_ctx,
-            companion.cuda_semaphore,
-            stream.cu_stream(),
-            fence,
-        )?;
+        cuda_wait_fence(&companion.cuda_ctx, companion.cuda_semaphore, stream.cu_stream(), fence)?;
     }
 
     memcpy_array_to_array(stream, &cuda_tex, dst_tex)?;

@@ -176,4 +176,13 @@ fn cuda_compute_to_present_multi_frame() {
             goldy::test_support::gpu_progress(&ctx)
         );
     }
+
+    // New Scheme each frame above is correctness-only; still assert the present path
+    // no longer requires CUDA handoff/flush when submit tails signal the fence.
+    let stats = device.cuda_path_stats_for_test().expect("CUDA stats");
+    assert_eq!(
+        stats.present_handoffs, 0,
+        "compute-to-present should signal in the submit tail, not via present handoff"
+    );
+    assert_eq!(stats.worker_flushes, 0, "present must not flush the submission worker");
 }

@@ -1205,6 +1205,18 @@ impl Device {
         f(mock)
     }
 
+    /// Snapshot CUDA retained-frame counters for integration tests.
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    pub fn cuda_path_stats_for_test(&self) -> Option<crate::cuda_test_stats::CudaGraphStatsSnapshot> {
+        let mut guard = self.inner.backend.lock().unwrap();
+        guard
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<crate::backend::cuda::CudaBackend>()
+            .map(|backend| backend.graph_stats_snapshot())
+    }
+
     /// Access the inner [`MockBackend`] for test introspection.
     ///
     /// Panics if the device was not created with `Device::from_backend(Box::new(MockBackend::new()))`.

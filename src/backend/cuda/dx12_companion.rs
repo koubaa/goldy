@@ -12,17 +12,17 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::{
-    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12DescriptorHeap,
-    ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12RootSignature, D3D12_COMMAND_LIST_TYPE_DIRECT,
-    D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
-    D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-    D3D12_FENCE_FLAG_SHARED, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC, D3D12SerializeVersionedRootSignature, D3D_ROOT_SIGNATURE_VERSION_1_1,
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0, D3D12_ROOT_SIGNATURE_DESC1,
+    D3D12CreateDevice, D3D12SerializeVersionedRootSignature, ID3D12CommandAllocator, ID3D12CommandList,
+    ID3D12CommandQueue, ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList,
+    ID3D12RootSignature, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
+    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+    D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_FENCE_FLAG_SHARED, D3D12_ROOT_SIGNATURE_DESC1,
+    D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT, D3D12_VERSIONED_ROOT_SIGNATURE_DESC,
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0, D3D_ROOT_SIGNATURE_VERSION_1_1,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5, DXGI_ADAPTER_FLAG,
-    DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_CREATE_FACTORY_FLAGS, DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+    CreateDXGIFactory2, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5, DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE,
+    DXGI_CREATE_FACTORY_FLAGS, DXGI_FEATURE_PRESENT_ALLOW_TEARING,
 };
 use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
 
@@ -43,13 +43,7 @@ impl AdapterLuid {
     pub fn from_cuda_device(cu_device: sys::CUdevice) -> Result<Self> {
         let mut luid = [0i8; 8];
         let mut node_mask: u32 = 0;
-        let r = unsafe {
-            sys::cuDeviceGetLuid(
-                luid.as_mut_ptr(),
-                &mut node_mask,
-                cu_device,
-            )
-        };
+        let r = unsafe { sys::cuDeviceGetLuid(luid.as_mut_ptr(), &mut node_mask, cu_device) };
         if r != sys::CUresult::CUDA_SUCCESS {
             bail!("CUDA: cuDeviceGetLuid failed: {r:?}");
         }
@@ -142,6 +136,8 @@ pub(super) struct PresentCommandSlot {
     pub list: ID3D12GraphicsCommandList,
     /// Last fence value submitted with this slot (0 = never used).
     pub fence_value: AtomicU64,
+    /// Incremented whenever this command list is reset for a new recording.
+    pub generation: AtomicU64,
 }
 
 impl Dx12Companion {
@@ -165,8 +161,7 @@ impl Dx12Companion {
             })
             .unwrap_or(false);
 
-        let (adapter, dxgi_adapter_id, adapter_luid) =
-            find_matching_dxgi_adapter(&factory, cuda_luid)?;
+        let (adapter, dxgi_adapter_id, adapter_luid) = find_matching_dxgi_adapter(&factory, cuda_luid)?;
 
         let mut device: Option<ID3D12Device> = None;
         unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device) }
@@ -175,9 +170,7 @@ impl Dx12Companion {
 
         let node_count = unsafe { device.GetNodeCount() };
         if node_count != 1 {
-            bail!(
-                "CUDA/DX12: linked-node adapters are not supported yet (GetNodeCount={node_count})"
-            );
+            bail!("CUDA/DX12: linked-node adapters are not supported yet (GetNodeCount={node_count})");
         }
 
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
@@ -186,16 +179,15 @@ impl Dx12Companion {
             Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
             NodeMask: 0,
         };
-        let queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&queue_desc) }
-            .context("CUDA/DX12: CreateCommandQueue failed")?;
+        let queue: ID3D12CommandQueue =
+            unsafe { device.CreateCommandQueue(&queue_desc) }.context("CUDA/DX12: CreateCommandQueue failed")?;
 
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_SHARED) }
             .context("CUDA/DX12: CreateFence(SHARED) failed")?;
 
-        let fence_handle: HANDLE = unsafe {
-            device.CreateSharedHandle(&fence, None, windows::Win32::Foundation::GENERIC_ALL.0, None)
-        }
-        .context("CUDA/DX12: CreateSharedHandle(fence) failed")?;
+        let fence_handle: HANDLE =
+            unsafe { device.CreateSharedHandle(&fence, None, windows::Win32::Foundation::GENERIC_ALL.0, None) }
+                .context("CUDA/DX12: CreateSharedHandle(fence) failed")?;
 
         let cuda_semaphore = import_d3d12_fence(cuda_ctx, fence_handle)?;
         // CUDA does not take ownership of the Win32 NT handle.
@@ -208,15 +200,15 @@ impl Dx12Companion {
             let allocator: ID3D12CommandAllocator =
                 unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
                     .context("CUDA/DX12: CreateCommandAllocator failed")?;
-            let list: ID3D12GraphicsCommandList = unsafe {
-                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
-            }
-            .context("CUDA/DX12: CreateCommandList failed")?;
+            let list: ID3D12GraphicsCommandList =
+                unsafe { device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None) }
+                    .context("CUDA/DX12: CreateCommandList failed")?;
             unsafe { list.Close() }.context("CUDA/DX12: Close initial command list")?;
             present_slots.push(PresentCommandSlot {
                 allocator,
                 list,
                 fence_value: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
             });
         }
 
@@ -224,10 +216,9 @@ impl Dx12Companion {
         let init_allocator: ID3D12CommandAllocator =
             unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
                 .context("CUDA/DX12: CreateCommandAllocator(init) failed")?;
-        let init_list: ID3D12GraphicsCommandList = unsafe {
-            device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &init_allocator, None)
-        }
-        .context("CUDA/DX12: CreateCommandList(init) failed")?;
+        let init_list: ID3D12GraphicsCommandList =
+            unsafe { device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &init_allocator, None) }
+                .context("CUDA/DX12: CreateCommandList(init) failed")?;
         unsafe { init_list.Close() }.context("CUDA/DX12: Close init command list")?;
 
         let rtv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
@@ -238,8 +229,7 @@ impl Dx12Companion {
         };
         let rtv_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&rtv_heap_desc) }
             .context("CUDA/DX12: CreateDescriptorHeap(RTV) failed")?;
-        let rtv_descriptor_size =
-            unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
+        let rtv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
 
         let graphics_root_signature = create_empty_ia_root_signature(&device)?;
 
@@ -248,15 +238,15 @@ impl Dx12Companion {
             let allocator: ID3D12CommandAllocator =
                 unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
                     .context("CUDA/DX12: CreateCommandAllocator(raster) failed")?;
-            let list: ID3D12GraphicsCommandList = unsafe {
-                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
-            }
-            .context("CUDA/DX12: CreateCommandList(raster) failed")?;
+            let list: ID3D12GraphicsCommandList =
+                unsafe { device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None) }
+                    .context("CUDA/DX12: CreateCommandList(raster) failed")?;
             unsafe { list.Close() }.context("CUDA/DX12: Close raster command list")?;
             raster_slots.push(PresentCommandSlot {
                 allocator,
                 list,
                 fence_value: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
             });
         }
 
@@ -297,8 +287,7 @@ impl Dx12Companion {
 
     pub fn signal_queue(&self, value: u64) -> Result<()> {
         let _guard = self.queue_lock.lock().unwrap();
-        unsafe { self.queue.Signal(&self.fence, value) }
-            .context("CUDA/DX12: queue Signal failed")?;
+        unsafe { self.queue.Signal(&self.fence, value) }.context("CUDA/DX12: queue Signal failed")?;
         Ok(())
     }
 
@@ -324,10 +313,8 @@ impl Dx12Companion {
         if unsafe { self.fence.GetCompletedValue() } >= value {
             return Ok(());
         }
-        let event = unsafe { CreateEventA(None, false, false, None) }
-            .context("CUDA/DX12: CreateEventA failed")?;
-        unsafe { self.fence.SetEventOnCompletion(value, event) }
-            .context("CUDA/DX12: SetEventOnCompletion failed")?;
+        let event = unsafe { CreateEventA(None, false, false, None) }.context("CUDA/DX12: CreateEventA failed")?;
+        unsafe { self.fence.SetEventOnCompletion(value, event) }.context("CUDA/DX12: SetEventOnCompletion failed")?;
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe {
             let _ = CloseHandle(event);
@@ -348,8 +335,7 @@ impl Dx12Companion {
             self.cpu_wait(prev)?;
         }
         unsafe { self.init_allocator.Reset() }.context("CUDA/DX12: reset init allocator")?;
-        unsafe { self.init_list.Reset(&self.init_allocator, None) }
-            .context("CUDA/DX12: reset init list")?;
+        unsafe { self.init_list.Reset(&self.init_allocator, None) }.context("CUDA/DX12: reset init list")?;
         Ok(())
     }
 
@@ -369,7 +355,7 @@ impl Dx12Companion {
     }
 
     /// Reset the next raster command allocator/list (waits only that slot's prior fence).
-    pub fn begin_raster_list(&self) -> Result<(usize, ID3D12GraphicsCommandList)> {
+    pub fn begin_raster_list(&self) -> Result<(usize, ID3D12GraphicsCommandList, u64)> {
         let idx = (self.raster_slot.fetch_add(1, Ordering::AcqRel) as usize) % MAX_FRAMES;
         let slot = &self.raster_slots[idx];
         let prev = slot.fence_value.load(Ordering::Acquire);
@@ -378,7 +364,8 @@ impl Dx12Companion {
         }
         unsafe { slot.allocator.Reset() }.context("CUDA/DX12: reset raster allocator")?;
         unsafe { slot.list.Reset(&slot.allocator, None) }.context("CUDA/DX12: reset raster list")?;
-        Ok((idx, slot.list.clone()))
+        let generation = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        Ok((idx, slot.list.clone(), generation))
     }
 
     /// Close and execute the raster list for `slot_idx` without a CPU wait.
@@ -391,6 +378,38 @@ impl Dx12Companion {
         self.execute_and_signal(&[Some(cmd)], signal)?;
         slot.fence_value.store(signal, Ordering::Release);
         Ok(signal)
+    }
+
+    /// Re-execute a still-closed raster list if its slot has not been reset.
+    pub fn try_reuse_raster_list(&self, slot_idx: usize, generation: u64) -> Result<Option<u64>> {
+        let slot = &self.raster_slots[slot_idx];
+        if slot.generation.load(Ordering::Acquire) != generation {
+            return Ok(None);
+        }
+        let prev = slot.fence_value.load(Ordering::Acquire);
+        if prev > 0 {
+            self.cpu_wait(prev)?;
+        }
+        let cmd: ID3D12CommandList = slot.list.cast().context("cast retained raster list")?;
+        let signal = self.next_fence_value();
+        self.execute_and_signal(&[Some(cmd)], signal)?;
+        slot.fence_value.store(signal, Ordering::Release);
+        Ok(Some(signal))
+    }
+
+    /// Reset retained present lists after retirement so they release swapchain resources.
+    pub fn invalidate_present_lists(&self) -> Result<()> {
+        for slot in &self.present_slots {
+            let prev = slot.fence_value.load(Ordering::Acquire);
+            if prev > 0 {
+                self.cpu_wait(prev)?;
+            }
+            unsafe { slot.allocator.Reset() }.context("CUDA/DX12: reset invalidated present allocator")?;
+            unsafe { slot.list.Reset(&slot.allocator, None) }.context("CUDA/DX12: reset invalidated present list")?;
+            unsafe { slot.list.Close() }.context("CUDA/DX12: close invalidated present list")?;
+            slot.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(())
     }
 
     /// Highest fence value known for companion-owned work (init + raster/present slots).
@@ -441,20 +460,14 @@ fn create_empty_ia_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSig
     let root_signature: ID3D12RootSignature = unsafe {
         device.CreateRootSignature(
             0,
-            std::slice::from_raw_parts(
-                sig_blob.GetBufferPointer() as *const u8,
-                sig_blob.GetBufferSize(),
-            ),
+            std::slice::from_raw_parts(sig_blob.GetBufferPointer() as *const u8, sig_blob.GetBufferSize()),
         )
     }
     .context("CUDA/DX12: CreateRootSignature(empty IA)")?;
     Ok(root_signature)
 }
 
-fn import_d3d12_fence(
-    cuda_ctx: &Arc<CudaContext>,
-    handle: HANDLE,
-) -> Result<sys::CUexternalSemaphore> {
+fn import_d3d12_fence(cuda_ctx: &Arc<CudaContext>, handle: HANDLE) -> Result<sys::CUexternalSemaphore> {
     cuda_ctx
         .bind_to_thread()
         .context("CUDA/DX12: bind context for fence import")?;
@@ -490,12 +503,8 @@ pub(super) fn cuda_signal_fence(
     let params = sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
         params: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1 {
             fence: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_1 { value },
-            nvSciSync: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_2 {
-                reserved: 0,
-            },
-            keyedMutex: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_3 {
-                key: 0,
-            },
+            nvSciSync: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_2 { reserved: 0 },
+            keyedMutex: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_3 { key: 0 },
             reserved: [0; 12],
         },
         flags: 0,
@@ -515,15 +524,11 @@ pub(super) fn cuda_wait_fence(
     stream: sys::CUstream,
     value: u64,
 ) -> Result<()> {
-    cuda_ctx
-        .bind_to_thread()
-        .context("CUDA/DX12: bind for external wait")?;
+    cuda_ctx.bind_to_thread().context("CUDA/DX12: bind for external wait")?;
     let params = sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS {
         params: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1 {
             fence: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_1 { value },
-            nvSciSync: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_2 {
-                reserved: 0,
-            },
+            nvSciSync: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_2 { reserved: 0 },
             keyedMutex: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_3 {
                 key: 0,
                 timeoutMs: 0,
@@ -574,8 +579,7 @@ mod tests {
                 // WARP uses a sentinel in the main DX12 backend; companion rejects software.
                 let stream = ctx.default_stream();
                 let v = companion.next_fence_value();
-                cuda_signal_fence(&ctx, companion.cuda_semaphore, stream.cu_stream(), v)
-                    .expect("cuda signal");
+                cuda_signal_fence(&ctx, companion.cuda_semaphore, stream.cu_stream(), v).expect("cuda signal");
                 stream.synchronize().expect("stream sync after signal");
                 companion.cpu_wait(v).expect("cpu wait on shared fence");
                 let _ = companion.wait_idle();

@@ -132,6 +132,13 @@ pub fn dx12_debug_mode() -> bool {
     false
 }
 
+/// CUDA retained-path counters exposed for structural integration tests.
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub mod cuda_test_stats {
+    pub use crate::backend::cuda::CudaGraphStatsSnapshot;
+}
+
 /// Test helpers for `--lib` and integration tests.
 ///
 /// - [`test_support::mock_device`] / [`test_support::with_mock`]: pure software; safe to run in parallel.

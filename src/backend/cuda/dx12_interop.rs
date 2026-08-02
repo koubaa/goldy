@@ -105,14 +105,7 @@ impl SharedScratchTexture {
         }
         .context("CUDA/DX12: CreateSharedHandle(texture) failed")?;
 
-        let import = import_shared_texture(
-            cuda_ctx,
-            handle,
-            allocation_size,
-            width,
-            height,
-            SURFACE_COMPUTE_FORMAT,
-        )?;
+        let import = import_shared_texture(cuda_ctx, handle, allocation_size, width, height, SURFACE_COMPUTE_FORMAT)?;
         unsafe {
             let _ = CloseHandle(handle);
         }
@@ -267,9 +260,7 @@ pub(super) fn import_shared_texture(
     };
 
     let mut mipmapped: sys::CUmipmappedArray = std::ptr::null_mut();
-    let r = unsafe {
-        sys::cuExternalMemoryGetMappedMipmappedArray(&mut mipmapped, external_memory, &mip_desc)
-    };
+    let r = unsafe { sys::cuExternalMemoryGetMappedMipmappedArray(&mut mipmapped, external_memory, &mip_desc) };
     if r != sys::CUresult::CUDA_SUCCESS {
         let _ = unsafe { sys::cuDestroyExternalMemory(external_memory) };
         bail!("CUDA: cuExternalMemoryGetMappedMipmappedArray failed: {r:?}");
@@ -315,8 +306,8 @@ pub(super) fn init_resource_state(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::dx12_companion::Dx12Companion;
+    use super::*;
 
     #[test]
     fn shared_scratch_import_or_skip() {
@@ -328,8 +319,7 @@ mod tests {
             eprintln!("skip: no DX12 companion");
             return;
         };
-        let scratch = SharedScratchTexture::create(&companion, &ctx, 64, 48, 0)
-            .expect("shared scratch create/import");
+        let scratch = SharedScratchTexture::create(&companion, &ctx, 64, 48, 0).expect("shared scratch create/import");
         assert_eq!(scratch.width, 64);
         assert_eq!(scratch.height, 48);
         assert_eq!(scratch.cuda_texture.format, SURFACE_COMPUTE_FORMAT);
@@ -441,10 +431,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         let root_signature: ID3D12RootSignature = unsafe {
             device.CreateRootSignature(
                 0,
-                std::slice::from_raw_parts(
-                    sig_blob.GetBufferPointer() as *const u8,
-                    sig_blob.GetBufferSize(),
-                ),
+                std::slice::from_raw_parts(sig_blob.GetBufferPointer() as *const u8, sig_blob.GetBufferSize()),
             )
         }
         .context("CUDA/DX12: CreateRootSignature(blit)")?;
@@ -468,8 +455,8 @@ void main(uint3 id : SV_DispatchThreadID) {
             Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
             NodeMask: 0,
         };
-        let srv_uav_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&heap_desc) }
-            .context("CUDA/DX12: CreateDescriptorHeap(blit)")?;
+        let srv_uav_heap: ID3D12DescriptorHeap =
+            unsafe { device.CreateDescriptorHeap(&heap_desc) }.context("CUDA/DX12: CreateDescriptorHeap(blit)")?;
         let descriptor_size =
             unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
 
@@ -482,13 +469,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     /// Write SRV(src) + UAV(dst) descriptors for slot `idx`.
-    pub fn write_descriptors(
-        &self,
-        device: &ID3D12Device,
-        idx: usize,
-        src: &ID3D12Resource,
-        dst: &ID3D12Resource,
-    ) {
+    pub fn write_descriptors(&self, device: &ID3D12Device, idx: usize, src: &ID3D12Resource, dst: &ID3D12Resource) {
         let base = unsafe { self.srv_uav_heap.GetCPUDescriptorHandleForHeapStart() };
         let srv = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: base.ptr + (idx * 2) as usize * self.descriptor_size as usize,
@@ -532,7 +513,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 
 /// Where the float4 present-blit source sits before the copy.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PresentColorSrcState {
     /// CUDA-written imported scratch (UAV).
     UnorderedAccess,
@@ -562,11 +543,7 @@ pub(super) fn record_present_copy(
         PresentColorSrcState::Common => D3D12_RESOURCE_STATE_COMMON,
     };
     // color → SRV for blit
-    let b0 = transition(
-        color_src,
-        src_before,
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-    );
+    let b0 = transition(color_src, src_before, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     unsafe { list.ResourceBarrier(&[b0]) };
 
     unsafe { list.SetPipelineState(&blit.pso) };
@@ -589,11 +566,7 @@ pub(super) fn record_present_copy(
     } else {
         D3D12_RESOURCE_STATE_PRESENT
     };
-    let b2 = transition(
-        backbuffer,
-        backbuffer_before,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-    );
+    let b2 = transition(backbuffer, backbuffer_before, D3D12_RESOURCE_STATE_COPY_DEST);
     // UAV barrier on blit_target before transitioning (compute wrote it).
     let uav_barrier = D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
@@ -607,21 +580,13 @@ pub(super) fn record_present_copy(
     unsafe { list.ResourceBarrier(&[uav_barrier, b1, b2]) };
     unsafe { list.CopyResource(backbuffer, blit_target) };
 
-    let b3 = transition(
-        backbuffer,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_PRESENT,
-    );
+    let b3 = transition(backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     let b4 = transition(
         blit_target,
         D3D12_RESOURCE_STATE_COPY_SOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
     );
-    let b5 = transition(
-        color_src,
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-        src_after,
-    );
+    let b5 = transition(color_src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, src_after);
     unsafe { list.ResourceBarrier(&[b3, b4, b5]) };
     Ok(())
 }

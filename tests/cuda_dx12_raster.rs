@@ -7,9 +7,9 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, DeviceDescriptor, Instance, MemoryExchange, PresentMode, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    BufferKind, Color, DeviceDescriptor, Instance, MemoryExchange, PresentMode, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -69,9 +69,8 @@ impl Drop for TestWindow {
 
 impl HasWindowHandle for TestWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let mut handle = Win32WindowHandle::new(
-            NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?,
-        );
+        let mut handle =
+            Win32WindowHandle::new(NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?);
         handle.hinstance = None;
         Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
     }
@@ -79,9 +78,7 @@ impl HasWindowHandle for TestWindow {
 
 impl HasDisplayHandle for TestWindow {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(unsafe {
-            DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
-        })
+        Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new())) })
     }
 }
 
@@ -309,13 +306,18 @@ fn cuda_raster_to_present_multi_frame() {
         scheme.copy_to_present(&rt, &lease);
         let mut submission = scheme.submit().expect("submit");
         let epoch = goldy::test_support::submission_epoch(&submission);
-        assert!(epoch > 0, "frame {frame_i}: submit must advance timeline");
+        // DX12-direct raster presentation has no CUDA body to submit. Its raster
+        // fence and the present timeline provide completion, so epoch may be zero.
 
         let claim = present_tx.claim(&mut submission).expect("claim");
         claim.consume().expect("present");
 
-        goldy::test_support::wait_until(&ctx, epoch).unwrap_or_else(|e| {
-            panic!("frame {frame_i}: wait_until({epoch}) failed: {e:#}")
-        });
+        if epoch > 0 {
+            goldy::test_support::wait_until(&ctx, epoch)
+                .unwrap_or_else(|e| panic!("frame {frame_i}: wait_until({epoch}) failed: {e:#}"));
+        }
     }
+    let stats = device.cuda_path_stats_for_test().expect("CUDA stats must be available");
+    assert_eq!(stats.vb_mirror_uploads, 1, "static vertex data uploads once");
+    assert_eq!(stats.dtoh_calls, 1, "static vertex data is read from CUDA once");
 }
