@@ -1,8 +1,10 @@
 //! CUDA + DX12 surface / swapchain / present.
 //!
 //! Swapchain backbuffers stay BGRA8 (non-shareable). Per-image float4 shared scratch
-//! textures are CUDA-writable; present blits scratch → BGRA UAV → backbuffer, waiting
-//! on the shared D3D12 fence that CUDA signals at submit completion.
+//! textures are CUDA-writable; present blits color → BGRA UAV → backbuffer. Compute
+//! writes wait on the shared D3D12 fence CUDA signals at submit completion. When
+//! `CopyRenderTarget` targets scratch (`bind_render_target`), present blits the DX12
+//! raster RT directly and skips the CUDA array round-trip.
 //!
 //! Present completion is published on the **Goldy/CUDA timeline** (event ledger), not
 //! the companion DX12 fence counter. `Frame::present` returns that Goldy value so
@@ -10,8 +12,8 @@
 
 use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_interop::{
-    record_present_copy, PresentBlitPipeline, SharedScratchTexture, SURFACE_COMPUTE_FORMAT,
-    SWAPCHAIN_DXGI_FORMAT,
+    record_present_copy, PresentBlitPipeline, PresentColorSrcState, SharedScratchTexture,
+    SURFACE_COMPUTE_FORMAT, SWAPCHAIN_DXGI_FORMAT,
 };
 use super::timeline::{self, EventLedger, LedgerEntry};
 use super::{CudaBackend, CudaDevice, CudaSubmitContext};
@@ -83,6 +85,9 @@ pub(super) struct ScratchSlot {
     pub cuda_complete: u64,
     /// Fence value after DX12 finished present-copy (CUDA may wait before reuse).
     pub dx12_complete: u64,
+    /// When set, present blits this DX12 color resource (raster RT) instead of
+    /// CUDA-imported scratch — skips the RT→scratch CUDA array round-trip.
+    pub dx12_present_src: Option<(ID3D12Resource, u64)>,
 }
 
 pub(super) fn create_surface(
@@ -734,14 +739,24 @@ pub(super) fn take_present_gpu_work(
 
     let scratch = state
         .scratch
-        .get(image_index)
-        .and_then(|s| s.as_ref())
+        .get_mut(image_index)
+        .and_then(|s| s.as_mut())
         .context("no scratch for present")?;
     let scratch_handle = scratch.texture_handle;
-    let scratch_res = scratch.shared.d3d12_resource.clone();
     let blit_target = scratch.shared.blit_target.clone();
     let width = scratch.shared.width;
     let height = scratch.shared.height;
+    // Prefer a stashed DX12 raster RT (bind_render_target) over CUDA-written scratch.
+    let (color_src, color_src_state, dx12_src_fence) =
+        if let Some((res, fence)) = scratch.dx12_present_src.take() {
+            (res, PresentColorSrcState::Common, fence)
+        } else {
+            (
+                scratch.shared.d3d12_resource.clone(),
+                PresentColorSrcState::UnorderedAccess,
+                0,
+            )
+        };
     let backbuffer = state.backbuffers[image_index].clone();
     let backbuffer_from_common = state.backbuffer_in_common[image_index];
     let swapchain = state.swapchain.clone();
@@ -755,7 +770,7 @@ pub(super) fn take_present_gpu_work(
     blit.write_descriptors(
         &companion.device,
         image_index,
-        &scratch_res,
+        &color_src,
         &blit_target,
     );
 
@@ -774,12 +789,14 @@ pub(super) fn take_present_gpu_work(
         present_slot,
         scratch_handle,
         cuda_complete,
+        dx12_src_fence,
         present_tv,
         present_event,
         event_ledger,
         context,
         companion,
-        scratch_res,
+        color_src,
+        color_src_state,
         blit_target,
         backbuffer,
         backbuffer_from_common,
@@ -853,9 +870,8 @@ impl PendingSubmit for CudaPresentHandoff {
             self.stream.cu_stream(),
             self.signal_value,
         )?;
-        self.stream
-            .synchronize()
-            .context("CUDA/DX12: synchronize handoff fence signal")?;
+        // Do not CPU-sync the stream: DX12 `wait_queue(signal_value)` orders the
+        // present copy after this CUDA→fence signal on the GPU timeline.
         Ok(())
     }
 }
@@ -867,12 +883,15 @@ struct CudaDx12PresentGpuWork {
     present_slot: usize,
     scratch_handle: TextureHandle,
     cuda_complete: u64,
+    /// Companion fence for a DX12-direct color source (raster RT); 0 if unused.
+    dx12_src_fence: u64,
     present_tv: crate::timeline::TimelineValue,
     present_event: Arc<CudaEvent>,
     event_ledger: EventLedger,
     context: Arc<CudaSubmitContext>,
     companion: Arc<Dx12Companion>,
-    scratch_res: ID3D12Resource,
+    color_src: ID3D12Resource,
+    color_src_state: PresentColorSrcState,
     blit_target: ID3D12Resource,
     backbuffer: ID3D12Resource,
     backbuffer_from_common: bool,
@@ -892,7 +911,11 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         if self.cuda_complete > 0 {
             self.companion.wait_queue(self.cuda_complete)?;
         }
+        if self.dx12_src_fence > 0 {
+            self.companion.wait_queue(self.dx12_src_fence)?;
+        }
 
+        // Allocator reuse requires CPU completion of the prior list on this slot.
         if self.existing_fence > 0 {
             self.companion.cpu_wait(self.existing_fence)?;
         }
@@ -904,7 +927,8 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             &self.list,
             &self.blit,
             self.image_index,
-            &self.scratch_res,
+            &self.color_src,
+            self.color_src_state,
             &self.blit_target,
             &self.backbuffer,
             self.backbuffer_from_common,
@@ -918,11 +942,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         self.companion
             .execute_and_signal(&[Some(cmd)], return_fence)?;
 
-        // Wait for the copy to retire before DXGI Present (flip model requires rendering done).
-        self.companion
-            .cpu_wait(return_fence)
-            .context("CUDA/DX12: wait for present-copy fence")?;
-
+        // Flip-model Present is ordered after the copy on the DX12 queue; no CPU wait.
         let (sync_interval, flags) = present_args(self.present_mode, self.allow_tearing);
         let hr = unsafe { self.swapchain.Present(sync_interval, flags) };
         // Present may fail after the copy is already submitted. Always retire
@@ -943,10 +963,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         self.present_event
             .record(&self.companion.present_stream)
             .context("CUDA/DX12: record present completion event")?;
-        self.companion
-            .present_stream
-            .synchronize()
-            .context("CUDA/DX12: synchronize present stream")?;
+        // Leave present_stream async — ledger polling retires the timeline later.
         timeline::mark_recorded(&self.event_ledger, self.present_tv);
         timeline::poll_retire_events(
             &self.event_ledger,
@@ -1063,6 +1080,7 @@ fn ensure_scratch(
         texture_handle,
         cuda_complete: 0,
         dx12_complete: 0,
+        dx12_present_src: None,
     });
     Ok(texture_handle)
 }
@@ -1123,6 +1141,24 @@ fn companion_ref(backend: &CudaBackend, device: DeviceHandle) -> Result<&Dx12Com
         .context("CUDA: DX12 companion not available (requires cuda+graphics+dx12 on Windows)")
 }
 
+/// Locate the live surface scratch slot that owns `texture` (present drawable).
+pub(super) fn scratch_slot_for_texture(
+    backend: &CudaBackend,
+    texture: TextureHandle,
+) -> Option<(SurfaceHandle, usize)> {
+    for (surface, state) in &backend.surfaces {
+        for (image_index, slot) in state.scratch.iter().enumerate() {
+            if slot
+                .as_ref()
+                .is_some_and(|s| s.texture_handle == texture)
+            {
+                return Some((*surface, image_index));
+            }
+        }
+    }
+    None
+}
+
 /// True when any recorded CUDA completion event on this device is still outstanding.
 fn cuda_device_has_pending_work(backend: &CudaBackend, device: DeviceHandle) -> bool {
     for context in backend.contexts.values().filter(|c| c.device == device) {
@@ -1151,9 +1187,7 @@ fn wait_surface_resources_idle(
         let gpu = backend.device(device)?;
         let companion = gpu.dx12.as_ref().map(Arc::clone);
         if let Some(c) = companion.as_ref() {
-            fence_high = fence_high
-                .max(c.init_fence.load(Ordering::Acquire))
-                .max(c.raster_fence.load(Ordering::Acquire));
+            fence_high = fence_high.max(c.companion_fence_high_water());
         }
         (
             Arc::clone(&gpu.submission_worker),

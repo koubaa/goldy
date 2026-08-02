@@ -131,19 +131,17 @@ pub(super) struct Dx12Companion {
     pub next_rtv_offset: AtomicU64,
     /// Empty root signature (IA input layout allowed) for first-slice graphics PSOs.
     pub graphics_root_signature: ID3D12RootSignature,
-    /// Dedicated allocator/list for blocking `render_to_target` submits.
-    pub raster_allocator: ID3D12CommandAllocator,
-    pub raster_list: ID3D12GraphicsCommandList,
-    /// Fence value of the last raster submit that used [`Self::raster_allocator`].
-    pub raster_fence: AtomicU64,
+    /// Rotating allocator/list slots for `render_to_target` (no per-frame CPU wait).
+    pub raster_slots: Vec<PresentCommandSlot>,
+    /// Next raster slot index (0..MAX_FRAMES).
+    pub raster_slot: AtomicU64,
 }
 
 pub(super) struct PresentCommandSlot {
     pub allocator: ID3D12CommandAllocator,
     pub list: ID3D12GraphicsCommandList,
     /// Last fence value submitted with this slot (0 = never used).
-    #[allow(dead_code)]
-    pub fence_value: u64,
+    pub fence_value: AtomicU64,
 }
 
 impl Dx12Companion {
@@ -218,7 +216,7 @@ impl Dx12Companion {
             present_slots.push(PresentCommandSlot {
                 allocator,
                 list,
-                fence_value: 0,
+                fence_value: AtomicU64::new(0),
             });
         }
 
@@ -245,14 +243,22 @@ impl Dx12Companion {
 
         let graphics_root_signature = create_empty_ia_root_signature(&device)?;
 
-        let raster_allocator: ID3D12CommandAllocator =
-            unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
-                .context("CUDA/DX12: CreateCommandAllocator(raster) failed")?;
-        let raster_list: ID3D12GraphicsCommandList = unsafe {
-            device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &raster_allocator, None)
+        let mut raster_slots = Vec::with_capacity(MAX_FRAMES);
+        for _ in 0..MAX_FRAMES {
+            let allocator: ID3D12CommandAllocator =
+                unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                    .context("CUDA/DX12: CreateCommandAllocator(raster) failed")?;
+            let list: ID3D12GraphicsCommandList = unsafe {
+                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
+            }
+            .context("CUDA/DX12: CreateCommandList(raster) failed")?;
+            unsafe { list.Close() }.context("CUDA/DX12: Close raster command list")?;
+            raster_slots.push(PresentCommandSlot {
+                allocator,
+                list,
+                fence_value: AtomicU64::new(0),
+            });
         }
-        .context("CUDA/DX12: CreateCommandList(raster) failed")?;
-        unsafe { raster_list.Close() }.context("CUDA/DX12: Close raster command list")?;
 
         let present_stream = cuda_ctx
             .new_stream()
@@ -279,9 +285,8 @@ impl Dx12Companion {
             rtv_descriptor_size,
             next_rtv_offset: AtomicU64::new(0),
             graphics_root_signature,
-            raster_allocator,
-            raster_list,
-            raster_fence: AtomicU64::new(0),
+            raster_slots,
+            raster_slot: AtomicU64::new(0),
         })
     }
 
@@ -363,27 +368,38 @@ impl Dx12Companion {
         self.next_rtv_offset.fetch_add(1, Ordering::AcqRel) as u32
     }
 
-    /// Reset the dedicated raster command allocator/list (blocking on prior use).
-    pub fn begin_raster_list(&self) -> Result<()> {
-        let prev = self.raster_fence.load(Ordering::Acquire);
+    /// Reset the next raster command allocator/list (waits only that slot's prior fence).
+    pub fn begin_raster_list(&self) -> Result<(usize, ID3D12GraphicsCommandList)> {
+        let idx = (self.raster_slot.fetch_add(1, Ordering::AcqRel) as usize) % MAX_FRAMES;
+        let slot = &self.raster_slots[idx];
+        let prev = slot.fence_value.load(Ordering::Acquire);
         if prev > 0 {
             self.cpu_wait(prev)?;
         }
-        unsafe { self.raster_allocator.Reset() }.context("CUDA/DX12: reset raster allocator")?;
-        unsafe { self.raster_list.Reset(&self.raster_allocator, None) }
-            .context("CUDA/DX12: reset raster list")?;
-        Ok(())
+        unsafe { slot.allocator.Reset() }.context("CUDA/DX12: reset raster allocator")?;
+        unsafe { slot.list.Reset(&slot.allocator, None) }.context("CUDA/DX12: reset raster list")?;
+        Ok((idx, slot.list.clone()))
     }
 
-    /// Close, execute, and CPU-wait the raster list; returns the signaled fence value.
-    pub fn finish_raster_list(&self) -> Result<u64> {
-        unsafe { self.raster_list.Close() }.context("CUDA/DX12: close raster list")?;
-        let cmd: ID3D12CommandList = self.raster_list.cast().context("cast raster list")?;
+    /// Close and execute the raster list for `slot_idx` without a CPU wait.
+    /// Returns the signaled fence value (GPU-side retirement).
+    pub fn finish_raster_list(&self, slot_idx: usize) -> Result<u64> {
+        let slot = &self.raster_slots[slot_idx];
+        unsafe { slot.list.Close() }.context("CUDA/DX12: close raster list")?;
+        let cmd: ID3D12CommandList = slot.list.cast().context("cast raster list")?;
         let signal = self.next_fence_value();
         self.execute_and_signal(&[Some(cmd)], signal)?;
-        self.cpu_wait(signal)?;
-        self.raster_fence.store(signal, Ordering::Release);
+        slot.fence_value.store(signal, Ordering::Release);
         Ok(signal)
+    }
+
+    /// Highest fence value known for companion-owned work (init + raster/present slots).
+    pub fn companion_fence_high_water(&self) -> u64 {
+        let mut high = self.init_fence.load(Ordering::Acquire);
+        for slot in self.raster_slots.iter().chain(self.present_slots.iter()) {
+            high = high.max(slot.fence_value.load(Ordering::Acquire));
+        }
+        high
     }
 }
 

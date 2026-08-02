@@ -277,6 +277,8 @@ struct CudaBuffer {
     element_stride: Option<u32>,
     slot: Option<u32>,
     readback: bool,
+    /// Bumped on every host/GPU write that changes contents (VB mirror cache key).
+    content_epoch: u64,
 }
 
 struct CudaShader {
@@ -454,6 +456,7 @@ impl CudaBackend {
                 element_stride,
                 slot: Some(slot),
                 readback: false,
+                content_epoch: 0,
             },
         );
         Ok(handle)
@@ -1175,7 +1178,7 @@ impl CudaBackend {
         Ok((buffers, textures))
     }
 
-    fn materialize_ops(&self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+    fn materialize_ops(&mut self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
         let mut ops = Vec::new();
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
@@ -1413,52 +1416,99 @@ impl CudaBackend {
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     {
-                        let (cuda_src, fence, device) = {
-                            let rt = self
-                                .render_targets
-                                .get(src)
-                                .context("CUDA/DX12: invalid CopyRenderTarget source")?;
-                            (Arc::clone(&rt.cuda_texture), rt.last_dx12_fence, rt.device)
-                        };
-                        let cuda_dst = Arc::clone(
-                            self.textures
-                                .get(dst)
-                                .context("CUDA/DX12: invalid CopyRenderTarget destination")?,
-                        );
-                        if cuda_src.format != cuda_dst.format {
-                            anyhow::bail!(
-                                "CUDA/DX12: CopyRenderTarget format mismatch ({:?} → {:?})",
-                                cuda_src.format,
-                                cuda_dst.format
+                        // Fast path: copy into surface present scratch → stash the DX12 RT
+                        // so present can blit it directly (no CUDA array round-trip).
+                        if let Some((surf, image_index)) =
+                            surface::scratch_slot_for_texture(self, *dst)
+                        {
+                            let (d3d12_resource, fence) = {
+                                let rt = self
+                                    .render_targets
+                                    .get(src)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget source")?;
+                                let dst_tex = self
+                                    .textures
+                                    .get(dst)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget destination")?;
+                                if rt.cuda_texture.format != dst_tex.format {
+                                    anyhow::bail!(
+                                        "CUDA/DX12: CopyRenderTarget format mismatch ({:?} → {:?})",
+                                        rt.cuda_texture.format,
+                                        dst_tex.format
+                                    );
+                                }
+                                if rt.width != dst_tex.width || rt.height != dst_tex.height {
+                                    anyhow::bail!(
+                                        "CUDA/DX12: CopyRenderTarget size mismatch ({}x{} → {}x{})",
+                                        rt.width,
+                                        rt.height,
+                                        dst_tex.width,
+                                        dst_tex.height
+                                    );
+                                }
+                                (rt.d3d12_resource.clone(), rt.last_dx12_fence)
+                            };
+                            if let Some(slot) = self
+                                .surfaces
+                                .get_mut(&surf)
+                                .and_then(|s| s.scratch.get_mut(image_index))
+                                .and_then(|s| s.as_mut())
+                            {
+                                slot.dx12_present_src = Some((d3d12_resource, fence));
+                            }
+                        } else {
+                            let (cuda_src, fence, device) = {
+                                let rt = self
+                                    .render_targets
+                                    .get(src)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget source")?;
+                                (Arc::clone(&rt.cuda_texture), rt.last_dx12_fence, rt.device)
+                            };
+                            let cuda_dst = Arc::clone(
+                                self.textures
+                                    .get(dst)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget destination")?,
                             );
-                        }
-                        if cuda_src.width != cuda_dst.width || cuda_src.height != cuda_dst.height {
-                            anyhow::bail!(
-                                "CUDA/DX12: CopyRenderTarget size mismatch ({}x{} → {}x{})",
-                                cuda_src.width,
-                                cuda_src.height,
-                                cuda_dst.width,
-                                cuda_dst.height
-                            );
-                        }
-                        if fence > 0 {
-                            let companion = self
-                                .devices
-                                .get(&device)
-                                .context("CUDA: invalid device")?
-                                .dx12
-                                .as_ref()
-                                .context("CUDA/DX12: companion required for CopyRenderTarget")?;
-                            ops.push(CudaOp::WaitExternalFence {
-                                cuda_ctx: Arc::clone(&companion.cuda_ctx),
-                                semaphore: pending_submit::SendExternalSemaphore(companion.cuda_semaphore),
-                                value: fence,
+                            if cuda_src.format != cuda_dst.format {
+                                anyhow::bail!(
+                                    "CUDA/DX12: CopyRenderTarget format mismatch ({:?} → {:?})",
+                                    cuda_src.format,
+                                    cuda_dst.format
+                                );
+                            }
+                            if cuda_src.width != cuda_dst.width || cuda_src.height != cuda_dst.height
+                            {
+                                anyhow::bail!(
+                                    "CUDA/DX12: CopyRenderTarget size mismatch ({}x{} → {}x{})",
+                                    cuda_src.width,
+                                    cuda_src.height,
+                                    cuda_dst.width,
+                                    cuda_dst.height
+                                );
+                            }
+                            if fence > 0 {
+                                let companion = self
+                                    .devices
+                                    .get(&device)
+                                    .context("CUDA: invalid device")?
+                                    .dx12
+                                    .as_ref()
+                                    .context(
+                                        "CUDA/DX12: companion required for CopyRenderTarget",
+                                    )?;
+                                ops.push(CudaOp::WaitExternalFence {
+                                    cuda_ctx: Arc::clone(&companion.cuda_ctx),
+                                    semaphore: pending_submit::SendExternalSemaphore(
+                                        companion.cuda_semaphore,
+                                    ),
+                                    value: fence,
+                                });
+                            }
+                            ops.push(CudaOp::CopyTexture {
+                                src: cuda_src,
+                                dst: cuda_dst,
                             });
                         }
-                        ops.push(CudaOp::CopyTexture {
-                            src: cuda_src,
-                            dst: cuda_dst,
-                        });
                     }
                     #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
                     {
@@ -1662,7 +1712,12 @@ impl CudaBuffer {
             element_stride: self.element_stride,
             slot: self.slot,
             readback: self.readback,
+            content_epoch: self.content_epoch,
         }
+    }
+
+    fn bump_content_epoch(&mut self) {
+        self.content_epoch = self.content_epoch.wrapping_add(1);
     }
 }
 
@@ -2309,8 +2364,19 @@ impl GpuBackend for CudaBackend {
                 .map(|buffer| buffer.device)
                 .context("CUDA: invalid buffer handle")?,
         )?;
-        let buffer = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
-        let stream = Arc::clone(&self.device(buffer.device)?.alloc_stream);
+        let device = {
+            let buffer = self
+                .buffers
+                .get_mut(&buffer)
+                .context("CUDA: invalid buffer handle")?;
+            buffer.bump_content_epoch();
+            buffer.device
+        };
+        let stream = Arc::clone(&self.device(device)?.alloc_stream);
+        let buffer = self
+            .buffers
+            .get(&buffer)
+            .context("CUDA: invalid buffer handle")?;
         Self::write_buffer_region(&stream, buffer, offset, data)
     }
 
@@ -2335,6 +2401,7 @@ impl GpuBackend for CudaBackend {
                 element_stride: None,
                 slot: None,
                 readback: true,
+                content_epoch: 0,
             },
         );
         Ok(handle)
@@ -2448,7 +2515,8 @@ impl GpuBackend for CudaBackend {
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         self.sync_device_streams_for_immediate_api(device)?;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
-        let target = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+        let target = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
+        target.bump_content_epoch();
         Self::clear_buffer_region(&stream, target, offset, size)
     }
 
@@ -2513,6 +2581,7 @@ impl GpuBackend for CudaBackend {
                 element_stride: element_stride.or(parent.element_stride),
                 slot: Some(slot),
                 readback: false,
+                content_epoch: parent.content_epoch,
             },
         );
         Ok(handle)
@@ -2559,6 +2628,7 @@ impl GpuBackend for CudaBackend {
         target.offset = 0;
         target.size = new_size;
         target.capacity = capacity;
+        target.bump_content_epoch();
         Ok(())
     }
 

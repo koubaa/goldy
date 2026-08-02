@@ -11,7 +11,6 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{bail, Context as _, Result};
 use cudarc::driver::{sys, CudaContext};
 use std::sync::Arc;
-use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
@@ -532,20 +531,42 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 }
 
+/// Where the float4 present-blit source sits before the copy.
+#[derive(Clone, Copy)]
+pub(super) enum PresentColorSrcState {
+    /// CUDA-written imported scratch (UAV).
+    UnorderedAccess,
+    /// DX12 raster target left in COMMON after `render_to_target`.
+    Common,
+}
+
 /// Record float→BGRA blit + CopyResource(blit→backbuffer) + present barriers.
 pub(super) fn record_present_copy(
     list: &ID3D12GraphicsCommandList,
     blit: &PresentBlitPipeline,
     slot_idx: usize,
-    scratch: &ID3D12Resource,
+    color_src: &ID3D12Resource,
+    color_src_state: PresentColorSrcState,
     blit_target: &ID3D12Resource,
     backbuffer: &ID3D12Resource,
     backbuffer_from_common: bool,
     width: u32,
     height: u32,
 ) -> Result<()> {
-    // scratch UAV → SRV for blit
-    let b0 = transition(scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    let src_before = match color_src_state {
+        PresentColorSrcState::UnorderedAccess => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        PresentColorSrcState::Common => D3D12_RESOURCE_STATE_COMMON,
+    };
+    let src_after = match color_src_state {
+        PresentColorSrcState::UnorderedAccess => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        PresentColorSrcState::Common => D3D12_RESOURCE_STATE_COMMON,
+    };
+    // color → SRV for blit
+    let b0 = transition(
+        color_src,
+        src_before,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    );
     unsafe { list.ResourceBarrier(&[b0]) };
 
     unsafe { list.SetPipelineState(&blit.pso) };
@@ -597,9 +618,9 @@ pub(super) fn record_present_copy(
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
     );
     let b5 = transition(
-        scratch,
+        color_src,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        src_after,
     );
     unsafe { list.ResourceBarrier(&[b3, b4, b5]) };
     Ok(())

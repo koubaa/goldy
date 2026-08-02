@@ -7,9 +7,11 @@
 //! - Vertex buffers + draw (no indexed draw, no bindless resources, no depth)
 //!
 //! Vertex buffers are CUDA allocations; for IA they are mirrored into DX12 UPLOAD
-//! heaps at `render_to_target` time (blocking DtoH). Render-target color is a shared
-//! D3D12 resource imported into CUDA so [`GpuCommand::CopyRenderTarget`] can array-copy
-//! into present scratch / other CUDA textures after a companion-fence wait.
+//! heaps at `render_to_target` time and cached by buffer content epoch (static
+//! geometry uploads once). Render-target color is a shared D3D12 resource imported
+//! into CUDA so [`GpuCommand::CopyRenderTarget`] can array-copy into present scratch
+//! / other CUDA textures after a companion-fence wait. When the copy destination is
+//! surface scratch, the CUDA backend skips that copy and presents the RT on DX12.
 
 use super::dx12_companion::{cuda_wait_fence, Dx12Companion};
 use super::dx12_interop::{create_shared_texture, import_shared_texture, CudaImportedTexture};
@@ -67,6 +69,8 @@ unsafe impl Sync for CudaRenderTarget {}
 pub(super) struct Dx12VertexMirror {
     pub resource: ID3D12Resource,
     pub size: u64,
+    /// [`CudaBuffer::content_epoch`] last uploaded into this mirror.
+    pub content_epoch: u64,
 }
 
 // SAFETY: see [`CudaGraphicsPipeline`].
@@ -462,7 +466,7 @@ fn ensure_vertex_mirror<'a>(
     mirrors: &'a mut std::collections::HashMap<BufferHandle, Dx12VertexMirror>,
     buffer: BufferHandle,
     size: u64,
-) -> Result<&'a Dx12VertexMirror> {
+) -> Result<&'a mut Dx12VertexMirror> {
     let needs_recreate = mirrors
         .get(&buffer)
         .map(|m| m.size < size)
@@ -505,10 +509,11 @@ fn ensure_vertex_mirror<'a>(
             Dx12VertexMirror {
                 resource,
                 size: size.max(4),
+                content_epoch: u64::MAX, // force upload on first use
             },
         );
     }
-    Ok(mirrors.get(&buffer).unwrap())
+    Ok(mirrors.get_mut(&buffer).unwrap())
 }
 
 fn upload_vertex_mirror(
@@ -565,11 +570,11 @@ pub(super) fn render_to_target(
         }
     }
 
-    // Flush CUDA work that may have written the shared RT / vertex buffers.
-    backend.sync_device_streams_for_immediate_api(device)?;
+    // Do not blanket-sync all CUDA streams here. Vertex mirrors are refreshed from
+    // content_epoch (host writes bump the epoch). Shared RT consumers wait on
+    // `last_dx12_fence` via the external-semaphore path.
 
     let companion = {
-        // Clone Arc so we can mutate backend maps while using companion methods.
         Arc::clone(
             backend
                 .devices
@@ -581,16 +586,14 @@ pub(super) fn render_to_target(
         )
     };
 
-    // If a prior raster wrote this target and CUDA may consume it later, the fence
-    // is already CPU-waited by finish_raster_list. Still wait on the queue for
-    // ordering relative to present/other DIRECT work.
+    // Order this draw after prior raster/present work on this target without a
+    // host stall — queue Wait is enough when the prior signal has been submitted.
     let prior_fence = backend.render_targets.get(&target).unwrap().last_dx12_fence;
     if prior_fence > 0 {
         companion.wait_queue(prior_fence)?;
     }
 
-    companion.begin_raster_list()?;
-    let list = &companion.raster_list;
+    let (slot_idx, list) = companion.begin_raster_list()?;
 
     let (width, height, rtv_offset, d3d12_resource) = {
         let rt = backend.render_targets.get(&target).unwrap();
@@ -677,18 +680,20 @@ pub(super) fn render_to_target(
                     bail!("CUDA/DX12: vertex buffer offset out of range");
                 }
                 let nbytes = cuda_buf.size - offset;
-                let host = read_cuda_buffer_host(&alloc_stream, &cuda_buf)?;
-                let host_slice = &host[*offset as usize..];
-                {
-                    let mirror = ensure_vertex_mirror(
-                        &companion,
-                        &mut backend.vb_mirrors,
-                        *buffer,
-                        nbytes,
-                    )?;
+                let epoch = cuda_buf.content_epoch;
+                let mirror = ensure_vertex_mirror(
+                    &companion,
+                    &mut backend.vb_mirrors,
+                    *buffer,
+                    nbytes,
+                )?;
+                if mirror.content_epoch != epoch {
+                    // Content changed (or first use): DtoH once into the UPLOAD mirror.
+                    let host = read_cuda_buffer_host(&alloc_stream, &cuda_buf)?;
+                    let host_slice = &host[*offset as usize..];
                     upload_vertex_mirror(&companion, mirror, host_slice)?;
+                    mirror.content_epoch = epoch;
                 }
-                let mirror = backend.vb_mirrors.get(buffer).unwrap();
                 let view = D3D12_VERTEX_BUFFER_VIEW {
                     BufferLocation: unsafe { mirror.resource.GetGPUVirtualAddress() },
                     SizeInBytes: nbytes as u32,
@@ -729,7 +734,7 @@ pub(super) fn render_to_target(
     );
     unsafe { list.ResourceBarrier(&[to_common]) };
 
-    let signal = companion.finish_raster_list()?;
+    let signal = companion.finish_raster_list(slot_idx)?;
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
     }
