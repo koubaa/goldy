@@ -8,6 +8,12 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Upload built wheels to PyPI (use to republish missing platforms)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -179,7 +185,7 @@ jobs:
   # Publish all wheels + sdist to PyPI
   publish:
     name: Publish to PyPI
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || inputs.publish == true
     needs:
       - build-sdist
       - build-linux-x86_64
@@ -206,4 +212,7 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Safe when republishing after partial uploads (e.g. file-size limit).
+          skip-existing: true
 
