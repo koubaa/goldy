@@ -1,4 +1,9 @@
-//! Compute-only CUDA backend prototype.
+//! Compute-focused CUDA backend (Slang → PTX → Driver API).
+//!
+//! With `cuda` + `graphics` + `dx12` on Windows, presentation is enabled via a
+//! DX12 companion: CUDA writes shared float4 scratch textures and DX12 copies
+//! them to the swapchain. Raster pipelines and offscreen render targets remain
+//! unsupported in this slice.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -27,6 +32,13 @@ mod retained_graph;
 mod runtime_module;
 mod texture;
 mod timeline;
+
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod dx12_companion;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod dx12_interop;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod surface;
 
 use super::*;
 use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
@@ -99,6 +111,8 @@ pub(crate) struct CudaBackend {
     compute_pipelines: HashMap<ComputePipelineHandle, CudaComputePipeline>,
     retained: HashMap<(ContextHandle, u64), RetainedEntry>,
     graph_stats: Arc<CudaGraphStats>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    surfaces: HashMap<SurfaceHandle, surface::CudaSurfaceState>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -107,6 +121,8 @@ pub(crate) struct CudaBackend {
     next_slot: u32,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    next_surface: SurfaceHandle,
 }
 
 struct CudaDevice {
@@ -124,6 +140,9 @@ struct CudaDevice {
     limits: CudaDeviceLimits,
     /// NVRTC-compiled updater for device-updatable indirect dispatch.
     indirect_updater: Arc<runtime_module::IndirectUpdater>,
+    /// DX12 presentation companion (cuda+graphics+dx12 on Windows only).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    dx12: Option<Arc<dx12_companion::Dx12Companion>>,
 }
 
 pub(super) struct CudaSubmitContext {
@@ -327,6 +346,8 @@ impl CudaBackend {
             compute_pipelines: HashMap::new(),
             retained: HashMap::new(),
             graph_stats: Arc::new(CudaGraphStats::default()),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            surfaces: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
@@ -335,6 +356,8 @@ impl CudaBackend {
             next_slot: 0,
             next_shader: 1,
             next_compute_pipeline: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_surface: 1,
         })
     }
 
@@ -1792,13 +1815,33 @@ impl GpuBackendTimelineWait for CudaBackend {
 }
 
 #[cfg(feature = "graphics")]
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+impl GpuBackendPresentSplit for CudaBackend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn PresentGpuWork>> {
+        surface::take_present_gpu_work(self, frame, submit_tv)
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::finish_present(self, finish, submit_tv)
+    }
+}
+
+#[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
 impl GpuBackendPresentSplit for CudaBackend {
     fn take_present_gpu_work(
         &mut self,
         _frame: FrameToken,
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn PresentGpuWork>> {
-        Self::unsupported("presentation")
+        Self::unsupported("presentation (requires cuda+graphics+dx12 on Windows)")
     }
 
     fn finish_present(
@@ -1806,7 +1849,7 @@ impl GpuBackendPresentSplit for CudaBackend {
         _finish: PresentFinishState,
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        Self::unsupported("presentation")
+        Self::unsupported("presentation (requires cuda+graphics+dx12 on Windows)")
     }
 }
 
@@ -1854,26 +1897,40 @@ impl GpuBackend for CudaBackend {
         let alloc_stream = ctx.default_stream();
         let handle = self.next_device;
         self.next_device += 1;
-        self.devices.insert(
-            handle,
-            CudaDevice {
-                ctx,
-                alloc_stream,
-                submission_worker: Arc::new(SubmissionWorker::new(submission_worker::SUBMISSION_QUEUE_CAPACITY)),
-                next_timeline: Arc::new(AtomicU64::new(1)),
-                retired: Arc::new(AtomicU64::new(0)),
-                event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
-                deletion_queue: Arc::new(Mutex::new(Vec::new())),
-                graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
-                graph_stats: Arc::clone(&self.graph_stats),
-                limits,
-                indirect_updater,
-            },
-        );
+        let mut gpu = CudaDevice {
+            ctx,
+            alloc_stream,
+            submission_worker: Arc::new(SubmissionWorker::new(submission_worker::SUBMISSION_QUEUE_CAPACITY)),
+            next_timeline: Arc::new(AtomicU64::new(1)),
+            retired: Arc::new(AtomicU64::new(0)),
+            event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
+            deletion_queue: Arc::new(Mutex::new(Vec::new())),
+            graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
+            graph_stats: Arc::clone(&self.graph_stats),
+            limits,
+            indirect_updater,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            dx12: None,
+        };
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        surface::attach_companion(&mut gpu)
+            .with_context(|| format!("CUDA: attach DX12 presentation companion for adapter {adapter_id}"))?;
+        self.devices.insert(handle, gpu);
         Ok(handle)
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let surfaces: Vec<_> = self
+                .surfaces
+                .iter()
+                .filter_map(|(h, s)| (s.device == device).then_some(*h))
+                .collect();
+            for surface in surfaces {
+                surface::destroy_surface(self, surface);
+            }
+        }
         let contexts: Vec<_> = self
             .contexts
             .iter()
@@ -1882,10 +1939,14 @@ impl GpuBackend for CudaBackend {
         for ctx in contexts {
             let _ = destroy_context_mut(self, ctx);
         }
-        if let Some(gpu) = self.devices.remove(&device) {
+        if let Some(mut gpu) = self.devices.remove(&device) {
             let _ = gpu.submission_worker.flush();
             let _ = gpu.alloc_stream.synchronize();
             gpu.submission_worker.shutdown();
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                gpu.dx12 = None;
+            }
         }
         self.buffers.retain(|_, buffer| buffer.device != device);
         self.shaders.retain(|_, shader| shader.device != device);
@@ -2572,7 +2633,18 @@ impl GpuBackend for CudaBackend {
         self.samplers.get(&sampler).map(|s| s.slot)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn create_surface(
+        &mut self,
+        device: DeviceHandle,
+        window: &dyn raw_window_handle::HasWindowHandle,
+        display: &dyn raw_window_handle::HasDisplayHandle,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<SurfaceHandle> {
+        surface::create_surface(self, device, window, display, depth_format)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn create_surface(
         &mut self,
         _device: DeviceHandle,
@@ -2580,25 +2652,54 @@ impl GpuBackend for CudaBackend {
         _display: &dyn raw_window_handle::HasDisplayHandle,
         _depth_format: Option<DepthFormat>,
     ) -> Result<SurfaceHandle> {
-        Self::unsupported("surfaces")
+        Self::unsupported("surfaces (requires cuda+graphics+dx12 on Windows)")
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn destroy_surface(&mut self, surface: SurfaceHandle) {
+        surface::destroy_surface(self, surface);
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn destroy_surface(&mut self, _surface: SurfaceHandle) {}
 
-    #[cfg(feature = "graphics")]
-    fn surface_resize(&mut self, _surface: SurfaceHandle, _width: u32, _height: u32) -> Result<()> {
-        Self::unsupported("surfaces")
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+        surface::surface_resize(self, surface, width, height)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
+    fn surface_resize(&mut self, _surface: SurfaceHandle, _width: u32, _height: u32) -> Result<()> {
+        Self::unsupported("surfaces (requires cuda+graphics+dx12 on Windows)")
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
+        surface::surface_size(self, surface)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn surface_size(&self, _surface: SurfaceHandle) -> (u32, u32) {
         (0, 0)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat {
+        surface::surface_format(self, surface)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn surface_format(&self, _surface: SurfaceHandle) -> TextureFormat {
         TextureFormat::Bgra8UnormSrgb
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_set_present_mode(
+        &mut self,
+        surface: SurfaceHandle,
+        mode: crate::types::PresentMode,
+    ) -> Result<()> {
+        surface::surface_set_present_mode(self, surface, mode)
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
@@ -2764,14 +2865,24 @@ impl GpuBackend for CudaBackend {
         }
     }
 
-    #[cfg(feature = "graphics")]
-    fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
-        Self::unsupported("frames")
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
+        surface::begin_frame(self, surface, ctx)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
+    fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
+        Self::unsupported("frames (requires cuda+graphics+dx12 on Windows)")
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::submit_frame(self, frame)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn submit_frame(&mut self, _frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
-        Self::unsupported("frames")
+        Self::unsupported("frames (requires cuda+graphics+dx12 on Windows)")
     }
 
     fn create_compute_pipeline(

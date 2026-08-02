@@ -165,6 +165,9 @@ fn check_cu(result: sys::CUresult, what: &str) -> Result<()> {
 pub(super) struct CudaArray {
     ctx: Arc<CudaContext>,
     array: sys::CUarray,
+    /// When false, the array is borrowed from an imported mipmapped array and must
+    /// not be destroyed here (see [`CudaTextureResource::from_imported_array`]).
+    owns_array: bool,
 }
 
 impl CudaArray {
@@ -203,16 +206,34 @@ impl CudaArray {
         Ok(Self {
             ctx: Arc::clone(ctx),
             array,
+            owns_array: true,
         })
+    }
+
+    /// Wrap a level-0 array borrowed from `cuExternalMemoryGetMappedMipmappedArray`.
+    pub(super) fn from_imported(ctx: &Arc<CudaContext>, array: sys::CUarray) -> Self {
+        Self {
+            ctx: Arc::clone(ctx),
+            array,
+            owns_array: false,
+        }
     }
 
     pub(super) fn raw(&self) -> sys::CUarray {
         self.array
     }
+
+    /// True when this array is borrowed from `cuImportExternalMemory` (D3D12 interop).
+    pub(super) fn is_imported(&self) -> bool {
+        !self.owns_array
+    }
 }
 
 impl Drop for CudaArray {
     fn drop(&mut self) {
+        if !self.owns_array {
+            return;
+        }
         let _ = self.ctx.bind_to_thread();
         let array = std::mem::replace(&mut self.array, std::ptr::null_mut());
         if !array.is_null() {
@@ -280,8 +301,52 @@ impl CudaTextureResource {
         }))
     }
 
+    /// Build a texture view over an imported D3D12/external level-0 CUDA array.
+    ///
+    /// The caller retains ownership of the external memory / mipmapped array and must
+    /// outlive this resource. Tex/surf objects are still destroyed on drop.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub(super) fn from_imported_array(
+        ctx: &Arc<CudaContext>,
+        array: sys::CUarray,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        kind: TextureKind,
+        flags: TextureFlags,
+        storage_slot: Option<u32>,
+        sampled_slot: Option<u32>,
+    ) -> Result<Arc<Self>> {
+        if array.is_null() {
+            bail!("CUDA: imported array is null");
+        }
+        if width == 0 || height == 0 {
+            bail!("CUDA: texture dimensions must be non-zero");
+        }
+        let info = format_info(format)?;
+        Ok(Arc::new(Self {
+            ctx: Arc::clone(ctx),
+            array: Arc::new(CudaArray::from_imported(ctx, array)),
+            width,
+            height,
+            format,
+            kind,
+            flags,
+            storage_slot,
+            sampled_slot,
+            srgb: info.srgb,
+            tex_objects: Mutex::new(HashMap::new()),
+            surf_object: Mutex::new(None),
+        }))
+    }
+
     pub(super) fn array(&self) -> sys::CUarray {
         self.array.raw()
+    }
+
+    /// True when backed by D3D12-imported external memory (not graph-capture safe).
+    pub(super) fn is_imported(&self) -> bool {
+        self.array.is_imported()
     }
 
     pub(super) fn bytes_per_pixel(&self) -> u32 {

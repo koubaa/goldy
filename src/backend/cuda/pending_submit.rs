@@ -157,16 +157,75 @@ pub(super) enum CudaOp {
 
 /// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
 ///
-/// Kernel launches (direct and indirect) are capture-safe. `memset` / `memcpy` via cudarc
-/// have been observed to invalidate `THREAD_LOCAL` stream capture on this driver stack, so
-/// clears and copies stay on the command-replay path until an explicit-graph or capture-safe
-/// copy path lands.
+/// Kernel launches (direct and indirect) are capture-safe when they only touch
+/// driver-owned allocations. Launches that write imported D3D12/external surface
+/// scratch (`cuImportExternalMemory`) are not — capture often fails at `end_capture`.
 pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
     if ops.is_empty() {
         return false;
     }
-    ops.iter()
-        .all(|op| matches!(op, CudaOp::Launch { .. } | CudaOp::LaunchIndirect { .. }))
+    ops.iter().all(|op| match op {
+        CudaOp::Launch {
+            keep_alive_textures, ..
+        }
+        | CudaOp::LaunchIndirect {
+            keep_alive_textures, ..
+        } => !keep_alive_textures.iter().any(|tex| tex.is_imported()),
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod graph_safe_tests {
+    use super::*;
+    use crate::types::{TextureFlags, TextureFormat, TextureKind};
+    use cudarc::driver::CudaContext;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn rejects_launch_with_imported_texture() {
+        let Ok(ctx) = CudaContext::new(0) else {
+            eprintln!("skip: no CUDA device");
+            return;
+        };
+        let Ok(owned) =
+            super::super::texture::CudaArray::create(&ctx, 4, 4, TextureFormat::Rgba32Float, true)
+        else {
+            eprintln!("skip: array create failed");
+            return;
+        };
+        let imported = Arc::new(super::super::texture::CudaTextureResource {
+            ctx: Arc::clone(&ctx),
+            array: Arc::new(super::super::texture::CudaArray::from_imported(
+                &ctx,
+                owned.raw(),
+            )),
+            width: 4,
+            height: 4,
+            format: TextureFormat::Rgba32Float,
+            kind: TextureKind::Direct,
+            flags: TextureFlags::empty(),
+            storage_slot: Some(0),
+            sampled_slot: None,
+            srgb: false,
+            tex_objects: Mutex::new(std::collections::HashMap::new()),
+            surf_object: Mutex::new(None),
+        });
+        let op = CudaOp::Launch {
+            label: None,
+            function: std::ptr::null_mut(),
+            module: Arc::new(cudarc::driver::CudaModule::from_ptx(
+                cudarc::nvrtc::Ptx::from_src(".version 8.0\n.target sm_50\n.entry cs_main() { ret; }"),
+                (0, 0),
+            ).expect("ptx")),
+            workgroup_size: [1, 1, 1],
+            grid: (1, 1, 1),
+            args: vec![],
+            keep_alive_buffers: vec![],
+            keep_alive_textures: vec![imported],
+        };
+        assert!(!ops_are_graph_safe(&[op]));
+    }
 }
 
 pub(super) fn ops_contain_indirect(ops: &[CudaOp]) -> bool {

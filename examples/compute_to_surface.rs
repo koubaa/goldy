@@ -70,6 +70,9 @@ void cs_main(BufRO<Uniforms> uniforms_buf, DirectSpatial<float4> output, ThreadI
 }
 "#;
 
+const INITIAL_WIDTH: u32 = 800;
+const INITIAL_HEIGHT: u32 = 600;
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -82,17 +85,50 @@ fn main() -> Result<()> {
     println!("===================================");
     println!("Press V to toggle vsync, Escape to exit\n");
 
+    println!("Initializing GPU...");
+    let warmup = warm_gpu()?;
+    println!("GPU ready.");
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::default();
+    let mut app = App {
+        warmup: Some(warmup),
+        state: None,
+    };
     event_loop.run_app(&mut app)?;
 
     Ok(())
 }
 
+/// Device, context, and compiled compute pipeline — everything except the window/surface.
+struct GpuWarmup {
+    ctx: goldy::Context,
+    compute_pipeline: ComputePipeline,
+    retained_pool: RetainedPool,
+}
+
+fn warm_gpu() -> Result<GpuWarmup> {
+    let instance = Instance::new()?;
+    let device = Arc::new(
+        instance
+            .request_adapter(&RequestAdapterOptions::default())?
+            .request_device(&DeviceDescriptor::default())?,
+    );
+    let ctx = device.create_context()?;
+    let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
+    let compute_pipeline = ComputePipeline::new(&device, &shader)?;
+    let retained_pool = RetainedPool::new(device);
+    Ok(GpuWarmup {
+        ctx,
+        compute_pipeline,
+        retained_pool,
+    })
+}
+
 #[derive(Default)]
 struct App {
+    warmup: Option<GpuWarmup>,
     state: Option<RenderState>,
 }
 
@@ -147,13 +183,16 @@ fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
 
 impl App {
     fn init(&mut self, window: Arc<Window>) -> Result<()> {
-        let instance = Instance::new()?;
-        let device = Arc::new(
-            instance
-                .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
-        );
-        let ctx = device.create_context()?;
+        let warmup = self
+            .warmup
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("GPU warmup state missing"))?;
+        let GpuWarmup {
+            ctx,
+            compute_pipeline,
+            mut retained_pool,
+            ..
+        } = warmup;
 
         let surface = SurfaceExchange::new_with_depth(
             &ctx,
@@ -165,10 +204,6 @@ impl App {
             },
         )?;
 
-        let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
-        let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-
-        let mut retained_pool = RetainedPool::new(device);
         let uniform_buffer = retained_pool.acquire_buffer_with_data(
             &[Uniforms {
                 width: surface.width(),
@@ -238,7 +273,8 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("Goldy — Compute to Surface")
-            .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
+            .with_inner_size(winit::dpi::LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
+            .with_visible(false);
 
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
@@ -248,6 +284,7 @@ impl ApplicationHandler for App {
             return;
         }
 
+        window.set_visible(true);
         window.request_redraw();
     }
 
