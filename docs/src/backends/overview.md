@@ -195,23 +195,35 @@ The Metal backend uses the `metal` crate (native Metal, not MoltenVK):
 Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API (**CUDA 13.1+**
 required for device-updatable graph nodes). Slang compiles to PTX; dispatches use the
 CUDA launch model. Does not imply the `graphics` feature (no raster, surfaces, or
-presentation). Buffer schemes, uploads/readbacks, timelines, and **indirect dispatch**
-work; textures/samplers are still deferred. Enable with the `cuda` Cargo feature
-(`--no-default-features --features cuda` auto-selects CUDA; in default builds use
-`GOLDY_BACKEND=cuda`):
+presentation). Buffer schemes, uploads/readbacks, timelines, **indirect dispatch**, and
+**2D textures/samplers** (CUDA arrays + texture/surface objects) work. Enable with the
+`cuda` Cargo feature (`--no-default-features --features cuda` auto-selects CUDA; in
+default builds use `GOLDY_BACKEND=cuda`):
 
 ```bash
 cargo test --no-default-features --features cuda --test scheme_compute_integration
 ```
 
+Texture notes for CUDA:
+
+- Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`,
+  `Rgba16Float`, `Rgba32Float`. **BGRA is rejected** (no matching CUDA array swizzle).
+- Writable shader access (`DirectSpatial<T>`) initially requires a storage-compatible
+  format: `DirectSpatial<float4>` ↔ `Rgba32Float` only. Upload/copy/readback of other
+  supported formats still works.
+- CUDA has no separate sampler object — filtering is baked into each `CUtexObject`.
+  A dispatch may use at most one distinct `Filter` configuration; additional distinct
+  samplers are rejected.
+
 Retainable kernel-only partitions are captured into CUDA graphs on first submit and
 relaunched on clean resubmits. Indirect dispatches in those partitions use CUDA 13.1
 device-updatable kernel nodes: an in-graph updater reads the GPU-resident
 `DispatchShape` and updates the consumer node's grid (or disables it for a zero /
-oversized shape). Uploads, clears, and copies stay on the stream command-replay path,
-where indirect grids are resolved with a worker-side DtoH before `cuLaunchKernel`.
-Dynamic waits and completion events remain outside the captured graph. Stream capture
-is skipped when `CUDA_LAUNCH_BLOCKING` is set (including under `GOLDY_VALIDATION=api`).
+oversized shape). Uploads, clears, and copies (including texture copies) stay on the
+stream command-replay path, where indirect grids are resolved with a worker-side DtoH
+before `cuLaunchKernel`. Dynamic waits and completion events remain outside the
+captured graph. Stream capture is skipped when `CUDA_LAUNCH_BLOCKING` is set
+(including under `GOLDY_VALIDATION=api`).
 
 With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnostics: PTX JIT error/info logs on module load, host-side launch-limit checks, StructuredBuffer ABI checks, and per-op stream synchronize with labeled errors. It may set `CUDA_LAUNCH_BLOCKING=1` when unset. Deep memory/race checking still requires external [`compute-sanitizer`](https://docs.nvidia.com/compute-sanitizer/), not `GOLDY_VALIDATION`.
 

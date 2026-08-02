@@ -102,6 +102,9 @@ pub(super) struct CudaRetainedPartition {
     /// Keep PTX modules alive for the lifetime of the graph.
     #[allow(dead_code)]
     pub modules: Vec<Arc<CudaModule>>,
+    /// Keep CUDA texture arrays / tex/surf objects alive for baked handles.
+    #[allow(dead_code)]
+    pub textures: Vec<Arc<super::texture::CudaTextureResource>>,
     pub last_launch_tv: u64,
 }
 

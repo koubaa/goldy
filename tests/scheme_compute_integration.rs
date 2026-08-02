@@ -1639,6 +1639,12 @@ mod imp {
 
     fn scheme_compute_write_to_texture(device: &Device) {
         let ctx = submission_context(&device);
+        let is_cuda = device.backend_type() == BackendType::Cuda;
+        let format = if is_cuda {
+            TextureFormat::Rgba32Float
+        } else {
+            TextureFormat::Rgba8Unorm
+        };
 
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -1650,14 +1656,7 @@ mod imp {
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let texture = pool
-            .acquire_texture(
-                width,
-                height,
-                TextureFormat::Rgba8Unorm,
-                TextureKind::Direct,
-                TextureFlags::COPY_SRC,
-                None,
-            )
+            .acquire_texture(width, height, format, TextureKind::Direct, TextureFlags::COPY_SRC, None)
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
@@ -1671,19 +1670,33 @@ mod imp {
         let mut frame = scheme.submit().expect("submit");
         let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
 
-        let mut output = &*loan;
+        let output = &*loan;
         let nonzero = output.iter().filter(|&&b| b != 0).count();
         assert!(nonzero > 0, "texture readback all zeros");
-        assert_eq!(output[0], 255, "R channel");
-        assert_eq!(output[1], 0, "G channel");
-        assert_eq!(output[2], 0, "B channel");
-        assert_eq!(output[3], 255, "A channel");
+        if is_cuda {
+            let floats: &[f32] = bytemuck::cast_slice(output);
+            assert_eq!(floats[0], 1.0, "R channel");
+            assert_eq!(floats[1], 0.0, "G channel");
+            assert_eq!(floats[2], 0.0, "B channel");
+            assert_eq!(floats[3], 1.0, "A channel");
+        } else {
+            assert_eq!(output[0], 255, "R channel");
+            assert_eq!(output[1], 0, "G channel");
+            assert_eq!(output[2], 0, "B channel");
+            assert_eq!(output[3], 255, "A channel");
+        }
     }
 
     /// Verify that a [`goldy::Texture`] from [`RetainedPool`] can be bound via
     /// [`goldy::scheme::SchemeNodeBuilder::with_parcel`] using its parcel stamp.
     fn scheme_with_parcel_raw_texture(device: &Device) {
         let ctx = submission_context(&device);
+        let is_cuda = device.backend_type() == BackendType::Cuda;
+        let format = if is_cuda {
+            TextureFormat::Rgba32Float
+        } else {
+            TextureFormat::Rgba8Unorm
+        };
 
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -1693,13 +1706,14 @@ mod imp {
         let wg_x = width.div_ceil(8);
         let wg_y = height.div_ceil(8);
 
-        let zeros = vec![0u8; (width * height * 4) as usize];
+        let bpp = format.bytes_per_pixel() as usize;
+        let zeros = vec![0u8; (width * height) as usize * bpp];
         let texture = test_alloc_texture(
             &device,
             &zeros,
             width,
             height,
-            TextureFormat::Rgba8Unorm,
+            format,
             TextureKind::Direct,
             TextureFlags::COPY_SRC,
         );
@@ -1712,12 +1726,20 @@ mod imp {
         let mut frame = scheme.submit().expect("submit");
         frame.wait_until_settled().expect("wait");
 
-        let mut output = read_texture_via_scheme_copy(&ctx, &texture);
+        let output = read_texture_via_scheme_copy(&ctx, &texture);
 
-        assert_eq!(output[0], 255, "R channel");
-        assert_eq!(output[1], 0, "G channel");
-        assert_eq!(output[2], 0, "B channel");
-        assert_eq!(output[3], 255, "A channel");
+        if is_cuda {
+            let floats: &[f32] = bytemuck::cast_slice(&output);
+            assert_eq!(floats[0], 1.0, "R channel");
+            assert_eq!(floats[1], 0.0, "G channel");
+            assert_eq!(floats[2], 0.0, "B channel");
+            assert_eq!(floats[3], 1.0, "A channel");
+        } else {
+            assert_eq!(output[0], 255, "R channel");
+            assert_eq!(output[1], 0, "G channel");
+            assert_eq!(output[2], 0, "B channel");
+            assert_eq!(output[3], 255, "A channel");
+        }
         let nonzero = output.iter().filter(|&&b| b != 0).count();
         assert!(
             nonzero > 0,
@@ -1815,17 +1837,16 @@ mod imp {
         const N: usize = (W * H) as usize;
 
         let ctx = submission_context(&device);
+        let is_cuda = device.backend_type() == BackendType::Cuda;
+        let format = if is_cuda {
+            TextureFormat::Rgba32Float
+        } else {
+            TextureFormat::Rgba8Unorm
+        };
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let tex = pool
-            .acquire_texture(
-                W,
-                H,
-                TextureFormat::Rgba8Unorm,
-                TextureKind::DirectInterpolated,
-                TextureFlags::empty(),
-                None,
-            )
+            .acquire_texture(W, H, format, TextureKind::DirectInterpolated, TextureFlags::empty(), None)
             .expect("texture");
         let out = pool
             .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
@@ -1863,7 +1884,7 @@ mod imp {
                 let r = (packed & 0xFF) as u8;
                 let g = ((packed >> 8) & 0xFF) as u8;
                 let b = ((packed >> 16) & 0xFF) as u8;
-                let a = ((packed >> 24) & 0xFF) as u8;
+                let a = ((packed >> 24) as u8);
                 assert_eq!(r, expected_r, "r mismatch at ({x},{y})");
                 assert_eq!(g, expected_g, "g mismatch at ({x},{y})");
                 assert_eq!(b, 0, "b mismatch at ({x},{y})");
@@ -3367,12 +3388,16 @@ mod imp {
             1,
             "copy_buffer_to_texture_parcel is identity; should record exactly once"
         );
-        #[cfg(not(feature = "metal"))]
-        assert_eq!(
-            scheme.replay_stats().resubmit_hits,
-            1,
-            "second submit must be a retention hit"
-        );
+        // Tight (pitch=0) uploads are standalone (`waves_can_retain` → false), so CUDA
+        // never produces a retention hit. Vulkan/DX12 historically counted a hit here;
+        // keep that assert off Metal and CUDA.
+        if !matches!(device.backend_type(), BackendType::Cuda | BackendType::Metal) {
+            assert_eq!(
+                scheme.replay_stats().resubmit_hits,
+                1,
+                "second submit must be a retention hit"
+            );
+        }
     }
 
     fn scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles(device: &Device) {
@@ -3446,21 +3471,37 @@ mod imp {
         refresh_and_submit(&mut scheme, &staging);
         refresh_and_submit(&mut scheme, &staging);
 
-        #[cfg(not(feature = "metal"))]
-        {
-            assert_eq!(
-                scheme.replay_stats().records,
-                2,
-                "initial record + one re-record when destination texture layout settles"
-            );
-            assert_eq!(
-                scheme.replay_stats().resubmit_hits,
-                1,
-                "third submit must resubmit the retained pitched texture-upload partition"
-            );
+        match device.backend_type() {
+            BackendType::Cuda => {
+                // CUDA has no texture layout transitions; the pitched upload partition
+                // retains on the first submit and hits thereafter.
+                assert_eq!(
+                    scheme.replay_stats().records,
+                    1,
+                    "CUDA pitched upload should record once (no layout settle)"
+                );
+                assert_eq!(
+                    scheme.replay_stats().resubmit_hits,
+                    2,
+                    "CUDA pitched upload: two clean resubmits after the initial record"
+                );
+            }
+            BackendType::Metal => {}
+            _ => {
+                assert_eq!(
+                    scheme.replay_stats().records,
+                    2,
+                    "initial record + one re-record when destination texture layout settles"
+                );
+                assert_eq!(
+                    scheme.replay_stats().resubmit_hits,
+                    1,
+                    "third submit must resubmit the retained pitched texture-upload partition"
+                );
+            }
         }
 
-        let mut output = read_texture_via_scheme_copy(&ctx, &texture);
+        let output = read_texture_via_scheme_copy(&ctx, &texture);
         assert_eq!(output, pixels, "pitched retained upload must produce correct pixels");
     }
 
@@ -3986,11 +4027,16 @@ mod imp {
     const CROSS_RETENTION_TEX_H: u32 = 16;
 
     fn cross_retention_texture(device: &Device) -> goldy::Texture {
+        let format = if device.backend_type() == BackendType::Cuda {
+            TextureFormat::Rgba32Float
+        } else {
+            TextureFormat::Rgba8Unorm
+        };
         RetainedPool::new(Arc::new(device.clone()))
             .acquire_texture(
                 CROSS_RETENTION_TEX_W,
                 CROSS_RETENTION_TEX_H,
-                TextureFormat::Rgba8Unorm,
+                format,
                 TextureKind::Direct,
                 TextureFlags::COPY_SRC,
                 None,
@@ -4079,17 +4125,17 @@ mod imp {
     /// machine that has those drivers to confirm stamp retirement on those paths.
     fn scheme_return_transient_texture_invalidates_retained_scheme(device: &Device) {
         let ctx = submission_context(&device);
+        let is_cuda = device.backend_type() == BackendType::Cuda;
+        let format = if is_cuda {
+            TextureFormat::Rgba32Float
+        } else {
+            TextureFormat::Rgba8Unorm
+        };
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("texture pipeline");
 
         let tex = ctx
-            .acquire_transient_texture(
-                8,
-                8,
-                TextureFormat::Rgba8Unorm,
-                TextureKind::Direct,
-                TextureFlags::empty(),
-            )
+            .acquire_transient_texture(8, 8, format, TextureKind::Direct, TextureFlags::empty())
             .expect("transient texture");
 
         let mut scheme = Scheme::new(&ctx);
@@ -4105,19 +4151,125 @@ mod imp {
         assert!(
             matches!(scheme.submit(), Err(goldy::GoldyError::StaleResource)),
             "retained resubmit after return_transient_texture must return StaleResource \
-             (Metal/Vulkan/DX12); returning a bound transient ends its deed"
+             (Metal/Vulkan/DX12/CUDA); returning a bound transient ends its deed"
         );
     }
 
-    /// Buffer-compute gate for all shipped backends, including CUDA-only builds:
+    /// CUDA rejects BGRA array formats (no channel swizzle matching Goldy).
+    fn cuda_rejects_bgra_texture(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        let err = RetainedPool::new(Arc::new(device.clone())).acquire_texture(
+            4,
+            4,
+            TextureFormat::Bgra8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_DST,
+            None,
+        );
+        let err = match err {
+            Ok(_) => panic!("BGRA texture create should fail on CUDA"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("BGRA") || msg.contains("Bgra"), "{msg}");
+    }
+
+    /// CUDA writable shaders require storage-compatible formats (float4 ↔ Rgba32Float).
+    fn cuda_rejects_unorm_writable_shader_access(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let texture = pool
+            .acquire_texture(
+                8,
+                8,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("unorm texture create (upload/readback still allowed)");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&texture, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let err = scheme.submit();
+        assert!(err.is_err(), "DirectSpatial<float4> + Rgba8Unorm must fail on CUDA");
+        let msg = format!("{:#}", err.unwrap_err());
+        assert!(
+            msg.contains("storage-compatible") || msg.contains("Rgba32Float") || msg.contains("float4"),
+            "{msg}"
+        );
+    }
+
+    /// CUDA bakes sampler state into each CUtexObject; distinct Filters in one dispatch are rejected.
+    fn cuda_rejects_multiple_distinct_samplers(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        const SHADER: &str = r#"
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(1, 1, 1)]
+        void cs_main(
+            Interpolated<float4> src,
+            Filter nearest_s,
+            Filter linear_s,
+            Scattered<uint> out,
+            ThreadId id
+        ) {
+            float4 a = src.Sample(nearest_s, float2(0.5, 0.5));
+            float4 b = src.Sample(linear_s, float2(0.5, 0.5));
+            out[0] = uint(a.x + b.x);
+        }
+        "#;
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, SHADER).expect("shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let tex = pool
+            .acquire_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Interpolated,
+                TextureFlags::COPY_DST,
+                Some(&[0u8; 4 * 4 * 4]),
+            )
+            .expect("tex");
+        let out = pool
+            .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("out");
+        let nearest = Sampler::nearest(&device).expect("nearest");
+        let linear = Sampler::linear(&device).expect("linear");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("sample", &pipeline)
+            .with_parcel(&tex, NodeAccess::Read)
+            .with_parcel(&nearest, NodeAccess::Read)
+            .with_parcel(&linear, NodeAccess::Read)
+            .with_parcel(&out, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let err = scheme.submit();
+        assert!(err.is_err(), "distinct Filters in one CUDA dispatch must fail");
+        let msg = format!("{:#}", err.unwrap_err());
+        assert!(
+            msg.contains("Filter") || msg.contains("sampler") || msg.contains("CUtexObject"),
+            "{msg}"
+        );
+    }
+
+    /// Compute integration gate for all shipped backends, including CUDA-only builds:
     /// `cargo test --no-default-features --features cuda --test scheme_compute_integration`
-    ///
-    /// CUDA deliberately defers texture/sampler GPGPU (still part of the public compute
-    /// API without the `graphics` feature). Those trials are registered as ignored with a
-    /// `cuda-deferred` kind so the suite stays explicit.
     pub fn run() {
         let device = make_device();
-        let is_cuda = device.backend_type() == BackendType::Cuda;
 
         let mut trials = Vec::new();
         macro_rules! trial {
@@ -4127,20 +4279,6 @@ mod imp {
                     $f(&device);
                     Ok(())
                 }));
-            }};
-        }
-        // Register the trial normally, or as ignored on CUDA with an explicit reason.
-        macro_rules! trial_cuda_deferred {
-            ($f:ident, $reason:literal) => {{
-                if is_cuda {
-                    trials.push(
-                        libtest_mimic::Trial::test(stringify!($f), || Ok(()))
-                            .with_kind(concat!("cuda-deferred: ", $reason))
-                            .with_ignored_flag(true),
-                    );
-                } else {
-                    trial!($f);
-                }
             }};
         }
 
@@ -4173,8 +4311,11 @@ mod imp {
         trial!(scheme_cpu_readable_compute_write_and_read);
         trial!(scheme_cpu_readable_write_to_parcel_roundtrip);
         trial!(scheme_scattered_typed_variable_assignment);
-        trial_cuda_deferred!(scheme_compute_write_to_texture, "textures");
-        trial_cuda_deferred!(scheme_with_parcel_raw_texture, "textures");
+        // CUDA deliberately deferred texture/sampler GPGPU during the buffer-only
+        // prototype. Native CUDA arrays / tex / surf objects are now wired; keep this
+        // comment so the historical gate remains discoverable.
+        trial!(scheme_compute_write_to_texture);
+        trial!(scheme_with_parcel_raw_texture);
         trial!(scheme_wave_inclusive_scan_uniform_64);
         trial!(scheme_wave_inclusive_scan_ramp_64);
         trial!(scheme_wave_inclusive_scan_uniform_256);
@@ -4182,7 +4323,7 @@ mod imp {
         trial!(scheme_workgroup_inclusive_scan_uint_correct);
         trial!(scheme_workgroup_broadcast_correct);
         trial!(scheme_workgroup_upper_bound_linear);
-        trial_cuda_deferred!(scheme_texture_dual_view_round_trip, "textures");
+        trial!(scheme_texture_dual_view_round_trip);
         trial!(scheme_two_contexts_both_submit_and_complete);
         trial!(scheme_two_contexts_reclaim_independently);
         trial!(scheme_deposit_buffer_reuse_across_submissions);
@@ -4202,28 +4343,25 @@ mod imp {
         trial!(scheme_clear_parcel_full);
         trial!(scheme_clear_parcel_partial_preserves_edges);
         trial!(scheme_clear_parcel_size_zero_fills_to_end);
-        trial_cuda_deferred!(scheme_clear_parcel_requires_buffer_parcel, "textures");
+        trial!(scheme_clear_parcel_requires_buffer_parcel);
         trial!(scheme_copy_buffer_parcel_basic);
         trial!(scheme_copy_buffer_parcel_partial_with_offsets);
-        trial_cuda_deferred!(scheme_copy_buffer_parcel_rejects_texture_src, "textures");
-        trial_cuda_deferred!(scheme_copy_buffer_parcel_rejects_texture_dst, "textures");
+        trial!(scheme_copy_buffer_parcel_rejects_texture_src);
+        trial!(scheme_copy_buffer_parcel_rejects_texture_dst);
         trial!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
         trial!(scheme_cpu_writable_staging_write_then_copy);
         trial!(scheme_cpu_writable_staging_update_each_frame);
-        trial_cuda_deferred!(scheme_write_texture_round_trip, "textures");
-        trial_cuda_deferred!(scheme_write_texture_wrong_size_returns_error, "textures");
-        trial_cuda_deferred!(scheme_write_texture_marks_scheme_dirty, "textures");
-        trial_cuda_deferred!(scheme_write_texture_region_round_trip, "textures");
-        trial_cuda_deferred!(scheme_write_texture_region_oob_returns_error, "textures");
-        trial_cuda_deferred!(scheme_write_texture_region_multiple_non_overlapping, "textures");
-        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_full_texture, "textures");
-        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_oob_returns_error, "textures");
-        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src, "textures");
-        trial_cuda_deferred!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained, "textures");
-        trial_cuda_deferred!(
-            scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles,
-            "textures"
-        );
+        trial!(scheme_write_texture_round_trip);
+        trial!(scheme_write_texture_wrong_size_returns_error);
+        trial!(scheme_write_texture_marks_scheme_dirty);
+        trial!(scheme_write_texture_region_round_trip);
+        trial!(scheme_write_texture_region_oob_returns_error);
+        trial!(scheme_write_texture_region_multiple_non_overlapping);
+        trial!(scheme_copy_buffer_to_texture_parcel_full_texture);
+        trial!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
+        trial!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
+        trial!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
+        trial!(scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles);
         trial!(cross_scheme_grant_read_reader_is_topology_invisible);
         trial!(cross_scheme_copy_reader_forces_one_topology_record);
         trial!(single_scheme_write_then_readback_records_once);
@@ -4237,8 +4375,11 @@ mod imp {
         trial!(cross_scheme_grant_then_copy_reader_boundary);
         trial!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
         trial!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
-        trial_cuda_deferred!(cross_scheme_texture_readback_retained_loop_records_twice, "textures");
-        trial_cuda_deferred!(scheme_return_transient_texture_invalidates_retained_scheme, "textures");
+        trial!(cross_scheme_texture_readback_retained_loop_records_twice);
+        trial!(scheme_return_transient_texture_invalidates_retained_scheme);
+        trial!(cuda_rejects_bgra_texture);
+        trial!(cuda_rejects_unorm_writable_shader_access);
+        trial!(cuda_rejects_multiple_distinct_samplers);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);

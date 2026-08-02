@@ -664,12 +664,47 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
 /// Kind of CUDA kernel launch argument corresponding to one author-facing
 /// `[goldy_compute]` parameter (system values are omitted — they come from the
 /// launch grid, not host-passed args).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CudaLaunchArgKind {
     /// Consumes the next `BindResourcesRaw.indices` registry key → `CudaBufferArg`.
     Buffer,
+    /// Consumes the next registry key → `CUtexObject` (`Interpolated<T>` / `Texture2D`).
+    SampledTexture {
+        /// Inner element type string (e.g. `"float4"`).
+        element: String,
+    },
+    /// Consumes the next registry key → `CUsurfObject` (`DirectSpatial<T>` / `RWTexture2D`).
+    StorageTexture {
+        /// Inner element type string (e.g. `"float4"`).
+        element: String,
+    },
+    /// Consumes the next registry key → ignored `SamplerState` word (`Filter`).
+    ///
+    /// Slang still emits a pointer-sized kernel parameter; the host passes zero.
+    /// Filtering is baked into each `CUtexObject` from the bound sampler desc.
+    Sampler,
     /// Consumes the next `BindResourcesRaw.user` u32 word.
     Scalar,
+}
+
+impl CudaLaunchArgKind {
+    /// True when this kind consumes one entry from `BindResourcesRaw.indices`.
+    pub fn consumes_registry_index(&self) -> bool {
+        !matches!(self, Self::Scalar)
+    }
+}
+
+fn cuda_texture_element(ty: &str, prefix: &str) -> Result<String, String> {
+    let ty = ty.trim();
+    if ty.starts_with(prefix) && ty.ends_with('>') {
+        let inner = ty[prefix.len()..ty.len() - 1].trim();
+        if inner.is_empty() {
+            return Err(format!("CUDA texture type `{ty}` has an empty element type"));
+        }
+        Ok(inner.to_string())
+    } else {
+        Err(format!("expected `{prefix}T>`, got `{ty}`"))
+    }
 }
 
 /// Extract the CUDA launch-arg layout for the primary `[goldy_compute]` entry.
@@ -691,7 +726,25 @@ pub fn extract_cuda_compute_launch_layout(source: &str) -> Result<Vec<CudaLaunch
             return Err("conditional parameters are not supported by the CUDA prototype".to_string());
         };
         match &param.kind {
-            ParamKind::Resource | ParamKind::Broadcast => layout.push(CudaLaunchArgKind::Buffer),
+            ParamKind::Broadcast => layout.push(CudaLaunchArgKind::Buffer),
+            ParamKind::Resource => {
+                let ty = param.ty.trim();
+                if ty.starts_with("Interpolated<") {
+                    layout.push(CudaLaunchArgKind::SampledTexture {
+                        element: cuda_texture_element(ty, "Interpolated<")?,
+                    });
+                } else if ty.starts_with("DirectSpatial<") {
+                    layout.push(CudaLaunchArgKind::StorageTexture {
+                        element: cuda_texture_element(ty, "DirectSpatial<")?,
+                    });
+                } else if ty == "Filter" {
+                    layout.push(CudaLaunchArgKind::Sampler);
+                } else if ty.starts_with("Scattered<") || ty == "ByteAddress" || ty.starts_with("BufRO<") {
+                    layout.push(CudaLaunchArgKind::Buffer);
+                } else {
+                    return Err(format!("unsupported CUDA resource parameter type `{ty}`"));
+                }
+            }
             ParamKind::Scalar => {
                 cuda_scalar_init_expr(&param.ty, "_")?;
                 layout.push(CudaLaunchArgKind::Scalar);
@@ -729,10 +782,14 @@ fn cuda_scalar_init_expr(ty: &str, word: &str) -> Result<String, String> {
 /// parameter. Slang's CUDA target lowers those to `{T* data; size_t count}`
 /// descriptors that the backend fills from `CUdeviceptr` at launch time.
 ///
+/// Textures become `uniform Texture2D` / `RWTexture2D` (→ `CUtexObject` /
+/// `CUsurfObject`); samplers become `uniform SamplerState` (pointer-sized,
+/// ignored by Slang — filtering is baked into each texture object).
+///
 /// Broadcast structs are passed as a one-element read-only structured buffer and
 /// loaded at index 0. Single-word scalars (`uint`/`float`/`int`/`bool`) become
-/// `uniform uint` kernel args (Goldy `with_param` words). Textures, samplers,
-/// multi-word scalars, and graphics stages are rejected.
+/// `uniform uint` kernel args (Goldy `with_param` words). Multi-word scalars and
+/// graphics stages are rejected.
 pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
@@ -741,15 +798,17 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
 
     fn resource_param_ty(param: &Param) -> Result<String, String> {
         let ty = param.ty.trim();
-        if ty.starts_with("Scattered<") || ty == "ByteAddress" || ty.starts_with("BufRO<") {
+        if ty.starts_with("Scattered<")
+            || ty == "ByteAddress"
+            || ty.starts_with("BufRO<")
+            || ty.starts_with("Interpolated<")
+            || ty.starts_with("DirectSpatial<")
+            || ty == "Filter"
+        {
             Ok(ty.to_string())
         } else if matches!(param.kind, ParamKind::Broadcast) {
             // One-element read-only buffer; wrapper loads `[0]`.
             Ok(format!("StructuredBuffer<{ty}>"))
-        } else if ty.starts_with("Interpolated<") || ty.starts_with("DirectSpatial<") || ty == "Filter" {
-            Err(format!(
-                "CUDA prototype does not support texture/sampler parameter type `{ty}`"
-            ))
         } else {
             Err(format!("unsupported CUDA resource parameter type `{ty}`"))
         }
@@ -2919,7 +2978,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     }
 
     #[test]
-    fn cuda_compute_rejects_vector_scalar_and_texture() {
+    fn cuda_compute_rejects_vector_scalar() {
         let vector = r#"
 [goldy_compute]
 [numthreads(1, 1, 1)]
@@ -2927,14 +2986,41 @@ void cs_main(Scattered<uint> values, uint3 base, ThreadId id) {}
 "#;
         let err = transform_virtual_main_cuda_compute(vector).unwrap_err();
         assert!(err.contains("single-word"), "{err}");
+    }
 
-        let texture = r#"
+    #[test]
+    fn cuda_compute_texture_and_sampler_layout() {
+        let src = r#"import goldy_exp;
+
 [goldy_compute]
 [numthreads(1, 1, 1)]
-void cs_main(Interpolated<float4> tex, Filter samp, ThreadId id) {}
+void cs_main(Interpolated<float4> tex, Filter samp, DirectSpatial<float4> img, ThreadId id) {}
 "#;
-        let err = transform_virtual_main_cuda_compute(texture).unwrap_err();
-        assert!(err.contains("texture/sampler"), "{err}");
+        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        assert!(
+            result.contains("uniform Interpolated<float4> _goldy_cuda_binding_0"),
+            "{result}"
+        );
+        assert!(
+            result.contains("uniform Filter _goldy_cuda_binding_1"),
+            "{result}"
+        );
+        assert!(
+            result.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_2"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src).unwrap(),
+            vec![
+                CudaLaunchArgKind::SampledTexture {
+                    element: "float4".into()
+                },
+                CudaLaunchArgKind::Sampler,
+                CudaLaunchArgKind::StorageTexture {
+                    element: "float4".into()
+                },
+            ]
+        );
     }
 
     #[test]

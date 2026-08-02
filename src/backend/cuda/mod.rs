@@ -1,7 +1,12 @@
 //! Compute-only CUDA backend prototype.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
-//! arguments use Slang's CUDA `StructuredBuffer` ABI (`{T* data; size_t count}`)
+//! arguments use Slang's CUDA ABI:
+//! - buffers → `{T* data; size_t count}`
+//! - sampled textures → `CUtexObject`
+//! - storage textures → `CUsurfObject`
+//! - samplers → ignored pointer-sized `SamplerState` (filtering is baked into each
+//!   `CUtexObject` from the bound Goldy sampler)
 //! interleaved with bare `uniform uint` scalars from [`GpuCommand::BindResourcesRaw::user`].
 //! Single-dispatch registry keys come from [`GpuCommand::BindResourcesRaw`]; batched
 //! dispatches resolve keys from [`GpuCommand::FrameTableStaging`] in shader
@@ -20,6 +25,7 @@
 mod pending_submit;
 mod retained_graph;
 mod runtime_module;
+mod texture;
 mod timeline;
 
 use super::*;
@@ -35,6 +41,9 @@ use cudarc::driver::{
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
 use retained_graph::{CudaGraphStats, GraphRegistry};
+use texture::{
+    memcpy_htod_array, storage_shader_compatible, CudaSamplerKey, CudaTextureResource,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -83,6 +92,11 @@ pub(crate) struct CudaBackend {
     contexts: HashMap<ContextHandle, Arc<CudaSubmitContext>>,
     buffers: HashMap<BufferHandle, CudaBuffer>,
     buffer_slots: HashMap<u32, BufferHandle>,
+    textures: HashMap<TextureHandle, Arc<CudaTextureResource>>,
+    /// Registry keys for both sampled and storage texture views.
+    texture_slots: HashMap<u32, TextureHandle>,
+    samplers: HashMap<SamplerHandle, CudaSampler>,
+    sampler_slots: HashMap<u32, SamplerHandle>,
     shaders: HashMap<ShaderHandle, CudaShader>,
     compute_pipelines: HashMap<ComputePipelineHandle, CudaComputePipeline>,
     retained: HashMap<(ContextHandle, u64), RetainedEntry>,
@@ -90,6 +104,8 @@ pub(crate) struct CudaBackend {
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
+    next_texture: TextureHandle,
+    next_sampler: SamplerHandle,
     next_slot: u32,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
@@ -131,6 +147,11 @@ pub(super) enum CudaDeferredDrop {
         retire_at: u64,
         #[allow(dead_code)]
         memory: Arc<Mutex<CudaSlice<u8>>>,
+    },
+    Texture {
+        retire_at: u64,
+        #[allow(dead_code)]
+        resource: Arc<CudaTextureResource>,
     },
     Pipeline {
         retire_at: u64,
@@ -205,7 +226,9 @@ fn drain_deletion_queue_up_to(queue: &Mutex<Vec<CudaDeferredDrop>>, retired: u64
     let mut kept = Vec::new();
     for entry in guard.drain(..) {
         let retire_at = match &entry {
-            CudaDeferredDrop::Buffer { retire_at, .. } | CudaDeferredDrop::Pipeline { retire_at, .. } => *retire_at,
+            CudaDeferredDrop::Buffer { retire_at, .. }
+            | CudaDeferredDrop::Texture { retire_at, .. }
+            | CudaDeferredDrop::Pipeline { retire_at, .. } => *retire_at,
         };
         if retire_at > retired {
             kept.push(entry);
@@ -234,6 +257,13 @@ struct CudaShader {
     optimization_level: crate::types::OptimizationLevel,
 }
 
+struct CudaSampler {
+    device: DeviceHandle,
+    desc: SamplerDesc,
+    slot: u32,
+    key: CudaSamplerKey,
+}
+
 struct CudaComputePipeline {
     device: DeviceHandle,
     #[allow(dead_code)]
@@ -250,6 +280,8 @@ struct CudaComputePipeline {
 /// Host-side values pushed to `cuLaunchKernel` in shader parameter order.
 pub(super) enum CudaLaunchArg {
     Buffer(CudaBufferArg),
+    /// `CUtexObject`, `CUsurfObject`, or ignored `SamplerState` word.
+    Handle(u64),
     Scalar(u32),
 }
 
@@ -289,6 +321,10 @@ impl CudaBackend {
             contexts: HashMap::new(),
             buffers: HashMap::new(),
             buffer_slots: HashMap::new(),
+            textures: HashMap::new(),
+            texture_slots: HashMap::new(),
+            samplers: HashMap::new(),
+            sampler_slots: HashMap::new(),
             shaders: HashMap::new(),
             compute_pipelines: HashMap::new(),
             retained: HashMap::new(),
@@ -296,6 +332,8 @@ impl CudaBackend {
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
+            next_texture: 1,
+            next_sampler: 1,
             next_slot: 0,
             next_shader: 1,
             next_compute_pipeline: 1,
@@ -496,17 +534,17 @@ impl CudaBackend {
             return Ok(args);
         }
 
-        let expected_buffers = launch_layout
+        let expected_indices = launch_layout
             .iter()
-            .filter(|kind| matches!(kind, CudaLaunchArgKind::Buffer))
+            .filter(|kind| kind.consumes_registry_index())
             .count();
         let expected_scalars = launch_layout
             .iter()
             .filter(|kind| matches!(kind, CudaLaunchArgKind::Scalar))
             .count();
-        if indices.len() != expected_buffers {
+        if indices.len() != expected_indices {
             anyhow::bail!(
-                "CUDA: dispatch bound {} buffer(s) but shader expects {expected_buffers}",
+                "CUDA: dispatch bound {} resource index(es) but shader expects {expected_indices}",
                 indices.len()
             );
         }
@@ -516,6 +554,46 @@ impl CudaBackend {
                 user.len()
             );
         }
+
+        // Resolve the single effective sampler configuration for this dispatch.
+        let mut sampler_keys = Vec::new();
+        let mut index_i = 0usize;
+        for kind in launch_layout {
+            match kind {
+                CudaLaunchArgKind::Sampler => {
+                    let index = indices[index_i];
+                    index_i += 1;
+                    let handle = self.sampler_slots.get(&index).with_context(|| {
+                        format!("CUDA: sampler binding references unknown registry key {index}")
+                    })?;
+                    let sampler = self
+                        .samplers
+                        .get(handle)
+                        .with_context(|| format!("CUDA: registry key {index} references a destroyed sampler"))?;
+                    sampler_keys.push(sampler.key);
+                }
+                CudaLaunchArgKind::Scalar => {}
+                CudaLaunchArgKind::Buffer
+                | CudaLaunchArgKind::SampledTexture { .. }
+                | CudaLaunchArgKind::StorageTexture { .. } => {
+                    index_i += 1;
+                }
+            }
+        }
+        let effective_sampler = match sampler_keys.as_slice() {
+            [] => CudaSamplerKey::nearest_clamp(),
+            [first] => *first,
+            many => {
+                let first = many[0];
+                if many.iter().any(|key| *key != first) {
+                    anyhow::bail!(
+                        "CUDA: at most one distinct Filter configuration per dispatch \
+                         (CUDA bakes sampler state into each CUtexObject)"
+                    );
+                }
+                first
+            }
+        };
 
         let mut args = Vec::with_capacity(launch_layout.len());
         let mut index_i = 0usize;
@@ -527,6 +605,33 @@ impl CudaBackend {
                     args.push(CudaLaunchArg::Buffer(self.resolve_buffer_arg(stream, index_i, index)?));
                     index_i += 1;
                 }
+                CudaLaunchArgKind::SampledTexture { .. } => {
+                    let index = indices[index_i];
+                    let tex = self.resolve_texture(index_i, index)?;
+                    let handle = tex.tex_object(effective_sampler)?;
+                    args.push(CudaLaunchArg::Handle(handle));
+                    index_i += 1;
+                }
+                CudaLaunchArgKind::StorageTexture { element } => {
+                    let index = indices[index_i];
+                    let tex = self.resolve_texture(index_i, index)?;
+                    if !storage_shader_compatible(element, tex.format) {
+                        anyhow::bail!(
+                            "CUDA: DirectSpatial<{element}> writable access requires a \
+                             storage-compatible format (float4 ↔ Rgba32Float); got {:?}",
+                            tex.format
+                        );
+                    }
+                    let handle = tex.surf_object()?;
+                    args.push(CudaLaunchArg::Handle(handle));
+                    index_i += 1;
+                }
+                CudaLaunchArgKind::Sampler => {
+                    // Slang emits an unused SamplerState parameter (pointer-sized).
+                    let _index = indices[index_i];
+                    args.push(CudaLaunchArg::Handle(0));
+                    index_i += 1;
+                }
                 CudaLaunchArgKind::Scalar => {
                     args.push(CudaLaunchArg::Scalar(user[user_i]));
                     user_i += 1;
@@ -534,6 +639,31 @@ impl CudaBackend {
             }
         }
         Ok(args)
+    }
+
+    fn resolve_texture(&self, binding: usize, index: u32) -> Result<&Arc<CudaTextureResource>> {
+        let handle = self.texture_slots.get(&index).with_context(|| {
+            format!("CUDA: binding {binding} references unknown texture registry key {index}")
+        })?;
+        self.textures
+            .get(handle)
+            .with_context(|| format!("CUDA: registry key {index} references a destroyed texture"))
+    }
+
+    fn alloc_registry_slot(&mut self) -> u32 {
+        let slot = self.next_slot;
+        self.next_slot = self
+            .next_slot
+            .checked_add(1)
+            .expect("CUDA: registry slot counter overflow");
+        slot
+    }
+
+    fn texture_device_is(&self, tex: &CudaTextureResource, device: DeviceHandle) -> bool {
+        self.devices
+            .get(&device)
+            .map(|d| Arc::ptr_eq(&d.ctx, &tex.ctx))
+            .unwrap_or(false)
     }
 
     fn write_buffer_region(stream: &Arc<CudaStream>, buffer: &CudaBuffer, offset: u64, data: &[u8]) -> Result<()> {
@@ -688,6 +818,9 @@ impl CudaBackend {
                     CudaLaunchArg::Buffer(buffer) => {
                         builder.arg(buffer);
                     }
+                    CudaLaunchArg::Handle(handle) => {
+                        builder.arg(handle);
+                    }
                     CudaLaunchArg::Scalar(word) => {
                         builder.arg(word);
                     }
@@ -698,14 +831,14 @@ impl CudaBackend {
         Ok(())
     }
 
-    fn launch_layout_buffer_count(launch_layout: &[CudaLaunchArgKind]) -> Option<usize> {
+    fn launch_layout_index_count(launch_layout: &[CudaLaunchArgKind]) -> Option<usize> {
         if launch_layout.is_empty() {
             None
         } else {
             Some(
                 launch_layout
                     .iter()
-                    .filter(|kind| matches!(kind, CudaLaunchArgKind::Buffer))
+                    .filter(|kind| kind.consumes_registry_index())
                     .count(),
             )
         }
@@ -753,7 +886,7 @@ impl CudaBackend {
             bases.push(layout._reserved[dispatch_table_base_word_index()]);
         }
 
-        let n_buffers = match Self::launch_layout_buffer_count(&pipeline.launch_layout) {
+        let n_buffers = match Self::launch_layout_index_count(&pipeline.launch_layout) {
             Some(n) => n,
             None => {
                 anyhow::ensure!(
@@ -854,17 +987,7 @@ impl CudaBackend {
             label,
         )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
-        let mut keep_alive = Vec::new();
-        for (binding, index) in indices.iter().copied().enumerate() {
-            let handle = self.buffer_slots.get(&index).with_context(|| {
-                format!("CUDA: binding {binding} references unknown registry key {index}")
-            })?;
-            let buffer = self
-                .buffers
-                .get(handle)
-                .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
-            keep_alive.push(Arc::clone(&buffer.memory));
-        }
+        let (keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
         let function = pipeline
             .module
             .load_function("cs_main")
@@ -876,7 +999,8 @@ impl CudaBackend {
             workgroup_size: pipeline.workgroup_size,
             grid: workgroups,
             args: launch_args,
-            keep_alive,
+            keep_alive_buffers,
+            keep_alive_textures,
         })
     }
 
@@ -910,18 +1034,8 @@ impl CudaBackend {
             );
         }
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
-        let mut keep_alive = Vec::new();
-        for (binding, index) in indices.iter().copied().enumerate() {
-            let handle = self.buffer_slots.get(&index).with_context(|| {
-                format!("CUDA: binding {binding} references unknown registry key {index}")
-            })?;
-            let buffer = self
-                .buffers
-                .get(handle)
-                .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
-            keep_alive.push(Arc::clone(&buffer.memory));
-        }
-        keep_alive.push(Arc::clone(&shape_buf.memory));
+        let (mut keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
+        keep_alive_buffers.push(Arc::clone(&shape_buf.memory));
 
         let shape_abs_offset = shape_buf.offset + shape_offset;
         let shape_ptr = {
@@ -976,7 +1090,8 @@ impl CudaBackend {
             module,
             workgroup_size,
             args: launch_args,
-            keep_alive,
+            keep_alive_buffers,
+            keep_alive_textures,
             shape_ptr,
             shape_memory: Arc::clone(&shape_buf.memory),
             shape_abs_offset,
@@ -990,6 +1105,33 @@ impl CudaBackend {
             max_threads_per_block,
             limits,
         })
+    }
+
+    /// Pin buffers/textures referenced by registry keys for the lifetime of a launch/graph.
+    fn collect_launch_pins(
+        &self,
+        indices: &[u32],
+    ) -> Result<(Vec<Arc<Mutex<CudaSlice<u8>>>>, Vec<Arc<CudaTextureResource>>)> {
+        let mut buffers = Vec::new();
+        let mut textures = Vec::new();
+        for (binding, index) in indices.iter().copied().enumerate() {
+            if let Some(handle) = self.buffer_slots.get(&index) {
+                let buffer = self.buffers.get(handle).with_context(|| {
+                    format!("CUDA: registry key {index} references a destroyed buffer")
+                })?;
+                buffers.push(Arc::clone(&buffer.memory));
+            } else if let Some(handle) = self.texture_slots.get(&index) {
+                let texture = self.textures.get(handle).with_context(|| {
+                    format!("CUDA: registry key {index} references a destroyed texture")
+                })?;
+                textures.push(Arc::clone(texture));
+            } else if self.sampler_slots.contains_key(&index) {
+                // Samplers are CPU-side descriptors; nothing to pin.
+            } else {
+                anyhow::bail!("CUDA: binding {binding} references unknown registry key {index}");
+            }
+        }
+        Ok((buffers, textures))
     }
 
     fn materialize_ops(&self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
@@ -1111,13 +1253,135 @@ impl CudaBackend {
                     )?;
                     ops.extend(batch_ops);
                 }
-                GpuCommand::WriteTexture { .. }
-                | GpuCommand::WriteTextureRegion { .. }
-                | GpuCommand::CopyTexture { .. }
-                | GpuCommand::CopyRenderTarget { .. }
-                | GpuCommand::CopyBufferToTexture { .. }
-                | GpuCommand::CopyTextureToReadback { .. } => {
-                    anyhow::bail!("CUDA compute-only backend: texture command is not supported")
+                GpuCommand::WriteTexture {
+                    texture,
+                    data,
+                    width,
+                    height,
+                } => {
+                    let tex = self
+                        .textures
+                        .get(texture)
+                        .context("CUDA: invalid WriteTexture handle")?;
+                    if *width != tex.width || *height != tex.height {
+                        anyhow::bail!(
+                            "CUDA: WriteTexture size {}x{} does not match texture {}x{}",
+                            width,
+                            height,
+                            tex.width,
+                            tex.height
+                        );
+                    }
+                    ops.push(CudaOp::WriteTexture {
+                        texture: Arc::clone(tex),
+                        x: 0,
+                        y: 0,
+                        width: *width,
+                        height: *height,
+                        data: data.to_vec(),
+                        src_row_pitch: 0,
+                    });
+                }
+                GpuCommand::WriteTextureRegion {
+                    texture,
+                    x,
+                    y,
+                    width,
+                    height,
+                    data,
+                } => {
+                    let tex = self
+                        .textures
+                        .get(texture)
+                        .context("CUDA: invalid WriteTextureRegion handle")?;
+                    ops.push(CudaOp::WriteTexture {
+                        texture: Arc::clone(tex),
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
+                        data: data.to_vec(),
+                        src_row_pitch: 0,
+                    });
+                }
+                GpuCommand::CopyTexture { src, dst } => {
+                    let src_tex = self
+                        .textures
+                        .get(src)
+                        .context("CUDA: invalid CopyTexture source")?;
+                    let dst_tex = self
+                        .textures
+                        .get(dst)
+                        .context("CUDA: invalid CopyTexture destination")?;
+                    ops.push(CudaOp::CopyTexture {
+                        src: Arc::clone(src_tex),
+                        dst: Arc::clone(dst_tex),
+                    });
+                }
+                GpuCommand::CopyBufferToTexture {
+                    src,
+                    src_offset,
+                    src_row_pitch,
+                    dst,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let src_buf = self
+                        .buffers
+                        .get(src)
+                        .context("CUDA: invalid CopyBufferToTexture source")?;
+                    let dst_tex = self
+                        .textures
+                        .get(dst)
+                        .context("CUDA: invalid CopyBufferToTexture destination")?;
+                    ops.push(CudaOp::CopyBufferToTexture {
+                        src: Arc::clone(&src_buf.memory),
+                        src_abs: src_buf.offset + *src_offset,
+                        src_row_pitch: *src_row_pitch,
+                        texture: Arc::clone(dst_tex),
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
+                    });
+                }
+                GpuCommand::CopyTextureToReadback {
+                    src,
+                    dst,
+                    layout,
+                } => {
+                    let src_tex = self
+                        .textures
+                        .get(src)
+                        .context("CUDA: invalid CopyTextureToReadback source")?;
+                    let dst_buf = self
+                        .buffers
+                        .get(dst)
+                        .context("CUDA: invalid CopyTextureToReadback destination")?;
+                    if layout.width != src_tex.width || layout.height != src_tex.height {
+                        anyhow::bail!(
+                            "CUDA: CopyTextureToReadback footprint {}x{} != texture {}x{}",
+                            layout.width,
+                            layout.height,
+                            src_tex.width,
+                            src_tex.height
+                        );
+                    }
+                    ops.push(CudaOp::CopyTextureToBuffer {
+                        texture: Arc::clone(src_tex),
+                        x: 0,
+                        y: 0,
+                        width: layout.width,
+                        height: layout.height,
+                        dst: Arc::clone(&dst_buf.memory),
+                        dst_abs: dst_buf.offset + layout.footprint_offset,
+                        dst_row_pitch: layout.row_pitch,
+                    });
+                }
+                GpuCommand::CopyRenderTarget { .. } => {
+                    anyhow::bail!("CUDA compute-only backend: CopyRenderTarget is not supported")
                 }
             }
         }
@@ -1909,31 +2173,75 @@ impl GpuBackend for CudaBackend {
     fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,
-        _width: u32,
-        _height: u32,
-        _format: TextureFormat,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
     ) -> Result<TextureCopyFootprint> {
-        Self::unsupported("texture readback")
+        // Reject unsupported formats early (e.g. BGRA).
+        texture::format_info(format)?;
+        let row_pitch = width.saturating_mul(format.bytes_per_pixel());
+        let logical_bytes = row_pitch as u64 * height as u64;
+        Ok(TextureCopyFootprint {
+            width,
+            height,
+            format,
+            logical_bytes,
+            staging_bytes: logical_bytes,
+            row_pitch,
+            footprint_offset: 0,
+        })
     }
 
     fn alloc_texture_readback_staging(
         &mut self,
-        _device: DeviceHandle,
-        _layout: TextureCopyFootprint,
+        device: DeviceHandle,
+        layout: TextureCopyFootprint,
     ) -> Result<BufferHandle> {
-        Self::unsupported("texture readback")
+        self.alloc_readback_buffer(device, layout.staging_bytes)
     }
 
     fn read_texture_readback_staging(
         &self,
-        _buffer: BufferHandle,
-        _layout: TextureCopyFootprint,
-        _output: &mut [u8],
+        buffer: BufferHandle,
+        layout: TextureCopyFootprint,
+        output: &mut [u8],
     ) -> Result<()> {
-        Self::unsupported("texture readback")
+        if output.len() as u64 != layout.logical_bytes {
+            anyhow::bail!(
+                "CUDA: read_texture_readback_staging size mismatch: expected {}, got {}",
+                layout.logical_bytes,
+                output.len()
+            );
+        }
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .context("CUDA: invalid texture readback staging buffer")?;
+        if !buf.readback {
+            anyhow::bail!("CUDA: read_texture_readback_staging requires a withdraw staging buffer");
+        }
+        // Tight footprint: staging == logical.
+        let mut staging = vec![0u8; layout.staging_bytes as usize];
+        self.read_readback_buffer(buffer, &mut staging)?;
+        if layout.row_pitch == layout.tight_row_bytes() && layout.footprint_offset == 0 {
+            output.copy_from_slice(&staging[..layout.logical_bytes as usize]);
+            return Ok(());
+        }
+        // Pitched unpack (defensive; CUDA uses tight rows today).
+        let tight = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        let base = layout.footprint_offset as usize;
+        for row in 0..layout.height as usize {
+            let src = base + row * pitch;
+            let dst = row * tight;
+            output[dst..dst + tight].copy_from_slice(&staging[src..src + tight]);
+        }
+        Ok(())
     }
 
     fn texture_copy_retention_tag(&self, _texture: TextureHandle) -> u64 {
+        // CUDA arrays have no layout transitions; a constant tag keeps pitched
+        // buffer→texture partition fingerprints stable across submits.
         0
     }
 
@@ -2140,50 +2448,179 @@ impl GpuBackend for CudaBackend {
 
     fn create_texture(
         &mut self,
-        _device: DeviceHandle,
-        _width: u32,
-        _height: u32,
-        _format: TextureFormat,
-        _access: TextureKind,
-        _flags: TextureFlags,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        Self::unsupported("textures")
+        let gpu = self.device(device)?;
+        let ctx = Arc::clone(&gpu.ctx);
+        let (storage_slot, sampled_slot) = match access {
+            TextureKind::Interpolated => (None, Some(self.alloc_registry_slot())),
+            TextureKind::Direct => (Some(self.alloc_registry_slot()), None),
+            TextureKind::DirectInterpolated => {
+                (Some(self.alloc_registry_slot()), Some(self.alloc_registry_slot()))
+            }
+        };
+        let resource = CudaTextureResource::create(
+            &ctx,
+            width,
+            height,
+            format,
+            access,
+            flags,
+            storage_slot,
+            sampled_slot,
+        )?;
+        let handle = self.next_texture;
+        self.next_texture += 1;
+        if let Some(slot) = storage_slot {
+            self.texture_slots.insert(slot, handle);
+        }
+        if let Some(slot) = sampled_slot {
+            self.texture_slots.insert(slot, handle);
+        }
+        self.textures.insert(handle, resource);
+        Ok(handle)
     }
 
-    fn write_texture(&mut self, _texture: TextureHandle, _data: &[u8], _width: u32, _height: u32) -> Result<()> {
-        Self::unsupported("textures")
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
+        let tex = self
+            .textures
+            .get(&texture)
+            .context("CUDA: invalid texture handle")?;
+        let device = {
+            // Find owning device via context of the array's CudaContext — textures store ctx Arc.
+            // Use any device whose ctx matches; fall back to syncing all isn't needed if we sync
+            // via the texture's own context stream.
+            tex.ctx.clone()
+        };
+        // Sync all devices that share this context (one CUDA context per device).
+        let device_handle = self
+            .devices
+            .iter()
+            .find(|(_, d)| Arc::ptr_eq(&d.ctx, &device))
+            .map(|(h, _)| *h)
+            .context("CUDA: texture device not found")?;
+        self.sync_device_streams_for_immediate_api(device_handle)?;
+        let stream = Arc::clone(&self.device(device_handle)?.alloc_stream);
+        let tex = self
+            .textures
+            .get(&texture)
+            .context("CUDA: invalid texture handle")?;
+        if width != tex.width || height != tex.height {
+            anyhow::bail!(
+                "CUDA: write_texture size {}x{} does not match texture {}x{}",
+                width,
+                height,
+                tex.width,
+                tex.height
+            );
+        }
+        memcpy_htod_array(&stream, tex, 0, 0, width, height, data, 0)?;
+        stream
+            .synchronize()
+            .context("CUDA: synchronize after write_texture")?;
+        Ok(())
     }
 
     fn write_texture_region(
         &mut self,
-        _texture: TextureHandle,
-        _x: u32,
-        _y: u32,
-        _width: u32,
-        _height: u32,
-        _data: &[u8],
+        texture: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
     ) -> Result<()> {
-        Self::unsupported("textures")
+        let tex = self
+            .textures
+            .get(&texture)
+            .context("CUDA: invalid texture handle")?;
+        let device_handle = self
+            .devices
+            .iter()
+            .find(|(_, d)| Arc::ptr_eq(&d.ctx, &tex.ctx))
+            .map(|(h, _)| *h)
+            .context("CUDA: texture device not found")?;
+        self.sync_device_streams_for_immediate_api(device_handle)?;
+        let stream = Arc::clone(&self.device(device_handle)?.alloc_stream);
+        let tex = self
+            .textures
+            .get(&texture)
+            .context("CUDA: invalid texture handle")?;
+        memcpy_htod_array(&stream, tex, x, y, width, height, data, 0)?;
+        stream
+            .synchronize()
+            .context("CUDA: synchronize after write_texture_region")?;
+        Ok(())
     }
 
-    fn destroy_texture(&mut self, _texture: TextureHandle) {}
-
-    fn texture_bindless_index(&self, _texture: TextureHandle) -> Option<u32> {
-        None
+    fn destroy_texture(&mut self, texture: TextureHandle) {
+        if let Some(resource) = self.textures.remove(&texture) {
+            if let Some(slot) = resource.storage_slot {
+                self.texture_slots.remove(&slot);
+            }
+            if let Some(slot) = resource.sampled_slot {
+                self.texture_slots.remove(&slot);
+            }
+            let device_handle = self
+                .devices
+                .iter()
+                .find(|(_, d)| Arc::ptr_eq(&d.ctx, &resource.ctx))
+                .map(|(h, _)| *h);
+            if let Some(device_handle) = device_handle {
+                if let Some(device) = self.devices.get(&device_handle) {
+                    let retire_at = submission_worker::submission_horizon(&device.next_timeline);
+                    device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Texture {
+                        retire_at,
+                        resource,
+                    });
+                }
+            }
+        }
     }
 
-    fn texture_bindless_sampled_index(&self, _texture: TextureHandle) -> Option<u32> {
-        None
+    fn texture_bindless_index(&self, texture: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture)?.storage_slot.or_else(|| {
+            // Interpolated-only textures expose their sampled slot as the primary index.
+            self.textures.get(&texture)?.sampled_slot
+        })
     }
 
-    fn create_sampler(&mut self, _device: DeviceHandle, _desc: &SamplerDesc) -> Result<SamplerHandle> {
-        Self::unsupported("samplers")
+    fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32> {
+        self.textures.get(&texture)?.sampled_slot
     }
 
-    fn destroy_sampler(&mut self, _sampler: SamplerHandle) {}
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
+        self.device(device)?;
+        let key = CudaSamplerKey::from_desc(desc)?;
+        let slot = self.alloc_registry_slot();
+        let handle = self.next_sampler;
+        self.next_sampler += 1;
+        self.sampler_slots.insert(slot, handle);
+        self.samplers.insert(
+            handle,
+            CudaSampler {
+                device,
+                desc: desc.clone(),
+                slot,
+                key,
+            },
+        );
+        Ok(handle)
+    }
 
-    fn sampler_bindless_index(&self, _sampler: SamplerHandle) -> Option<u32> {
-        None
+    fn destroy_sampler(&mut self, sampler: SamplerHandle) {
+        if let Some(sampler) = self.samplers.remove(&sampler) {
+            self.sampler_slots.remove(&sampler.slot);
+        }
+    }
+
+    fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32> {
+        self.samplers.get(&sampler).map(|s| s.slot)
     }
 
     #[cfg(feature = "graphics")]
@@ -2451,23 +2888,40 @@ impl GpuBackend for CudaBackend {
     }
 
     fn max_bindless_slots_per_category(&self, _device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
-        if matches!(
-            category,
-            crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::Broadcast
-        ) {
-            4096
-        } else {
-            0
+        match category {
+            crate::types::ResourceCategory::Scattered
+            | crate::types::ResourceCategory::Broadcast
+            | crate::types::ResourceCategory::Texture
+            | crate::types::ResourceCategory::StorageImage
+            | crate::types::ResourceCategory::Sampler => 4096,
         }
     }
 
     fn available_bindless_slots(&self, device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
-        self.max_bindless_slots_per_category(device, category).saturating_sub(
-            self.buffers
+        let used = match category {
+            crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::Broadcast => self
+                .buffers
                 .values()
                 .filter(|buffer| buffer.device == device && buffer.slot.is_some())
                 .count() as u32,
-        )
+            crate::types::ResourceCategory::Texture => self
+                .textures
+                .values()
+                .filter(|tex| tex.sampled_slot.is_some() && self.texture_device_is(tex, device))
+                .count() as u32,
+            crate::types::ResourceCategory::StorageImage => self
+                .textures
+                .values()
+                .filter(|tex| tex.storage_slot.is_some() && self.texture_device_is(tex, device))
+                .count() as u32,
+            crate::types::ResourceCategory::Sampler => self
+                .samplers
+                .values()
+                .filter(|sampler| sampler.device == device)
+                .count() as u32,
+        };
+        self.max_bindless_slots_per_category(device, category)
+            .saturating_sub(used)
     }
 
     fn max_submission_contexts(&self, _device: DeviceHandle) -> u32 {

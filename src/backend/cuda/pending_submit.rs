@@ -74,7 +74,8 @@ pub(super) enum CudaOp {
         workgroup_size: [u32; 3],
         grid: (u32, u32, u32),
         args: Vec<CudaLaunchArg>,
-        keep_alive: Vec<Arc<Mutex<CudaSlice<u8>>>>,
+        keep_alive_buffers: Vec<Arc<Mutex<CudaSlice<u8>>>>,
+        keep_alive_textures: Vec<Arc<super::texture::CudaTextureResource>>,
     },
     /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
     /// path resolves the shape via DtoH on the worker stream.
@@ -84,7 +85,8 @@ pub(super) enum CudaOp {
         module: Arc<CudaModule>,
         workgroup_size: [u32; 3],
         args: Vec<CudaLaunchArg>,
-        keep_alive: Vec<Arc<Mutex<CudaSlice<u8>>>>,
+        keep_alive_buffers: Vec<Arc<Mutex<CudaSlice<u8>>>>,
+        keep_alive_textures: Vec<Arc<super::texture::CudaTextureResource>>,
         /// Absolute device address of the 12-byte [`DispatchShape`].
         shape_ptr: u64,
         shape_memory: Arc<Mutex<CudaSlice<u8>>>,
@@ -119,6 +121,39 @@ pub(super) enum CudaOp {
         dst_abs: u64,
         size: u64,
     },
+    WriteTexture {
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+        src_row_pitch: u32,
+    },
+    CopyBufferToTexture {
+        src: Arc<Mutex<CudaSlice<u8>>>,
+        src_abs: u64,
+        src_row_pitch: u32,
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
+    CopyTexture {
+        src: Arc<super::texture::CudaTextureResource>,
+        dst: Arc<super::texture::CudaTextureResource>,
+    },
+    CopyTextureToBuffer {
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        dst: Arc<Mutex<CudaSlice<u8>>>,
+        dst_abs: u64,
+        dst_row_pitch: u32,
+    },
 }
 
 /// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
@@ -141,30 +176,39 @@ pub(super) fn ops_contain_indirect(ops: &[CudaOp]) -> bool {
 
 pub(super) fn collect_pins(
     ops: &[CudaOp],
-) -> (Vec<Arc<Mutex<CudaSlice<u8>>>>, Vec<Arc<CudaModule>>) {
+) -> (
+    Vec<Arc<Mutex<CudaSlice<u8>>>>,
+    Vec<Arc<CudaModule>>,
+    Vec<Arc<super::texture::CudaTextureResource>>,
+) {
     let mut buffers = Vec::new();
     let mut modules = Vec::new();
+    let mut textures = Vec::new();
     for op in ops {
         match op {
             CudaOp::Launch {
                 module,
-                keep_alive,
+                keep_alive_buffers,
+                keep_alive_textures,
                 ..
             } => {
                 modules.push(Arc::clone(module));
-                buffers.extend(keep_alive.iter().cloned());
+                buffers.extend(keep_alive_buffers.iter().cloned());
+                textures.extend(keep_alive_textures.iter().cloned());
             }
             CudaOp::LaunchIndirect {
                 module,
                 updater_module,
-                keep_alive,
+                keep_alive_buffers,
+                keep_alive_textures,
                 shape_memory,
                 ..
             } => {
                 modules.push(Arc::clone(module));
                 modules.push(Arc::clone(updater_module));
-                buffers.extend(keep_alive.iter().cloned());
+                buffers.extend(keep_alive_buffers.iter().cloned());
                 buffers.push(Arc::clone(shape_memory));
+                textures.extend(keep_alive_textures.iter().cloned());
             }
             CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
                 buffers.push(Arc::clone(memory));
@@ -173,9 +217,24 @@ pub(super) fn collect_pins(
                 buffers.push(Arc::clone(src));
                 buffers.push(Arc::clone(dst));
             }
+            CudaOp::WriteTexture { texture, .. } => {
+                textures.push(Arc::clone(texture));
+            }
+            CudaOp::CopyBufferToTexture { src, texture, .. } => {
+                buffers.push(Arc::clone(src));
+                textures.push(Arc::clone(texture));
+            }
+            CudaOp::CopyTexture { src, dst } => {
+                textures.push(Arc::clone(src));
+                textures.push(Arc::clone(dst));
+            }
+            CudaOp::CopyTextureToBuffer { texture, dst, .. } => {
+                textures.push(Arc::clone(texture));
+                buffers.push(Arc::clone(dst));
+            }
         }
     }
-    (buffers, modules)
+    (buffers, modules, textures)
 }
 
 pub(super) fn maybe_validate_sync(stream: &Arc<CudaStream>, op: &str) -> Result<()> {
@@ -297,6 +356,93 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "CopyBuffer")?;
                 }
             }
+            CudaOp::WriteTexture {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                data,
+                src_row_pitch,
+            } => {
+                super::texture::memcpy_htod_array(
+                    stream,
+                    texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                    data,
+                    *src_row_pitch,
+                )?;
+                if validate {
+                    maybe_validate_sync(stream, "WriteTexture")?;
+                }
+            }
+            CudaOp::CopyBufferToTexture {
+                src,
+                src_abs,
+                src_row_pitch,
+                texture,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let src_ptr = {
+                    let memory = src.lock().unwrap();
+                    let (base, _sync) = memory.device_ptr(stream);
+                    base + *src_abs
+                };
+                super::texture::memcpy_dtod_array(
+                    stream,
+                    src_ptr,
+                    *src_row_pitch,
+                    texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                )?;
+                if validate {
+                    maybe_validate_sync(stream, "CopyBufferToTexture")?;
+                }
+            }
+            CudaOp::CopyTexture { src, dst } => {
+                super::texture::memcpy_array_to_array(stream, src, dst)?;
+                if validate {
+                    maybe_validate_sync(stream, "CopyTexture")?;
+                }
+            }
+            CudaOp::CopyTextureToBuffer {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                dst,
+                dst_abs,
+                dst_row_pitch,
+            } => {
+                let dst_ptr = {
+                    let memory = dst.lock().unwrap();
+                    let (base, _sync) = memory.device_ptr(stream);
+                    base + *dst_abs
+                };
+                super::texture::memcpy_array_to_device(
+                    stream,
+                    texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                    dst_ptr,
+                    *dst_row_pitch,
+                )?;
+                if validate {
+                    maybe_validate_sync(stream, "CopyTextureToReadback")?;
+                }
+            }
         }
     }
     Ok(())
@@ -324,6 +470,9 @@ fn launch_direct(
             match arg {
                 CudaLaunchArg::Buffer(buffer) => {
                     builder.arg(buffer);
+                }
+                CudaLaunchArg::Handle(handle) => {
+                    builder.arg(handle);
                 }
                 CudaLaunchArg::Scalar(word) => {
                     builder.arg(word);
@@ -479,7 +628,13 @@ pub(super) fn finalize_indirect_capture(
                     .context("CUDA: write CUgraphDeviceNode into updater slot failed")?;
                 kernel_ordinal += 2;
             }
-            CudaOp::Clear { .. } | CudaOp::Write { .. } | CudaOp::Copy { .. } => {
+            CudaOp::Clear { .. }
+            | CudaOp::Write { .. }
+            | CudaOp::Copy { .. }
+            | CudaOp::WriteTexture { .. }
+            | CudaOp::CopyBufferToTexture { .. }
+            | CudaOp::CopyTexture { .. }
+            | CudaOp::CopyTextureToBuffer { .. } => {
                 anyhow::bail!(
                     "CUDA: finalize_indirect_capture called on a graph-unsafe op set"
                 );
@@ -589,7 +744,7 @@ impl PendingSubmit for CudaPendingSubmit {
                 stats,
             } => {
                 let ctx = self.context.handle;
-                let (buffers, modules) = collect_pins(&ops);
+                let (buffers, modules, textures) = collect_pins(&ops);
                 let needs_indirect = ops_contain_indirect(&ops);
                 let graph = capture_partition_graph(&self.stream, &ops)?;
                 stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -607,6 +762,7 @@ impl PendingSubmit for CudaPendingSubmit {
                             graph,
                             buffers,
                             modules,
+                            textures,
                             last_launch_tv: self.fence_value,
                         },
                     );
