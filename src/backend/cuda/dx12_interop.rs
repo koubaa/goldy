@@ -51,6 +51,13 @@ pub(super) struct CudaImportedTexture {
     level0: sys::CUarray,
 }
 
+impl CudaImportedTexture {
+    /// Borrowed level-0 array (owned by `mipmapped`; do not destroy).
+    pub(super) fn level0(&self) -> sys::CUarray {
+        self.level0
+    }
+}
+
 impl Drop for CudaImportedTexture {
     fn drop(&mut self) {
         let _ = self.cuda_ctx.bind_to_thread();
@@ -148,7 +155,7 @@ impl SharedScratchTexture {
     }
 }
 
-fn create_shared_texture(
+pub(super) fn create_shared_texture(
     device: &ID3D12Device,
     width: u32,
     height: u32,
@@ -191,7 +198,7 @@ fn create_shared_texture(
     Ok((resource, alloc_info.SizeInBytes))
 }
 
-fn import_shared_texture(
+pub(super) fn import_shared_texture(
     cuda_ctx: &Arc<CudaContext>,
     handle: HANDLE,
     size: u64,
@@ -263,7 +270,7 @@ fn import_shared_texture(
     })
 }
 
-fn init_resource_state(
+pub(super) fn init_resource_state(
     companion: &Dx12Companion,
     resource: &ID3D12Resource,
     after: D3D12_RESOURCE_STATES,

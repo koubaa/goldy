@@ -660,7 +660,7 @@ pub enum BackendType {
     Dx12,
     /// Portable WebGPU backend (currently compute-only).
     WebGpu,
-    /// NVIDIA CUDA backend (compute + Windows DX12 presentation when
+    /// NVIDIA CUDA backend (compute + Windows DX12 presentation/raster when
     /// `cuda+graphics+dx12` are enabled).
     Cuda,
 }

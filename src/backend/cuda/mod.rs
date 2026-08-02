@@ -1,9 +1,10 @@
 //! Compute-focused CUDA backend (Slang → PTX → Driver API).
 //!
-//! With `cuda` + `graphics` + `dx12` on Windows, presentation is enabled via a
-//! DX12 companion: CUDA writes shared float4 scratch textures and DX12 copies
-//! them to the swapchain. Raster pipelines and offscreen render targets remain
-//! unsupported in this slice.
+//! With `cuda` + `graphics` + `dx12` on Windows, presentation and a first-slice
+//! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
+//! textures and DX12 presents them; offscreen `Rgba32Float` render targets and
+//! TriangleList graphics pipelines are also supported. Depth, indexed draws, and
+//! bindless render bindings remain unsupported in this slice.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -37,6 +38,8 @@ mod timeline;
 mod dx12_companion;
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 mod dx12_interop;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod raster;
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 mod surface;
 
@@ -113,6 +116,12 @@ pub(crate) struct CudaBackend {
     graph_stats: Arc<CudaGraphStats>,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     surfaces: HashMap<SurfaceHandle, surface::CudaSurfaceState>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pipelines: HashMap<PipelineHandle, raster::CudaGraphicsPipeline>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    render_targets: HashMap<RenderTargetHandle, raster::CudaRenderTarget>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    vb_mirrors: HashMap<BufferHandle, raster::Dx12VertexMirror>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -123,6 +132,10 @@ pub(crate) struct CudaBackend {
     next_compute_pipeline: ComputePipelineHandle,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     next_surface: SurfaceHandle,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    next_pipeline: PipelineHandle,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    next_render_target: RenderTargetHandle,
 }
 
 struct CudaDevice {
@@ -348,6 +361,12 @@ impl CudaBackend {
             graph_stats: Arc::new(CudaGraphStats::default()),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             surfaces: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            pipelines: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            render_targets: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            vb_mirrors: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
@@ -358,6 +377,10 @@ impl CudaBackend {
             next_compute_pipeline: 1,
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             next_surface: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_pipeline: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_render_target: 1,
         })
     }
 
@@ -1387,8 +1410,63 @@ impl CudaBackend {
                         dst_row_pitch: layout.row_pitch,
                     });
                 }
-                GpuCommand::CopyRenderTarget { .. } => {
-                    anyhow::bail!("CUDA compute-only backend: CopyRenderTarget is not supported")
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    {
+                        let (cuda_src, fence, device) = {
+                            let rt = self
+                                .render_targets
+                                .get(src)
+                                .context("CUDA/DX12: invalid CopyRenderTarget source")?;
+                            (Arc::clone(&rt.cuda_texture), rt.last_dx12_fence, rt.device)
+                        };
+                        let cuda_dst = Arc::clone(
+                            self.textures
+                                .get(dst)
+                                .context("CUDA/DX12: invalid CopyRenderTarget destination")?,
+                        );
+                        if cuda_src.format != cuda_dst.format {
+                            anyhow::bail!(
+                                "CUDA/DX12: CopyRenderTarget format mismatch ({:?} → {:?})",
+                                cuda_src.format,
+                                cuda_dst.format
+                            );
+                        }
+                        if cuda_src.width != cuda_dst.width || cuda_src.height != cuda_dst.height {
+                            anyhow::bail!(
+                                "CUDA/DX12: CopyRenderTarget size mismatch ({}x{} → {}x{})",
+                                cuda_src.width,
+                                cuda_src.height,
+                                cuda_dst.width,
+                                cuda_dst.height
+                            );
+                        }
+                        if fence > 0 {
+                            let companion = self
+                                .devices
+                                .get(&device)
+                                .context("CUDA: invalid device")?
+                                .dx12
+                                .as_ref()
+                                .context("CUDA/DX12: companion required for CopyRenderTarget")?;
+                            ops.push(CudaOp::WaitExternalFence {
+                                cuda_ctx: Arc::clone(&companion.cuda_ctx),
+                                semaphore: pending_submit::SendExternalSemaphore(companion.cuda_semaphore),
+                                value: fence,
+                            });
+                        }
+                        ops.push(CudaOp::CopyTexture {
+                            src: cuda_src,
+                            dst: cuda_dst,
+                        });
+                    }
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    {
+                        let _ = (src, dst);
+                        anyhow::bail!(
+                            "CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows"
+                        );
+                    }
                 }
             }
         }
@@ -1413,11 +1491,62 @@ impl CudaBackend {
             match cmd {
                 GraphCommand::Compute(c) => out.push(c.clone()),
                 GraphCommand::Render { .. } => {
-                    anyhow::bail!("CUDA compute-only backend: render graph commands are not supported")
+                    anyhow::bail!(
+                        "CUDA: GraphCommand::Render cannot be flattened into compute ops; \
+                         use submit_graph (blocking render_to_target between batches)"
+                    )
                 }
             }
         }
         Ok(out)
+    }
+
+    /// True when the graph contains an offscreen render partition.
+    fn graph_has_render(commands: &[GraphCommand]) -> bool {
+        commands
+            .iter()
+            .any(|c| matches!(c, GraphCommand::Render { .. }))
+    }
+
+    fn submit_graph_with_renders(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(ctx);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    color_load,
+                    commands: render_cmds,
+                } => {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    {
+                        if !batch.is_empty() {
+                            last_tv = self.submit_commands(ctx, &batch, sync)?;
+                            self.wait_until(ctx, last_tv)?;
+                            batch.clear();
+                        }
+                        let device = self.context_device(ctx);
+                        raster::render_to_target(self, device, *target, *color_load, render_cmds)?;
+                        last_tv = self.submit_commands(ctx, &[], sync)?;
+                    }
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    {
+                        let _ = (target, color_load, render_cmds);
+                        anyhow::bail!("CUDA: render graph commands require cuda+graphics+dx12 on Windows");
+                    }
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = self.submit_commands(ctx, &batch, sync)?;
+        }
+        Ok(last_tv)
     }
 
     fn enqueue_submit(
@@ -1951,6 +2080,26 @@ impl GpuBackend for CudaBackend {
         self.buffers.retain(|_, buffer| buffer.device != device);
         self.shaders.retain(|_, shader| shader.device != device);
         self.compute_pipelines.retain(|_, pipeline| pipeline.device != device);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            self.pipelines.retain(|_, p| p.device != device);
+            let rt_tex: Vec<_> = self
+                .render_targets
+                .iter()
+                .filter(|(_, rt)| rt.device == device)
+                .map(|(_, rt)| {
+                    // Find texture handles that alias the RT cuda_texture via slot map.
+                    rt.cuda_texture.storage_slot
+                })
+                .collect();
+            self.render_targets.retain(|_, rt| rt.device != device);
+            self.vb_mirrors.clear();
+            for slot in rt_tex.into_iter().flatten() {
+                if let Some(tex) = self.texture_slots.remove(&slot) {
+                    self.textures.remove(&tex);
+                }
+            }
+        }
         self.buffer_slots.retain(|_, handle| self.buffers.contains_key(handle));
     }
 
@@ -2444,7 +2593,28 @@ impl GpuBackend for CudaBackend {
         self.shaders.remove(&shader);
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn create_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+    ) -> Result<PipelineHandle> {
+        raster::create_pipeline(
+            self,
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn create_pipeline(
         &mut self,
         _device: DeviceHandle,
@@ -2454,27 +2624,54 @@ impl GpuBackend for CudaBackend {
         _topology: PrimitiveTopology,
         _target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        Self::unsupported("graphics pipelines")
+        Self::unsupported("graphics pipelines (requires cuda+graphics+dx12 on Windows)")
     }
 
     #[cfg(feature = "graphics")]
-    fn destroy_pipeline(&mut self, _pipeline: PipelineHandle) {}
+    fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        raster::destroy_pipeline(self, pipeline);
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        let _ = pipeline;
+    }
 
     #[cfg(feature = "graphics")]
     fn create_pipeline_with_depth(
         &mut self,
-        _device: DeviceHandle,
-        _vertex_shader: ShaderHandle,
-        _fragment_shader: ShaderHandle,
-        _vertex_layout: &VertexBufferLayout,
-        _topology: PrimitiveTopology,
-        _target_format: TextureFormat,
-        _depth_stencil: Option<&DepthStencilState>,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        Self::unsupported("graphics pipelines")
+        if depth_stencil.is_some() {
+            return Self::unsupported("graphics pipelines with depth (first CUDA raster slice)");
+        }
+        self.create_pipeline(
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn create_render_target_with_depth(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<RenderTargetHandle> {
+        raster::create_render_target(self, device, width, height, color_format, depth_format)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn create_render_target_with_depth(
         &mut self,
         _device: DeviceHandle,
@@ -2483,10 +2680,21 @@ impl GpuBackend for CudaBackend {
         _color_format: TextureFormat,
         _depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
-        Self::unsupported("render targets")
+        Self::unsupported("render targets (requires cuda+graphics+dx12 on Windows)")
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn render_to_target(
+        &mut self,
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
+        raster::render_to_target(self, device, target, color_load, commands)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn render_to_target(
         &mut self,
         _device: DeviceHandle,
@@ -2494,7 +2702,7 @@ impl GpuBackend for CudaBackend {
         _color_load: crate::types::TargetLoad,
         _commands: &[RenderCommand],
     ) -> Result<()> {
-        Self::unsupported("rendering")
+        Self::unsupported("rendering (requires cuda+graphics+dx12 on Windows)")
     }
 
     fn create_texture(
@@ -2803,6 +3011,19 @@ impl GpuBackend for CudaBackend {
         self.submit_commands(ctx, commands, sync)
     }
 
+    fn submit_graph(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        if Self::graph_has_render(commands) {
+            return self.submit_graph_with_renders(ctx, commands, sync);
+        }
+        let gpu_commands = Self::flatten_graph_commands(commands)?;
+        self.submit_commands(ctx, &gpu_commands, sync)
+    }
+
     fn submit_graph_and_retain(
         &mut self,
         ctx: ContextHandle,
@@ -2810,6 +3031,11 @@ impl GpuBackend for CudaBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
+        // Render partitions are not CUDA-graph-capturable; fall back to the blocking path.
+        if Self::graph_has_render(commands) {
+            return self.submit_graph_with_renders(ctx, commands, sync);
+        }
+
         // Evict any previous artifact for this key before recording a replacement.
         if self.retained.remove(&(ctx, key)).is_some() {
             self.enqueue_evict_retained(ctx, key);

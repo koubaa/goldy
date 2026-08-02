@@ -12,9 +12,13 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::{
-    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12Device,
-    ID3D12Fence, ID3D12GraphicsCommandList, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC,
-    D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_FENCE_FLAG_SHARED,
+    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12DescriptorHeap,
+    ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12RootSignature, D3D12_COMMAND_LIST_TYPE_DIRECT,
+    D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+    D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+    D3D12_FENCE_FLAG_SHARED, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC, D3D12SerializeVersionedRootSignature, D3D_ROOT_SIGNATURE_VERSION_1_1,
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0, D3D12_ROOT_SIGNATURE_DESC1,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5, DXGI_ADAPTER_FLAG,
@@ -121,6 +125,17 @@ pub(super) struct Dx12Companion {
     pub init_list: ID3D12GraphicsCommandList,
     /// Fence value of the last submit that used [`Self::init_allocator`].
     pub init_fence: AtomicU64,
+    /// RTV descriptor heap for offscreen raster targets.
+    pub rtv_heap: ID3D12DescriptorHeap,
+    pub rtv_descriptor_size: u32,
+    pub next_rtv_offset: AtomicU64,
+    /// Empty root signature (IA input layout allowed) for first-slice graphics PSOs.
+    pub graphics_root_signature: ID3D12RootSignature,
+    /// Dedicated allocator/list for blocking `render_to_target` submits.
+    pub raster_allocator: ID3D12CommandAllocator,
+    pub raster_list: ID3D12GraphicsCommandList,
+    /// Fence value of the last raster submit that used [`Self::raster_allocator`].
+    pub raster_fence: AtomicU64,
 }
 
 pub(super) struct PresentCommandSlot {
@@ -217,6 +232,28 @@ impl Dx12Companion {
         .context("CUDA/DX12: CreateCommandList(init) failed")?;
         unsafe { init_list.Close() }.context("CUDA/DX12: Close init command list")?;
 
+        let rtv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+            NumDescriptors: 64,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            NodeMask: 0,
+        };
+        let rtv_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&rtv_heap_desc) }
+            .context("CUDA/DX12: CreateDescriptorHeap(RTV) failed")?;
+        let rtv_descriptor_size =
+            unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
+
+        let graphics_root_signature = create_empty_ia_root_signature(&device)?;
+
+        let raster_allocator: ID3D12CommandAllocator =
+            unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                .context("CUDA/DX12: CreateCommandAllocator(raster) failed")?;
+        let raster_list: ID3D12GraphicsCommandList = unsafe {
+            device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &raster_allocator, None)
+        }
+        .context("CUDA/DX12: CreateCommandList(raster) failed")?;
+        unsafe { raster_list.Close() }.context("CUDA/DX12: Close raster command list")?;
+
         let present_stream = cuda_ctx
             .new_stream()
             .context("CUDA/DX12: create present stream failed")?;
@@ -238,6 +275,13 @@ impl Dx12Companion {
             init_allocator,
             init_list,
             init_fence: AtomicU64::new(0),
+            rtv_heap,
+            rtv_descriptor_size,
+            next_rtv_offset: AtomicU64::new(0),
+            graphics_root_signature,
+            raster_allocator,
+            raster_list,
+            raster_fence: AtomicU64::new(0),
         })
     }
 
@@ -313,6 +357,34 @@ impl Dx12Companion {
         self.init_fence.store(signal, Ordering::Release);
         Ok(())
     }
+
+    /// Allocate the next RTV heap offset (monotonic).
+    pub fn alloc_rtv_offset(&self) -> u32 {
+        self.next_rtv_offset.fetch_add(1, Ordering::AcqRel) as u32
+    }
+
+    /// Reset the dedicated raster command allocator/list (blocking on prior use).
+    pub fn begin_raster_list(&self) -> Result<()> {
+        let prev = self.raster_fence.load(Ordering::Acquire);
+        if prev > 0 {
+            self.cpu_wait(prev)?;
+        }
+        unsafe { self.raster_allocator.Reset() }.context("CUDA/DX12: reset raster allocator")?;
+        unsafe { self.raster_list.Reset(&self.raster_allocator, None) }
+            .context("CUDA/DX12: reset raster list")?;
+        Ok(())
+    }
+
+    /// Close, execute, and CPU-wait the raster list; returns the signaled fence value.
+    pub fn finish_raster_list(&self) -> Result<u64> {
+        unsafe { self.raster_list.Close() }.context("CUDA/DX12: close raster list")?;
+        let cmd: ID3D12CommandList = self.raster_list.cast().context("cast raster list")?;
+        let signal = self.next_fence_value();
+        self.execute_and_signal(&[Some(cmd)], signal)?;
+        self.cpu_wait(signal)?;
+        self.raster_fence.store(signal, Ordering::Release);
+        Ok(signal)
+    }
 }
 
 impl Drop for Dx12Companion {
@@ -331,6 +403,37 @@ unsafe impl Send for Dx12Companion {}
 unsafe impl Sync for Dx12Companion {}
 
 pub(super) const MAX_FRAMES: usize = 3;
+
+fn create_empty_ia_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSignature> {
+    use windows::Win32::Graphics::Direct3D::ID3DBlob;
+    let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
+        NumParameters: 0,
+        pParameters: std::ptr::null(),
+        NumStaticSamplers: 0,
+        pStaticSamplers: std::ptr::null(),
+        Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+    };
+    let versioned = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+        Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+        Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
+    };
+    let mut sig_blob: Option<ID3DBlob> = None;
+    let mut sig_err: Option<ID3DBlob> = None;
+    unsafe { D3D12SerializeVersionedRootSignature(&versioned, &mut sig_blob, Some(&mut sig_err)) }
+        .context("CUDA/DX12: serialize empty IA root signature")?;
+    let sig_blob = sig_blob.context("CUDA/DX12: null empty root signature blob")?;
+    let root_signature: ID3D12RootSignature = unsafe {
+        device.CreateRootSignature(
+            0,
+            std::slice::from_raw_parts(
+                sig_blob.GetBufferPointer() as *const u8,
+                sig_blob.GetBufferSize(),
+            ),
+        )
+    }
+    .context("CUDA/DX12: CreateRootSignature(empty IA)")?;
+    Ok(root_signature)
+}
 
 fn import_d3d12_fence(
     cuda_ctx: &Arc<CudaContext>,

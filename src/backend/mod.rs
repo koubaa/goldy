@@ -1789,7 +1789,7 @@ pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBac
         }
         #[cfg(feature = "cuda")]
         BackendType::Cuda => {
-            tracing::info!("Creating CUDA backend (compute-only)");
+            tracing::info!("Creating CUDA backend");
             Ok(Box::new(cuda::CudaBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),

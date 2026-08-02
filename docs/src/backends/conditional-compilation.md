@@ -53,17 +53,19 @@ backend automatically. In a default multi-backend build, opt in with
 On Windows, enabling `cuda` together with `graphics` and `dx12` (the usual case
 when adding `cuda` on top of default features) attaches a DX12 presentation
 companion to each CUDA device: LUID-matched DXGI adapter, shared float4 scratch
-textures, and swapchain present. Raster pipelines and offscreen render targets
-remain unsupported on the CUDA backend until a later slice. Without that full
-gate, surface/present APIs still return compute-only errors.
+textures, and swapchain present. The same gate enables a first-slice raster path
+(offscreen `Rgba32Float` targets + TriangleList pipelines). Depth, indexed draws,
+and bindless render bindings remain unsupported until a later slice. Without that
+full gate, surface/present/raster APIs still return compute-only errors.
 
 ```bash
 # CUDA compute-only
 cargo test --no-default-features --features cuda --test scheme_compute_integration
 
-# CUDA + DX12 presentation (Windows)
+# CUDA + DX12 presentation + first-slice raster (Windows)
 cargo check --no-default-features --features cuda,graphics,dx12
 GOLDY_BACKEND=cuda cargo run --example compute_to_surface --features examples
+cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_raster
 ```
 
 ### Dependency Exclusion

@@ -204,8 +204,12 @@ CUDA device opens a LUID-matched DX12 companion. Surface frames expose an
 present blits to the BGRA8 swapchain on the DX12 DIRECT queue using a shared
 D3D12 fence imported as a CUDA external semaphore. This is zero-copy between CUDA
 and DX12; a GPU blit into the non-shareable swapchain image remains. Adapter
-mismatch, WARP, and linked-node adapters fail at device creation. Raster pipelines,
-offscreen render targets, and Vulkan interop are not in this slice.
+mismatch, WARP, and linked-node adapters fail at device creation. A first-slice
+raster path is also available under the same feature gate: offscreen
+`Rgba32Float` render targets, TriangleList graphics pipelines (Slang → DXIL), and
+`CopyRenderTarget` into present scratch / CUDA textures. Depth, indexed draws,
+and bindless render bindings are not in this slice. Vulkan interop is not
+supported.
 
 Enable with the `cuda` Cargo feature (`--no-default-features --features cuda`
 auto-selects CUDA; in default builds use `GOLDY_BACKEND=cuda`):

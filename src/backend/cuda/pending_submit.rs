@@ -143,6 +143,13 @@ pub(super) enum CudaOp {
         src: Arc<super::texture::CudaTextureResource>,
         dst: Arc<super::texture::CudaTextureResource>,
     },
+    /// Wait on a D3D12 fence imported as a CUDA external semaphore (raster → compute handoff).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    WaitExternalFence {
+        cuda_ctx: Arc<cudarc::driver::CudaContext>,
+        semaphore: SendExternalSemaphore,
+        value: u64,
+    },
     CopyTextureToBuffer {
         texture: Arc<super::texture::CudaTextureResource>,
         x: u32,
@@ -154,6 +161,16 @@ pub(super) enum CudaOp {
         dst_row_pitch: u32,
     },
 }
+
+/// `CUexternalSemaphore` is a driver handle; Goldy only uses it from the submission worker.
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+#[derive(Clone, Copy)]
+pub(super) struct SendExternalSemaphore(pub cudarc::driver::sys::CUexternalSemaphore);
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+// SAFETY: handle is process-local and only touched under Goldy's submit serialization.
+unsafe impl Send for SendExternalSemaphore {}
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+unsafe impl Sync for SendExternalSemaphore {}
 
 /// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
 ///
@@ -264,6 +281,8 @@ pub(super) fn collect_pins(
                 textures.push(Arc::clone(src));
                 textures.push(Arc::clone(dst));
             }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::WaitExternalFence { .. } => {}
             CudaOp::CopyTextureToBuffer { texture, dst, .. } => {
                 textures.push(Arc::clone(texture));
                 buffers.push(Arc::clone(dst));
@@ -428,6 +447,17 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 super::texture::memcpy_array_to_array(stream, src, dst)?;
                 if validate {
                     maybe_validate_sync(stream, "CopyTexture")?;
+                }
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::WaitExternalFence {
+                cuda_ctx,
+                semaphore,
+                value,
+            } => {
+                super::dx12_companion::cuda_wait_fence(cuda_ctx, semaphore.0, stream.cu_stream(), *value)?;
+                if validate {
+                    maybe_validate_sync(stream, "WaitExternalFence")?;
                 }
             }
             CudaOp::CopyTextureToBuffer {
@@ -643,6 +673,10 @@ pub(super) fn finalize_indirect_capture(
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
             | CudaOp::CopyTextureToBuffer { .. } => {
+                anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::WaitExternalFence { .. } => {
                 anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
             }
         }
