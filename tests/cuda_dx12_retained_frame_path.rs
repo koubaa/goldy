@@ -170,6 +170,10 @@ fn cuda_raster_direct_retained_steady_state() {
     assert_eq!(stats.present_handoffs, 0, "direct raster present needs no CUDA handoff");
     assert_eq!(stats.worker_flushes, 0, "direct raster present needs no worker flush");
     assert_eq!(
+        stats.present_completion_events, 0,
+        "direct raster present must not allocate CUDA completion events"
+    );
+    assert_eq!(
         stats.rematerialize_fallbacks, 0,
         "retained replay must not rematerialize"
     );

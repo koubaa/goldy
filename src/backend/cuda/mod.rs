@@ -64,7 +64,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use texture::{memcpy_htod_array, storage_shader_compatible, CudaSamplerKey, CudaTextureResource};
-use timeline::{EventLedger, LedgerEntry};
+use timeline::{EventLedger, LedgerCompletion, LedgerEntry};
 
 /// Logical retained entry under the backend lock (graphs themselves live on the worker).
 #[derive(Clone)]
@@ -1819,32 +1819,56 @@ impl CudaBackend {
             fence_value,
             LedgerEntry {
                 context: ctx,
-                event: Arc::clone(&completion_event),
+                completion: LedgerCompletion::CudaEvent(Arc::clone(&completion_event)),
                 recorded: false,
             },
         );
 
         let mut stream_waits = Vec::new();
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let mut dx12_stream_fence_waits = Vec::new();
         let mut host_waits = Vec::new();
         let mut deferred_writes = Vec::new();
         if let Some(sync) = sync {
             for epoch in &sync.waits {
-                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value).with_context(|| {
-                    format!(
-                        "CUDA: cross-context wait missing event for context {:?} value {}",
-                        epoch.context, epoch.value
-                    )
-                })?;
-                stream_waits.push(event);
+                match timeline::lookup_completion(&event_ledger, epoch.context, epoch.value) {
+                    Some(LedgerCompletion::CudaEvent(event)) => stream_waits.push(event),
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    Some(LedgerCompletion::Dx12Fence { companion, value }) => {
+                        // Unbound present fence (value 0) is not waitable yet; skip — DX12
+                        // slot/raster fences already order present reuse on this path.
+                        if value > 0 {
+                            dx12_stream_fence_waits.push((companion, value));
+                        }
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "CUDA: cross-context wait missing event for context {:?} value {}",
+                            epoch.context,
+                            epoch.value
+                        );
+                    }
+                }
             }
             for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
-                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value).with_context(|| {
-                    format!(
-                        "CUDA: host wait missing event for context {:?} value {}",
-                        epoch.context, epoch.value
-                    )
-                })?;
-                host_waits.push(event);
+                match timeline::lookup_completion(&event_ledger, epoch.context, epoch.value) {
+                    Some(LedgerCompletion::CudaEvent(event)) => host_waits.push(event),
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    Some(LedgerCompletion::Dx12Fence { companion, value }) => {
+                        // Match DX12: never HOL cpu_wait WAR/present fence epochs on the
+                        // submit worker. Demote to an async stream wait when bound.
+                        if value > 0 {
+                            dx12_stream_fence_waits.push((companion, value));
+                        }
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "CUDA: host wait missing event for context {:?} value {}",
+                            epoch.context,
+                            epoch.value
+                        );
+                    }
+                }
             }
             deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |handle| {
                 let buffer = self
@@ -1862,6 +1886,8 @@ impl CudaBackend {
             completion_event,
             event_ledger,
             stream_waits,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            dx12_stream_fence_waits,
             host_waits,
             deferred_writes,
             body,
@@ -2160,8 +2186,22 @@ impl GpuBackendTimelineWait for CudaBackend {
         }
         let device_handle = self.context_device(ctx);
         let device = self.device(device_handle)?;
-        match timeline::lookup_event(&device.event_ledger, ctx, value) {
-            Some(event) => Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event }))),
+        match timeline::lookup_completion(&device.event_ledger, ctx, value) {
+            Some(LedgerCompletion::CudaEvent(event)) => {
+                Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            Some(LedgerCompletion::Dx12Fence { companion, value: fence_value }) => {
+                if fence_value == 0 {
+                    // Present TV reserved but not yet Signal'd — treat as not submitted.
+                    Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value })))
+                } else {
+                    Ok(Some(Box::new(timeline::Dx12FenceTimelineBlockingWait {
+                        companion,
+                        value: fence_value,
+                    })))
+                }
+            }
             // Match DX12: waiting on a never-submitted value still yields a timeout-capable
             // wait object (not an immediate Err that used to deadlock under classify+lock).
             None => Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value }))),
@@ -3217,16 +3257,26 @@ impl GpuBackend for CudaBackend {
         let gpu = self.device(device)?;
         gpu.submission_worker
             .wait_submitted_if_scheduled(value, submission_worker::submission_horizon(&gpu.next_timeline))?;
-        let event = {
+        {
             let ledger = gpu.event_ledger.lock().unwrap();
-            ledger
+            let entry = ledger
                 .get(&value)
-                .map(|entry| Arc::clone(&entry.event))
-                .with_context(|| format!("CUDA: timeline value {value} has not been submitted"))?
-        };
-        event
-            .synchronize()
-            .context("CUDA: device_wait_until event sync failed")?;
+                .with_context(|| format!("CUDA: timeline value {value} has not been submitted"))?;
+            match &entry.completion {
+                LedgerCompletion::CudaEvent(event) => event
+                    .synchronize()
+                    .context("CUDA: device_wait_until event sync failed")?,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::Dx12Fence { companion, value: fence_value } => {
+                    if *fence_value == 0 {
+                        anyhow::bail!("CUDA: timeline value {value} present fence not yet signaled");
+                    }
+                    companion
+                        .cpu_wait(*fence_value)
+                        .context("CUDA: device_wait_until DX12 fence wait failed")?;
+                }
+            }
+        }
         timeline::advance_device_retired(&gpu.event_ledger, &gpu.retired);
         for context in self.contexts.values().filter(|context| context.device == device) {
             timeline::poll_retire_events(

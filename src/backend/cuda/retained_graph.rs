@@ -20,6 +20,7 @@ pub(super) struct CudaGraphStats {
     pub evictions: AtomicU64,
     pub empty_submits_elided: AtomicU64,
     pub completion_events: AtomicU64,
+    pub present_completion_events: AtomicU64,
     pub worker_flushes: AtomicU64,
     pub present_handoffs: AtomicU64,
     pub vb_mirror_uploads: AtomicU64,
@@ -46,6 +47,7 @@ impl CudaGraphStats {
             evictions: self.evictions.load(Ordering::Relaxed),
             empty_submits_elided: self.empty_submits_elided.load(Ordering::Relaxed),
             completion_events: self.completion_events.load(Ordering::Relaxed),
+            present_completion_events: self.present_completion_events.load(Ordering::Relaxed),
             worker_flushes: self.worker_flushes.load(Ordering::Relaxed),
             present_handoffs: self.present_handoffs.load(Ordering::Relaxed),
             vb_mirror_uploads: self.vb_mirror_uploads.load(Ordering::Relaxed),
@@ -67,6 +69,7 @@ impl CudaGraphStats {
         self.evictions.store(0, Ordering::Relaxed);
         self.empty_submits_elided.store(0, Ordering::Relaxed);
         self.completion_events.store(0, Ordering::Relaxed);
+        self.present_completion_events.store(0, Ordering::Relaxed);
         self.worker_flushes.store(0, Ordering::Relaxed);
         self.present_handoffs.store(0, Ordering::Relaxed);
         self.vb_mirror_uploads.store(0, Ordering::Relaxed);
@@ -89,6 +92,7 @@ pub struct CudaGraphStatsSnapshot {
     pub evictions: u64,
     pub empty_submits_elided: u64,
     pub completion_events: u64,
+    pub present_completion_events: u64,
     pub worker_flushes: u64,
     pub present_handoffs: u64,
     pub vb_mirror_uploads: u64,

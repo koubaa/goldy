@@ -9,15 +9,73 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// One pre-allocated completion event for a device timeline value.
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+use super::dx12_companion::Dx12Companion;
+
+/// How a ledger timeline value becomes observable as complete.
+pub(super) enum LedgerCompletion {
+    CudaEvent(Arc<CudaEvent>),
+    /// DX12 companion fence signaled on the presentation DIRECT queue.
+    ///
+    /// `value` may be 0 until [`bind_dx12_fence_value`] runs at Signal time.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    Dx12Fence {
+        companion: Arc<Dx12Companion>,
+        value: u64,
+    },
+}
+
+/// Snapshot used so fence/event queries do not run under the ledger mutex.
+enum CompletionSnap {
+    CudaEvent(Arc<CudaEvent>),
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    Dx12Fence {
+        companion: Arc<Dx12Companion>,
+        value: u64,
+    },
+}
+
+impl CompletionSnap {
+    fn from_completion(completion: &LedgerCompletion) -> Option<Self> {
+        match completion {
+            LedgerCompletion::CudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            LedgerCompletion::Dx12Fence { companion, value } => {
+                (*value > 0).then(|| Self::Dx12Fence {
+                    companion: Arc::clone(companion),
+                    value: *value,
+                })
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        match self {
+            Self::CudaEvent(event) => event.is_complete(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            Self::Dx12Fence { companion, value } => (unsafe { companion.fence.GetCompletedValue() }) >= *value,
+        }
+    }
+}
+
+/// One pre-allocated completion marker for a device timeline value.
 pub(super) struct LedgerEntry {
     pub context: ContextHandle,
-    pub event: Arc<CudaEvent>,
-    /// Set after the submission worker records the event onto its stream.
+    pub completion: LedgerCompletion,
+    /// Set after the submission worker records a CUDA event, or after a DX12 fence
+    /// signal is submitted for fence-based entries.
     pub recorded: bool,
 }
 
-/// Shared device-wide ledger of timeline values → completion events.
+impl LedgerEntry {
+    pub(super) fn is_complete(&self) -> bool {
+        CompletionSnap::from_completion(&self.completion)
+            .map(|snap| snap.is_complete())
+            .unwrap_or(false)
+    }
+}
+
+/// Shared device-wide ledger of timeline values → completion markers.
 pub(super) type EventLedger = Arc<Mutex<BTreeMap<u64, LedgerEntry>>>;
 
 /// Advance per-context high-water and device-contiguous retirement.
@@ -32,13 +90,26 @@ pub(super) fn poll_retire_events(
     signal_queue: &crate::signal::SignalQueue,
     last_emitted: &AtomicU64,
 ) {
-    let mut ctx_max = 0u64;
-    {
+    // Snapshot under the lock; query completion outside so GetCompletedValue /
+    // cudaEventQuery cannot stall insert/lookup on the present/submit hot path.
+    let snaps: Vec<(u64, CompletionSnap)> = {
         let guard = ledger.lock().unwrap();
-        for (tv, entry) in guard.iter() {
-            if entry.context == context && entry.recorded && entry.event.is_complete() {
-                ctx_max = ctx_max.max(*tv);
-            }
+        guard
+            .iter()
+            .filter_map(|(tv, entry)| {
+                if entry.context == context && entry.recorded {
+                    CompletionSnap::from_completion(&entry.completion).map(|snap| (*tv, snap))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    let mut ctx_max = 0u64;
+    for (tv, snap) in snaps {
+        if snap.is_complete() {
+            ctx_max = ctx_max.max(tv);
         }
     }
 
@@ -60,17 +131,22 @@ pub(super) fn poll_retire_events(
 
 /// Device retired value is the longest contiguous prefix of recorded+complete events.
 pub(super) fn advance_device_retired(ledger: &EventLedger, device_retired: &AtomicU64) {
-    let guard = ledger.lock().unwrap();
-    let mut retired = device_retired.load(Ordering::Acquire);
     loop {
-        let next = retired + 1;
-        match guard.get(&next) {
-            Some(entry) if entry.recorded && entry.event.is_complete() => {
-                retired = next;
-                device_retired.store(retired, Ordering::Release);
+        let next = device_retired.load(Ordering::Acquire) + 1;
+        let snap = {
+            let guard = ledger.lock().unwrap();
+            match guard.get(&next) {
+                Some(entry) if entry.recorded => CompletionSnap::from_completion(&entry.completion),
+                _ => None,
             }
-            _ => break,
+        };
+        let Some(snap) = snap else {
+            break;
+        };
+        if !snap.is_complete() {
+            break;
         }
+        let _ = device_retired.compare_exchange(next - 1, next, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -78,7 +154,29 @@ pub(super) fn lookup_event(ledger: &EventLedger, context: ContextHandle, value: 
     let guard = ledger.lock().unwrap();
     guard.get(&value).and_then(|entry| {
         if entry.context == context {
-            Some(Arc::clone(&entry.event))
+            match &entry.completion {
+                LedgerCompletion::CudaEvent(event) => Some(Arc::clone(event)),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::Dx12Fence { .. } => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
+pub(super) fn lookup_completion(ledger: &EventLedger, context: ContextHandle, value: u64) -> Option<LedgerCompletion> {
+    let guard = ledger.lock().unwrap();
+    guard.get(&value).and_then(|entry| {
+        if entry.context == context {
+            Some(match &entry.completion {
+                LedgerCompletion::CudaEvent(event) => LedgerCompletion::CudaEvent(Arc::clone(event)),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::Dx12Fence { companion, value } => LedgerCompletion::Dx12Fence {
+                    companion: Arc::clone(companion),
+                    value: *value,
+                },
+            })
         } else {
             None
         }
@@ -88,6 +186,16 @@ pub(super) fn lookup_event(ledger: &EventLedger, context: ContextHandle, value: 
 pub(super) fn mark_recorded(ledger: &EventLedger, value: u64) {
     if let Some(entry) = ledger.lock().unwrap().get_mut(&value) {
         entry.recorded = true;
+    }
+}
+
+/// Fill the DX12 fence value for a present ledger entry at Signal time (not earlier).
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+pub(super) fn bind_dx12_fence_value(ledger: &EventLedger, timeline: u64, fence_value: u64) {
+    if let Some(entry) = ledger.lock().unwrap().get_mut(&timeline) {
+        if let LedgerCompletion::Dx12Fence { value, .. } = &mut entry.completion {
+            *value = fence_value;
+        }
     }
 }
 
@@ -112,6 +220,39 @@ impl TimelineBlockingWait for CudaTimelineBlockingWait {
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(self.event.is_complete())
+    }
+}
+
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+pub(super) struct Dx12FenceTimelineBlockingWait {
+    pub companion: Arc<Dx12Companion>,
+    pub value: u64,
+}
+
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+impl TimelineBlockingWait for Dx12FenceTimelineBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        if self.value == 0 {
+            bail!("CUDA/DX12: cannot wait on unbound present fence");
+        }
+        self.companion.cpu_wait(self.value)
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        if self.value == 0 {
+            return Ok(false);
+        }
+        if timeout_ms == 0 {
+            return Ok(unsafe { self.companion.fence.GetCompletedValue() } >= self.value);
+        }
+        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+        while Instant::now() < deadline {
+            if unsafe { self.companion.fence.GetCompletedValue() } >= self.value {
+                return Ok(true);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(unsafe { self.companion.fence.GetCompletedValue() } >= self.value)
     }
 }
 

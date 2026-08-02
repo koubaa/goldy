@@ -3,6 +3,8 @@
 use super::retained_graph::{self, CudaGraphStats, GraphRegistry};
 use super::timeline::{self, EventLedger};
 use super::{CudaBufferArg, CudaLaunchArg, CudaSubmitContext};
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+use super::dx12_companion::{cuda_wait_fence, Dx12Companion};
 use crate::backend::submission_worker::PendingSubmit;
 use crate::backend::{ContextHandle, DeferredHostWrite};
 use crate::timeline::TimelineValue;
@@ -34,6 +36,12 @@ pub(super) struct CudaPendingSubmit {
     pub event_ledger: EventLedger,
     /// Cross-context GPU waits (`SubmitSync.waits`).
     pub stream_waits: Vec<Arc<CudaEvent>>,
+    /// DX12 fence values to wait on the submission stream before GPU work.
+    ///
+    /// Also used for demoted WAR/`host_observed` Dx12Fence epochs — never CPU-wait those
+    /// on the worker (matches DX12's measured FPS policy).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub dx12_stream_fence_waits: Vec<(Arc<Dx12Companion>, u64)>,
     /// Host waits before deferred writes / GPU enqueue.
     pub host_waits: Vec<Arc<CudaEvent>>,
     pub deferred_writes: Vec<MaterializedHostWrite>,
@@ -768,6 +776,7 @@ fn run_dynamic_prefix(
     host_waits: &[Arc<CudaEvent>],
     deferred_writes: &[MaterializedHostWrite],
     stream_waits: &[Arc<CudaEvent>],
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))] dx12_stream_fence_waits: &[(Arc<Dx12Companion>, u64)],
 ) -> Result<()> {
     for event in host_waits {
         timeline::host_wait_event(event)?;
@@ -788,6 +797,16 @@ fn run_dynamic_prefix(
         stream
             .wait(event)
             .context("CUDA: stream wait on producer event failed")?;
+    }
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    for (companion, value) in dx12_stream_fence_waits {
+        cuda_wait_fence(
+            &companion.cuda_ctx,
+            companion.cuda_semaphore,
+            stream.cu_stream(),
+            *value,
+        )
+        .with_context(|| format!("CUDA/DX12: stream wait on fence {value} failed"))?;
     }
     Ok(())
 }
@@ -821,6 +840,8 @@ impl PendingSubmit for CudaPendingSubmit {
             &self.host_waits,
             &self.deferred_writes,
             &self.stream_waits,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            &self.dx12_stream_fence_waits,
         )?;
 
         match self.body {
