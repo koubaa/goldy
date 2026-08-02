@@ -400,48 +400,34 @@ impl Dx12Companion {
         Ok(signal)
     }
 
-    /// Re-execute a closed retained raster list.
+    /// Re-execute a closed retained raster list with no CPU wait.
     ///
-    /// Strategy:
-    /// 1. Re-execute a matching slot that is already GPU-retired (no CPU wait).
-    /// 2. If every matching copy is busy but we still have fewer than [`MAX_FRAMES`]
-    ///    copies and a free slot exists, return `None` so the caller can record
-    ///    another copy (warmup / deepen the pipeline).
-    /// 3. Otherwise wait for the soonest busy matching copy and re-execute it —
-    ///    never Reset a retained slot under load.
+    /// A closed D3D12 command list may be `ExecuteCommandLists`'d repeatedly while a
+    /// prior execute is still in flight; only `Reset` requires retirement. Prefer a
+    /// GPU-retired matching slot when available, otherwise re-execute any matching
+    /// copy — never `cpu_wait` on the reuse path.
     pub fn try_reuse_raster_for_fingerprint(&self, fingerprint: u64) -> Result<Option<u64>> {
         if fingerprint == 0 {
             return Ok(None);
         }
         let completed = unsafe { self.fence.GetCompletedValue() };
         let start = self.raster_slot.load(Ordering::Acquire) as usize;
-        let mut soonest_busy: Option<(usize, u64)> = None;
-        let mut match_count = 0usize;
-        let mut has_free_record_slot = false;
+        let mut busy_match: Option<usize> = None;
         for offset in 0..MAX_FRAMES {
             let idx = (start + offset) % MAX_FRAMES;
             let slot = &self.raster_slots[idx];
+            if slot.retained_fingerprint.load(Ordering::Acquire) != fingerprint {
+                continue;
+            }
             let prev = slot.fence_value.load(Ordering::Acquire);
-            let fp = slot.retained_fingerprint.load(Ordering::Acquire);
-            if fp == fingerprint {
-                match_count += 1;
-                if prev <= completed {
-                    return self.reexecute_raster_slot(idx);
-                }
-                match soonest_busy {
-                    Some((_, fence)) if prev >= fence => {}
-                    _ => soonest_busy = Some((idx, prev)),
-                }
-            } else if prev <= completed {
-                has_free_record_slot = true;
+            if prev <= completed {
+                return self.reexecute_raster_slot(idx);
+            }
+            if busy_match.is_none() {
+                busy_match = Some(idx);
             }
         }
-        if match_count < MAX_FRAMES && has_free_record_slot {
-            // Deepen the retained pool instead of blocking on the only copy.
-            return Ok(None);
-        }
-        if let Some((idx, fence)) = soonest_busy {
-            self.cpu_wait(fence)?;
+        if let Some(idx) = busy_match {
             return self.reexecute_raster_slot(idx);
         }
         Ok(None)

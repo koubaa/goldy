@@ -642,9 +642,8 @@ pub(super) fn render_to_target(
         companion.wait_queue(prior_fence)?;
     }
 
-    // Prefer retained raster replay. If copies exist but are busy, wait-and-replay
-    // the soonest one — never Reset a retained slot under load (that destroyed
-    // copies and made frames progressively worse).
+    // Prefer retained raster replay. Closed lists may be re-executed without a
+    // CPU wait even while a prior execute is in flight; only Reset needs retirement.
     if backend
         .raster_list_cache
         .get(&target)
