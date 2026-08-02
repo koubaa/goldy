@@ -107,7 +107,8 @@ pub(super) struct ScratchSlot {
 pub(super) enum PresentSource {
     /// CUDA wrote imported scratch; present waits on companion fence `cuda_complete`.
     CudaScratch { cuda_complete: u64 },
-    /// DX12 raster RT; present blits this resource after wait_queue(fence).
+    /// DX12 raster RT; present blits this resource. Same-queue submission order
+    /// after `render_to_target` is enough — no extra queue Wait on `fence`.
     Dx12Raster { resource: ID3D12Resource, fence: u64 },
 }
 
@@ -774,12 +775,13 @@ pub(super) fn take_present_gpu_work(
     let width = scratch.shared.width;
     let height = scratch.shared.height;
     // Prefer a stashed DX12 raster RT over CUDA-written imported scratch.
-    let (color_src, color_src_state, dx12_src_fence) = match present_source {
-        Some(PresentSource::Dx12Raster { resource, fence }) => (resource, PresentColorSrcState::Common, fence),
+    let (color_src, color_src_state) = match present_source {
+        Some(PresentSource::Dx12Raster { resource, fence: _ }) => {
+            (resource, PresentColorSrcState::Common)
+        }
         Some(PresentSource::CudaScratch { .. }) | None => (
             scratch.shared.d3d12_resource.clone(),
             PresentColorSrcState::UnorderedAccess,
-            0,
         ),
     };
     let backbuffer = state.backbuffers[image_index].clone();
@@ -836,7 +838,6 @@ pub(super) fn take_present_gpu_work(
         present_slot,
         scratch_handle,
         cuda_complete,
-        dx12_src_fence,
         present_tv,
         present_event,
         event_ledger,
@@ -935,8 +936,6 @@ struct CudaDx12PresentGpuWork {
     present_slot: usize,
     scratch_handle: TextureHandle,
     cuda_complete: u64,
-    /// Companion fence for a DX12-direct color source (raster RT); 0 if unused.
-    dx12_src_fence: u64,
     present_tv: crate::timeline::TimelineValue,
     present_event: Arc<CudaEvent>,
     event_ledger: EventLedger,
@@ -963,11 +962,10 @@ struct CudaDx12PresentGpuWork {
 
 impl PresentGpuWork for CudaDx12PresentGpuWork {
     fn run(self: Box<Self>) -> Result<PresentFinishState> {
+        // Cross-domain only: CUDA→DX12 external fence. Raster→present on the same
+        // DIRECT queue is already ordered by submission; do not wait_queue(dx12_src_fence).
         if self.cuda_complete > 0 {
             self.companion.wait_queue(self.cuda_complete)?;
-        }
-        if self.dx12_src_fence > 0 {
-            self.companion.wait_queue(self.dx12_src_fence)?;
         }
 
         if !self.reuse_list {

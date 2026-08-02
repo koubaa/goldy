@@ -635,12 +635,8 @@ pub(super) fn render_to_target(
     };
     let fingerprint = raster_fingerprint(backend, target, color_load, commands)?;
 
-    // Order this draw after prior raster/present work on this target without a
-    // host stall — queue Wait is enough when the prior signal has been submitted.
-    let prior_fence = backend.render_targets.get(&target).unwrap().last_dx12_fence;
-    if prior_fence > 0 {
-        companion.wait_queue(prior_fence)?;
-    }
+    // Same DIRECT queue already orders this draw after prior raster/present submits;
+    // no queue Wait on `last_dx12_fence` is required.
 
     // Prefer retained raster replay. Closed lists may be re-executed without a
     // CPU wait even while a prior execute is in flight; only Reset needs retirement.
