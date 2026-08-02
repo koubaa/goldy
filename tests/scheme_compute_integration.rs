@@ -3408,7 +3408,14 @@ mod imp {
         }
     }
 
-    fn scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles(device: &Device) {
+    /// Pitched `CopyBufferToTexture` partitions are retainable (`src_row_pitch > 0`).
+    ///
+    /// Clean IR resubmits reuse sticky `partition_keys` (layout tags are only folded when
+    /// a key is first computed). This test asserts that retention behavior — not a
+    /// layout-settle re-record. Aspirational layout-settle re-recording is described in
+    /// `partition_copy_texture_layout_fingerprint` comments but is not wired through the
+    /// `ir_clean` sticky-key path.
+    fn scheme_copy_buffer_to_texture_pitched_resubmit_is_retained(device: &Device) {
         let ctx = submission_context(&device);
 
         const W: u32 = 4;
@@ -3479,37 +3486,17 @@ mod imp {
         refresh_and_submit(&mut scheme, &staging);
         refresh_and_submit(&mut scheme, &staging);
 
-        match device.backend_type() {
-            BackendType::Cuda => {
-                // CUDA has no texture layout transitions; the pitched upload partition
-                // retains on the first submit and hits thereafter.
-                assert_eq!(
-                    scheme.replay_stats().records,
-                    1,
-                    "CUDA pitched upload should record once (no layout settle)"
-                );
-                #[cfg(not(feature = "metal"))]
-                assert_eq!(
-                    scheme.replay_stats().resubmit_hits,
-                    2,
-                    "CUDA pitched upload: two clean resubmits after the initial record"
-                );
-            }
-            BackendType::Metal => {}
-            _ => {
-                assert_eq!(
-                    scheme.replay_stats().records,
-                    2,
-                    "initial record + one re-record when destination texture layout settles"
-                );
-                #[cfg(not(feature = "metal"))]
-                assert_eq!(
-                    scheme.replay_stats().resubmit_hits,
-                    1,
-                    "third submit must resubmit the retained pitched texture-upload partition"
-                );
-            }
-        }
+        assert_eq!(
+            scheme.replay_stats().records,
+            1,
+            "pitched upload should record once under sticky partition keys"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            2,
+            "two clean resubmits after the initial record"
+        );
 
         let output = read_texture_via_scheme_copy(&ctx, &texture);
         assert_eq!(output, pixels, "pitched retained upload must produce correct pixels");
@@ -4371,7 +4358,7 @@ mod imp {
         trial!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
         trial!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
         trial!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
-        trial!(scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles);
+        trial!(scheme_copy_buffer_to_texture_pitched_resubmit_is_retained);
         trial!(cross_scheme_grant_read_reader_is_topology_invisible);
         trial!(cross_scheme_copy_reader_forces_one_topology_record);
         trial!(single_scheme_write_then_readback_records_once);

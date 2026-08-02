@@ -1217,6 +1217,9 @@ fn submit_resolved_ir_partitions_replay(
         if ir_clean {
             let schedule = &cache.as_ref().unwrap().schedule;
             let keys = replay.partition_keys.as_slice();
+            // Sticky keys: reuse the last retained fingerprint when present. Layout tags
+            // are only folded in the miss path below (first compute of a key), matching
+            // historical behavior since layout fingerprinting was introduced.
             (0..wave_ranges.len())
                 .map(|i| {
                     keys.get(i).and_then(|k| *k).unwrap_or_else(|| {
