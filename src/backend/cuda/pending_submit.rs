@@ -195,8 +195,9 @@ unsafe impl Sync for SendExternalSemaphore {}
 /// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
 ///
 /// Kernel launches (direct and indirect) are capture-safe when they only touch
-/// driver-owned allocations. Launches that write imported D3D12/external surface
-/// scratch (`cuImportExternalMemory`) are not — capture often fails at `end_capture`.
+/// driver-owned allocations. Launches that would write imported D3D12/external surface
+/// scratch are rewritten onto CUDA-owned staging before this check (with a
+/// `CopyTexture` export left in the non-capturable tail).
 pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
     match op {
         CudaOp::Launch {

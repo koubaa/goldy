@@ -255,16 +255,24 @@ fn cuda_compute_to_present_retained_steady_state() {
     }
 
     let stats = device.cuda_path_stats_for_test().expect("CUDA stats must be available");
-    // Imported scratch writes are not graph-capturable; retained Ops replay must still
-    // avoid rematerialization and present handoff/flush (submit-tail fence signal).
-    assert_eq!(stats.rematerialize_fallbacks, 0, "retained ops must not rematerialize");
+    // Present-bound launches are rewritten onto CUDA-owned staging and captured; the
+    // imported scratch export stays in the fixed GraphWithTail (CopyTexture + fence).
+    assert_eq!(stats.rematerialize_fallbacks, 0, "retained replay must not rematerialize");
     assert_eq!(stats.present_handoffs, 0, "scratch present must use submit-tail signal");
     assert_eq!(stats.worker_flushes, 0, "scratch present must not flush the worker");
-    assert_eq!(stats.launches, 0, "imported scratch path stays on Ops replay");
     assert!(
-        stats.fallbacks >= 1,
-        "first record should mark command/ops fallback, got {}",
-        stats.fallbacks
+        stats.captures >= 1,
+        "compute-to-present must capture the staging launch core, got {}",
+        stats.captures
+    );
+    assert!(
+        stats.launches >= 1,
+        "compute-to-present must relaunch the retained graph, got {}",
+        stats.launches
+    );
+    assert_eq!(
+        stats.fallbacks, 0,
+        "compute-to-present must not fall back to Ops replay after staging rewrite"
     );
     assert_eq!(
         stats.vb_mirror_uploads, 0,
