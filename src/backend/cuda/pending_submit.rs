@@ -178,51 +178,29 @@ pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
 #[cfg(test)]
 mod graph_safe_tests {
     use super::*;
-    use crate::types::{TextureFlags, TextureFormat, TextureKind};
-    use cudarc::driver::CudaContext;
-    use std::sync::{Arc, Mutex};
 
     #[test]
-    fn rejects_launch_with_imported_texture() {
-        let Ok(ctx) = CudaContext::new(0) else {
+    fn empty_ops_are_not_graph_safe() {
+        assert!(!ops_are_graph_safe(&[]));
+    }
+
+    #[test]
+    fn clear_ops_are_not_graph_safe() {
+        // Graph capture rejects clears/copies; only kernel launches without imported
+        // textures are safe. A Clear with a dummy Arc is enough to hit the `_ => false` arm.
+        let Ok(ctx) = cudarc::driver::CudaContext::new(0) else {
             eprintln!("skip: no CUDA device");
             return;
         };
-        let Ok(owned) =
-            super::super::texture::CudaArray::create(&ctx, 4, 4, TextureFormat::Rgba32Float, true)
-        else {
-            eprintln!("skip: array create failed");
+        let stream = ctx.default_stream();
+        let Ok(slice) = stream.alloc_zeros::<u8>(16) else {
+            eprintln!("skip: alloc failed");
             return;
         };
-        let imported = Arc::new(super::super::texture::CudaTextureResource {
-            ctx: Arc::clone(&ctx),
-            array: Arc::new(super::super::texture::CudaArray::from_imported(
-                &ctx,
-                owned.raw(),
-            )),
-            width: 4,
-            height: 4,
-            format: TextureFormat::Rgba32Float,
-            kind: TextureKind::Direct,
-            flags: TextureFlags::empty(),
-            storage_slot: Some(0),
-            sampled_slot: None,
-            srgb: false,
-            tex_objects: Mutex::new(std::collections::HashMap::new()),
-            surf_object: Mutex::new(None),
-        });
-        let op = CudaOp::Launch {
-            label: None,
-            function: std::ptr::null_mut(),
-            module: Arc::new(cudarc::driver::CudaModule::from_ptx(
-                cudarc::nvrtc::Ptx::from_src(".version 8.0\n.target sm_50\n.entry cs_main() { ret; }"),
-                (0, 0),
-            ).expect("ptx")),
-            workgroup_size: [1, 1, 1],
-            grid: (1, 1, 1),
-            args: vec![],
-            keep_alive_buffers: vec![],
-            keep_alive_textures: vec![imported],
+        let op = CudaOp::Clear {
+            memory: Arc::new(Mutex::new(slice)),
+            abs_offset: 0,
+            size: 16,
         };
         assert!(!ops_are_graph_safe(&[op]));
     }

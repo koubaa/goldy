@@ -1,12 +1,25 @@
 //! CUDA + DX12 presentation companion tests (Windows).
 //!
-//! GPU-dependent cases skip cleanly when no NVIDIA adapter is present.
+//! GPU-dependent cases skip cleanly when no NVIDIA adapter / DX12 companion is present.
 
 #![cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
 
 use goldy::types::BackendType;
-use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
+use goldy::{
+    ComputePipeline, DeviceDescriptor, Instance, PresentMode, RequestAdapterOptions, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange,
+};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
+};
+use std::num::NonZeroIsize;
 use std::sync::Arc;
+use windows::core::w;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+};
 
 fn try_cuda_instance() -> Option<Instance> {
     // SAFETY: test process; GOLDY_BACKEND is read during Instance::new.
@@ -17,6 +30,69 @@ fn try_cuda_instance() -> Option<Instance> {
             .any(|a| a.get_info().backend == BackendType::Cuda)
     })
 }
+
+struct TestWindow {
+    hwnd: HWND,
+}
+
+impl TestWindow {
+    fn create(width: i32, height: i32) -> windows::core::Result<Self> {
+        // Built-in STATIC class avoids Win32_Graphics_Gdi (RegisterClassW).
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("goldy cuda present test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                width,
+                height,
+                None,
+                None,
+                None,
+                None,
+            )
+        }?;
+        Ok(Self { hwnd })
+    }
+}
+
+impl Drop for TestWindow {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+}
+
+impl HasWindowHandle for TestWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let mut handle = Win32WindowHandle::new(
+            NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?,
+        );
+        handle.hinstance = None;
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+    }
+}
+
+impl HasDisplayHandle for TestWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        Ok(unsafe {
+            DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
+        })
+    }
+}
+
+const FILL_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(8, 8, 1)]
+void cs_main(DirectSpatial<float4> output, ThreadId tid) {
+    output[tid.xy] = float4(0.1, 0.2, 0.3, 1.0);
+}
+"#;
 
 #[test]
 fn cuda_device_attaches_dx12_companion_or_skips() {
@@ -39,32 +115,80 @@ fn cuda_device_attaches_dx12_companion_or_skips() {
         }
     };
     assert_eq!(device.backend_type(), BackendType::Cuda);
-    // Creating a context exercises the same device that holds the companion.
     let _ctx = device.create_context().expect("create_context");
 }
 
 #[test]
-fn cuda_surface_format_is_rgba32_float_when_companion_works() {
+fn cuda_compute_to_present_multi_frame() {
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
     };
-    let adapter = match instance.request_adapter(&RequestAdapterOptions::default()) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("skip: {e:#}");
-            return;
-        }
+    let Ok(adapter) = instance.request_adapter(&RequestAdapterOptions::default()) else {
+        eprintln!("skip: no adapter");
+        return;
     };
     let Ok(device) = adapter.request_device(&DeviceDescriptor::default()) else {
         eprintln!("skip: no DX12 companion");
         return;
     };
     let device = Arc::new(device);
+    assert_eq!(device.backend_type(), BackendType::Cuda);
     let ctx = device.create_context().expect("context");
 
-    // Headless: we cannot create a real HWND surface here without winit.
-    // Device creation succeeding is the LUID + shared-fence import proof.
-    let _ = ctx;
-    assert_eq!(device.backend_type(), BackendType::Cuda);
+    let Ok(window) = TestWindow::create(128, 128) else {
+        eprintln!("skip: CreateWindowExW failed");
+        return;
+    };
+    let surface = match SurfaceExchange::new_with_depth(
+        &ctx,
+        &window,
+        2,
+        SurfaceConfig {
+            present_mode: PresentMode::Immediate,
+            depth_format: None,
+        },
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skip: surface create failed: {e:#}");
+            return;
+        }
+    };
+
+    let shader = match ShaderModule::from_slang(&device, FILL_SHADER) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skip: shader compile failed: {e:#}");
+            return;
+        }
+    };
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    for frame_i in 0..3u32 {
+        let mut scheme = Scheme::new(&ctx);
+        let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
+        let (w, h) = surface.size();
+        scheme
+            .node("fill", &pipeline)
+            .with_present(&lease)
+            .dispatch(w.div_ceil(8), h.div_ceil(8), 1);
+        let mut submission = scheme.submit().expect("submit");
+        let compute_tv = goldy::test_support::submission_epoch(&submission);
+        assert!(compute_tv > 0, "frame {frame_i}: compute must advance timeline");
+
+        let claim = present_tx.claim(&mut submission).expect("claim");
+        claim.consume().expect("present");
+
+        // Present publishes completion on the Goldy/CUDA timeline. Waiting on the
+        // compute submit value must succeed (same namespace; present >= compute).
+        goldy::test_support::wait_until(&ctx, compute_tv).unwrap_or_else(|e| {
+            panic!("frame {frame_i}: wait_until({compute_tv}) failed: {e:#}")
+        });
+        assert!(
+            goldy::test_support::gpu_progress(&ctx) >= compute_tv,
+            "frame {frame_i}: progress {} < compute {compute_tv}",
+            goldy::test_support::gpu_progress(&ctx)
+        );
+    }
 }

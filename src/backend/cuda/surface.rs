@@ -3,18 +3,25 @@
 //! Swapchain backbuffers stay BGRA8 (non-shareable). Per-image float4 shared scratch
 //! textures are CUDA-writable; present blits scratch → BGRA UAV → backbuffer, waiting
 //! on the shared D3D12 fence that CUDA signals at submit completion.
+//!
+//! Present completion is published on the **Goldy/CUDA timeline** (event ledger), not
+//! the companion DX12 fence counter. `Frame::present` returns that Goldy value so
+//! `Context::wait_until` observes the same namespace as compute submits.
 
 use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_interop::{
     record_present_copy, PresentBlitPipeline, SharedScratchTexture, SURFACE_COMPUTE_FORMAT,
     SWAPCHAIN_DXGI_FORMAT,
 };
-use super::{CudaBackend, CudaDevice};
+use super::timeline::{self, EventLedger, LedgerEntry};
+use super::{CudaBackend, CudaDevice, CudaSubmitContext};
+use crate::backend::submission_worker::{self, PendingSubmit};
 use crate::backend::{
     ContextHandle, DeviceHandle, FrameToken, PresentFinishState, PresentGpuWork, SurfaceHandle,
     SwapchainImageHandle, TextureHandle,
 };
 use anyhow::{bail, Context as _, Result};
+use cudarc::driver::{sys, CudaContext, CudaEvent, CudaStream};
 use raw_window_handle::RawWindowHandle;
 use std::sync::Arc;
 use windows::core::Interface;
@@ -457,26 +464,68 @@ pub(super) fn take_present_gpu_work(
             .context("CUDA device missing DX12 companion")?,
     );
 
-    // Signal the shared fence from CUDA once submit_tv's completion event is done.
-    let cuda_complete = if submit_tv > 0 {
-        let context = backend.context(frame.context)?;
-        let event = {
-            let guard = context.event_ledger.lock().unwrap();
-            guard.get(&submit_tv).map(|e| Arc::clone(&e.event))
-        };
-        let stream = Arc::clone(&context.stream);
-        let signal_value = companion.next_fence_value();
-        if let Some(event) = event {
-            stream
-                .wait(&event)
-                .context("CUDA/DX12: stream wait on submit completion")?;
+    let context = Arc::clone(backend.context(frame.context)?);
+    let (worker, next_timeline, event_ledger, cuda_ctx) = {
+        let gpu = backend.device(device)?;
+        (
+            Arc::clone(&gpu.submission_worker),
+            Arc::clone(&gpu.next_timeline),
+            Arc::clone(&gpu.event_ledger),
+            Arc::clone(&gpu.ctx),
+        )
+    };
+
+    // Require a real completion event for the compute submit — never present without waiting.
+    let submit_event = if submit_tv > 0 {
+        let guard = event_ledger.lock().unwrap();
+        let entry = guard.get(&submit_tv).with_context(|| {
+            format!(
+                "CUDA/DX12: present submit_tv {submit_tv} has no completion event on context {}",
+                frame.context
+            )
+        })?;
+        if entry.context != frame.context {
+            bail!(
+                "CUDA/DX12: present submit_tv {submit_tv} belongs to context {}, not {}",
+                entry.context,
+                frame.context
+            );
         }
-        cuda_signal_fence(
-            &companion.cuda_ctx,
-            companion.cuda_semaphore,
-            stream.cu_stream(),
+        Some(Arc::clone(&entry.event))
+    } else {
+        None
+    };
+
+    // Goldy timeline value for present/copy completion (same namespace as compute).
+    let present_tv = submission_worker::allocate_timeline_value(&next_timeline);
+    let present_event = Arc::new(
+        cuda_ctx
+            .new_event(None)
+            .context("CUDA/DX12: create present completion event failed")?,
+    );
+    event_ledger.lock().unwrap().insert(
+        present_tv,
+        LedgerEntry {
+            context: frame.context,
+            event: Arc::clone(&present_event),
+            recorded: false,
+        },
+    );
+
+    // Enqueue CUDA wait(submit) + signal(fence) on the submission worker so later
+    // context submits cannot insert between the wait and the handoff signal.
+    let cuda_complete = if let Some(submit_event) = submit_event {
+        let signal_value = companion.next_fence_value();
+        let handoff = CudaPresentHandoff {
+            stream: Arc::clone(&context.stream),
+            submit_event,
+            cuda_ctx: Arc::clone(&companion.cuda_ctx),
+            cuda_semaphore: companion.cuda_semaphore,
             signal_value,
-        )?;
+        };
+        worker
+            .enqueue(0, Box::new(handoff))
+            .context("CUDA/DX12: enqueue present handoff failed")?;
         signal_value
     } else {
         0
@@ -507,7 +556,6 @@ pub(super) fn take_present_gpu_work(
     let allow_tearing = companion.allow_tearing;
     let existing_fence = state.slot_fence[present_slot];
 
-    // Ensure blit descriptors are written for this slot.
     companion
         .as_ref(); // keep alive
     let blit = &state.blit;
@@ -518,10 +566,8 @@ pub(super) fn take_present_gpu_work(
         &blit_target,
     );
 
-    // Clone command slot resources.
     let allocator = companion.present_slots[present_slot].allocator.clone();
     let list = companion.present_slots[present_slot].list.clone();
-    // Rebuild PresentBlitPipeline handles for the work item (COM clone).
     let blit_pipe = PresentBlitPipeline {
         root_signature: state.blit.root_signature.clone(),
         pso: state.blit.pso.clone(),
@@ -535,6 +581,10 @@ pub(super) fn take_present_gpu_work(
         present_slot,
         scratch_handle,
         cuda_complete,
+        present_tv,
+        present_event,
+        event_ledger,
+        context,
         companion,
         scratch_res,
         blit_target,
@@ -580,6 +630,34 @@ pub(super) fn finish_present(
     Ok(finish.present_timeline)
 }
 
+/// Worker job: wait for compute completion, then signal the shared DX12 fence.
+struct CudaPresentHandoff {
+    stream: Arc<CudaStream>,
+    submit_event: Arc<CudaEvent>,
+    cuda_ctx: Arc<CudaContext>,
+    cuda_semaphore: sys::CUexternalSemaphore,
+    signal_value: u64,
+}
+
+// SAFETY: executed only on the goldy-submit worker; the semaphore is owned by
+// `Dx12Companion` for the lifetime of the device and is not freed while jobs run.
+unsafe impl Send for CudaPresentHandoff {}
+
+impl PendingSubmit for CudaPresentHandoff {
+    fn execute(self: Box<Self>) -> Result<()> {
+        self.stream
+            .wait(&self.submit_event)
+            .context("CUDA/DX12: stream wait on submit completion")?;
+        cuda_signal_fence(
+            &self.cuda_ctx,
+            self.cuda_semaphore,
+            self.stream.cu_stream(),
+            self.signal_value,
+        )?;
+        Ok(())
+    }
+}
+
 struct CudaDx12PresentGpuWork {
     frame: FrameToken,
     image_index: usize,
@@ -587,6 +665,10 @@ struct CudaDx12PresentGpuWork {
     present_slot: usize,
     scratch_handle: TextureHandle,
     cuda_complete: u64,
+    present_tv: crate::timeline::TimelineValue,
+    present_event: Arc<CudaEvent>,
+    event_ledger: EventLedger,
+    context: Arc<CudaSubmitContext>,
     companion: Arc<Dx12Companion>,
     scratch_res: ID3D12Resource,
     blit_target: ID3D12Resource,
@@ -640,13 +722,42 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             bail!("CUDA/DX12: Present failed: {hr:?}");
         }
 
+        // Publish present/copy completion on the Goldy timeline (not the DX12 fence counter).
+        // CPU-wait the companion fence so we know the copy retired, then record on the
+        // dedicated present stream (avoids racing the submission worker's context stream).
+        self.companion
+            .cpu_wait(return_fence)
+            .context("CUDA/DX12: wait for present-copy fence")?;
+        cuda_wait_fence(
+            &self.companion.cuda_ctx,
+            self.companion.cuda_semaphore,
+            self.companion.present_stream.cu_stream(),
+            return_fence,
+        )?;
+        self.present_event
+            .record(&self.companion.present_stream)
+            .context("CUDA/DX12: record present completion event")?;
+        self.companion
+            .present_stream
+            .synchronize()
+            .context("CUDA/DX12: synchronize present stream")?;
+        timeline::mark_recorded(&self.event_ledger, self.present_tv);
+        timeline::poll_retire_events(
+            &self.event_ledger,
+            &self.context.completed,
+            self.context.handle,
+            &self.context.device_retired,
+            &self.context.signal_queue,
+            &self.context.last_emitted,
+        );
+
         Ok(PresentFinishState {
             frame: self.frame,
             return_fence,
             scratch_texture: Some(self.scratch_handle),
             scratch_layout_updated: true,
-            present_timeline: return_fence,
-            copy_timeline: Some(return_fence),
+            present_timeline: self.present_tv,
+            copy_timeline: Some(self.present_tv),
             frame_compute_timeline: None,
             signal_timeline: None,
             render_pass_submitted: false,
@@ -771,4 +882,141 @@ pub(super) fn attach_companion(gpu: &mut CudaDevice) -> Result<()> {
     );
     gpu.dx12 = Some(Arc::new(companion));
     Ok(())
+}
+
+#[cfg(test)]
+mod present_tests {
+    use super::*;
+    use crate::backend::{GpuBackend, GpuBackendPresentSplit};
+    use raw_window_handle::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle, Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
+    };
+    use std::num::NonZeroIsize;
+    use windows::core::w;
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
+    };
+
+    struct TestHwnd {
+        hwnd: HWND,
+    }
+
+    impl TestHwnd {
+        fn create() -> Option<Self> {
+            // Use a built-in class so we do not need Win32_Graphics_Gdi (RegisterClassW).
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    Default::default(),
+                    w!("STATIC"),
+                    w!("goldy cuda surface unit"),
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    64,
+                    64,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .ok()?;
+            Some(Self { hwnd })
+        }
+    }
+
+    impl Drop for TestHwnd {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+
+    impl HasWindowHandle for TestHwnd {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let handle = Win32WindowHandle::new(
+                NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?,
+            );
+            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for TestHwnd {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            Ok(unsafe {
+                DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
+            })
+        }
+    }
+
+    fn try_backend_with_surface() -> Option<(CudaBackend, DeviceHandle, ContextHandle, SurfaceHandle, TestHwnd)> {
+        let mut backend = CudaBackend::new().ok()?;
+        if backend.enumerate_adapters().is_empty() {
+            return None;
+        }
+        let device = backend.create_device(0).ok()?;
+        let ctx = backend.create_context(device).ok()?;
+        let window = TestHwnd::create()?;
+        let surface = backend
+            .create_surface(device, &window, &window, None)
+            .ok()?;
+        Some((backend, device, ctx, surface, window))
+    }
+
+    #[test]
+    fn present_errors_when_submit_tv_missing_from_ledger() {
+        let Some((mut backend, _device, ctx, surface, _window)) = try_backend_with_surface() else {
+            eprintln!("skip: CUDA/DX12 surface unavailable");
+            return;
+        };
+        let (token, _tex) = backend.begin_frame(surface, ctx).expect("begin_frame");
+        match backend.take_present_gpu_work(token, 0xDEAD_BEEF) {
+            Ok(_) => panic!("missing ledger entry must fail"),
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("no completion event"),
+                    "unexpected error: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn present_returns_goldy_timeline_value() {
+        let Some((mut backend, _device, ctx, surface, _window)) = try_backend_with_surface() else {
+            eprintln!("skip: CUDA/DX12 surface unavailable");
+            return;
+        };
+        let (token, _tex) = backend.begin_frame(surface, ctx).expect("begin_frame");
+        // submit_tv == 0: no compute wait, but present still publishes a Goldy TV.
+        let work = backend
+            .take_present_gpu_work(token, 0)
+            .expect("take_present_gpu_work");
+        let finish = work.run().expect("present run");
+        let present_tv = backend
+            .finish_present(finish, 0)
+            .expect("finish_present");
+        assert!(present_tv > 0, "present must allocate a Goldy timeline value");
+        // Must be waitable in the CUDA event ledger (not a raw DX12 fence counter).
+        let event = timeline::lookup_event(
+            &backend.context(ctx).unwrap().event_ledger,
+            ctx,
+            present_tv,
+        );
+        assert!(
+            event.is_some(),
+            "present_tv {present_tv} missing from CUDA event ledger"
+        );
+        assert!(
+            event.unwrap().is_complete(),
+            "present_tv {present_tv} event should be complete after PresentGpuWork::run"
+        );
+        backend
+            .wait_until(ctx, present_tv)
+            .expect("wait_until present_tv on Goldy timeline");
+    }
 }
