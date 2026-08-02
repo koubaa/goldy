@@ -74,8 +74,6 @@ pub(super) struct Dx12VertexMirror {
 #[derive(Clone, Copy)]
 pub(super) struct RasterListCache {
     pub fingerprint: u64,
-    pub slot_idx: usize,
-    pub slot_generation: u64,
 }
 
 // SAFETY: see [`CudaGraphicsPipeline`].
@@ -644,16 +642,21 @@ pub(super) fn render_to_target(
         companion.wait_queue(prior_fence)?;
     }
 
-    if let Some(cache) = backend.raster_list_cache.get(&target).copied() {
-        if cache.fingerprint == fingerprint {
-            if let Some(signal) = companion.try_reuse_raster_list(cache.slot_idx, cache.slot_generation)? {
-                backend.render_targets.get_mut(&target).unwrap().last_dx12_fence = signal;
-                return Ok(());
-            }
+    // Prefer retained raster replay. If copies exist but are busy, wait-and-replay
+    // the soonest one — never Reset a retained slot under load (that destroyed
+    // copies and made frames progressively worse).
+    if backend
+        .raster_list_cache
+        .get(&target)
+        .is_some_and(|cache| cache.fingerprint == fingerprint)
+    {
+        if let Some(signal) = companion.try_reuse_raster_for_fingerprint(fingerprint)? {
+            backend.render_targets.get_mut(&target).unwrap().last_dx12_fence = signal;
+            return Ok(());
         }
     }
 
-    let (slot_idx, list, slot_generation) = companion.begin_raster_list()?;
+    let (slot_idx, list, _slot_generation) = companion.begin_raster_list()?;
 
     let (width, height, rtv_offset, d3d12_resource) = {
         let rt = backend.render_targets.get(&target).unwrap();
@@ -792,7 +795,7 @@ pub(super) fn render_to_target(
     );
     unsafe { list.ResourceBarrier(&[to_common]) };
 
-    let signal = companion.finish_raster_list(slot_idx)?;
+    let signal = companion.finish_raster_list(slot_idx, fingerprint)?;
     backend
         .graph_stats
         .raster_list_records
@@ -800,14 +803,9 @@ pub(super) fn render_to_target(
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
     }
-    backend.raster_list_cache.insert(
-        target,
-        RasterListCache {
-            fingerprint,
-            slot_idx,
-            slot_generation,
-        },
-    );
+    backend
+        .raster_list_cache
+        .insert(target, RasterListCache { fingerprint });
     Ok(())
 }
 

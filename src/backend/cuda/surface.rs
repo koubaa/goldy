@@ -584,6 +584,10 @@ pub(super) fn begin_frame(
     if let Some(SendSyncHandle(waitable)) = waitable {
         unsafe { WaitForSingleObject(waitable, INFINITE) };
     }
+    // Rotating present_slot (independent of DXGI backbuffer index) keeps allocator
+    // retirement at depth MAX_FRAMES. Present-list reuse is opportunistic when the
+    // cached recording matches this slot's backbuffer; misses re-record without
+    // collapsing acquire waits onto the just-presented image.
     if prev_fence > 0 {
         companion_ref(backend, device)?.cpu_wait(prev_fence)?;
         backend.surfaces.get_mut(&surface).unwrap().slot_fence[present_slot] = 0;
@@ -1042,7 +1046,14 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
 }
 
 fn ensure_scratch(backend: &mut CudaBackend, surface: SurfaceHandle, image_index: usize) -> Result<TextureHandle> {
-    drain_pending_scratch(backend, surface)?;
+    let has_pending = backend
+        .surfaces
+        .get(&surface)
+        .map(|state| !state.pending_scratch.is_empty())
+        .unwrap_or(false);
+    if has_pending {
+        drain_pending_scratch(backend, surface)?;
+    }
 
     let (device, width, height, reuse) = {
         let state = backend.surfaces.get(&surface).context("invalid surface")?;

@@ -138,6 +138,8 @@ pub(super) struct PresentCommandSlot {
     pub fence_value: AtomicU64,
     /// Incremented whenever this command list is reset for a new recording.
     pub generation: AtomicU64,
+    /// Fingerprint of the closed retained recording on this slot (0 = none).
+    pub retained_fingerprint: AtomicU64,
 }
 
 impl Dx12Companion {
@@ -209,6 +211,7 @@ impl Dx12Companion {
                 list,
                 fence_value: AtomicU64::new(0),
                 generation: AtomicU64::new(0),
+                retained_fingerprint: AtomicU64::new(0),
             });
         }
 
@@ -247,6 +250,7 @@ impl Dx12Companion {
                 list,
                 fence_value: AtomicU64::new(0),
                 generation: AtomicU64::new(0),
+                retained_fingerprint: AtomicU64::new(0),
             });
         }
 
@@ -355,45 +359,102 @@ impl Dx12Companion {
     }
 
     /// Reset the next raster command allocator/list (waits only that slot's prior fence).
+    ///
+    /// Prefers a GPU-retired slot so warmup can populate multiple retained copies
+    /// without blocking; only waits when every slot is still in flight.
     pub fn begin_raster_list(&self) -> Result<(usize, ID3D12GraphicsCommandList, u64)> {
-        let idx = (self.raster_slot.fetch_add(1, Ordering::AcqRel) as usize) % MAX_FRAMES;
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        let start = (self.raster_slot.fetch_add(1, Ordering::AcqRel) as usize) % MAX_FRAMES;
+        let mut chosen = None;
+        for offset in 0..MAX_FRAMES {
+            let idx = (start + offset) % MAX_FRAMES;
+            let prev = self.raster_slots[idx].fence_value.load(Ordering::Acquire);
+            if prev <= completed {
+                chosen = Some(idx);
+                break;
+            }
+        }
+        let idx = chosen.unwrap_or(start);
         let slot = &self.raster_slots[idx];
         let prev = slot.fence_value.load(Ordering::Acquire);
-        if prev > 0 {
+        if prev > completed {
             self.cpu_wait(prev)?;
         }
         unsafe { slot.allocator.Reset() }.context("CUDA/DX12: reset raster allocator")?;
         unsafe { slot.list.Reset(&slot.allocator, None) }.context("CUDA/DX12: reset raster list")?;
+        slot.retained_fingerprint.store(0, Ordering::Release);
         let generation = slot.generation.fetch_add(1, Ordering::AcqRel) + 1;
         Ok((idx, slot.list.clone(), generation))
     }
 
     /// Close and execute the raster list for `slot_idx` without a CPU wait.
     /// Returns the signaled fence value (GPU-side retirement).
-    pub fn finish_raster_list(&self, slot_idx: usize) -> Result<u64> {
+    pub fn finish_raster_list(&self, slot_idx: usize, fingerprint: u64) -> Result<u64> {
         let slot = &self.raster_slots[slot_idx];
         unsafe { slot.list.Close() }.context("CUDA/DX12: close raster list")?;
         let cmd: ID3D12CommandList = slot.list.cast().context("cast raster list")?;
         let signal = self.next_fence_value();
         self.execute_and_signal(&[Some(cmd)], signal)?;
         slot.fence_value.store(signal, Ordering::Release);
+        slot.retained_fingerprint.store(fingerprint, Ordering::Release);
         Ok(signal)
     }
 
-    /// Re-execute a still-closed raster list if its slot has not been reset.
-    pub fn try_reuse_raster_list(&self, slot_idx: usize, generation: u64) -> Result<Option<u64>> {
-        let slot = &self.raster_slots[slot_idx];
-        if slot.generation.load(Ordering::Acquire) != generation {
+    /// Re-execute a closed retained raster list.
+    ///
+    /// Strategy:
+    /// 1. Re-execute a matching slot that is already GPU-retired (no CPU wait).
+    /// 2. If every matching copy is busy but we still have fewer than [`MAX_FRAMES`]
+    ///    copies and a free slot exists, return `None` so the caller can record
+    ///    another copy (warmup / deepen the pipeline).
+    /// 3. Otherwise wait for the soonest busy matching copy and re-execute it —
+    ///    never Reset a retained slot under load.
+    pub fn try_reuse_raster_for_fingerprint(&self, fingerprint: u64) -> Result<Option<u64>> {
+        if fingerprint == 0 {
             return Ok(None);
         }
-        let prev = slot.fence_value.load(Ordering::Acquire);
-        if prev > 0 {
-            self.cpu_wait(prev)?;
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        let start = self.raster_slot.load(Ordering::Acquire) as usize;
+        let mut soonest_busy: Option<(usize, u64)> = None;
+        let mut match_count = 0usize;
+        let mut has_free_record_slot = false;
+        for offset in 0..MAX_FRAMES {
+            let idx = (start + offset) % MAX_FRAMES;
+            let slot = &self.raster_slots[idx];
+            let prev = slot.fence_value.load(Ordering::Acquire);
+            let fp = slot.retained_fingerprint.load(Ordering::Acquire);
+            if fp == fingerprint {
+                match_count += 1;
+                if prev <= completed {
+                    return self.reexecute_raster_slot(idx);
+                }
+                match soonest_busy {
+                    Some((_, fence)) if prev >= fence => {}
+                    _ => soonest_busy = Some((idx, prev)),
+                }
+            } else if prev <= completed {
+                has_free_record_slot = true;
+            }
         }
+        if match_count < MAX_FRAMES && has_free_record_slot {
+            // Deepen the retained pool instead of blocking on the only copy.
+            return Ok(None);
+        }
+        if let Some((idx, fence)) = soonest_busy {
+            self.cpu_wait(fence)?;
+            return self.reexecute_raster_slot(idx);
+        }
+        Ok(None)
+    }
+
+    fn reexecute_raster_slot(&self, idx: usize) -> Result<Option<u64>> {
+        let slot = &self.raster_slots[idx];
         let cmd: ID3D12CommandList = slot.list.cast().context("cast retained raster list")?;
         let signal = self.next_fence_value();
         self.execute_and_signal(&[Some(cmd)], signal)?;
         slot.fence_value.store(signal, Ordering::Release);
+        self.raster_slot
+            .store((idx as u64).wrapping_add(1), Ordering::Release);
         Ok(Some(signal))
     }
 
@@ -408,6 +469,7 @@ impl Dx12Companion {
             unsafe { slot.list.Reset(&slot.allocator, None) }.context("CUDA/DX12: reset invalidated present list")?;
             unsafe { slot.list.Close() }.context("CUDA/DX12: close invalidated present list")?;
             slot.generation.fetch_add(1, Ordering::AcqRel);
+            slot.retained_fingerprint.store(0, Ordering::Release);
         }
         Ok(())
     }

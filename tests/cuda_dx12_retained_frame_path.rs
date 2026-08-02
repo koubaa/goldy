@@ -176,14 +176,14 @@ fn cuda_raster_direct_retained_steady_state() {
     assert_eq!(stats.vb_mirror_uploads, 1, "static vertex buffer uploads once");
     assert_eq!(stats.dtoh_calls, 1, "static vertex buffer performs one DtoH");
     assert!(
-        stats.present_list_records <= 6,
-        "three slots may each record COMMON and PRESENT variants, got {}",
-        stats.present_list_records
+        stats.raster_list_records <= 3,
+        "warmup should record at most one retained list per raster slot, got {}",
+        stats.raster_list_records
     );
     assert!(
-        stats.raster_list_records <= 3,
-        "identical raster commands should reuse a closed slot list, got {}",
-        stats.raster_list_records
+        stats.present_list_records <= 6,
+        "aligned backbuffer slots should retain present lists after COMMON→PRESENT warmup, got {}",
+        stats.present_list_records
     );
 }
 
