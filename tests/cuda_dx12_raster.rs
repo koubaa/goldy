@@ -20,7 +20,7 @@ use std::sync::Arc;
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
 };
 
 fn try_cuda_instance() -> Option<Instance> {
@@ -44,7 +44,8 @@ impl TestWindow {
                 Default::default(),
                 w!("STATIC"),
                 w!("goldy cuda raster test"),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                // Hidden: unit tests must not pop visible windows/dialogs.
+                WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 width,
@@ -442,4 +443,160 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
         after.shared_vb_binds > before.shared_vb_binds,
         "expected shared VB refresh/bind"
     );
+}
+
+#[test]
+fn cuda_deposit_refreshes_shared_vb_each_frame() {
+    // Spinning-cube style: CPU deposit into a VB every frame must DtoD-refresh the
+    // shared twin each time — including after the upload scheme retains and
+    // resubmits without rematerializing (content_epoch may not bump).
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertex_buffer = pool
+        .acquire_buffer_sized::<Vertex2D>(3, BufferKind::Scattered, goldy::BufferFlags::empty())
+        .expect("vertex buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut upload = Scheme::new(&ctx);
+    let deposit = MemoryExchange::new(&ctx)
+        .bind_deposit_buffer(&mut upload, &vertex_buffer, vertex_buffer.byte_size())
+        .expect("deposit");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+
+    let frames: [(Color, fn(f32, f32, f32) -> bool); 2] = [
+        (
+            Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            |r, g, b| r > 0.5 && g < 0.25 && b < 0.25,
+        ),
+        (
+            Color {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            |r, g, b| g > 0.5 && r < 0.25 && b < 0.25,
+        ),
+    ];
+
+    // Warm retention on upload + render so color frames exercise the resubmit path.
+    for _ in 0..2 {
+        let verts = [
+            Vertex2D::new(0.0, 0.5, Color::BLACK),
+            Vertex2D::new(-0.5, -0.5, Color::BLACK),
+            Vertex2D::new(0.5, -0.5, Color::BLACK),
+        ];
+        deposit
+            .write(&mut upload, 0, bytemuck::cast_slice(&verts))
+            .expect("warmup deposit");
+        upload.submit().expect("warmup upload");
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &readback)
+            .expect("warmup withdraw");
+        let mut submission = scheme.submit().expect("warmup submit");
+        let _ = grant.claim(&mut submission).expect("warmup claim").consume();
+    }
+
+    let mut prev_binds = device
+        .cuda_path_stats_for_test()
+        .expect("stats")
+        .shared_vb_binds;
+
+    for (frame_i, (color, expect_pixel)) in frames.iter().enumerate() {
+        let verts = [
+            Vertex2D::new(0.0, 0.5, *color),
+            Vertex2D::new(-0.5, -0.5, *color),
+            Vertex2D::new(0.5, -0.5, *color),
+        ];
+        deposit
+            .write(&mut upload, 0, bytemuck::cast_slice(&verts))
+            .expect("deposit write");
+        upload.submit().expect("upload submit");
+
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &readback)
+            .expect("withdraw");
+        let mut submission = scheme.submit().expect("submit");
+        let pixels = grant
+            .claim(&mut submission)
+            .expect("claim")
+            .consume()
+            .expect("consume")
+            .to_vec();
+
+        let binds = device
+            .cuda_path_stats_for_test()
+            .expect("stats")
+            .shared_vb_binds;
+        assert!(
+            binds > prev_binds,
+            "frame {frame_i}: expected shared VB refresh after retain (binds {binds} <= prev {prev_binds})"
+        );
+        prev_binds = binds;
+
+        let x = 32usize;
+        let y = 28usize;
+        let offset = (y * 64 + x) * 16;
+        let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+        let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+        let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+        assert!(
+            expect_pixel(r, g, b),
+            "frame {frame_i}: unexpected pixel ({r},{g},{b}) — twin likely stale after retain"
+        );
+    }
 }

@@ -206,7 +206,7 @@ D3D12 fence imported as a CUDA external semaphore. This is zero-copy between CUD
 and DX12; a GPU blit into the non-shareable swapchain image remains. Adapter
 mismatch, WARP, and linked-node adapters fail at device creation. A first-slice
 raster path is also available under the same feature gate: offscreen
-`Rgba32Float` render targets, TriangleList graphics pipelines (Slang → DXIL), and
+`Rgba32Float` render targets, non-indexed point/line/triangle pipelines (Slang → DXIL), and
 `CopyRenderTarget` into present scratch / CUDA textures. Depth, indexed draws,
 and bindless render bindings are not in this slice. Vulkan interop is not
 supported.

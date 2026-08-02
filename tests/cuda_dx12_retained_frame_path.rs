@@ -17,7 +17,7 @@ use std::sync::Arc;
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
 };
 
 const TRIANGLE_SHADER: &str = r#"
@@ -43,7 +43,8 @@ impl TestWindow {
                 Default::default(),
                 w!("STATIC"),
                 w!("goldy retained frame path"),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                // Hidden: unit tests must not pop visible windows/dialogs.
+                WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 128,

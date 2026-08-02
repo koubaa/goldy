@@ -54,7 +54,7 @@ On Windows, enabling `cuda` together with `graphics` and `dx12` (the usual case
 when adding `cuda` on top of default features) attaches a DX12 presentation
 companion to each CUDA device: LUID-matched DXGI adapter, shared float4 scratch
 textures, and swapchain present. The same gate enables a first-slice raster path
-(offscreen `Rgba32Float` targets + TriangleList pipelines). Depth, indexed draws,
+(offscreen `Rgba32Float` targets + non-indexed point/line/triangle pipelines). Depth, indexed draws,
 and bindless render bindings remain unsupported until a later slice. Without that
 full gate, surface/present/raster APIs still return compute-only errors.
 

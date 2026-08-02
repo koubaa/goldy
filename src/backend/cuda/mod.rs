@@ -3,10 +3,10 @@
 //! With `cuda` + `graphics` + `dx12` on Windows, presentation and a first-slice
 //! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
 //! textures and DX12 presents them; offscreen `Rgba32Float` render targets and
-//! TriangleList graphics pipelines are also supported. Vertex buffers use a
-//! shareable D3D12 twin refreshed by device-to-device copy (no host DtoH) for IA.
-//! Depth, indexed draws, and bindless render bindings remain unsupported in this
-//! slice.
+//! non-indexed graphics pipelines (point/line/triangle list+strip) are also
+//! supported. Vertex buffers use a shareable D3D12 twin refreshed by
+//! device-to-device copy (no host DtoH) for IA. Depth, indexed draws, and
+//! bindless render bindings remain unsupported in this slice.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -1282,12 +1282,17 @@ impl CudaBackend {
                     )?);
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
-                    let buffer = self.buffers.get(buffer).context("CUDA: invalid clear buffer")?;
+                    let buffer = self
+                        .buffers
+                        .get_mut(buffer)
+                        .context("CUDA: invalid clear buffer")?;
                     let clear_size = if *size == 0 {
                         buffer.size.saturating_sub(*offset)
                     } else {
                         *size
                     };
+                    // Invalidate shared DX12 VB twins used by raster.
+                    buffer.bump_content_epoch();
                     ops.push(CudaOp::Clear {
                         memory: Arc::clone(&buffer.memory),
                         abs_offset: buffer.offset + *offset,
@@ -1295,10 +1300,15 @@ impl CudaBackend {
                     });
                 }
                 GpuCommand::WriteBuffer { buffer, offset, data } => {
-                    let buffer = self.buffers.get(buffer).context("CUDA: invalid write buffer")?;
+                    let buffer = self
+                        .buffers
+                        .get_mut(buffer)
+                        .context("CUDA: invalid write buffer")?;
                     if *offset + data.len() as u64 > buffer.size {
                         anyhow::bail!("CUDA: write exceeds logical buffer size");
                     }
+                    // Invalidate shared DX12 VB twins used by raster (deposit / staging path).
+                    buffer.bump_content_epoch();
                     ops.push(CudaOp::Write {
                         memory: Arc::clone(&buffer.memory),
                         abs_offset: buffer.offset + *offset,
@@ -1313,19 +1323,31 @@ impl CudaBackend {
                     size,
                 } => {
                     let src_buf = self.buffers.get(src).context("CUDA: invalid copy source")?;
-                    let dst_buf = self.buffers.get(dst).context("CUDA: invalid copy destination")?;
-                    if src_buf.device != dst_buf.device {
+                    if src_buf.device
+                        != self
+                            .buffers
+                            .get(dst)
+                            .context("CUDA: invalid copy destination")?
+                            .device
+                    {
                         anyhow::bail!("CUDA: copy across devices is not supported");
                     }
                     if *src_offset + *size > src_buf.size {
                         anyhow::bail!("CUDA: copy source range exceeds logical buffer size");
                     }
+                    let src_memory = Arc::clone(&src_buf.memory);
+                    let src_abs = src_buf.offset + *src_offset;
+                    let dst_buf = self
+                        .buffers
+                        .get_mut(dst)
+                        .context("CUDA: invalid copy destination")?;
                     if *dst_offset + *size > dst_buf.size {
                         anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
                     }
+                    dst_buf.bump_content_epoch();
                     ops.push(CudaOp::Copy {
-                        src: Arc::clone(&src_buf.memory),
-                        src_abs: src_buf.offset + *src_offset,
+                        src: src_memory,
+                        src_abs,
                         dst: Arc::clone(&dst_buf.memory),
                         dst_abs: dst_buf.offset + *dst_offset,
                         size: *size,
@@ -1838,11 +1860,14 @@ impl CudaBackend {
         } else {
             scratch_images.to_vec()
         };
-        let shared_bufs = self.shared_buffers_touched_by_ops(ops);
+        // Shared VB twins are native-CUDA allocations with a separate imported D3D12
+        // buffer. Host Write/Clear/Copy and compute launches mutate the native side only;
+        // CUDA→DX12 handoff is the DtoD + fence in `refresh_shared_vertex_backing`.
+        // Do not signal the companion fence for those ops — that races with raster refresh
+        // signals (deposit-every-frame examples like spinning_cube).
 
         let device_handle = self.context(ctx)?.device;
-        let needs_companion = !touched.is_empty() || !shared_bufs.is_empty();
-        if !needs_companion {
+        if touched.is_empty() {
             return Ok(());
         }
 
@@ -1891,13 +1916,6 @@ impl CudaBackend {
                 .and_then(|slot| slot.as_mut())
             {
                 slot.present_source = Some(surface::PresentSource::CudaScratch { cuda_complete });
-            }
-        }
-        for handle in shared_bufs {
-            if let Some(shared) = self.buffers.get(&handle).and_then(|b| b.shared.as_ref()) {
-                shared
-                    .last_cuda_fence
-                    .store(cuda_complete, Ordering::Release);
             }
         }
         Ok(())
@@ -1991,6 +2009,15 @@ impl CudaBackend {
                             });
                             last_tv = self.submit_commands(ctx, &batch, sync)?;
                             if written_vertex_buffer {
+                                // Compute may have rewritten native VB storage without a
+                                // WriteBuffer op; invalidate shared twins so raster DtoDs.
+                                for render in render_cmds.iter() {
+                                    if let RenderCommand::SetVertexBuffer { buffer, .. } = render {
+                                        if let Some(buf) = self.buffers.get_mut(buffer) {
+                                            buf.bump_content_epoch();
+                                        }
+                                    }
+                                }
                                 let device = self.context_device(ctx);
                                 let worker = Arc::clone(&self.device(device)?.submission_worker);
                                 worker.flush().context("CUDA/DX12: flush before raster VB wait")?;

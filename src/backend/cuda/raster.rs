@@ -3,7 +3,8 @@
 //! Scope (intentionally narrow):
 //! - Windows + `cuda` + `graphics` + `dx12`
 //! - Color-only [`TextureFormat::Rgba32Float`] render targets
-//! - [`PrimitiveTopology::TriangleList`] only
+//! - Non-indexed draws (`PointList` / `LineList` / `LineStrip` / `TriangleList` /
+//!   `TriangleStrip`)
 //! - Vertex buffers + draw (no indexed draw, no bindless resources, no depth)
 //!
 //! Vertex buffers stay on native CUDA allocations for compute. A shareable D3D12
@@ -261,9 +262,6 @@ pub(super) fn create_pipeline(
     topology: PrimitiveTopology,
     target_format: TextureFormat,
 ) -> Result<PipelineHandle> {
-    if topology != PrimitiveTopology::TriangleList {
-        bail!("CUDA/DX12 raster: only TriangleList is supported in the first slice (got {topology:?})");
-    }
     if target_format != RASTER_COLOR_FORMAT {
         bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} targets are supported (got {target_format:?})");
     }
@@ -563,11 +561,10 @@ fn refresh_shared_vertex_backing(
         backend.buffers.get_mut(&buffer).unwrap().shared_epoch = u64::MAX;
     }
 
-    let (content_epoch, shared_epoch, offset, size, memory, shared) = {
+    let (content_epoch, offset, size, memory, shared) = {
         let buf = backend.buffers.get(&buffer).unwrap();
         (
             buf.content_epoch,
-            buf.shared_epoch,
             buf.offset,
             buf.size,
             Arc::clone(&buf.memory),
@@ -575,15 +572,15 @@ fn refresh_shared_vertex_backing(
         )
     };
 
-    if content_epoch == shared_epoch {
-        return Ok(shared.last_cuda_fence.load(Ordering::Acquire));
-    }
     if size == 0 {
         backend.buffers.get_mut(&buffer).unwrap().shared_epoch = content_epoch;
         return Ok(0);
     }
 
     // Device-to-device refresh: native CUDA allocation → imported DX12 twin.
+    // Always copy: retained deposit/copy submits replay without rematerializing, so
+    // `content_epoch` may stay unchanged while native bytes move every frame
+    // (spinning_cube / waveform / digital_clock). Skipping here freezes the mesh.
     let nbytes = size as usize;
     let src_ptr = {
         let guard = memory.lock().unwrap();
@@ -653,6 +650,28 @@ pub(super) fn render_to_target(
 
     // Ensure shareable DX12 twins exist and are DtoD-refreshed from native CUDA storage
     // (kernels cannot write imported external buffer pointers on this driver stack).
+    // Prior deposit/copy submits may still be in flight on context streams — flush/sync
+    // before DtoD whenever a VB already has a twin (or will refresh after create).
+    let needs_vb_sync = commands.iter().any(|command| {
+        matches!(command, RenderCommand::SetVertexBuffer { .. })
+    });
+    if needs_vb_sync {
+        let worker = Arc::clone(&backend.device(device)?.submission_worker);
+        worker
+            .flush()
+            .context("CUDA/DX12: flush before shared VB refresh")?;
+        backend
+            .graph_stats
+            .worker_flushes
+            .fetch_add(1, Ordering::Relaxed);
+        for context in backend.contexts.values().filter(|context| context.device == device) {
+            context
+                .stream
+                .synchronize()
+                .context("CUDA/DX12: sync context stream before shared VB refresh")?;
+        }
+    }
+
     let alloc_stream = Arc::clone(&backend.device(device)?.alloc_stream);
     let mut vb_wait = 0u64;
     for command in commands {
@@ -879,6 +898,18 @@ mod tests {
         assert_eq!(
             topology_type_to_d3d12(PrimitiveTopology::TriangleList),
             D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
+        );
+    }
+
+    #[test]
+    fn line_topologies_map() {
+        assert_eq!(
+            topology_type_to_d3d12(PrimitiveTopology::LineList),
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+        );
+        assert_eq!(
+            topology_type_to_d3d12(PrimitiveTopology::LineStrip),
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
         );
     }
 }
