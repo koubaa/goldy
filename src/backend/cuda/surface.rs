@@ -61,7 +61,20 @@ pub(super) struct CudaSurfaceState {
     /// After create/resize, DXGI backbuffers are in COMMON until the first present copy.
     pub backbuffer_in_common: [bool; MAX_FRAMES],
     pub blit: PresentBlitPipeline,
+    /// Scratch retired from the live slots; destroyed/pooled once `retire_at` completes.
+    pending_scratch: Vec<PendingScratchDrop>,
+    /// Recently-retired scratch reusable across oscillating resizes (keyed by size).
+    scratch_pool: Vec<SharedScratchTexture>,
 }
+
+struct PendingScratchDrop {
+    /// Companion fence value that must complete before CUDA/D3D12 teardown is safe.
+    retire_at: u64,
+    slot: ScratchSlot,
+}
+
+/// Soft cap on pooled scratch textures per surface (oscillating interactive resize).
+const SCRATCH_POOL_CAP: usize = 4;
 
 pub(super) struct ScratchSlot {
     pub shared: SharedScratchTexture,
@@ -180,6 +193,8 @@ pub(super) fn create_surface(
             slot_fence: [0; MAX_FRAMES],
             backbuffer_in_common: [true; MAX_FRAMES],
             blit,
+            pending_scratch: Vec::new(),
+            scratch_pool: Vec::new(),
         },
     );
     tracing::info!("CUDA/DX12: created surface {width}x{height} (compute format {SURFACE_COMPUTE_FORMAT:?})");
@@ -196,28 +211,29 @@ pub(super) fn destroy_surface(backend: &mut CudaBackend, surface: SurfaceHandle)
     if let Err(e) = wait_device_idle_for_surface(backend, device) {
         tracing::error!("CUDA/DX12: destroy_surface idle wait failed: {e:#}");
     }
-    // Drop CUDA tex/surf objects before imported external memory (strict interop order).
-    let tex_handles: Vec<_> = state
-        .scratch
-        .iter()
-        .filter_map(|s| s.as_ref().map(|x| x.texture_handle))
-        .collect();
-    for h in &tex_handles {
-        if let Some(resource) = backend.textures.remove(h) {
-            if let Some(slot) = resource.storage_slot {
-                backend.texture_slots.remove(&slot);
-            }
-            if let Some(slot) = resource.sampled_slot {
-                backend.texture_slots.remove(&slot);
-            }
-            drop(resource);
-        }
+    let mut live_slots: Vec<ScratchSlot> = state.scratch.iter_mut().filter_map(|s| s.take()).collect();
+    live_slots.extend(state.pending_scratch.drain(..).map(|p| p.slot));
+    state.scratch_pool.clear();
+    for slot in live_slots {
+        unregister_scratch_texture(backend, slot.texture_handle);
+        drop(slot);
     }
-    state.scratch.clear();
     if let Some(SendSyncHandle(waitable)) = state.frame_latency_waitable.take() {
         unsafe {
             let _ = CloseHandle(waitable);
         }
+    }
+}
+
+fn unregister_scratch_texture(backend: &mut CudaBackend, handle: TextureHandle) {
+    if let Some(resource) = backend.textures.remove(&handle) {
+        if let Some(sid) = resource.storage_slot {
+            backend.texture_slots.remove(&sid);
+        }
+        if let Some(sid) = resource.sampled_slot {
+            backend.texture_slots.remove(&sid);
+        }
+        drop(resource);
     }
 }
 
@@ -281,12 +297,14 @@ pub(super) fn surface_resize(
         for slot in state.scratch.iter().flatten() {
             high = high.max(slot.cuda_complete).max(slot.dx12_complete);
         }
+        for pending in &state.pending_scratch {
+            high = high.max(pending.retire_at);
+        }
         high
     };
 
-    // Take scratch slots, drain surface-scoped GPU work, then drop CUDA views before
-    // external memory. Retained partitions that still reference destroyed scratch are
-    // evicted; unrelated CUDA graphs stay warm across resize.
+    // Take live scratch out of the swapchain slots. Teardown is deferred until the
+    // companion fence retires so ResizeBuffers is not blocked on cuDestroyExternalMemory.
     let old_slots: Vec<ScratchSlot> = {
         let state = backend.surfaces.get_mut(&surface).unwrap();
         state.scratch.iter_mut().filter_map(|s| s.take()).collect()
@@ -318,8 +336,8 @@ pub(super) fn surface_resize(
         .surface_resize_idle_ns
         .fetch_add(idle_ns, Ordering::Relaxed);
 
-    // Evict while scratch textures are still in `backend.textures` so Graph pin
-    // identity checks can resolve Arc pointers.
+    // Evict retained entries that reference the retiring scratch, unregister handles,
+    // then park the imported textures for deferred drop/pool (not on the resize hot path).
     let teardown_t0 = std::time::Instant::now();
     let evicted = evict_retained_touching_scratch(backend, &destroyed_handles, &destroyed_slots);
     backend
@@ -327,17 +345,16 @@ pub(super) fn surface_resize(
         .surface_resize_evictions
         .fetch_add(evicted, Ordering::Relaxed);
     for slot in old_slots {
-        let h = slot.texture_handle;
-        if let Some(resource) = backend.textures.remove(&h) {
-            if let Some(sid) = resource.storage_slot {
-                backend.texture_slots.remove(&sid);
-            }
-            if let Some(sid) = resource.sampled_slot {
-                backend.texture_slots.remove(&sid);
-            }
-            drop(resource);
-        }
-        drop(slot);
+        let retire_at = fence_high
+            .max(slot.cuda_complete)
+            .max(slot.dx12_complete);
+        unregister_scratch_texture(backend, slot.texture_handle);
+        backend
+            .surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .pending_scratch
+            .push(PendingScratchDrop { retire_at, slot });
     }
     let teardown_ns = teardown_t0.elapsed().as_nanos() as u64;
     backend
@@ -390,6 +407,10 @@ pub(super) fn surface_resize(
     state.current_image_index = None;
     state.slot_fence = [0; MAX_FRAMES];
     state.backbuffer_in_common = [true; MAX_FRAMES];
+
+    // Intentionally do not drain pending scratch here: cuDestroyExternalMemory /
+    // pool insertion runs on the next acquire (`ensure_scratch`) so ResizeBuffers
+    // returns without paying import teardown on the interactive resize path.
 
     tracing::info!(
         width,
@@ -956,6 +977,8 @@ fn ensure_scratch(
     surface: SurfaceHandle,
     image_index: usize,
 ) -> Result<TextureHandle> {
+    drain_pending_scratch(backend, surface)?;
+
     let (device, width, height, reuse) = {
         let state = backend.surfaces.get(&surface).context("invalid surface")?;
         let reuse = state
@@ -975,8 +998,7 @@ fn ensure_scratch(
         return Ok(handle);
     }
     if let Some((old, false)) = reuse {
-        // Size mismatch: drain GPU before destroying the imported scratch.
-        wait_device_idle_for_surface(backend, device)?;
+        // Size mismatch should be rare after resize clears slots; park for deferred drop.
         if let Some(slot) = backend
             .surfaces
             .get_mut(&surface)
@@ -985,27 +1007,35 @@ fn ensure_scratch(
             .get_mut(image_index)
             .and_then(|s| s.take())
         {
-            // Drop CUDA views before external memory.
-            if let Some(resource) = backend.textures.remove(&old) {
-                if let Some(slot_id) = resource.storage_slot {
-                    backend.texture_slots.remove(&slot_id);
-                }
-                if let Some(slot_id) = resource.sampled_slot {
-                    backend.texture_slots.remove(&slot_id);
-                }
-                drop(resource);
+            let retire_at = slot.cuda_complete.max(slot.dx12_complete);
+            unregister_scratch_texture(backend, old);
+            backend
+                .surfaces
+                .get_mut(&surface)
+                .unwrap()
+                .pending_scratch
+                .push(PendingScratchDrop { retire_at, slot });
+            if retire_at > 0 {
+                wait_surface_resources_idle(backend, device, retire_at)?;
             }
-            drop(slot);
+            drain_pending_scratch(backend, surface)?;
         }
     }
 
     let storage_slot = backend.alloc_registry_slot();
-    let companion = companion_ref(backend, device)?;
     let cuda_ctx = Arc::clone(&backend.device(device)?.ctx);
-    let shared = SharedScratchTexture::create(companion, &cuda_ctx, width, height, storage_slot)?;
+
+    let shared = if let Some(mut pooled) = take_pooled_scratch(backend, surface, width, height) {
+        pooled.retarget_storage_slot(&cuda_ctx, storage_slot)?;
+        pooled
+    } else {
+        let companion = companion_ref(backend, device)?;
+        SharedScratchTexture::create(companion, &cuda_ctx, width, height, storage_slot)?
+    };
 
     // Write blit descriptors for this image index.
     {
+        let companion = companion_ref(backend, device)?;
         let state = backend.surfaces.get(&surface).unwrap();
         state.blit.write_descriptors(
             &companion.device,
@@ -1037,6 +1067,55 @@ fn ensure_scratch(
     Ok(texture_handle)
 }
 
+fn take_pooled_scratch(
+    backend: &mut CudaBackend,
+    surface: SurfaceHandle,
+    width: u32,
+    height: u32,
+) -> Option<SharedScratchTexture> {
+    let state = backend.surfaces.get_mut(&surface)?;
+    let idx = state
+        .scratch_pool
+        .iter()
+        .position(|s| s.width == width && s.height == height)?;
+    Some(state.scratch_pool.swap_remove(idx))
+}
+
+/// Recycle fence-retired scratch into the size pool, or drop when the pool is full.
+fn drain_pending_scratch(backend: &mut CudaBackend, surface: SurfaceHandle) -> Result<()> {
+    let device = backend
+        .surfaces
+        .get(&surface)
+        .context("CUDA/DX12: invalid surface")?
+        .device;
+    let completed = {
+        let companion = companion_ref(backend, device)?;
+        unsafe { companion.fence.GetCompletedValue() }
+    };
+    let state = backend.surfaces.get_mut(&surface).unwrap();
+    let mut still_pending = Vec::new();
+    let mut retired = Vec::new();
+    for pending in state.pending_scratch.drain(..) {
+        if pending.retire_at == 0 || pending.retire_at <= completed {
+            retired.push(pending.slot);
+        } else {
+            still_pending.push(pending);
+        }
+    }
+    state.pending_scratch = still_pending;
+    for slot in retired {
+        let shared = slot.shared;
+        if state.scratch_pool.len() < SCRATCH_POOL_CAP {
+            state.scratch_pool.push(shared);
+        } else {
+            // Prefer pooling the newly retired size; drop an arbitrary older entry.
+            let _ = state.scratch_pool.pop();
+            state.scratch_pool.push(shared);
+        }
+    }
+    Ok(())
+}
+
 fn companion_ref(backend: &CudaBackend, device: DeviceHandle) -> Result<&Dx12Companion> {
     let gpu = backend.devices.get(&device).context("CUDA: invalid device")?;
     gpu.dx12
@@ -1044,12 +1123,25 @@ fn companion_ref(backend: &CudaBackend, device: DeviceHandle) -> Result<&Dx12Com
         .context("CUDA: DX12 companion not available (requires cuda+graphics+dx12 on Windows)")
 }
 
+/// True when any recorded CUDA completion event on this device is still outstanding.
+fn cuda_device_has_pending_work(backend: &CudaBackend, device: DeviceHandle) -> bool {
+    for context in backend.contexts.values().filter(|c| c.device == device) {
+        let Ok(guard) = context.event_ledger.lock() else {
+            return true;
+        };
+        for entry in guard.values() {
+            if entry.context == context.handle && entry.recorded && !entry.event.is_complete() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Drain GPU work that may still reference this surface's imported scratch / present slots.
 ///
-/// Narrower than a full device idle: flush the submission worker, synchronize CUDA streams
-/// that can write scratch or publish present completion, then CPU-wait the companion fence
-/// through `fence_high` (caller-supplied max of slot / scratch completes) plus companion
-/// init/raster fences — without signaling a fresh fence for unrelated DX12 work.
+/// Skips CUDA stream synchronizes when the event ledger shows no in-flight work (common
+/// between frames). Skips the DX12 CPU wait when `fence_high` has already retired.
 fn wait_surface_resources_idle(
     backend: &mut CudaBackend,
     device: DeviceHandle,
@@ -1072,22 +1164,29 @@ fn wait_surface_resources_idle(
     worker
         .flush()
         .context("CUDA/DX12: flush submission worker before surface teardown")?;
-    for context in backend.contexts.values().filter(|c| c.device == device) {
-        context
-            .stream
-            .synchronize()
-            .context("CUDA/DX12: context stream synchronize before surface teardown")?;
+
+    if cuda_device_has_pending_work(backend, device) {
+        for context in backend.contexts.values().filter(|c| c.device == device) {
+            context
+                .stream
+                .synchronize()
+                .context("CUDA/DX12: context stream synchronize before surface teardown")?;
+        }
+        if let Some(stream) = present_stream {
+            stream
+                .synchronize()
+                .context("CUDA/DX12: present stream synchronize before surface teardown")?;
+        }
     }
-    if let Some(stream) = present_stream {
-        stream
-            .synchronize()
-            .context("CUDA/DX12: present stream synchronize before surface teardown")?;
-    }
+
     if let Some(companion) = companion {
         if fence_high > 0 {
-            companion
-                .cpu_wait(fence_high)
-                .context("CUDA/DX12: companion fence wait before surface teardown")?;
+            let completed = unsafe { companion.fence.GetCompletedValue() };
+            if completed < fence_high {
+                companion
+                    .cpu_wait(fence_high)
+                    .context("CUDA/DX12: companion fence wait before surface teardown")?;
+            }
         }
     }
     Ok(())

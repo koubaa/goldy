@@ -139,7 +139,8 @@ impl SharedScratchTexture {
         )?;
         // blit_target is DX12-only (not imported); SHARED flag is harmless.
 
-        // Transition both to UAV for first use.
+        // Transition both to UAV for first use (separate submits keep the init-list
+        // state machine simple; still cheaper than streaming upload paths).
         init_resource_state(companion, &d3d12_resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)?;
         init_resource_state(companion, &blit_target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)?;
 
@@ -152,6 +153,27 @@ impl SharedScratchTexture {
             allocation_size,
             blit_target,
         })
+    }
+
+    /// Rebuild the CUDA texture view with a new registry slot (scratch pool reuse).
+    pub fn retarget_storage_slot(
+        &mut self,
+        cuda_ctx: &Arc<CudaContext>,
+        storage_slot: u32,
+    ) -> Result<Arc<CudaTextureResource>> {
+        let cuda_texture = CudaTextureResource::from_imported_array(
+            cuda_ctx,
+            self.import.level0(),
+            self.width,
+            self.height,
+            SURFACE_COMPUTE_FORMAT,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            Some(storage_slot),
+            None,
+        )?;
+        self.cuda_texture = Arc::clone(&cuda_texture);
+        Ok(cuda_texture)
     }
 }
 

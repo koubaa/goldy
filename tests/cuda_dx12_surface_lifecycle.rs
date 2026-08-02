@@ -313,10 +313,15 @@ fn cuda_surface_same_size_resize_is_cheap() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
     present_one_fill(&surface, &pipeline, &ctx);
 
-    let structural = Instant::now();
-    surface.resize(256, 256).expect("structural");
-    let structural_dt = structural.elapsed();
+    // Deferred resize: recording a new extent is near-free; apply happens on present.
+    let record = Instant::now();
+    surface.resize(256, 256).expect("record structural");
+    let record_dt = record.elapsed();
+    assert_eq!(surface.size(), (256, 256));
+
+    let apply = Instant::now();
     present_one_fill(&surface, &pipeline, &ctx);
+    let apply_dt = apply.elapsed();
 
     let mut same_total = Duration::ZERO;
     for _ in 0..32 {
@@ -326,13 +331,16 @@ fn cuda_surface_same_size_resize_is_cheap() {
     }
     let same_avg = same_total / 32;
     eprintln!(
-        "cuda resize bench: structural {:?} same-size avg {:?} (32 iters)",
-        structural_dt, same_avg
+        "cuda resize bench: record {:?} apply+present {:?} same-size avg {:?}",
+        record_dt, apply_dt, same_avg
     );
-    // Same-size must be near free — orders of magnitude below a structural rebuild.
     assert!(
-        same_avg < structural_dt / 10 || same_avg < Duration::from_millis(2),
-        "same-size resize too slow: avg {same_avg:?} vs structural {structural_dt:?}"
+        record_dt < Duration::from_millis(1),
+        "deferred resize record too slow: {record_dt:?}"
+    );
+    assert!(
+        same_avg < Duration::from_millis(1),
+        "same-size resize too slow: avg {same_avg:?}"
     );
 }
 
@@ -374,19 +382,58 @@ fn cuda_surface_resize_latency_microbench() {
         present_one_fill(&surface, &pipeline, &ctx);
         let t0 = Instant::now();
         surface.resize(w, h).expect("resize");
-        let dt = t0.elapsed();
-        times.push((w, h, dt));
+        let record_dt = t0.elapsed();
+        let t1 = Instant::now();
         present_one_fill(&surface, &pipeline, &ctx);
+        let apply_dt = t1.elapsed();
+        times.push((w, h, record_dt, apply_dt));
     }
-    for (w, h, dt) in &times {
-        eprintln!("cuda resize {w}x{h}: {dt:?}");
+    for (w, h, record_dt, apply_dt) in &times {
+        eprintln!("cuda resize {w}x{h}: record {record_dt:?} apply+present {apply_dt:?}");
     }
-    let max = times.iter().map(|(_, _, d)| *d).max().unwrap();
-    // Soft budget: structural resize after present should stay under a second on
-    // capable hardware. Catches accidental full-process hangs.
+
+    // Window-size storm: many resize() calls, one present applies the last extent.
+    present_one_fill(&surface, &pipeline, &ctx);
+    let storm = Instant::now();
+    for i in 0..30u32 {
+        let w = 160 + i * 2;
+        let h = 120 + i;
+        surface.resize(w, h).expect("storm");
+    }
+    let storm_record = storm.elapsed();
+    assert_eq!(surface.size(), (160 + 29 * 2, 120 + 29));
+    let storm_apply = Instant::now();
+    present_one_fill(&surface, &pipeline, &ctx);
+    let storm_apply_dt = storm_apply.elapsed();
+    eprintln!(
+        "cuda resize storm: 30 records in {:?}, apply+present {:?}",
+        storm_record, storm_apply_dt
+    );
     assert!(
-        max < Duration::from_secs(2),
-        "resize exceeded soft budget: {max:?}"
+        storm_record < Duration::from_millis(5),
+        "resize storm record too slow: {storm_record:?}"
+    );
+
+    let oscillate = [(192u32, 144u32), (256, 192), (192, 144), (256, 192), (192, 144)];
+    let mut osc_times = Vec::new();
+    for &(w, h) in &oscillate {
+        surface.resize(w, h).expect("oscillate");
+        let t0 = Instant::now();
+        present_one_fill(&surface, &pipeline, &ctx);
+        osc_times.push(t0.elapsed());
+    }
+    eprintln!("cuda oscillate apply+present: {osc_times:?}");
+
+    let max_apply = times
+        .iter()
+        .map(|(_, _, _, d)| *d)
+        .chain(osc_times.iter().copied())
+        .chain(std::iter::once(storm_apply_dt))
+        .max()
+        .unwrap();
+    assert!(
+        max_apply < Duration::from_secs(2),
+        "apply+present exceeded soft budget: {max_apply:?}"
     );
 }
 

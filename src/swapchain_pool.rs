@@ -12,7 +12,7 @@ use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -24,6 +24,9 @@ pub(crate) struct SwapchainPoolInner {
     /// Advanced on resize / present-mode change so stale claims and retained
     /// physical variants cannot be reused after backing recreation.
     pub(crate) generation: Arc<AtomicU64>,
+    /// Last requested extent; applied on the next acquire so interactive
+    /// `WM_SIZE` storms only pay for one `ResizeBuffers` per frame.
+    pending_resize: Mutex<Option<(u32, u32)>>,
     /// When true, the next [`SwapchainPool::acquire_slot`] fails once (scheme tests).
     #[cfg(test)]
     fail_next_acquire: AtomicBool,
@@ -36,6 +39,28 @@ impl SwapchainPoolInner {
 
     fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Logical drawable size (pending resize if any, else live swapchain).
+    fn logical_size(&self) -> (u32, u32) {
+        if let Ok(guard) = self.pending_resize.lock() {
+            if let Some(size) = *guard {
+                return size;
+            }
+        }
+        self.surface.read().unwrap().size()
+    }
+
+    /// Apply a coalesced pending resize before acquiring a drawable.
+    fn apply_pending_resize(&self) -> Result<()> {
+        let pending = self.pending_resize.lock().unwrap().take();
+        let Some((width, height)) = pending else {
+            return Ok(());
+        };
+        let mut surface = self.surface.write().unwrap();
+        // Generation already advanced when the pending request was recorded.
+        surface.resize(width, height)?;
+        Ok(())
     }
 }
 
@@ -134,6 +159,7 @@ impl SwapchainPool {
                 surface: RwLock::new(surface),
                 depth: depth.max(1),
                 generation: Arc::new(AtomicU64::new(0)),
+                pending_resize: Mutex::new(None),
                 #[cfg(test)]
                 fail_next_acquire: AtomicBool::new(false),
             }),
@@ -174,10 +200,9 @@ impl SwapchainPool {
         })
     }
 
-    /// Current drawable extent.
+    /// Current drawable extent (includes a pending resize not yet applied).
     pub fn size(&self) -> (u32, u32) {
-        let surface = self.inner.surface.read().unwrap();
-        surface.size()
+        self.inner.logical_size()
     }
 
     pub fn width(&self) -> u32 {
@@ -193,27 +218,28 @@ impl SwapchainPool {
         surface.format()
     }
 
-    /// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
+    /// Request a swapchain resize (structural edit — rebuild scheme nodes).
     ///
-    /// Advances the pool generation so claims and retained variants from the
-    /// previous backing cannot be reused.
+    /// The DXGI/CUDA rebuild is deferred until the next drawable acquire so a
+    /// burst of window-size events only pays for one `ResizeBuffers` per frame.
+    /// Advances the pool generation immediately so claims and retained variants
+    /// from the previous backing cannot be reused.
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        let mut surface = self.inner.surface.write().unwrap();
-        let (old_w, old_h) = surface.size();
-        surface.resize(width, height)?;
-        let (new_w, new_h) = surface.size();
-        // Only invalidate retained variants / claims when the swapchain actually changed.
-        // Same-size and zero-size no-ops must not bump generation (interactive resize churn).
-        if (new_w, new_h) != (old_w, old_h) {
-            self.inner.bump_generation();
+        let (old_w, old_h) = self.inner.logical_size();
+        if width == old_w && height == old_h {
+            return Ok(());
         }
+        *self.inner.pending_resize.lock().unwrap() = Some((width, height));
+        self.inner.bump_generation();
         Ok(())
     }
 
     pub fn set_present_mode(&self, mode: crate::types::PresentMode) -> Result<()> {
+        // Present mode touches the live swapchain; apply any pending extent first.
+        self.inner.apply_pending_resize()?;
         let mut surface = self.inner.surface.write().unwrap();
         surface.set_present_mode(mode)?;
         self.inner.bump_generation();
@@ -233,8 +259,8 @@ impl SwapchainPool {
                 anyhow::bail!("test-injected acquire failure");
             }
         }
-        // Read lock only: `begin()` may block on swapchain image availability without
-        // preventing concurrent queries or stalling resize on a held write lock.
+        // Coalesce window-size storms: apply the latest pending extent once per frame.
+        pool.apply_pending_resize()?;
         let generation = pool.generation();
         let frame = {
             let surface = pool.surface.read().unwrap();

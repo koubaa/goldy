@@ -107,11 +107,18 @@ let desc = RenderPipelineDesc {
 
 ## Resize Handling
 
-Call `resize()` when the window size changes. Zero-size dimensions are silently ignored (common during window minimize). Rebuild the scheme and transaction when dimensions change.
+Call `resize()` when the window size changes. Zero-size dimensions are silently
+ignored (common during window minimize). Rebuild the scheme when
+`surface.size()` changes.
+
+`SurfaceExchange::resize` records the new extent immediately (and advances the
+pool generation) but defers the DXGI/`ResizeBuffers` work until the next
+drawable acquire. A burst of window-size events therefore only pays for one
+structural rebuild per presented frame.
 
 ```rust
 surface.resize(width, height)?;
-// rebuild scheme + transaction
+// rebuild scheme + transaction using surface.size()
 ```
 
 ## Transaction Lifetime
