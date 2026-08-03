@@ -66,19 +66,22 @@ const MAX_LINE_VERTICES: usize = CUBE_EDGES.len() * 2;
 
 struct App {
     instance: Instance,
-    ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
-    pipeline: Option<RenderPipeline>,
-    shader: Option<ShaderModule>,
-    _retained_pool: Option<RetainedPool>,
-    vertex_parcel: Option<Buffer>,
-    upload_scheme: Option<Scheme>,
-    vertex_deposit: Option<DepositTransaction>,
+    // Window + surface before ctx/device so Escape teardown destroys the swapchain
+    // while the CUDA context stream is still alive (avoids cudarc sticky error_state
+    // from stream Drop racing destroy_surface bind).
     window: Option<Arc<Window>>,
     surface: Option<SurfaceExchange>,
     present: Option<Transaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
+    upload_scheme: Option<Scheme>,
+    vertex_deposit: Option<DepositTransaction>,
+    vertex_parcel: Option<Buffer>,
+    _retained_pool: Option<RetainedPool>,
+    pipeline: Option<RenderPipeline>,
+    shader: Option<ShaderModule>,
+    ctx: Option<goldy::Context>,
+    device: Option<Arc<goldy::Device>>,
     start_time: Instant,
     frame_count: u32,
 }
@@ -87,20 +90,20 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
-            ctx: None,
-            device: None,
-            pipeline: None,
-            shader: None,
             window: None,
             surface: None,
             present: None,
             scene_rt: None,
             scheme: None,
-            start_time: Instant::now(),
-            _retained_pool: None,
-            vertex_parcel: None,
             upload_scheme: None,
             vertex_deposit: None,
+            vertex_parcel: None,
+            _retained_pool: None,
+            pipeline: None,
+            shader: None,
+            ctx: None,
+            device: None,
+            start_time: Instant::now(),
             frame_count: 0,
         })
     }

@@ -245,12 +245,36 @@ pub(super) fn destroy_surface(backend: &mut CudaBackend, surface: SurfaceHandle)
     let device = state.device;
     // CUDA may still be writing imported scratch; drain CUDA + DX12 before destroying
     // tex/surf objects and external memory.
-    if let Err(e) = wait_device_idle_for_surface(backend, device) {
-        tracing::error!("CUDA/DX12: destroy_surface idle wait failed: {e:#}");
-    }
     let mut live_slots: Vec<ScratchSlot> = state.scratch.iter_mut().filter_map(|s| s.take()).collect();
     live_slots.extend(state.pending_scratch.drain(..).map(|p| p.slot));
     state.scratch_pool.clear();
+    if let Err(e) = wait_device_idle_for_surface(backend, device) {
+        // Do not destroy imported CUDA/D3D12 mappings while completion is unproven.
+        tracing::error!(
+            "CUDA/DX12: destroy_surface idle wait failed ({e:#}); leaking {} scratch slot(s)",
+            live_slots.len()
+        );
+        for slot in live_slots {
+            if let Some(resource) = backend.textures.remove(&slot.texture_handle) {
+                if let Some(sid) = resource.storage_slot {
+                    backend.texture_slots.remove(&sid);
+                }
+                if let Some(sid) = resource.sampled_slot {
+                    backend.texture_slots.remove(&sid);
+                }
+                // Leak the CUDA view + import rather than cuDestroy while GPU may still
+                // reference it. Registry entries are cleared so the handle is dead.
+                std::mem::forget(resource);
+            }
+            std::mem::forget(slot);
+        }
+        if let Some(SendSyncHandle(waitable)) = state.frame_latency_waitable.take() {
+            unsafe {
+                let _ = CloseHandle(waitable);
+            }
+        }
+        return;
+    }
     for slot in live_slots {
         unregister_scratch_texture(backend, slot.texture_handle);
         drop(slot);
@@ -1270,7 +1294,7 @@ fn cuda_device_has_pending_work(backend: &CudaBackend, device: DeviceHandle) -> 
 /// Skips CUDA stream synchronizes when the event ledger shows no in-flight work (common
 /// between frames). Skips the DX12 CPU wait when `fence_high` has already retired.
 fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, mut fence_high: u64) -> Result<()> {
-    let (worker, present_stream, companion) = {
+    let (worker, present_stream, companion, cuda_ctx) = {
         let gpu = backend.device(device)?;
         let companion = gpu.dx12.as_ref().map(Arc::clone);
         if let Some(c) = companion.as_ref() {
@@ -1280,6 +1304,7 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
             Arc::clone(&gpu.submission_worker),
             companion.as_ref().map(|c| Arc::clone(&c.present_stream)),
             companion,
+            Arc::clone(&gpu.ctx),
         )
     };
     worker
@@ -1287,7 +1312,30 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
         .context("CUDA/DX12: flush submission worker before surface teardown")?;
     backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
 
+    // Retire DX12 first so any CUDA WaitExternalFence (scratch reuse) can complete
+    // before cuStreamSynchronize.
+    if let Some(companion) = companion.as_ref() {
+        if fence_high > 0 {
+            let completed = unsafe { companion.fence.GetCompletedValue() };
+            if completed < fence_high {
+                companion
+                    .cpu_wait(fence_high)
+                    .context("CUDA/DX12: companion fence wait before surface teardown")?;
+            }
+        }
+    }
+
+    // See wait_device_idle_for_surface: drain cudarc sticky error_state after DX12 idle.
+    if let Err(e) = cuda_ctx.check_err() {
+        tracing::warn!(
+            "CUDA/DX12: cleared sticky context error before surface resource sync: {e:?}"
+        );
+    }
+
     if cuda_device_has_pending_work(backend, device) {
+        cuda_ctx
+            .bind_to_thread()
+            .context("CUDA/DX12: bind context before surface teardown sync")?;
         for context in backend.contexts.values().filter(|c| c.device == device) {
             context
                 .stream
@@ -1300,36 +1348,48 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
                 .context("CUDA/DX12: present stream synchronize before surface teardown")?;
         }
     }
-
-    if let Some(companion) = companion {
-        if fence_high > 0 {
-            let completed = unsafe { companion.fence.GetCompletedValue() };
-            if completed < fence_high {
-                companion
-                    .cpu_wait(fence_high)
-                    .context("CUDA/DX12: companion fence wait before surface teardown")?;
-            }
-        }
-    }
     Ok(())
 }
 
 /// Full CUDA + DX12 drain used when destroying a surface or replacing a size-mismatched
 /// scratch outside `surface_resize` (no per-surface fence high-water available yet).
 fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle) -> Result<()> {
-    let (worker, alloc_stream, present_stream, companion) = {
+    let (worker, alloc_stream, present_stream, companion, cuda_ctx) = {
         let gpu = backend.device(device)?;
         (
             Arc::clone(&gpu.submission_worker),
             Arc::clone(&gpu.alloc_stream),
             gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
             gpu.dx12.as_ref().map(Arc::clone),
+            Arc::clone(&gpu.ctx),
         )
     };
     worker
         .flush()
         .context("CUDA/DX12: flush submission worker before surface teardown")?;
     backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
+
+    // DX12 before CUDA stream sync: streams may still be waiting on companion fence
+    // values (scratch reuse WaitExternalFence). Waiting DX12 first unblocks them.
+    if let Some(companion) = companion.as_ref() {
+        companion
+            .wait_idle()
+            .context("CUDA/DX12: companion wait_idle before surface teardown")?;
+    }
+
+    // cudarc records failures from Drop (e.g. destroying a stream after a raced /
+    // ignored context-destroy sync) into CudaContext::error_state. bind_to_thread
+    // returns that sticky error via check_err before touching the driver. Drain it
+    // only after DX12 is idle so subsequent stream syncs reflect real CUDA state.
+    if let Err(e) = cuda_ctx.check_err() {
+        tracing::warn!(
+            "CUDA/DX12: cleared sticky context error before surface teardown sync: {e:?}"
+        );
+    }
+
+    cuda_ctx
+        .bind_to_thread()
+        .context("CUDA/DX12: bind context before surface teardown sync")?;
     for context in backend.contexts.values().filter(|c| c.device == device) {
         context
             .stream
@@ -1344,11 +1404,6 @@ fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle)
     alloc_stream
         .synchronize()
         .context("CUDA/DX12: alloc stream synchronize before surface teardown")?;
-    if let Some(companion) = companion {
-        companion
-            .wait_idle()
-            .context("CUDA/DX12: companion wait_idle before surface teardown")?;
-    }
     Ok(())
 }
 

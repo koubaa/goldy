@@ -255,17 +255,41 @@ struct CudaDestroyContext {
     stream: Arc<CudaStream>,
     worker: Arc<SubmissionWorker>,
     fence_shutdown: Arc<AtomicBool>,
-    fence_thread: Option<JoinHandle<()>>,
+    /// Joined in [`Self::wait`] before stream sync so the poller cannot race
+    /// `bind_to_thread` / `cuStreamSynchronize` (cudarc records Drop failures into
+    /// sticky `CudaContext::error_state`, which then poisons later teardown binds).
+    fence_thread: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    companion: Option<Arc<dx12_companion::Dx12Companion>>,
 }
 
 impl ContextDestroyHandle for CudaDestroyContext {
     fn wait(&self) -> Result<()> {
-        let _ = self.worker.flush();
-        self.stream.synchronize().context("CUDA: context destroy stream sync")
+        self.fence_shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.fence_thread.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        self.worker
+            .flush()
+            .context("CUDA: flush submission worker before context destroy")?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = self.companion.as_ref() {
+            // Unblock any stream-side WaitExternalFence before cuStreamSynchronize.
+            companion
+                .wait_idle()
+                .context("CUDA/DX12: companion wait_idle before context destroy sync")?;
+        }
+        self.stream
+            .synchronize()
+            .context("CUDA: context destroy stream sync")?;
+        Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<()> {
-        crate::backend::signal_fence::join_fence_poller(&self.fence_shutdown, self.fence_thread);
+        // Poller was joined in `wait`; clear any residual handle.
+        if let Some(handle) = self.fence_thread.lock().unwrap().take() {
+            crate::backend::signal_fence::join_fence_poller(&self.fence_shutdown, Some(handle));
+        }
         Ok(())
     }
 }
@@ -2145,15 +2169,17 @@ impl CudaBackend {
             }
         }
         // Shared-primary rewrites must not race an in-flight DX12 IA draw.
+        // CPU companion wait (not WaitExternalFence on the CUDA stream): stream-side
+        // external waits plus later cuStreamSynchronize/bind have returned
+        // CUDA_ERROR_NOT_SUPPORTED on this WDDM+D3D12 stack at surface teardown.
+        let mut ia_wait = 0u64;
         for shared in &shared_primaries {
-            let ia = shared.last_dx12_ia_fence.load(Ordering::Acquire);
-            if ia > 0 {
-                waits.push(CudaOp::WaitExternalFence {
-                    cuda_ctx: Arc::clone(&companion.cuda_ctx),
-                    semaphore: pending_submit::SendExternalSemaphore(companion.cuda_semaphore),
-                    value: ia,
-                });
-            }
+            ia_wait = ia_wait.max(shared.last_dx12_ia_fence.load(Ordering::Acquire));
+        }
+        if ia_wait > 0 {
+            companion
+                .cpu_wait(ia_wait)
+                .context("CUDA/DX12: wait IA fence before Shared buffer rewrite")?;
         }
         if !waits.is_empty() {
             waits.append(ops);
@@ -3163,6 +3189,11 @@ impl GpuBackend for CudaBackend {
             .devices
             .get(&context.device)
             .map(|device| Arc::clone(&device.submission_worker));
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let companion = self
+            .devices
+            .get(&context.device)
+            .and_then(|d| d.dx12.as_ref().map(Arc::clone));
         if let Some(device) = self.devices.get(&context.device) {
             let retire_fallback = submission_worker::submission_horizon(&device.next_timeline);
             let job = pending_submit::CudaEvictContextGraphs {
@@ -3180,7 +3211,9 @@ impl GpuBackend for CudaBackend {
             stream: Arc::clone(&context.stream),
             worker: worker.unwrap_or_else(|| Arc::new(SubmissionWorker::new(1))),
             fence_shutdown: Arc::clone(&context.fence_shutdown),
-            fence_thread,
+            fence_thread: Mutex::new(fence_thread),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            companion,
         }))
     }
 

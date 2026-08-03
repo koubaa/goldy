@@ -717,8 +717,12 @@ pub(crate) trait ContextDestroyHandle: Send {
 
 /// Drain GPU work then release resources for a detached context.
 pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
-    let _ = handle.wait();
-    let _ = handle.finish();
+    if let Err(e) = handle.wait() {
+        tracing::error!("context destroy wait failed: {e:#}");
+    }
+    if let Err(e) = handle.finish() {
+        tracing::error!("context destroy finish failed: {e:#}");
+    }
 }
 
 /// Like [`destroy_context`] for an already-unlocked concrete backend (tests, `destroy_device`).

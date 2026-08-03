@@ -554,3 +554,162 @@ fn cuda_surface_rejects_depth_config() {
         "unexpected error: {msg}"
     );
 }
+
+/// Escape-style teardown: destroy surface while context is still alive, then drop
+/// context before device (correct lifetimes). Also covers the reverse order that
+/// spinning_cube previously hit via App field layout (`ctx` before `surface`).
+#[test]
+fn cuda_teardown_surface_then_context_after_raster_present() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+    let Ok(window) = TestWindow::create(128, 128) else {
+        eprintln!("skip: CreateWindowExW failed");
+        return;
+    };
+    let surface = SurfaceExchange::new_with_depth(
+        &ctx,
+        &window,
+        3,
+        SurfaceConfig {
+            present_mode: PresentMode::Immediate,
+            depth_format: None,
+        },
+    )
+    .expect("surface create");
+    let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&red_triangle_vertices(), BufferKind::Scattered)
+        .expect("vertex buffer");
+
+    for _ in 0..30 {
+        let mut scheme = Scheme::new(&ctx);
+        let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
+        let (w, h) = surface.size();
+        let rt = scheme
+            .lease_render_target(w, h, TextureFormat::Rgba32Float, None)
+            .expect("render target");
+        {
+            let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+            pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.draw(0..3, 0..1);
+            pass.finish();
+        }
+        scheme.copy_to_present(&rt, &lease);
+        let mut submission = scheme.submit().expect("submit");
+        present_tx.claim(&mut submission).expect("claim").consume().expect("present");
+    }
+
+    // Correct order (surface while ctx alive).
+    drop(surface);
+    drop(window);
+    drop(vertex_buffer);
+    drop(pool);
+    drop(pipeline);
+    drop(shader);
+    drop(ctx);
+    drop(device);
+    drop(instance);
+}
+
+/// Former spinning_cube App field order: `ctx` dropped before `surface`. Must not
+/// leave destroy_surface failing with sticky CUDA_ERROR_NOT_SUPPORTED.
+#[test]
+fn cuda_teardown_context_before_surface_after_raster_present() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+    let Ok(window) = TestWindow::create(128, 128) else {
+        eprintln!("skip: CreateWindowExW failed");
+        return;
+    };
+    let surface = SurfaceExchange::new_with_depth(
+        &ctx,
+        &window,
+        3,
+        SurfaceConfig {
+            present_mode: PresentMode::Immediate,
+            depth_format: None,
+        },
+    )
+    .expect("surface create");
+    let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&red_triangle_vertices(), BufferKind::Scattered)
+        .expect("vertex buffer");
+
+    for _ in 0..30 {
+        let mut scheme = Scheme::new(&ctx);
+        let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
+        let (w, h) = surface.size();
+        let rt = scheme
+            .lease_render_target(w, h, TextureFormat::Rgba32Float, None)
+            .expect("render target");
+        {
+            let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+            pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.draw(0..3, 0..1);
+            pass.finish();
+        }
+        scheme.copy_to_present(&rt, &lease);
+        let mut submission = scheme.submit().expect("submit");
+        present_tx.claim(&mut submission).expect("claim").consume().expect("present");
+    }
+
+    // Intentional reverse order (ctx before surface) — backend must tolerate it.
+    drop(ctx);
+    drop(device);
+    drop(surface);
+    drop(window);
+    drop(instance);
+}
