@@ -447,9 +447,9 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
 
 #[test]
 fn cuda_deposit_refreshes_shared_vb_each_frame() {
-    // Spinning-cube style: CPU deposit into a VB every frame must DtoD-refresh the
-    // shared twin each time — including after the upload scheme retains and
-    // resubmits without rematerializing (content_epoch may not bump).
+    // Spinning-cube style: CPU deposit into a Shared-primary VB every frame.
+    // Retained upload ops replay without rematerializing; CUDA→DX12 handoff is the
+    // companion fence on the imported buffer (no twin DtoD).
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;

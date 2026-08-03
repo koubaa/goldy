@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 pub(super) struct CudaFormatInfo {
     pub array_format: sys::CUarray_format,
     pub num_channels: u32,
+    #[allow(dead_code)]
     pub bytes_per_pixel: u32,
     pub srgb: bool,
 }
@@ -248,13 +249,14 @@ unsafe impl Send for CudaArray {}
 unsafe impl Sync for CudaArray {}
 
 /// GPU texture resource: CUDA array + cached tex/surf objects.
-pub(super) struct CudaTextureResource {
+pub(crate) struct CudaTextureResource {
     pub(super) ctx: Arc<CudaContext>,
     array: Arc<CudaArray>,
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
     pub kind: TextureKind,
+    #[allow(dead_code)]
     pub flags: TextureFlags,
     /// Registry key for storage / Direct access (UAV-equivalent).
     pub storage_slot: Option<u32>,
@@ -353,6 +355,7 @@ impl CudaTextureResource {
         self.format.bytes_per_pixel()
     }
 
+    #[allow(dead_code)]
     pub(super) fn byte_size(&self) -> u64 {
         self.width as u64 * self.height as u64 * self.bytes_per_pixel() as u64
     }
@@ -559,6 +562,7 @@ pub(super) fn memcpy_dtod_array(
 }
 
 /// CUDA array → host download (tight destination).
+#[allow(dead_code)]
 pub(super) fn memcpy_dtoh_array(
     stream: &CudaStream,
     tex: &CudaTextureResource,

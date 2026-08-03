@@ -509,10 +509,11 @@ pub(super) fn create_render_target(
     Ok(handle)
 }
 
-/// Create / refresh the DX12-shareable twin of a native CUDA buffer for IA binding.
+/// Ensure VERTEX physicalization and return a companion fence DX12 must wait on
+/// before IA (0 = already coherent / host-synced).
 ///
-/// Returns the companion fence value to `queue.Wait` before drawing (0 if already
-/// coherent and no GPU copy was needed).
+/// - **Shared**: no DtoD; wait on `last_cuda_fence` from CUDA writes into the import.
+/// - **NativeAndTwin**: DtoD native→twin only when `content_epoch != shared_epoch`.
 fn refresh_shared_vertex_backing(
     backend: &mut CudaBackend,
     device: DeviceHandle,
@@ -520,102 +521,155 @@ fn refresh_shared_vertex_backing(
     stream: &Arc<cudarc::driver::CudaStream>,
 ) -> Result<u64> {
     use cudarc::driver::DevicePtr;
+    use super::buffer_phys::{CudaBufferReq, CudaPhysKind};
 
-    let needs_create = {
-        let buf = backend
-            .buffers
-            .get(&buffer)
-            .context("CUDA/DX12: invalid vertex buffer")?;
-        match &buf.shared {
-            None => true,
-            Some(shared) => shared.size < buf.capacity.max(4),
-        }
-    };
-    if needs_create {
-        let companion = Arc::clone(
-            backend
-                .devices
-                .get(&device)
-                .context("CUDA: invalid device")?
-                .dx12
-                .as_ref()
-                .context("CUDA/DX12: companion required for raster")?,
-        );
-        let cuda_ctx = Arc::clone(&backend.device(device)?.ctx);
-        let capacity = backend.buffers.get(&buffer).unwrap().capacity.max(4);
-        let backing = super::dx12_interop::create_shared_buffer_backing(
-            &companion,
-            &cuda_ctx,
-            stream,
-            capacity,
-        )?;
-        let old = backend.buffers.get_mut(&buffer).unwrap().shared.replace(Arc::new(backing));
-        if let Some(old) = old {
-            let fence = old.last_cuda_fence.load(Ordering::Acquire);
-            if fence > 0 {
-                let _ = companion.cpu_wait(fence);
+    backend.ensure_buffer_requirements(buffer, CudaBufferReq::VERTEX)?;
+
+    let phys_kind = backend
+        .buffers
+        .get(&buffer)
+        .context("CUDA/DX12: invalid vertex buffer")?
+        .phys_kind;
+
+    match phys_kind {
+        CudaPhysKind::Shared => {
+            let shared = Arc::clone(
+                backend
+                    .buffers
+                    .get(&buffer)
+                    .unwrap()
+                    .shared
+                    .as_ref()
+                    .context("CUDA/DX12: Shared VB missing backing")?,
+            );
+            // Deposit-only path: CUDA wrote the import without a companion Signal.
+            // Flush/sync so DX12 IA observes the bytes (avoids Signal/DX12 fence races).
+            if shared.pending_host_sync.swap(false, Ordering::AcqRel) {
+                let worker = Arc::clone(&backend.device(device)?.submission_worker);
+                worker
+                    .flush()
+                    .context("CUDA/DX12: flush before Shared VB host sync")?;
+                backend
+                    .graph_stats
+                    .worker_flushes
+                    .fetch_add(1, Ordering::Relaxed);
+                for context in backend.contexts.values().filter(|context| context.device == device) {
+                    context
+                        .stream
+                        .synchronize()
+                        .context("CUDA/DX12: sync context stream before Shared VB bind")?;
+                }
             }
-            drop(old);
+            backend
+                .graph_stats
+                .shared_vb_binds
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(shared.last_cuda_fence.load(Ordering::Acquire))
         }
-        // Force a refresh copy below.
-        backend.buffers.get_mut(&buffer).unwrap().shared_epoch = u64::MAX;
+        CudaPhysKind::NativeAndTwin => {
+            let needs_create = {
+                let buf = backend.buffers.get(&buffer).unwrap();
+                match &buf.shared {
+                    None => true,
+                    Some(shared) => shared.size < buf.capacity.max(4),
+                }
+            };
+            if needs_create {
+                let companion = Arc::clone(
+                    backend
+                        .devices
+                        .get(&device)
+                        .context("CUDA: invalid device")?
+                        .dx12
+                        .as_ref()
+                        .context("CUDA/DX12: companion required for raster")?,
+                );
+                let cuda_ctx = Arc::clone(&backend.device(device)?.ctx);
+                let capacity = backend.buffers.get(&buffer).unwrap().capacity.max(4);
+                let backing = super::dx12_interop::create_shared_buffer_backing(
+                    &companion,
+                    &cuda_ctx,
+                    stream,
+                    capacity,
+                )?;
+                let old = backend
+                    .buffers
+                    .get_mut(&buffer)
+                    .unwrap()
+                    .shared
+                    .replace(Arc::new(backing));
+                if let Some(old) = old {
+                    let fence = old.last_cuda_fence.load(Ordering::Acquire);
+                    if fence > 0 {
+                        let _ = companion.cpu_wait(fence);
+                    }
+                    drop(old);
+                }
+                backend.buffers.get_mut(&buffer).unwrap().shared_epoch = u64::MAX;
+            }
+
+            let (content_epoch, shared_epoch, offset, size, memory, shared) = {
+                let buf = backend.buffers.get(&buffer).unwrap();
+                (
+                    buf.content_epoch,
+                    buf.shared_epoch,
+                    buf.offset,
+                    buf.size,
+                    Arc::clone(buf.memory_arc()?),
+                    Arc::clone(buf.shared.as_ref().unwrap()),
+                )
+            };
+
+            if size == 0 {
+                backend.buffers.get_mut(&buffer).unwrap().shared_epoch = content_epoch;
+                return Ok(0);
+            }
+
+            if content_epoch == shared_epoch {
+                // Twin already matches native; still Wait if a prior DtoD fence is pending.
+                return Ok(shared.last_cuda_fence.load(Ordering::Acquire));
+            }
+
+            let nbytes = size as usize;
+            let src_ptr = {
+                let guard = memory.lock().unwrap();
+                let view = guard
+                    .try_slice(offset as usize..(offset as usize + nbytes))
+                    .context("CUDA/DX12: VB source view")?;
+                let (ptr, _sync) = view.device_ptr(stream);
+                ptr
+            };
+            let dst_ptr = shared.import.device_ptr;
+            unsafe {
+                cudarc::driver::result::memcpy_dtod_async(
+                    dst_ptr,
+                    src_ptr,
+                    nbytes,
+                    stream.cu_stream(),
+                )
+            }
+            .context("CUDA/DX12: DtoD refresh into shared VB failed")?;
+
+            let companion = companion(backend, device)?;
+            let value = companion.next_fence_value();
+            super::dx12_companion::cuda_signal_fence(
+                &companion.cuda_ctx,
+                companion.cuda_semaphore,
+                stream.cu_stream(),
+                value,
+            )?;
+            shared.last_cuda_fence.store(value, Ordering::Release);
+            backend.buffers.get_mut(&buffer).unwrap().shared_epoch = content_epoch;
+            backend
+                .graph_stats
+                .shared_vb_binds
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(value)
+        }
+        other => bail!(
+            "CUDA/DX12: vertex buffer phys_kind={other:?} after VERTEX ensure (expected Shared or NativeAndTwin)"
+        ),
     }
-
-    let (content_epoch, offset, size, memory, shared) = {
-        let buf = backend.buffers.get(&buffer).unwrap();
-        (
-            buf.content_epoch,
-            buf.offset,
-            buf.size,
-            Arc::clone(&buf.memory),
-            Arc::clone(buf.shared.as_ref().unwrap()),
-        )
-    };
-
-    if size == 0 {
-        backend.buffers.get_mut(&buffer).unwrap().shared_epoch = content_epoch;
-        return Ok(0);
-    }
-
-    // Device-to-device refresh: native CUDA allocation → imported DX12 twin.
-    // Always copy: retained deposit/copy submits replay without rematerializing, so
-    // `content_epoch` may stay unchanged while native bytes move every frame
-    // (spinning_cube / waveform / digital_clock). Skipping here freezes the mesh.
-    let nbytes = size as usize;
-    let src_ptr = {
-        let guard = memory.lock().unwrap();
-        let view = guard
-            .try_slice(offset as usize..(offset as usize + nbytes))
-            .context("CUDA/DX12: VB source view")?;
-        let (ptr, _sync) = view.device_ptr(stream);
-        ptr
-    };
-    let dst_ptr = shared.import.device_ptr;
-    unsafe {
-        cudarc::driver::result::memcpy_dtod_async(
-            dst_ptr,
-            src_ptr,
-            nbytes,
-            stream.cu_stream(),
-        )
-    }
-    .context("CUDA/DX12: DtoD refresh into shared VB failed")?;
-
-    let companion = companion(backend, device)?;
-    let value = companion.next_fence_value();
-    super::dx12_companion::cuda_signal_fence(
-        &companion.cuda_ctx,
-        companion.cuda_semaphore,
-        stream.cu_stream(),
-        value,
-    )?;
-    shared.last_cuda_fence.store(value, Ordering::Release);
-    backend.buffers.get_mut(&buffer).unwrap().shared_epoch = content_epoch;
-    backend
-        .graph_stats
-        .shared_vb_binds
-        .fetch_add(1, Ordering::Relaxed);
-    Ok(value)
 }
 
 pub(super) fn render_to_target(
@@ -648,18 +702,31 @@ pub(super) fn render_to_target(
     };
     let fingerprint = raster_fingerprint(backend, target, color_load, commands)?;
 
-    // Ensure shareable DX12 twins exist and are DtoD-refreshed from native CUDA storage
-    // (kernels cannot write imported external buffer pointers on this driver stack).
-    // Prior deposit/copy submits may still be in flight on context streams — flush/sync
-    // before DtoD whenever a VB already has a twin (or will refresh after create).
-    let needs_vb_sync = commands.iter().any(|command| {
-        matches!(command, RenderCommand::SetVertexBuffer { .. })
+    use super::buffer_phys::{CudaBufferReq, CudaPhysKind};
+
+    // Pre-declare VERTEX so deposit→Shared can win before any provisional Native sticks
+    // (combined compute+render graphs call this after the compute batch already ran).
+    let mut vb_handles = Vec::new();
+    for command in commands {
+        if let RenderCommand::SetVertexBuffer { buffer, .. } = command {
+            backend.ensure_buffer_requirements(*buffer, CudaBufferReq::VERTEX)?;
+            if !vb_handles.contains(buffer) {
+                vb_handles.push(*buffer);
+            }
+        }
+    }
+
+    // Flush/sync only when a twin DtoD must observe in-flight native CUDA writes.
+    let needs_twin_sync = vb_handles.iter().any(|handle| {
+        backend.buffers.get(handle).is_some_and(|buf| {
+            buf.phys_kind == CudaPhysKind::NativeAndTwin && buf.content_epoch != buf.shared_epoch
+        })
     });
-    if needs_vb_sync {
+    if needs_twin_sync {
         let worker = Arc::clone(&backend.device(device)?.submission_worker);
         worker
             .flush()
-            .context("CUDA/DX12: flush before shared VB refresh")?;
+            .context("CUDA/DX12: flush before twin VB refresh")?;
         backend
             .graph_stats
             .worker_flushes
@@ -668,17 +735,15 @@ pub(super) fn render_to_target(
             context
                 .stream
                 .synchronize()
-                .context("CUDA/DX12: sync context stream before shared VB refresh")?;
+                .context("CUDA/DX12: sync context stream before twin VB refresh")?;
         }
     }
 
     let alloc_stream = Arc::clone(&backend.device(device)?.alloc_stream);
     let mut vb_wait = 0u64;
-    for command in commands {
-        if let RenderCommand::SetVertexBuffer { buffer, .. } = command {
-            let fence = refresh_shared_vertex_backing(backend, device, *buffer, &alloc_stream)?;
-            vb_wait = vb_wait.max(fence);
-        }
+    for handle in &vb_handles {
+        let fence = refresh_shared_vertex_backing(backend, device, *handle, &alloc_stream)?;
+        vb_wait = vb_wait.max(fence);
     }
     if vb_wait > 0 {
         companion.wait_queue(vb_wait)?;
@@ -691,6 +756,17 @@ pub(super) fn render_to_target(
     {
         if let Some(signal) = companion.try_reuse_raster_for_fingerprint(fingerprint)? {
             backend.render_targets.get_mut(&target).unwrap().last_dx12_fence = signal;
+            for handle in &vb_handles {
+                if let Some(shared) = backend
+                    .buffers
+                    .get(handle)
+                    .and_then(|buf| buf.shared.as_ref())
+                {
+                    shared
+                        .last_dx12_ia_fence
+                        .fetch_max(signal, Ordering::AcqRel);
+                }
+            }
             return Ok(());
         }
     }
@@ -826,6 +902,18 @@ pub(super) fn render_to_target(
         .fetch_add(1, Ordering::Relaxed);
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
+    }
+    // CUDA must not rewrite Shared-primary VBs until this IA draw retires.
+    for handle in &vb_handles {
+        if let Some(shared) = backend
+            .buffers
+            .get(handle)
+            .and_then(|buf| buf.shared.as_ref())
+        {
+            shared
+                .last_dx12_ia_fence
+                .fetch_max(signal, Ordering::AcqRel);
+        }
     }
     backend
         .raster_list_cache

@@ -180,7 +180,13 @@ pub(crate) struct SharedBufferBacking {
     pub d3d12_resource: ID3D12Resource,
     pub size: u64,
     /// Companion fence value signaled after the latest CUDA write to this buffer.
+    /// Only set when the write shared a submit with scratch present (async handoff).
     pub last_cuda_fence: std::sync::atomic::AtomicU64,
+    /// Companion fence value after the latest DX12 IA draw that read this buffer.
+    /// CUDA must Wait this before rewriting Shared-primary memory.
+    pub last_dx12_ia_fence: std::sync::atomic::AtomicU64,
+    /// Deposit-only Shared writes: raster must flush/sync CUDA before IA (no fence Signal).
+    pub pending_host_sync: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: COM + CUDA handles used under Goldy's backend lock / submission worker.
@@ -250,6 +256,8 @@ pub(super) fn create_shared_buffer_backing(
         d3d12_resource,
         size,
         last_cuda_fence: std::sync::atomic::AtomicU64::new(0),
+        last_dx12_ia_fence: std::sync::atomic::AtomicU64::new(0),
+        pending_host_sync: std::sync::atomic::AtomicBool::new(false),
     })
 }
 

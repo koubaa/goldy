@@ -203,6 +203,13 @@ pub mod test_support {
         })
     }
 
+    /// CUDA late-physicalization kind for a buffer parcel (`deferred`/`native`/`shared`/`native_and_twin`).
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub fn cuda_buffer_phys_kind(device: &Device, parcel: &crate::Parcel) -> Option<&'static str> {
+        let handle = parcel.buffer_handle()?;
+        device.cuda_buffer_phys_kind_for_test(handle)
+    }
+
     /// Count buffer entries in the first recorded `ResourceBarrier` on the mock backend.
     pub fn mock_barrier_buffer_count(device: &Device) -> usize {
         use crate::backend::GpuCommand;

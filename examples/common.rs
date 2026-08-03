@@ -5,11 +5,13 @@ use std::time::{Duration, Instant};
 use winit::event_loop::ActiveEventLoop;
 
 /// Rolling frame timestamps for windowed FPS (e.g. last 5s at exit).
+#[allow(dead_code)]
 pub struct FpsWindow {
     window: Duration,
     frames: Vec<Instant>,
 }
 
+#[allow(dead_code)]
 impl FpsWindow {
     pub fn new(window_secs: f64) -> Self {
         Self {

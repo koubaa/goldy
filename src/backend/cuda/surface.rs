@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 /// `HANDLE` is a raw pointer; DXGI waitables are process-local and only touched
 /// from Goldy's backend lock / present path.
 #[derive(Clone, Copy)]
-struct SendSyncHandle(HANDLE);
+pub(super) struct SendSyncHandle(HANDLE);
 // SAFETY: see comment on type.
 unsafe impl Send for SendSyncHandle {}
 unsafe impl Sync for SendSyncHandle {}
@@ -478,7 +478,7 @@ fn evict_retained_touching_scratch(
 
     let touches = |entry: &super::RetainedEntry| -> bool {
         match entry {
-            super::RetainedEntry::Graph { scratch_images }
+            super::RetainedEntry::Graph { scratch_images, .. }
             | super::RetainedEntry::GraphWithTail { scratch_images, .. } => {
                 scratch_images.iter().any(|(surface, image)| {
                     backend

@@ -150,6 +150,7 @@ pub(super) fn advance_device_retired(ledger: &EventLedger, device_retired: &Atom
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn lookup_event(ledger: &EventLedger, context: ContextHandle, value: u64) -> Option<Arc<CudaEvent>> {
     let guard = ledger.lock().unwrap();
     guard.get(&value).and_then(|entry| {
