@@ -31,7 +31,7 @@ bitflags! {
     pub struct CudaBufferReq: u8 {
         /// Bound to a compute launch (kernel may read/write).
         const KERNEL = 1 << 0;
-        /// Bound as a graphics vertex buffer (DX12 IA).
+        /// Bound as a graphics IA buffer (vertex or index; DX12 GPU VA).
         const VERTEX = 1 << 1;
         /// Host `write_buffer` / pending init bytes.
         const HOST_WRITE = 1 << 2;
@@ -491,13 +491,16 @@ impl CudaBackend {
             .dx12
             .as_ref()
             .context("CUDA/DX12: companion required for bindless descriptor")?;
-        let num_elements = (size.max(4) / u64::from(stride.max(1))) as u32;
+        let view_stride = stride.max(4);
+        // NumElements must not imply a view larger than the resource (D3D12 removes the
+        // device / drops draws). Use the view stride, not the logical element stride.
+        let num_elements = (size / u64::from(view_stride)).max(1) as u32;
         companion.bindless.write_buffer_srv(
             &companion.device,
             slot,
             &shared.d3d12_resource,
-            num_elements.max(1),
-            stride.max(4),
+            num_elements,
+            view_stride,
         )?;
         Ok(())
     }

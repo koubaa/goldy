@@ -1,15 +1,16 @@
 //! CUDA + DX12 first-slice raster tests (Windows).
 //!
-//! Covers offscreen TriangleList draws into shared `Rgba32Float` render targets,
-//! CopyRenderTarget → CUDA texture readback, and render → present.
+//! Covers offscreen TriangleList draws (indexed and non-indexed) into shared
+//! `Rgba32Float` render targets, CopyRenderTarget → CUDA texture readback, and
+//! render → present.
 
 #![cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, PresentMode,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler,
-    SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad,
+    BufferKind, Color, ComputePipeline, DeviceDescriptor, IndexFormat, Instance, MemoryExchange, NodeAccess,
+    PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool,
+    Sampler, SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad,
     TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
@@ -240,6 +241,97 @@ fn cuda_raster_triangle_readback() {
 }
 
 #[test]
+fn cuda_raster_indexed_triangle_readback() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    assert_eq!(device.backend_type(), BackendType::Cuda);
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertices = red_triangle_vertices();
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+    let indices: [u16; 3] = [0, 1, 2];
+    let index_buffer = pool
+        .acquire_buffer_with_data(&indices, BufferKind::Scattered)
+        .expect("index buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+        // Index buffers are IA geometry, not push-constant slots.
+        pass.with_buffer_dependency(&index_buffer, goldy::NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
+        pass.draw_indexed(0..3, 0, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    assert_eq!(pixels.len(), 64 * 64 * 16);
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r > 0.5 && g < 0.25 && b < 0.25,
+        "expected red indexed triangle pixel at ({x},{y}), got ({r},{g},{b})"
+    );
+}
+
+#[test]
 fn cuda_raster_to_present_multi_frame() {
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
@@ -443,6 +535,122 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
     assert!(
         after.shared_vb_binds > before.shared_vb_binds,
         "expected shared VB refresh/bind"
+    );
+}
+
+const FILL_INDICES_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> indices, ThreadId id) {
+    indices[0] = 0;
+    indices[1] = 1;
+    indices[2] = 2;
+}
+"#;
+
+#[test]
+fn cuda_compute_generated_indices_raster() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let vs_fs = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("graphics shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &vs_fs,
+        &vs_fs,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let cs = ShaderModule::from_slang(&device, FILL_INDICES_SHADER).expect("compute shader");
+    let compute = ComputePipeline::new(&device, &cs).expect("compute pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertices = red_triangle_vertices();
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+    let index_buffer = pool
+        .acquire_buffer_sized::<u32>(3, BufferKind::Scattered, goldy::BufferFlags::empty())
+        .expect("index buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let before = device.cuda_path_stats_for_test().expect("stats");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("gen_indices", &compute)
+        .with_parcel(&index_buffer, goldy::NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+        pass.with_buffer_dependency(&index_buffer, goldy::NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.set_index_buffer(&index_buffer, IndexFormat::Uint32);
+        pass.draw_indexed(0..3, 0, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    assert_eq!(pixels.len(), 64 * 64 * 16);
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r > 0.5 && g < 0.25 && b < 0.25,
+        "expected red triangle from compute-generated indices at ({x},{y}), got ({r},{g},{b})"
+    );
+
+    let after = device.cuda_path_stats_for_test().expect("stats");
+    // Texture withdraw uses DtoH for pixel readback; IA path must not.
+    assert!(
+        after.shared_vb_binds > before.shared_vb_binds,
+        "expected shared IA refresh/bind for compute-generated indices"
     );
 }
 

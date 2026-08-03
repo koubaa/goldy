@@ -3,12 +3,12 @@
 //! With `cuda` + `graphics` + `dx12` on Windows, presentation and a first-slice
 //! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
 //! textures and DX12 presents them; offscreen `Rgba32Float` render targets and
-//! non-indexed graphics pipelines (point/line/triangle list+strip) are also
-//! supported. Buffer handles are late-physicalized: acquire reserves identity
+//! indexed / non-indexed graphics pipelines (point/line/triangle list+strip) are
+//! also supported. Buffer handles are late-physicalized: acquire reserves identity
 //! only; scheme usage chooses Shared (deposit→IA), Native (compute), or
 //! NativeAndTwin (compute→IA). Bindless render bindings use the companion's
-//! SM 6.6 descriptor heaps with CUDA registry slots as DX12 indices. Depth and
-//! indexed draws remain unsupported in this slice.
+//! SM 6.6 descriptor heaps with CUDA registry slots as DX12 indices. Depth remains
+//! unsupported in this slice.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -2396,7 +2396,7 @@ impl CudaBackend {
                 } => {
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     {
-                        // Pre-declare VERTEX for deposit-only VBs so Copy lands Shared.
+                        // Pre-declare VERTEX for deposit-only VBs/IBs so Copy lands Shared.
                         // If the batch has a dispatch, skip — KERNEL+VERTEX must materialize
                         // Native (then twin) without a Shared→NativeAndTwin promote mid-submit.
                         let batch_has_dispatch = batch.iter().any(|c| {
@@ -2409,25 +2409,31 @@ impl CudaBackend {
                         });
                         if !batch_has_dispatch {
                             for render in render_cmds.iter() {
-                                if let RenderCommand::SetVertexBuffer { buffer, .. } = render {
-                                    self.ensure_buffer_requirements(
-                                        *buffer,
-                                        buffer_phys::CudaBufferReq::VERTEX,
-                                    )?;
+                                match render {
+                                    RenderCommand::SetVertexBuffer { buffer, .. }
+                                    | RenderCommand::SetIndexBuffer { buffer, .. } => {
+                                        self.ensure_buffer_requirements(
+                                            *buffer,
+                                            buffer_phys::CudaBufferReq::VERTEX,
+                                        )?;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                         if !batch.is_empty() {
-                            let written_vertex_buffer = render_cmds.iter().any(|render| {
-                                let RenderCommand::SetVertexBuffer { buffer, .. } = render else {
-                                    return false;
+                            let written_ia_buffer = render_cmds.iter().any(|render| {
+                                let buffer = match render {
+                                    RenderCommand::SetVertexBuffer { buffer, .. }
+                                    | RenderCommand::SetIndexBuffer { buffer, .. } => buffer,
+                                    _ => return false,
                                 };
                                 batch.iter().any(|compute| match compute {
                                     GpuCommand::ClearBuffer { buffer: dst, .. }
                                     | GpuCommand::WriteBuffer { buffer: dst, .. } => dst == buffer,
                                     GpuCommand::CopyBuffer { dst, .. } => dst == buffer,
-                                    // Conservatively sync when any dispatch precedes a VB draw —
-                                    // the dispatch may have written the VB through bindless indices.
+                                    // Conservatively sync when any dispatch precedes an IA draw —
+                                    // the dispatch may have written VB/IB through bindless indices.
                                     GpuCommand::Dispatch { .. }
                                     | GpuCommand::DispatchIndirect { .. } => true,
                                     _ => false,
@@ -2439,23 +2445,26 @@ impl CudaBackend {
                                 _ => None,
                             });
                             last_tv = self.submit_commands(ctx, &batch, sync)?;
-                            if written_vertex_buffer {
-                                // Compute may have rewritten native VB storage without a
+                            if written_ia_buffer {
+                                // Compute may have rewritten native IA storage without a
                                 // WriteBuffer op; invalidate shared twins so raster DtoDs.
                                 for render in render_cmds.iter() {
-                                    if let RenderCommand::SetVertexBuffer { buffer, .. } = render {
-                                        if let Some(buf) = self.buffers.get_mut(buffer) {
-                                            if buf.phys_kind
-                                                == buffer_phys::CudaPhysKind::NativeAndTwin
-                                            {
-                                                buf.bump_content_epoch();
-                                            }
+                                    let buffer = match render {
+                                        RenderCommand::SetVertexBuffer { buffer, .. }
+                                        | RenderCommand::SetIndexBuffer { buffer, .. } => buffer,
+                                        _ => continue,
+                                    };
+                                    if let Some(buf) = self.buffers.get_mut(buffer) {
+                                        if buf.phys_kind == buffer_phys::CudaPhysKind::NativeAndTwin {
+                                            buf.bump_content_epoch();
                                         }
                                     }
                                 }
                                 let needs_twin_sync = render_cmds.iter().any(|render| {
-                                    let RenderCommand::SetVertexBuffer { buffer, .. } = render else {
-                                        return false;
+                                    let buffer = match render {
+                                        RenderCommand::SetVertexBuffer { buffer, .. }
+                                        | RenderCommand::SetIndexBuffer { buffer, .. } => buffer,
+                                        _ => return false,
                                     };
                                     self.buffers.get(buffer).is_some_and(|buf| {
                                         buf.phys_kind == buffer_phys::CudaPhysKind::NativeAndTwin

@@ -3,13 +3,13 @@
 //! Scope:
 //! - Windows + `cuda` + `graphics` + `dx12`
 //! - Color-only [`TextureFormat::Rgba32Float`] render targets
-//! - Non-indexed draws (`PointList` / `LineList` / `LineStrip` / `TriangleList` /
-//!   `TriangleStrip`)
+//! - Indexed and non-indexed draws (`PointList` / `LineList` / `LineStrip` /
+//!   `TriangleList` / `TriangleStrip`)
 //! - Bindless render resources via companion SM 6.6 heaps (CUDA registry slot =
-//!   DX12 descriptor index); no depth / indexed draws yet
+//!   DX12 descriptor index); no depth yet
 //!
-//! Vertex buffers stay on native CUDA allocations for compute. A shareable D3D12
-//! twin is created lazily for IA; contents are refreshed with a device-to-device
+//! Vertex / index buffers stay on native CUDA allocations for compute. A shareable
+//! D3D12 twin is created lazily for IA; contents are refreshed with a device-to-device
 //! copy (no host DtoH) before draws. Kernel writes directly into imported
 //! `cuExternalMemoryGetMappedBuffer` pointers currently fault
 //! (`CUDA_ERROR_ILLEGAL_ADDRESS`) on this driver stack. Render-target color is a
@@ -26,8 +26,8 @@ use crate::backend::shared::{fill_frame_table_dispatch, set_frame_table_slots, P
 use crate::backend::{BufferHandle, DeviceHandle, PipelineHandle, RenderCommand, RenderTargetHandle, TextureHandle};
 use crate::frame_table::FrameTableStaging;
 use crate::types::{
-    BindlessSlotKind, PrimitiveTopology, ResourceCategory, TargetLoad, TextureFlags, TextureFormat, TextureKind,
-    VertexBufferLayout, VertexFormat,
+    BindlessSlotKind, IndexFormat, PrimitiveTopology, ResourceCategory, TargetLoad, TextureFlags, TextureFormat,
+    TextureKind, VertexBufferLayout, VertexFormat,
 };
 use anyhow::{bail, Context as _, Result};
 use std::hash::{Hash, Hasher};
@@ -147,9 +147,15 @@ fn raster_fingerprint(
                 first_instance.hash(&mut hash);
             }
             RenderCommand::ClearDepth(depth) => depth.to_bits().hash(&mut hash),
-            RenderCommand::SetIndexBuffer { buffer, offset, .. } => {
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                let cuda_buf = backend
+                    .buffers
+                    .get(buffer)
+                    .context("CUDA/DX12: invalid index buffer")?;
                 buffer.hash(&mut hash);
                 offset.hash(&mut hash);
+                format.hash(&mut hash);
+                cuda_buf.content_epoch.hash(&mut hash);
             }
             RenderCommand::DrawIndexed {
                 index_count,
@@ -217,6 +223,13 @@ fn vertex_format_to_dxgi(format: VertexFormat) -> DXGI_FORMAT {
         VertexFormat::Sint32 => DXGI_FORMAT_R32_SINT,
         VertexFormat::Uint8x4 => DXGI_FORMAT_R8G8B8A8_UINT,
         VertexFormat::Unorm8x4 => DXGI_FORMAT_R8G8B8A8_UNORM,
+    }
+}
+
+fn index_format_to_dxgi(format: IndexFormat) -> DXGI_FORMAT {
+    match format {
+        IndexFormat::Uint16 => DXGI_FORMAT_R16_UINT,
+        IndexFormat::Uint32 => DXGI_FORMAT_R32_UINT,
     }
 }
 
@@ -775,14 +788,15 @@ pub(super) fn render_to_target(
         prepare_cuda_render_commands(backend, commands, graph_staging)?;
 
     // Pre-declare VERTEX / SHADER so deposit→Shared can win before provisional Native sticks.
-    let mut vb_handles = Vec::new();
+    let mut ia_handles = Vec::new();
     let mut shader_buffers = Vec::new();
     for command in &lowered {
         match command {
-            RenderCommand::SetVertexBuffer { buffer, .. } => {
+            RenderCommand::SetVertexBuffer { buffer, .. }
+            | RenderCommand::SetIndexBuffer { buffer, .. } => {
                 backend.ensure_buffer_requirements(*buffer, CudaBufferReq::VERTEX)?;
-                if !vb_handles.contains(buffer) {
-                    vb_handles.push(*buffer);
+                if !ia_handles.contains(buffer) {
+                    ia_handles.push(*buffer);
                 }
             }
             RenderCommand::BindResourcesRaw {
@@ -825,8 +839,8 @@ pub(super) fn render_to_target(
 
     let fingerprint = raster_fingerprint(backend, target, color_load, &lowered, &staging_data)?;
 
-    // Flush/sync when twin DtoD must observe in-flight native CUDA writes (VB or shader).
-    let needs_twin_sync = vb_handles.iter().chain(shader_buffers.iter()).any(|handle| {
+    // Flush/sync when twin DtoD must observe in-flight native CUDA writes (IA or shader).
+    let needs_twin_sync = ia_handles.iter().chain(shader_buffers.iter()).any(|handle| {
         backend.buffers.get(handle).is_some_and(|buf| {
             buf.phys_kind == CudaPhysKind::NativeAndTwin && buf.content_epoch != buf.shared_epoch
         })
@@ -851,7 +865,7 @@ pub(super) fn render_to_target(
     let alloc_stream = Arc::clone(&backend.device(device)?.alloc_stream);
     let mut vb_wait = 0u64;
     let mut any_shared = false;
-    for handle in vb_handles.iter().chain(shader_buffers.iter()) {
+    for handle in ia_handles.iter().chain(shader_buffers.iter()) {
         if backend
             .buffers
             .get(handle)
@@ -880,7 +894,7 @@ pub(super) fn render_to_target(
     {
         if let Some(signal) = companion.try_reuse_raster_for_fingerprint(fingerprint)? {
             backend.render_targets.get_mut(&target).unwrap().last_dx12_fence = signal;
-            for handle in vb_handles.iter().chain(shader_buffers.iter()) {
+            for handle in ia_handles.iter().chain(shader_buffers.iter()) {
                 if let Some(shared) = backend.buffers.get(handle).and_then(|buf| buf.shared.as_ref()) {
                     shared.last_dx12_ia_fence.fetch_max(signal, Ordering::AcqRel);
                 }
@@ -993,8 +1007,27 @@ pub(super) fn render_to_target(
                 };
                 unsafe { list.IASetVertexBuffers(*slot, Some(&[view])) };
             }
-            RenderCommand::SetIndexBuffer { .. } => {
-                bail!("CUDA/DX12 raster: indexed draws are not supported in the first slice");
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                let cuda_buf = backend
+                    .buffers
+                    .get(buffer)
+                    .context("CUDA/DX12: invalid index buffer")?;
+                if *offset >= cuda_buf.size {
+                    bail!("CUDA/DX12: index buffer offset out of range");
+                }
+                let shared = cuda_buf
+                    .shared
+                    .as_ref()
+                    .context("CUDA/DX12: index buffer missing shared backing")?;
+                let abs_offset = cuda_buf.offset + offset;
+                let nbytes = (cuda_buf.size - offset) as u32;
+                let gpu_va = unsafe { shared.d3d12_resource.GetGPUVirtualAddress() } + abs_offset;
+                let view = D3D12_INDEX_BUFFER_VIEW {
+                    BufferLocation: gpu_va,
+                    SizeInBytes: nbytes,
+                    Format: index_format_to_dxgi(*format),
+                };
+                unsafe { list.IASetIndexBuffer(Some(&view)) };
             }
             RenderCommand::BindResources { .. } | RenderCommand::BindResourcesTyped { .. } => {
                 bail!("CUDA/DX12 raster: BindResources must be lowered before record");
@@ -1056,8 +1089,23 @@ pub(super) fn render_to_target(
                     list.DrawInstanced(*vertex_count, *instance_count, *first_vertex, *first_instance);
                 }
             }
-            RenderCommand::DrawIndexed { .. } => {
-                bail!("CUDA/DX12 raster: DrawIndexed is not supported in the first slice");
+            RenderCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => {
+                let _ = current_topology;
+                unsafe {
+                    list.DrawIndexedInstanced(
+                        *index_count,
+                        *instance_count,
+                        *first_index,
+                        *base_vertex,
+                        *first_instance,
+                    );
+                }
             }
         }
     }
@@ -1081,7 +1129,7 @@ pub(super) fn render_to_target(
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
     }
-    for handle in vb_handles.iter().chain(shader_buffers.iter()) {
+    for handle in ia_handles.iter().chain(shader_buffers.iter()) {
         if let Some(shared) = backend.buffers.get(handle).and_then(|buf| buf.shared.as_ref()) {
             shared.last_dx12_ia_fence.fetch_max(signal, Ordering::AcqRel);
         }
