@@ -1280,6 +1280,12 @@ pub(crate) trait GpuBackend:
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
+    /// Destroy a render target created by [`Self::create_render_target_with_depth`].
+    ///
+    /// Must free backend GPU resources and recycle descriptor-heap slots (DX12 RTV/DSV).
+    /// Omitting this leaks slots until the heap overflows and the driver AVs.
+    #[cfg(feature = "graphics")]
+    fn destroy_render_target(&mut self, target: RenderTargetHandle);
     #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,

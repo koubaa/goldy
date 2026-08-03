@@ -201,6 +201,36 @@ pub(super) fn create_with_depth(
     Ok(handle)
 }
 
+/// Destroy a Vulkan offscreen render target and free its GPU resources.
+pub(super) fn destroy(
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
+    render_targets: &SharedRenderTargetTable,
+    target: RenderTargetHandle,
+) {
+    let Some(rt) = render_targets.write().unwrap().entries.remove(&target) else {
+        return;
+    };
+    let Some(logical_device) = devices.get(&rt.device_handle) else {
+        return;
+    };
+    unsafe {
+        logical_device.device.destroy_image_view(rt.image_view, None);
+        logical_device.device.destroy_image(rt.image, None);
+        logical_device.device.free_memory(rt.image_memory, None);
+        if let Some(depth_view) = rt.depth_view {
+            logical_device.device.destroy_image_view(depth_view, None);
+        }
+        if let Some(depth_image) = rt.depth_image {
+            logical_device.device.destroy_image(depth_image, None);
+        }
+        if let Some(depth_memory) = rt.depth_memory {
+            logical_device.device.free_memory(depth_memory, None);
+        }
+        // Command buffers acquired from the device pool are recycled with the device;
+        // do not free individually here (matches device-teardown behavior).
+    }
+}
+
 /// dynamic rendering, draw commands, and the post-render barrier
 /// (COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL) into `cmd`.
 /// Does NOT begin/end the command buffer and does NOT submit.

@@ -78,7 +78,7 @@ fn main() {
         &out_dir.join("depth_occlusion.png"),
         64,
         64,
-        &scheme_render_depth_occlusion(&device, 64, 64),
+        &scheme_render_depth_occlusion(&device, 64, 64).expect("depth occlusion (not supported on CUDA)"),
     );
 
     println!("Updated PNGs in {}", out_dir.display());

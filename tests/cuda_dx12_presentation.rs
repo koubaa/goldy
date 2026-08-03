@@ -17,12 +17,17 @@ use raw_window_handle::{
     Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
 };
 use std::num::NonZeroIsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
 };
+
+/// CUDA+DX12 companion / DXGI present is not safe to run concurrently in-process:
+/// parallel `request_device` + present against the same adapter deadlocks (observed as
+/// `cuda_compute_to_present_multi_frame` hanging under the default libtest thread pool).
+static CUDA_DX12_PRESENT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn try_cuda_instance() -> Option<Instance> {
     // SAFETY: test process; GOLDY_BACKEND is read during Instance::new.
@@ -100,6 +105,9 @@ void cs_main(DirectSpatial<float4> output, ThreadId tid) {
 
 #[test]
 fn cuda_device_attaches_dx12_companion_or_skips() {
+    let _guard = CUDA_DX12_PRESENT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -118,6 +126,9 @@ fn cuda_device_attaches_dx12_companion_or_skips() {
 
 #[test]
 fn cuda_compute_to_present_multi_frame() {
+    let _guard = CUDA_DX12_PRESENT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;

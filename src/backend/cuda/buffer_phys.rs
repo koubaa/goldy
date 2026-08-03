@@ -104,6 +104,17 @@ impl CudaBackend {
         if req.is_empty() {
             return Ok(());
         }
+        // Views share the parent allocation — materialize the parent, then refresh the view.
+        if let Some(parent) = self.buffers.get(&buffer).and_then(|b| b.parent) {
+            self.fold_view_pending_into_parent(buffer)?;
+            self.ensure_buffer_requirements(parent, req)?;
+            self.sync_view_from_parent(buffer, parent)?;
+            // Mirror requirements on the view for diagnostics / later ensure short-circuit.
+            if let Some(buf) = self.buffers.get_mut(&buffer) {
+                buf.requirements |= req;
+            }
+            return Ok(());
+        }
         let (_device, old_req, old_kind, capacity) = {
             let buf = self
                 .buffers
@@ -140,6 +151,73 @@ impl CudaBackend {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Move a view's staged host bytes into the parent's pending_init (absolute offset).
+    fn fold_view_pending_into_parent(&mut self, view: BufferHandle) -> Result<()> {
+        let (parent, abs_off, pending, view_size) = {
+            let v = self
+                .buffers
+                .get_mut(&view)
+                .context("CUDA: fold pending: invalid view")?;
+            let parent = v.parent.context("CUDA: fold pending: not a view")?;
+            (parent, v.offset, v.pending_init.take(), v.size)
+        };
+        let Some(data) = pending else {
+            return Ok(());
+        };
+        let parent_buf = self
+            .buffers
+            .get_mut(&parent)
+            .context("CUDA: fold pending: invalid parent")?;
+        if parent_buf.phys_kind.is_deferred() {
+            let mut host = parent_buf
+                .pending_init
+                .take()
+                .unwrap_or_else(|| vec![0u8; parent_buf.size as usize]);
+            if host.len() < parent_buf.size as usize {
+                host.resize(parent_buf.size as usize, 0);
+            }
+            let start = abs_off as usize;
+            let n = (data.len() as u64).min(view_size) as usize;
+            if start + n > host.len() {
+                bail!(
+                    "CUDA: view pending write [{start}, {}) exceeds parent pending len {}",
+                    start + n,
+                    host.len()
+                );
+            }
+            host[start..start + n].copy_from_slice(&data[..n]);
+            parent_buf.pending_init = Some(host);
+            parent_buf.requirements |= CudaBufferReq::HOST_WRITE;
+            parent_buf.bump_content_epoch();
+            Ok(())
+        } else {
+            // Parent already physical — sync the view then write through it.
+            self.sync_view_from_parent(view, parent)?;
+            let n = (data.len() as u64).min(view_size) as usize;
+            self.write_buffer_physical(view, 0, &data[..n])
+        }
+    }
+
+    /// Copy physical backing pointers from parent onto a view (offset/size unchanged).
+    fn sync_view_from_parent(&mut self, view: BufferHandle, parent: BufferHandle) -> Result<()> {
+        let parent_meta = self
+            .buffers
+            .get(&parent)
+            .context("CUDA: sync view: invalid parent")?
+            .clone_meta();
+        let view_buf = self
+            .buffers
+            .get_mut(&view)
+            .context("CUDA: sync view: invalid view")?;
+        view_buf.memory = parent_meta.memory;
+        view_buf.shared = parent_meta.shared;
+        view_buf.shared_epoch = parent_meta.shared_epoch;
+        view_buf.phys_kind = parent_meta.phys_kind;
+        view_buf.memory_is_external = parent_meta.memory_is_external;
+        view_buf.content_epoch = parent_meta.content_epoch;
         Ok(())
     }
 

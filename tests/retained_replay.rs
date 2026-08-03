@@ -23,9 +23,9 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape},
-    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, Parcel,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat, TextureKind,
-    WithdrawTransaction,
+    BackendType, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Instance, MemoryExchange,
+    NodeAccess, Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags,
+    TextureFormat, TextureKind, WithdrawTransaction,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -50,6 +50,31 @@ fn make_device() -> (Device, goldy::test_support::CbReuseOverride) {
         .request_device(&DeviceDescriptor::default())
         .expect("Failed to create device");
     (device, cb)
+}
+
+/// CUDA writable `DirectSpatial<float4>` requires storage-compatible `Rgba32Float`.
+fn writable_texture_format(device: &Device) -> TextureFormat {
+    if device.backend_type() == BackendType::Cuda {
+        TextureFormat::Rgba32Float
+    } else {
+        TextureFormat::Rgba8Unorm
+    }
+}
+
+fn assert_solid_red_texel(loan: &[u8], is_cuda: bool, label: &str) {
+    assert!(!loan.is_empty(), "texture readback empty ({label})");
+    if is_cuda {
+        let floats: &[f32] = bytemuck::cast_slice(loan);
+        assert_eq!(floats[0], 1.0, "R channel ({label})");
+        assert_eq!(floats[1], 0.0, "G channel ({label})");
+        assert_eq!(floats[2], 0.0, "B channel ({label})");
+        assert_eq!(floats[3], 1.0, "A channel ({label})");
+    } else {
+        assert_eq!(loan[0], 255, "R channel ({label})");
+        assert_eq!(loan[1], 0, "G channel ({label})");
+        assert_eq!(loan[2], 0, "B channel ({label})");
+        assert_eq!(loan[3], 255, "A channel ({label})");
+    }
 }
 
 /// Copy input → output. Both parcels are declared in the scheme.
@@ -444,7 +469,7 @@ fn lease_texture_scheme_resubmits_without_rerecord() {
         .lease_texture(
             4,
             4,
-            TextureFormat::Rgba8Unorm,
+            writable_texture_format(&device),
             TextureKind::DirectInterpolated,
             TextureFlags::empty(),
         )
@@ -599,6 +624,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 fn withdraw_texture_concurrent_frames_distinct_backings() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
+    let is_cuda = device.backend_type() == BackendType::Cuda;
 
     let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("compile texture shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -613,7 +639,7 @@ fn withdraw_texture_concurrent_frames_distinct_backings() {
         .acquire_texture(
             width,
             height,
-            TextureFormat::Rgba8Unorm,
+            writable_texture_format(&device),
             TextureKind::Direct,
             TextureFlags::COPY_SRC,
             None,
@@ -632,13 +658,9 @@ fn withdraw_texture_concurrent_frames_distinct_backings() {
     let mut frame1 = scheme.submit().expect("submit K");
     let mut frame2 = scheme.submit().expect("submit K+1 without waiting on K");
 
-    for frame in [&mut frame1, &mut frame2] {
+    for (i, frame) in [&mut frame1, &mut frame2].into_iter().enumerate() {
         let loan = grant.claim(frame).expect("claim").consume().expect("withdraw consume");
-        assert!(loan.len() > 0, "texture readback empty");
-        assert_eq!(loan[0], 255, "R channel");
-        assert_eq!(loan[1], 0, "G channel");
-        assert_eq!(loan[2], 0, "B channel");
-        assert_eq!(loan[3], 255, "A channel");
+        assert_solid_red_texel(&loan, is_cuda, &format!("frame {i}"));
     }
 
     let stats = scheme.replay_stats();
@@ -815,6 +837,7 @@ fn withdraw_drop_frame_without_read_then_submit_and_read() {
 fn withdraw_texture_sequential_resubmit_correct_data() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
+    let is_cuda = device.backend_type() == BackendType::Cuda;
 
     let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("compile texture shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -829,7 +852,7 @@ fn withdraw_texture_sequential_resubmit_correct_data() {
         .acquire_texture(
             width,
             height,
-            TextureFormat::Rgba8Unorm,
+            writable_texture_format(&device),
             TextureKind::Direct,
             TextureFlags::COPY_SRC,
             None,
@@ -852,11 +875,7 @@ fn withdraw_texture_sequential_resubmit_correct_data() {
     for round in 0..3u32 {
         let mut frame = scheme.submit().expect("submit");
         let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
-        assert!(loan.len() > 0, "texture readback empty on round {round}");
-        assert_eq!(loan[0], 255, "R channel, round {round}");
-        assert_eq!(loan[1], 0, "G channel, round {round}");
-        assert_eq!(loan[2], 0, "B channel, round {round}");
-        assert_eq!(loan[3], 255, "A channel, round {round}");
+        assert_solid_red_texel(&loan, is_cuda, &format!("round {round}"));
     }
 
     let stats = scheme.replay_stats();

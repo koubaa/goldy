@@ -74,11 +74,21 @@ pub(super) fn create_with_depth(
     let texture = texture.context("CreateCommittedResource returned null")?;
 
     // Create RTV
-    let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
+    // Must match `device.rs` RTV heap `NumDescriptors`.
+    const RTV_HEAP_CAPACITY: u32 = 256;
+    let rtv_offset = if let Some(off) = state.free_rtv_offsets.pop() {
+        off
+    } else {
+        if state.next_rtv_offset >= RTV_HEAP_CAPACITY {
+            anyhow::bail!(
+                "DX12 RTV descriptor heap exhausted ({RTV_HEAP_CAPACITY} slots); \
+                 offscreen RenderTargets were likely dropped without destroy_render_target"
+            );
+        }
         let off = state.next_rtv_offset;
         state.next_rtv_offset += 1;
         off
-    });
+    };
 
     let rtv_handle = unsafe {
         let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
@@ -189,7 +199,18 @@ pub(super) fn create_with_depth(
     Ok(handle)
 }
 
-/// Destroy a render target.
+/// Destroy an offscreen render target and recycle its RTV/DSV descriptor slots.
+pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
+    let Some(rt) = state.render_targets.write().unwrap().entries.remove(&target) else {
+        return;
+    };
+    state.free_rtv_offsets.push(rt.rtv_offset);
+    if let Some(dsv) = rt.dsv_offset {
+        state.free_dsv_offsets.push(dsv);
+    }
+    // `rt` drop releases ID3D12Resource / command list COM refs.
+}
+
 /// Records COMMON -> RENDER_TARGET barriers, clear, viewport/scissor, descriptor heap
 /// binding, draw commands, and RENDER_TARGET -> COPY_SOURCE barrier into `cmd_list`.
 /// Does NOT close/execute/signal.

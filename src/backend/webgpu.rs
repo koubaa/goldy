@@ -900,6 +900,9 @@ impl GpuBackend for WebGpuBackend {
     }
 
     #[cfg(feature = "graphics")]
+    fn destroy_render_target(&mut self, _target: RenderTargetHandle) {}
+
+    #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
         _device: DeviceHandle,

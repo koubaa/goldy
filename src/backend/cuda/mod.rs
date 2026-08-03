@@ -66,7 +66,8 @@ use cudarc::driver::{
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
 pub use retained_graph::CudaGraphStatsSnapshot;
-use retained_graph::{CudaGraphStats, GraphRegistry};
+pub(crate) use retained_graph::CudaGraphStats;
+use retained_graph::{GraphRegistry};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -380,6 +381,9 @@ struct CudaBuffer {
     readback: bool,
     /// Bumped on every host/GPU write that changes contents (retained raster fingerprint).
     content_epoch: u64,
+    /// Parent allocation for [`GpuBackend::create_buffer_view`] slices (shares memory).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    parent: Option<BufferHandle>,
     /// DX12-shareable twin for vertex IA, or the sole backing when phys is Shared.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     shared: Option<Arc<dx12_interop::SharedBufferBacking>>,
@@ -537,8 +541,7 @@ impl CudaBackend {
         })
     }
 
-    #[cfg(test)]
-    fn graph_stats(&self) -> Arc<CudaGraphStats> {
+    pub(crate) fn graph_stats(&self) -> Arc<CudaGraphStats> {
         Arc::clone(&self.graph_stats)
     }
 
@@ -614,6 +617,8 @@ impl CudaBackend {
                 slot: Some(slot),
                 readback: false,
                 content_epoch: 0,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                parent: None,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 shared: None,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -1445,12 +1450,76 @@ impl CudaBackend {
         // Collect (handle, req) then apply — avoids borrow issues while scanning.
         let mut updates: Vec<(BufferHandle, CudaBufferReq)> = Vec::new();
         let mut current_indices: Vec<u32> = Vec::new();
+        let mut frame_table: Option<&[u32]> = None;
         for command in commands {
             match command {
+                GpuCommand::FrameTableStaging { data } => {
+                    frame_table = Some(data.as_ref());
+                }
                 GpuCommand::BindResourcesRaw { indices, .. } => {
                     current_indices.clone_from(indices);
                 }
-                GpuCommand::Dispatch { .. } | GpuCommand::DispatchBatch { .. } => {
+                GpuCommand::Dispatch { .. } => {
+                    for index in &current_indices {
+                        if let Some(handle) = self.buffer_slots.get(index) {
+                            updates.push((*handle, CudaBufferReq::KERNEL));
+                        }
+                    }
+                }
+                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                    // DispatchBatch does not emit BindResourcesRaw; indices live in FrameTableStaging.
+                    let entry_count = *count as usize;
+                    if entry_count == 0 {
+                        continue;
+                    }
+                    let needed = entry_count
+                        .checked_mul(DISPATCH_BATCH_STRIDE)
+                        .context("CUDA: DispatchBatch stride overflow")?;
+                    anyhow::ensure!(
+                        arg_data.len() >= needed,
+                        "CUDA: DispatchBatch arg_data len {} < {} entries × stride {}",
+                        arg_data.len(),
+                        entry_count,
+                        DISPATCH_BATCH_STRIDE
+                    );
+                    let mut bases = Vec::with_capacity(entry_count);
+                    for i in 0..entry_count {
+                        let base = i * DISPATCH_BATCH_STRIDE;
+                        let layout: PushLayout =
+                            *bytemuck::from_bytes(&arg_data[base..base + TOTAL_PUSH_BYTES]);
+                        bases.push(layout._reserved[dispatch_table_base_word_index()]);
+                    }
+                    // Infer buffer count from uniform frame-table spacing (same as materialize).
+                    let n_buffers = if entry_count >= 2 {
+                        bases[1].saturating_sub(bases[0]) as usize
+                    } else if let Some(table) = frame_table {
+                        // Single-entry batch should not occur, but fall back to remaining row words.
+                        table.len().saturating_sub(bases[0] as usize)
+                    } else {
+                        0
+                    };
+                    if n_buffers > 0 {
+                        let table = frame_table.context(
+                            "CUDA: DispatchBatch requires FrameTableStaging when bindings are present",
+                        )?;
+                        for &table_base in &bases {
+                            let start = table_base as usize;
+                            let end = start
+                                .checked_add(n_buffers)
+                                .context("CUDA: frame-table range overflow")?;
+                            anyhow::ensure!(
+                                end <= table.len(),
+                                "CUDA: DispatchBatch frame-table range [{start}, {end}) exceeds staging len {}",
+                                table.len()
+                            );
+                            for &index in &table[start..end] {
+                                if let Some(handle) = self.buffer_slots.get(&index) {
+                                    updates.push((*handle, CudaBufferReq::KERNEL));
+                                }
+                            }
+                        }
+                    }
+                    // Also honor any lingering BindResourcesRaw indices.
                     for index in &current_indices {
                         if let Some(handle) = self.buffer_slots.get(index) {
                             updates.push((*handle, CudaBufferReq::KERNEL));
@@ -2734,6 +2803,8 @@ impl CudaBuffer {
             readback: self.readback,
             content_epoch: self.content_epoch,
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            parent: self.parent,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             shared: self.shared.as_ref().map(Arc::clone),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             shared_epoch: self.shared_epoch,
@@ -3419,26 +3490,49 @@ impl GpuBackend for CudaBackend {
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
             // Stage host bytes on deferred buffers — do not force Native materialization
-            // before scheme usage is known (deposit→Shared path).
-            let is_deferred = self
-                .buffers
-                .get(&buffer)
-                .map(|b| b.phys_kind.is_deferred())
-                .unwrap_or(false);
+            // before scheme usage is known (deposit→Shared path). Views stage into the parent.
+            let (is_deferred, parent, abs_offset, logical_size) = {
+                let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+                (
+                    buf.phys_kind.is_deferred(),
+                    buf.parent,
+                    buf.offset + offset,
+                    buf.size,
+                )
+            };
             if is_deferred {
-                let buf = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
-                if offset + data.len() as u64 > buf.size {
+                if offset + data.len() as u64 > logical_size {
                     anyhow::bail!("CUDA: write exceeds logical buffer size");
                 }
-                let mut pending = buf.pending_init.take().unwrap_or_else(|| vec![0u8; buf.size as usize]);
-                if pending.len() < buf.size as usize {
-                    pending.resize(buf.size as usize, 0);
+                let target = parent.unwrap_or(buffer);
+                let stage_offset = if parent.is_some() { abs_offset } else { offset };
+                let buf = self.buffers.get_mut(&target).context("CUDA: invalid buffer handle")?;
+                let pending_len = if parent.is_some() {
+                    buf.size as usize
+                } else {
+                    buf.size as usize
+                };
+                if stage_offset + data.len() as u64 > buf.size {
+                    anyhow::bail!("CUDA: write exceeds parent buffer size");
                 }
-                let start = offset as usize;
+                let mut pending = buf
+                    .pending_init
+                    .take()
+                    .unwrap_or_else(|| vec![0u8; pending_len]);
+                if pending.len() < pending_len {
+                    pending.resize(pending_len, 0);
+                }
+                let start = stage_offset as usize;
                 pending[start..start + data.len()].copy_from_slice(data);
                 buf.pending_init = Some(pending);
                 buf.requirements |= buffer_phys::CudaBufferReq::HOST_WRITE;
                 buf.bump_content_epoch();
+                if let Some(view) = parent.map(|_| buffer) {
+                    // Keep view epoch in sync for retained fingerprints.
+                    if let Some(v) = self.buffers.get_mut(&view) {
+                        v.bump_content_epoch();
+                    }
+                }
                 return Ok(());
             }
             self.ensure_buffer_requirements(buffer, buffer_phys::CudaBufferReq::HOST_WRITE)?;
@@ -3482,6 +3576,8 @@ impl GpuBackend for CudaBackend {
                 slot: None,
                 readback: true,
                 content_epoch: 0,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                parent: None,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 shared: None,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -3610,6 +3706,55 @@ impl GpuBackend for CudaBackend {
     }
 
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let (is_deferred, parent, abs_offset, logical_size) = {
+                let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+                (
+                    buf.phys_kind.is_deferred(),
+                    buf.parent,
+                    buf.offset + offset,
+                    buf.size,
+                )
+            };
+            if is_deferred {
+                let clear_size = if size == 0 {
+                    logical_size.saturating_sub(offset)
+                } else {
+                    size
+                };
+                if offset.saturating_add(clear_size) > logical_size {
+                    anyhow::bail!("CUDA: clear exceeds logical buffer size");
+                }
+                let target = parent.unwrap_or(buffer);
+                let stage_offset = if parent.is_some() { abs_offset } else { offset };
+                let buf = self.buffers.get_mut(&target).context("CUDA: invalid buffer handle")?;
+                let pending_len = buf.size as usize;
+                let mut pending = buf
+                    .pending_init
+                    .take()
+                    .unwrap_or_else(|| vec![0u8; pending_len]);
+                if pending.len() < pending_len {
+                    pending.resize(pending_len, 0);
+                }
+                let start = stage_offset as usize;
+                let end = start + clear_size as usize;
+                pending[start..end].fill(0);
+                buf.pending_init = Some(pending);
+                buf.requirements |= buffer_phys::CudaBufferReq::HOST_WRITE;
+                buf.bump_content_epoch();
+                if parent.is_some() {
+                    if let Some(v) = self.buffers.get_mut(&buffer) {
+                        v.bump_content_epoch();
+                    }
+                }
+                return Ok(());
+            }
+            self.ensure_buffer_requirements(
+                buffer,
+                buffer_phys::CudaBufferReq::TRANSFER | buffer_phys::CudaBufferReq::HOST_WRITE,
+            )?;
+        }
         self.sync_device_streams_for_immediate_api(device)?;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let target = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
@@ -3654,9 +3799,10 @@ impl GpuBackend for CudaBackend {
         size: u64,
         element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
+        let parent_handle = parent;
         let parent = self
             .buffers
-            .get(&parent)
+            .get(&parent_handle)
             .context("CUDA: invalid parent buffer")?
             .clone_meta();
         if offset + size > parent.size {
@@ -3679,6 +3825,8 @@ impl GpuBackend for CudaBackend {
                 slot: Some(slot),
                 readback: false,
                 content_epoch: parent.content_epoch,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                parent: Some(parent_handle),
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 shared: parent.shared,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -3703,6 +3851,41 @@ impl GpuBackend for CudaBackend {
         new_size: u64,
         preserve_contents: bool,
     ) -> Result<()> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let is_deferred = self
+                .buffers
+                .get(&buffer)
+                .map(|b| b.phys_kind.is_deferred())
+                .unwrap_or(false);
+            if is_deferred {
+                let buf = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
+                if buf.parent.is_some() {
+                    anyhow::bail!("CUDA: cannot resize a buffer view");
+                }
+                if buf.device != device {
+                    anyhow::bail!("CUDA: buffer belongs to another device");
+                }
+                let new_cap = new_size.max(4);
+                match &mut buf.pending_init {
+                    Some(pending) if preserve_contents => {
+                        pending.resize(new_size as usize, 0);
+                    }
+                    Some(pending) => {
+                        *pending = vec![0u8; new_size as usize];
+                    }
+                    None if preserve_contents || new_size > 0 => {
+                        // Unwritten deferred bytes are zeros; keep that contract after resize.
+                        buf.pending_init = Some(vec![0u8; new_size as usize]);
+                    }
+                    None => {}
+                }
+                buf.size = new_size;
+                buf.capacity = new_cap;
+                buf.bump_content_epoch();
+                return Ok(());
+            }
+        }
         let old = self
             .buffers
             .get(&buffer)
@@ -3755,14 +3938,7 @@ impl GpuBackend for CudaBackend {
             // Shared twin is size-specific; drop and recreate on next VB bind.
             target.shared = None;
             target.shared_epoch = 0;
-            target.phys_kind = if target.requirements.contains(buffer_phys::CudaBufferReq::KERNEL) {
-                buffer_phys::CudaPhysKind::Native
-            } else if target.requirements.contains(buffer_phys::CudaBufferReq::VERTEX) {
-                // Will rematerialize Shared on next ensure.
-                buffer_phys::CudaPhysKind::Native
-            } else {
-                buffer_phys::CudaPhysKind::Native
-            };
+            target.phys_kind = buffer_phys::CudaPhysKind::Native;
             target.memory_is_external = false;
         }
         target.bump_content_epoch();
@@ -3905,6 +4081,18 @@ impl GpuBackend for CudaBackend {
         _depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
         Self::unsupported("render targets (requires cuda+graphics+dx12 on Windows)")
+    }
+
+    #[cfg(feature = "graphics")]
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            raster::destroy_render_target(self, target);
+        }
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        {
+            let _ = target;
+        }
     }
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -4648,6 +4836,47 @@ impl GpuBackend for CudaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+
+    #[allow(dead_code)] // held for RAII lock lifetime
+    enum CudaTestGate {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        Shared(RwLockReadGuard<'static, ()>),
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        Exclusive(RwLockWriteGuard<'static, ()>),
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        None,
+    }
+
+    struct CudaTestDevice {
+        device: Arc<crate::Device>,
+        _gate: CudaTestGate,
+    }
+
+    impl CudaTestDevice {
+        fn arc(&self) -> Arc<crate::Device> {
+            Arc::clone(&self.device)
+        }
+    }
+
+    impl std::ops::Deref for CudaTestDevice {
+        type Target = crate::Device;
+
+        fn deref(&self) -> &crate::Device {
+            &self.device
+        }
+    }
+
+    fn cuda_exclusive_guard() -> CudaTestGate {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            CudaTestGate::Exclusive(crate::test_support::cuda_lib_exclusive_gate())
+        }
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        {
+            CudaTestGate::None
+        }
+    }
 
     const DOUBLE_SLANG: &str = r#"
 [shader("compute")]
@@ -4689,6 +4918,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     }
 
     fn run_compute_dispatch_and_readback(shader_source: &str) -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -4765,16 +4995,11 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     }
 
     fn run_scheme_compute_and_withdraw(shader_source: &str) -> Result<()> {
-        let backend = match CudaBackend::new() {
-            Ok(backend) => backend,
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                return Ok(());
-            }
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
         };
-        let device = Arc::new(crate::Device::from_backend(Box::new(backend))?);
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, shader_source)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -4798,16 +5023,11 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 
     #[test]
     fn scheme_binds_two_goldy_buffers_in_parameter_order() -> Result<()> {
-        let backend = match CudaBackend::new() {
-            Ok(backend) => backend,
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                return Ok(());
-            }
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
         };
-        let device = Arc::new(crate::Device::from_backend(Box::new(backend))?);
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let input = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let output = pool.acquire_buffer_sized::<u32>(4, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_TWO_BUFFER_SLANG)?;
@@ -4826,26 +5046,73 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         Ok(())
     }
 
-    fn try_cuda_device() -> Result<Option<Arc<crate::Device>>> {
-        match CudaBackend::new() {
-            Ok(backend) => Ok(Some(Arc::new(crate::Device::from_backend(Box::new(backend))?))),
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                Ok(None)
+    fn try_cuda_device() -> Result<Option<CudaTestDevice>> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let Some(device) = crate::test_support::shared_cuda_lib_device() else {
+                eprintln!("skipping CUDA scheme test: no shared CUDA device");
+                return Ok(None);
+            };
+            return Ok(Some(CudaTestDevice {
+                device,
+                _gate: CudaTestGate::Shared(crate::test_support::cuda_lib_shared_gate()),
+            }));
+        }
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        {
+            match CudaBackend::new() {
+                Ok(backend) => Ok(Some(CudaTestDevice {
+                    device: Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                    _gate: CudaTestGate::None,
+                })),
+                Err(error) => {
+                    eprintln!("skipping CUDA scheme test: {error:#}");
+                    Ok(None)
+                }
             }
         }
     }
 
-    fn try_cuda_device_with_stats() -> Result<Option<(Arc<crate::Device>, Arc<CudaGraphStats>)>> {
-        match CudaBackend::new() {
-            Ok(backend) => {
-                let stats = backend.graph_stats();
-                stats.reset();
-                Ok(Some((Arc::new(crate::Device::from_backend(Box::new(backend))?), stats)))
-            }
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                Ok(None)
+    fn try_cuda_device_with_stats() -> Result<Option<(CudaTestDevice, Arc<CudaGraphStats>)>> {
+        // Quiet counter window: exclusive against other shared-device / raw-backend tests.
+        let gate = cuda_exclusive_guard();
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let Some(device) = crate::test_support::shared_cuda_lib_device() else {
+                eprintln!("skipping CUDA scheme test: no shared CUDA device");
+                return Ok(None);
+            };
+            let stats = device
+                .cuda_graph_stats_for_test()
+                .context("CUDA: shared device missing graph stats")?;
+            stats.reset();
+            return Ok(Some((
+                CudaTestDevice {
+                    device,
+                    _gate: gate,
+                },
+                stats,
+            )));
+        }
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        {
+            let _ = gate;
+            match CudaBackend::new() {
+                Ok(backend) => {
+                    let stats = backend.graph_stats();
+                    stats.reset();
+                    Ok(Some((
+                        CudaTestDevice {
+                            device: Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                            _gate: CudaTestGate::None,
+                        },
+                        stats,
+                    )))
+                }
+                Err(error) => {
+                    eprintln!("skipping CUDA scheme test: {error:#}");
+                    Ok(None)
+                }
             }
         }
     }
@@ -4865,7 +5132,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -4890,7 +5157,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_with_data(&[0xDEAD_BEEFu32], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -4914,7 +5181,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -4938,7 +5205,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(
             &device,
@@ -4976,7 +5243,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(2, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(
             &device,
@@ -5014,7 +5281,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         const N: usize = 64;
         let input: Vec<u32> = (0..N as u32).collect();
         let inp = pool.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
@@ -5054,7 +5321,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct Params {
@@ -5206,7 +5473,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, M2_FILL_SHADER)?;
@@ -5239,7 +5506,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
         let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let double_pipe =
@@ -5272,7 +5539,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         // Distinct pipeline objects so analysis emits two Dispatch commands, not DispatchBatch.
@@ -5312,7 +5579,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let src = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let y = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let z = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
@@ -5361,7 +5628,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buf = pool.acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)?;
         let pipe = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_ADD_TEN_SHADER)?)?;
 
@@ -5384,7 +5651,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
         let mid = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
@@ -5412,7 +5679,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         const N: usize = 64;
         let src: Vec<u32> = (1..=N as u32).collect();
         let dst = vec![0u32; N];
@@ -5468,6 +5735,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn overlapping_self_copy_is_memmove_safe() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -5517,6 +5785,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn resize_buffer_preserves_contents_on_device() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -5561,6 +5830,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn async_submit_wait_until_advances_progress() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -5622,7 +5892,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         let ctx_b = device.create_context()?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buf_a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let buf_b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
 
@@ -5666,7 +5936,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 init.push(0xCCCC_CCCCu32);
             }
         }
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buf = pool.acquire_buffer_with_data(&init, BufferKind::Scattered)?;
         let mut scheme = crate::Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 16 * 4, 32 * 4)?;
@@ -5743,7 +6013,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let pipeline =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
@@ -5799,7 +6069,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let pipeline = crate::ComputePipeline::new(
             &device,
@@ -5849,6 +6119,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn upload_write_commands_use_command_fallback_not_graph_capture() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -5900,6 +6171,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn destroy_context_evicts_retained_graphs() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -5989,7 +6261,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
         let work_pipe =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let shape =
             pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
@@ -6059,7 +6331,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
         let work_pipe =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let shape =
             pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[5u32, 6, 7, 8], BufferKind::Scattered)?;

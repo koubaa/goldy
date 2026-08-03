@@ -9,6 +9,13 @@
 //! Present completion is published on the **Goldy/CUDA timeline** (event ledger), not
 //! the companion DX12 fence counter. `Frame::present` returns that Goldy value so
 //! `Context::wait_until` observes the same namespace as compute submits.
+//!
+//! Shared-fence signal ordering: `cuSignalExternalSemaphoresAsync(V)` must be
+//! *submitted to CUDA* before D3D12 `Queue.Signal(W)` for any `W > V` on the same
+//! fence — a GPU `Wait(V)` between them is not enough and yields
+//! `CUDA_ERROR_INVALID_VALUE`. Scratch presents therefore join the submission worker
+//! for `submit_tv` (so the tail `SignalExternalFence` has been issued) before the
+//! present copy's return fence is signaled.
 
 use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_interop::{
@@ -789,6 +796,16 @@ pub(super) fn take_present_gpu_work(
     // New CUDA scratch submits signal in their own tail. Keep a temporary handoff
     // only for callers that supplied a submit timeline without a scratch-tail signal.
     let cuda_complete = if direct_cuda_complete > 0 {
+        // Join the worker so `SignalExternalFence(cuda_complete)` has been issued to
+        // CUDA before we Queue.Signal a higher present return fence (see module docs).
+        if submit_tv > 0 {
+            worker
+                .wait_submitted_if_scheduled(
+                    submit_tv,
+                    submission_worker::submission_horizon(&next_timeline),
+                )
+                .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
+        }
         direct_cuda_complete
     } else if let Some(submit_event) = submit_event {
         let signal_value = companion.next_fence_value();
@@ -1020,6 +1037,8 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
     fn run(self: Box<Self>) -> Result<PresentFinishState> {
         // Cross-domain only: CUDA→DX12 external fence. Raster→present on the same
         // DIRECT queue is already ordered by submission; do not wait_queue(dx12_src_fence).
+        // `take_present_gpu_work` already joined the submission worker so CUDA's
+        // Signal(cuda_complete) was issued before we Signal a higher return fence.
         if self.cuda_complete > 0 {
             self.companion.wait_queue(self.cuda_complete)?;
         }

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 /// Process-visible counters for capture / launch / fallback / eviction / resize.
 #[derive(Debug, Default)]
-pub(super) struct CudaGraphStats {
+pub(crate) struct CudaGraphStats {
     pub captures: AtomicU64,
     pub launches: AtomicU64,
     pub fallbacks: AtomicU64,

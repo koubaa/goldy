@@ -28,7 +28,9 @@ mod heap_tests {
     }
 
     fn make_device() -> SerialGpuDevice {
-        SerialGpuDevice::new()
+        // Device-global deferred VRAM ring: exclusive so parallel shared-device tests
+        // cannot leave foreign epochs that block `has_deferred_payloads` asserts.
+        SerialGpuDevice::exclusive()
     }
 
     fn scheme_submit_pipelined(ctx: &crate::Context) -> crate::timeline::TimelineValue {

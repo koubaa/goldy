@@ -1140,6 +1140,11 @@ impl GpuBackend for Dx12Backend {
             depth_format,
         )
     }
+
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        render_target::destroy(&mut self.state, target);
+    }
+
     fn create_texture(
         &mut self,
         device_handle: DeviceHandle,

@@ -582,6 +582,10 @@ pub(super) fn create_render_target(
     Ok(handle)
 }
 
+pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTargetHandle) {
+    let _ = backend.render_targets.remove(&target);
+}
+
 /// Ensure VERTEX physicalization and return a companion fence DX12 must wait on
 /// before IA (0 = already coherent / host-synced).
 ///
