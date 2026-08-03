@@ -37,6 +37,8 @@ bitflags! {
         const HOST_WRITE = 1 << 2;
         /// Participates in CopyBuffer / ClearBuffer.
         const TRANSFER = 1 << 3;
+        /// Bound as a graphics bindless shader resource (SRV/UAV/CBV).
+        const SHADER = 1 << 4;
     }
 }
 
@@ -74,13 +76,14 @@ impl CudaPhysKind {
 /// Pick a physical kind from the current requirement union.
 fn choose_kind(req: CudaBufferReq) -> CudaPhysKind {
     let kernel = req.contains(CudaBufferReq::KERNEL);
-    let vertex = req.contains(CudaBufferReq::VERTEX);
-    match (kernel, vertex) {
+    // VERTEX and SHADER both need a DX12-visible backing for the companion.
+    let dx12_visible = req.contains(CudaBufferReq::VERTEX) || req.contains(CudaBufferReq::SHADER);
+    match (kernel, dx12_visible) {
         (true, true) => CudaPhysKind::NativeAndTwin,
         (true, false) => CudaPhysKind::Native,
         (false, true) => CudaPhysKind::Shared,
         // Host/transfer-only (e.g. deposit Copy before the first VERTEX bind) lands
-        // provisional Native; VERTEX without KERNEL promotes to Shared.
+        // provisional Native; VERTEX/SHADER without KERNEL promotes to Shared.
         (false, false) => CudaPhysKind::Native,
     }
 }
@@ -218,6 +221,7 @@ impl CudaBackend {
         buf.shared_epoch = buf.content_epoch;
         buf.phys_kind = CudaPhysKind::Shared;
         buf.memory_is_external = true;
+        self.register_buffer_bindless_descriptor(buffer)?;
         Ok(())
     }
 
@@ -241,6 +245,7 @@ impl CudaBackend {
         let buf = self.buffers.get_mut(&buffer).unwrap();
         buf.shared = Some(Arc::new(backing));
         buf.shared_epoch = u64::MAX; // force refresh
+        self.register_buffer_bindless_descriptor(buffer)?;
         Ok(())
     }
 
@@ -311,6 +316,7 @@ impl CudaBackend {
             .buffer_promotions
             .fetch_add(1, Ordering::Relaxed);
         tracing::debug!(buffer, "CUDA: promoted Native → Shared");
+        self.register_buffer_bindless_descriptor(buffer)?;
         Ok(())
     }
 
@@ -456,6 +462,43 @@ impl CudaBackend {
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let buffer_ref = self.buffers.get(&buffer).unwrap();
         Self::write_buffer_region(&stream, buffer_ref, offset, data)?;
+        Ok(())
+    }
+
+    /// Register a companion SRV (or CBV for broadcast-sized) at the buffer's CUDA slot.
+    pub(super) fn register_buffer_bindless_descriptor(&mut self, buffer: BufferHandle) -> Result<()> {
+        let (device, slot, size, stride, shared) = {
+            let buf = self
+                .buffers
+                .get(&buffer)
+                .context("CUDA: register bindless descriptor: invalid buffer")?;
+            (
+                buf.device,
+                buf.slot,
+                buf.size,
+                buf.element_stride.unwrap_or(4),
+                buf.shared.clone(),
+            )
+        };
+        let Some(slot) = slot else {
+            return Ok(());
+        };
+        let Some(shared) = shared else {
+            bail!("CUDA/DX12: cannot register bindless descriptor without shared backing");
+        };
+        let companion = self
+            .device(device)?
+            .dx12
+            .as_ref()
+            .context("CUDA/DX12: companion required for bindless descriptor")?;
+        let num_elements = (size.max(4) / u64::from(stride.max(1))) as u32;
+        companion.bindless.write_buffer_srv(
+            &companion.device,
+            slot,
+            &shared.d3d12_resource,
+            num_elements.max(1),
+            stride.max(4),
+        )?;
         Ok(())
     }
 }

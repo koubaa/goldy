@@ -7,9 +7,10 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PresentMode,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, PresentMode,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler,
+    SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad,
+    TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -599,4 +600,475 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
             "frame {frame_i}: unexpected pixel ({r},{g},{b}) — twin likely stale after retain"
         );
     }
+}
+
+#[test]
+fn cuda_raster_goldy_vertex_color_2d() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, goldy::shaders::VERTEX_COLOR_2D).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertices = red_triangle_vertices();
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("goldy_tri", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r > 0.5 && g < 0.25 && b < 0.25,
+        "expected red goldy_ triangle pixel at ({x},{y}), got ({r},{g},{b})"
+    );
+}
+
+const BINDLESS_TINT_SHADER: &str = r#"
+import goldy_exp;
+
+struct VertexInput {
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+
+[goldy_vertex]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+[goldy_fragment]
+float4 fs_main(BufRO<float4> tint, VertexOutput input) : SV_Target {
+    return input.color * tint[0];
+}
+"#;
+
+const BINDLESS_TEXTURE_SHADER: &str = r#"
+import goldy_exp;
+
+struct VertexInput {
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
+
+struct VertexOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[goldy_vertex]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    // Map NDC triangle into [0,1] uv roughly around center.
+    output.uv = input.position * 0.5 + 0.5;
+    return output;
+}
+
+[goldy_fragment]
+float4 fs_main(Interpolated<float4> tex, Filter smp, VertexOutput input) : SV_Target {
+    return tex.Sample(smp, input.uv);
+}
+"#;
+
+#[test]
+fn cuda_raster_bindless_buffer_tint() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, BINDLESS_TINT_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    // White vertices × green tint → green. (Component-wise red×green is black.)
+    let vertices = [
+        Vertex2D::new(0.0, 0.5, Color::WHITE),
+        Vertex2D::new(-0.5, -0.5, Color::WHITE),
+        Vertex2D::new(0.5, -0.5, Color::WHITE),
+    ];
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+    // Tint multiplies vertex white by green → green output.
+    let tint = pool
+        .acquire_buffer_with_data(&[[0.0f32, 1.0, 0.0, 1.0]], BufferKind::Scattered)
+        .expect("tint buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("tint", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &tint,
+            access: NodeAccess::Read,
+        }]);
+        pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r < 0.25 && g > 0.5 && b < 0.25,
+        "expected green tinted pixel at ({x},{y}), got ({r},{g},{b})"
+    );
+
+    // Retained replay with unchanged bindings must succeed a second submit.
+    let _ = scheme.submit().expect("resubmit");
+}
+
+#[test]
+fn cuda_raster_bindless_tint_change_rerecords() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, BINDLESS_TINT_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertices = [
+        Vertex2D::new(0.0, 0.5, Color::WHITE),
+        Vertex2D::new(-0.5, -0.5, Color::WHITE),
+        Vertex2D::new(0.5, -0.5, Color::WHITE),
+    ];
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+    let green = pool
+        .acquire_buffer_with_data(&[[0.0f32, 1.0, 0.0, 1.0]], BufferKind::Scattered)
+        .expect("green tint");
+    let blue = pool
+        .acquire_buffer_with_data(&[[0.0f32, 0.0, 1.0, 1.0]], BufferKind::Scattered)
+        .expect("blue tint");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let sample = |pixels: &[u8]| {
+        let offset = (28usize * 64 + 32) * 16;
+        (
+            f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap()),
+            f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap()),
+            f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap()),
+        )
+    };
+
+    // Frame 1: green tint.
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("green", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &green,
+            access: NodeAccess::Read,
+        }]);
+        pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume").to_vec();
+    let (r, g, b) = sample(&pixels);
+    assert!(r < 0.25 && g > 0.5 && b < 0.25, "frame1 expected green, got ({r},{g},{b})");
+
+    // Frame 2: blue tint — changed bindings must not replay the green list.
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("blue", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &blue,
+            access: NodeAccess::Read,
+        }]);
+        pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume").to_vec();
+    let (r, g, b) = sample(&pixels);
+    assert!(r < 0.25 && g < 0.25 && b > 0.5, "frame2 expected blue, got ({r},{g},{b})");
+}
+
+#[test]
+fn cuda_raster_bindless_sampled_texture() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, BINDLESS_TEXTURE_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertices = red_triangle_vertices();
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+
+    // Solid blue Rgba32Float 4x4 texture.
+    let mut tex_data = vec![0u8; 4 * 4 * 16];
+    for pixel in tex_data.chunks_exact_mut(16) {
+        pixel[0..4].copy_from_slice(&0.0f32.to_le_bytes());
+        pixel[4..8].copy_from_slice(&0.0f32.to_le_bytes());
+        pixel[8..12].copy_from_slice(&1.0f32.to_le_bytes());
+        pixel[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+    }
+    let texture = pool
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba32Float,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_DST,
+            Some(&tex_data),
+        )
+        .expect("texture");
+    let sampler = Sampler::new(
+        &device,
+        &SamplerDesc {
+            mag_filter: goldy::types::FilterMode::Nearest,
+            min_filter: goldy::types::FilterMode::Nearest,
+            mipmap_filter: goldy::types::FilterMode::Nearest,
+            ..Default::default()
+        },
+    )
+    .expect("sampler");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
+        .expect("render target");
+    {
+        let mut pass = scheme.render_pass("tex", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_shader_resources(&[
+            ShaderResourceSlot::Parcel {
+                parcel: &texture,
+                access: NodeAccess::Read,
+            },
+            ShaderResourceSlot::Sampler(&sampler),
+        ]);
+        pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r < 0.25 && g < 0.25 && b > 0.5,
+        "expected blue sampled pixel at ({x},{y}), got ({r},{g},{b})"
+    );
 }

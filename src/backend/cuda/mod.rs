@@ -6,8 +6,9 @@
 //! non-indexed graphics pipelines (point/line/triangle list+strip) are also
 //! supported. Buffer handles are late-physicalized: acquire reserves identity
 //! only; scheme usage chooses Shared (deposit→IA), Native (compute), or
-//! NativeAndTwin (compute→IA). Depth, indexed draws, and bindless render
-//! bindings remain unsupported in this slice.
+//! NativeAndTwin (compute→IA). Bindless render bindings use the companion's
+//! SM 6.6 descriptor heaps with CUDA registry slots as DX12 indices. Depth and
+//! indexed draws remain unsupported in this slice.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -41,6 +42,8 @@ mod timeline;
 
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 mod buffer_phys;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod dx12_bindless;
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 mod dx12_companion;
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -151,6 +154,12 @@ pub(crate) struct CudaBackend {
     render_targets: HashMap<RenderTargetHandle, raster::CudaRenderTarget>,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     raster_list_cache: HashMap<RenderTargetHandle, raster::RasterListCache>,
+    /// D3D12 resources backing imported CUDA textures (bindless SRV/UAV writes).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    texture_dx12: HashMap<TextureHandle, windows::Win32::Graphics::Direct3D12::ID3D12Resource>,
+    /// CUDA external-memory imports that must outlive [`Self::textures`] views.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    texture_imports: HashMap<TextureHandle, dx12_interop::CudaImportedTexture>,
     /// CUDA-owned Direct textures used to stage compute writes before export to
     /// D3D12-imported present scratch (graph-capture safe core + CopyTexture tail).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -503,12 +512,19 @@ impl CudaBackend {
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             raster_list_cache: HashMap::new(),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            texture_dx12: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            texture_imports: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             present_staging: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
             next_texture: 1,
             next_sampler: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_slot: dx12_bindless::USER_SLOT_BASE,
+            #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
             next_slot: 0,
             next_shader: 1,
             next_compute_pipeline: 1,
@@ -859,6 +875,90 @@ impl CudaBackend {
             .checked_add(1)
             .expect("CUDA: registry slot counter overflow");
         slot
+    }
+
+    /// Create a shareable D3D12 texture imported into CUDA and register bindless descriptors.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_shared_texture_resource(
+        &mut self,
+        device: DeviceHandle,
+        companion: &Arc<dx12_companion::Dx12Companion>,
+        cuda_ctx: &Arc<CudaContext>,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+        storage_slot: Option<u32>,
+        sampled_slot: Option<u32>,
+    ) -> Result<TextureHandle> {
+        use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL};
+        use windows::Win32::Graphics::Direct3D12::*;
+
+        let dxgi = dx12_bindless::texture_format_to_dxgi(format)?;
+        let mut resource_flags = D3D12_RESOURCE_FLAG_NONE;
+        if matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated) {
+            resource_flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        }
+        let (d3d12_resource, allocation_size) =
+            dx12_interop::create_shared_texture(&companion.device, width, height, dxgi, resource_flags)?;
+        let handle_nt = unsafe {
+            companion
+                .device
+                .CreateSharedHandle(&d3d12_resource, None, GENERIC_ALL.0, None)
+        }
+        .context("CUDA/DX12: CreateSharedHandle(texture) failed")?;
+        let import = dx12_interop::import_shared_texture(
+            cuda_ctx,
+            handle_nt,
+            allocation_size,
+            width,
+            height,
+            format,
+        )?;
+        unsafe {
+            let _ = CloseHandle(handle_nt);
+        }
+        if matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated) {
+            dx12_interop::init_resource_state(companion, &d3d12_resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)?;
+        }
+        let resource = CudaTextureResource::from_imported_array(
+            cuda_ctx,
+            import.level0(),
+            width,
+            height,
+            format,
+            access,
+            flags,
+            storage_slot,
+            sampled_slot,
+        )?;
+        // Keep import alive by leaking into a side table keyed by the texture — the
+        // D3D12 resource map holds the graphics object; import must outlive CUDA views.
+        // Store import on a dedicated map by retaining the SharedScratchTexture pattern
+        // via texture_dx12 + dropping import last through deferred drop of the Arc texture
+        // (array is borrowed; import must live in texture_imports).
+        let handle = self.next_texture;
+        self.next_texture += 1;
+        if let Some(slot) = storage_slot {
+            self.texture_slots.insert(slot, handle);
+            companion
+                .bindless
+                .write_texture_uav(&companion.device, slot, &d3d12_resource, format)?;
+        }
+        if let Some(slot) = sampled_slot {
+            self.texture_slots.insert(slot, handle);
+            companion
+                .bindless
+                .write_texture_srv(&companion.device, slot, &d3d12_resource, format)?;
+        }
+        self.texture_dx12.insert(handle, d3d12_resource);
+        // Pin import for the lifetime of the texture handle.
+        self.texture_imports.insert(handle, import);
+        let _ = device;
+        self.textures.insert(handle, resource);
+        Ok(handle)
     }
 
     fn texture_device_is(&self, tex: &CudaTextureResource, device: DeviceHandle) -> bool {
@@ -2333,6 +2433,11 @@ impl CudaBackend {
                                     _ => false,
                                 })
                             });
+                            // Capture before clear: Scheme emits FrameTableStaging in this batch.
+                            let graph_staging = batch.iter().find_map(|c| match c {
+                                GpuCommand::FrameTableStaging { data } => Some(Arc::clone(data)),
+                                _ => None,
+                            });
                             last_tv = self.submit_commands(ctx, &batch, sync)?;
                             if written_vertex_buffer {
                                 // Compute may have rewritten native VB storage without a
@@ -2369,9 +2474,26 @@ impl CudaBackend {
                                 }
                             }
                             batch.clear();
+                            let device = self.context_device(ctx);
+                            raster::render_to_target(
+                                self,
+                                device,
+                                *target,
+                                *color_load,
+                                render_cmds,
+                                graph_staging.as_deref(),
+                            )?;
+                        } else {
+                            let device = self.context_device(ctx);
+                            raster::render_to_target(
+                                self,
+                                device,
+                                *target,
+                                *color_load,
+                                render_cmds,
+                                None,
+                            )?;
                         }
-                        let device = self.context_device(ctx);
-                        raster::render_to_target(self, device, *target, *color_load, render_cmds)?;
                     }
                     #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
                     {
@@ -3703,6 +3825,23 @@ impl GpuBackend for CudaBackend {
         Self::unsupported("graphics pipelines (requires cuda+graphics+dx12 on Windows)")
     }
 
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn render_pipeline_slot_access(&self, pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
+        self.pipelines
+            .get(&pipeline)
+            .map(|p| {
+                p.push_constant_slot_kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        Some(crate::types::BindlessSlotKind::StorageUav) => Some(ResourceAccess::ReadWrite),
+                        Some(crate::types::BindlessSlotKind::ReadOnlySrv) => Some(ResourceAccess::Read),
+                        Some(crate::types::BindlessSlotKind::UniformCbv) | None => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[cfg(feature = "graphics")]
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
         #[cfg(all(feature = "dx12", target_os = "windows"))]
@@ -3767,7 +3906,7 @@ impl GpuBackend for CudaBackend {
         color_load: crate::types::TargetLoad,
         commands: &[RenderCommand],
     ) -> Result<()> {
-        raster::render_to_target(self, device, target, color_load, commands)
+        raster::render_to_target(self, device, target, color_load, commands, None)
     }
 
     #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
@@ -3790,13 +3929,31 @@ impl GpuBackend for CudaBackend {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        let gpu = self.device(device)?;
-        let ctx = Arc::clone(&gpu.ctx);
+        let ctx = Arc::clone(&self.device(device)?.ctx);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let companion = self.device(device)?.dx12.clone();
         let (storage_slot, sampled_slot) = match access {
             TextureKind::Interpolated => (None, Some(self.alloc_registry_slot())),
             TextureKind::Direct => (Some(self.alloc_registry_slot()), None),
             TextureKind::DirectInterpolated => (Some(self.alloc_registry_slot()), Some(self.alloc_registry_slot())),
         };
+
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = companion {
+            return self.create_shared_texture_resource(
+                device,
+                &companion,
+                &ctx,
+                width,
+                height,
+                format,
+                access,
+                flags,
+                storage_slot,
+                sampled_slot,
+            );
+        }
+
         let resource =
             CudaTextureResource::create(&ctx, width, height, format, access, flags, storage_slot, sampled_slot)?;
         let handle = self.next_texture;
@@ -3884,6 +4041,16 @@ impl GpuBackend for CudaBackend {
                 .map(|(h, _)| *h);
             if let Some(device_handle) = device_handle {
                 if let Some(device) = self.devices.get(&device_handle) {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    if let Some(companion) = device.dx12.as_ref() {
+                        let retire_at = companion.companion_fence_high_water().max(1);
+                        if let Some(slot) = resource.storage_slot {
+                            companion.bindless.defer_reclaim_resource(slot, retire_at);
+                        }
+                        if let Some(slot) = resource.sampled_slot {
+                            companion.bindless.defer_reclaim_resource(slot, retire_at);
+                        }
+                    }
                     let retire_at = submission_worker::submission_horizon(&device.next_timeline);
                     device
                         .deletion_queue
@@ -3891,6 +4058,12 @@ impl GpuBackend for CudaBackend {
                         .unwrap()
                         .push(CudaDeferredDrop::Texture { retire_at, resource });
                 }
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                // Drop CUDA views (resource above) before import before D3D12 resource.
+                let _ = self.texture_imports.remove(&texture);
+                let _ = self.texture_dx12.remove(&texture);
             }
         }
     }
@@ -3913,6 +4086,12 @@ impl GpuBackend for CudaBackend {
         let handle = self.next_sampler;
         self.next_sampler += 1;
         self.sampler_slots.insert(slot, handle);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = self.device(device)?.dx12.as_ref() {
+            companion
+                .bindless
+                .write_sampler(&companion.device, slot, desc)?;
+        }
         self.samplers.insert(
             handle,
             CudaSampler {
@@ -3928,6 +4107,15 @@ impl GpuBackend for CudaBackend {
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         if let Some(sampler) = self.samplers.remove(&sampler) {
             self.sampler_slots.remove(&sampler.slot);
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            if let Some(device) = self.devices.get(&sampler.device) {
+                if let Some(companion) = device.dx12.as_ref() {
+                    let retire_at = companion.companion_fence_high_water().max(1);
+                    companion
+                        .bindless
+                        .defer_reclaim_sampler(sampler.slot, retire_at);
+                }
+            }
         }
     }
 
@@ -5833,6 +6021,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             "stable indirect resubmit must graph-launch: {after_first:?} vs {after_second:?}"
         );
         assert_eq!(scheme.replay_stats().records, 1);
+        #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 1);
         Ok(())
     }

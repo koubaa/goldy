@@ -1,11 +1,12 @@
 //! First-slice CUDA + DX12 raster: offscreen color targets, graphics PSOs, and draws.
 //!
-//! Scope (intentionally narrow):
+//! Scope:
 //! - Windows + `cuda` + `graphics` + `dx12`
 //! - Color-only [`TextureFormat::Rgba32Float`] render targets
 //! - Non-indexed draws (`PointList` / `LineList` / `LineStrip` / `TriangleList` /
 //!   `TriangleStrip`)
-//! - Vertex buffers + draw (no indexed draw, no bindless resources, no depth)
+//! - Bindless render resources via companion SM 6.6 heaps (CUDA registry slot =
+//!   DX12 descriptor index); no depth / indexed draws yet
 //!
 //! Vertex buffers stay on native CUDA allocations for compute. A shareable D3D12
 //! twin is created lazily for IA; contents are refreshed with a device-to-device
@@ -21,9 +22,12 @@ use super::dx12_companion::Dx12Companion;
 use super::dx12_interop::{create_shared_texture, import_shared_texture, CudaImportedTexture};
 use super::texture::{memcpy_array_to_array, CudaTextureResource};
 use super::{CudaBackend, CudaShader};
+use crate::backend::shared::{fill_frame_table_dispatch, set_frame_table_slots, PushLayout, TOTAL_PUSH_BYTES};
 use crate::backend::{BufferHandle, DeviceHandle, PipelineHandle, RenderCommand, RenderTargetHandle, TextureHandle};
+use crate::frame_table::FrameTableStaging;
 use crate::types::{
-    PrimitiveTopology, TargetLoad, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout, VertexFormat,
+    BindlessSlotKind, PrimitiveTopology, ResourceCategory, TargetLoad, TextureFlags, TextureFormat, TextureKind,
+    VertexBufferLayout, VertexFormat,
 };
 use anyhow::{bail, Context as _, Result};
 use std::hash::{Hash, Hasher};
@@ -42,6 +46,10 @@ pub(super) struct CudaGraphicsPipeline {
     pub root_signature: ID3D12RootSignature,
     pub vertex_stride: u32,
     pub topology: PrimitiveTopology,
+    pub push_constant_categories: Vec<Option<ResourceCategory>>,
+    pub push_constant_slot_kinds: Vec<Option<BindlessSlotKind>>,
+    pub binding_element_strides: Vec<Option<u32>>,
+    pub shader_debug_name: String,
 }
 
 // SAFETY: COM objects used under Goldy's backend lock.
@@ -78,6 +86,7 @@ fn raster_fingerprint(
     target: RenderTargetHandle,
     color_load: TargetLoad,
     commands: &[RenderCommand],
+    staging_data: &[u32],
 ) -> Result<u64> {
     let rt = backend
         .render_targets
@@ -97,6 +106,14 @@ fn raster_fingerprint(
         }
         TargetLoad::Load => 1u8.hash(&mut hash),
         TargetLoad::Discard => 2u8.hash(&mut hash),
+    }
+    // Graph lowering clears BindResourcesRaw.indices into the staging table; hash the
+    // active row so bind identity changes bust retained list reuse.
+    for word in staging_data
+        .iter()
+        .take(crate::frame_table::FRAME_TABLE_ROW_STRIDE as usize)
+    {
+        word.hash(&mut hash);
     }
     for command in commands {
         std::mem::discriminant(command).hash(&mut hash);
@@ -147,9 +164,26 @@ fn raster_fingerprint(
                 base_vertex.hash(&mut hash);
                 first_instance.hash(&mut hash);
             }
-            RenderCommand::BindResources { .. }
-            | RenderCommand::BindResourcesRaw { .. }
-            | RenderCommand::BindResourcesTyped { .. } => {}
+            RenderCommand::BindResources { buffers } => {
+                for h in buffers {
+                    h.hash(&mut hash);
+                }
+            }
+            RenderCommand::BindResourcesRaw {
+                indices,
+                user,
+                frame_table_base,
+            } => {
+                indices.hash(&mut hash);
+                user.hash(&mut hash);
+                frame_table_base.hash(&mut hash);
+            }
+            RenderCommand::BindResourcesTyped { handles } => {
+                for h in handles {
+                    h.index().hash(&mut hash);
+                    std::mem::discriminant(&h.category()).hash(&mut hash);
+                }
+            }
         }
     }
     Ok(hash.finish())
@@ -223,7 +257,10 @@ fn transition(
     }
 }
 
-fn compile_stage_dxil(shader: &CudaShader, stage: crate::slang::SlangStage) -> Result<Vec<u8>> {
+fn compile_stage_dxil(
+    shader: &CudaShader,
+    stage: crate::slang::SlangStage,
+) -> Result<(Vec<u8>, crate::slang::ShaderReflection)> {
     let entry = match stage {
         crate::slang::SlangStage::Vertex => "vs_main",
         crate::slang::SlangStage::Fragment => "fs_main",
@@ -246,11 +283,21 @@ fn compile_stage_dxil(shader: &CudaShader, stage: crate::slang::SlangStage) -> R
             shader.optimization_level,
         )
         .with_context(|| format!("CUDA/DX12: compile {entry} to DXIL"))?;
-    compiled
+    let dxil = compiled
         .shader
         .as_dxil()
-        .context("CUDA/DX12: expected DXIL bytecode")
-        .map(|b| b.to_vec())
+        .context("CUDA/DX12: expected DXIL bytecode")?
+        .to_vec();
+    let mut reflection = compiled.reflection;
+    if reflection.push_constant_categories.is_empty() {
+        reflection.push_constant_categories =
+            crate::slang::virtual_main::extract_push_constant_categories(&shader.source);
+    }
+    if reflection.push_constant_slot_kinds.is_empty() {
+        reflection.push_constant_slot_kinds =
+            crate::slang::virtual_main::extract_push_constant_slot_kinds(&shader.source);
+    }
+    Ok((dxil, reflection))
 }
 
 pub(super) fn create_pipeline(
@@ -283,8 +330,12 @@ pub(super) fn create_pipeline(
         bail!("CUDA/DX12: fragment shader belongs to a different device");
     }
 
-    let vs_dxil = compile_stage_dxil(vs, crate::slang::SlangStage::Vertex)?;
-    let fs_dxil = compile_stage_dxil(fs, crate::slang::SlangStage::Fragment)?;
+    let (vs_dxil, _vs_refl) = compile_stage_dxil(vs, crate::slang::SlangStage::Vertex)?;
+    let (fs_dxil, fs_refl) = compile_stage_dxil(fs, crate::slang::SlangStage::Fragment)?;
+    let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
+    let push_constant_categories = fs_refl.push_constant_categories.clone();
+    let push_constant_slot_kinds = fs_refl.push_constant_slot_kinds.clone();
+    let binding_element_strides = fs_refl.binding_element_strides.clone();
 
     let mut texcoord_index = 0u32;
     let input_elements: Vec<D3D12_INPUT_ELEMENT_DESC> = vertex_layout
@@ -401,6 +452,10 @@ pub(super) fn create_pipeline(
             root_signature,
             vertex_stride: vertex_layout.stride,
             topology,
+            push_constant_categories,
+            push_constant_slot_kinds,
+            binding_element_strides,
+            shader_debug_name,
         },
     );
     tracing::debug!("CUDA/DX12: created graphics pipeline {handle}");
@@ -474,6 +529,10 @@ pub(super) fn create_render_target(
         None,
     )?;
 
+    companion
+        .bindless
+        .write_texture_uav(&companion.device, storage_slot, &d3d12_resource, color_format)?;
+
     let rtv_offset = companion.alloc_rtv_offset();
     let rtv = unsafe {
         let mut h = companion.rtv_heap.GetCPUDescriptorHandleForHeapStart();
@@ -488,6 +547,7 @@ pub(super) fn create_render_target(
     backend.next_texture += 1;
     backend.texture_slots.insert(storage_slot, tex_handle);
     backend.textures.insert(tex_handle, Arc::clone(&cuda_texture));
+    backend.texture_dx12.insert(tex_handle, d3d12_resource.clone());
 
     let handle = backend.next_render_target;
     backend.next_render_target += 1;
@@ -672,12 +732,18 @@ fn refresh_shared_vertex_backing(
     }
 }
 
+/// Record and submit a companion DX12 raster pass for `target`.
+///
+/// `graph_staging` is the task-graph [`GpuCommand::FrameTableStaging`] payload.
+/// When present, the companion prologue must upload that table — Scheme already
+/// lowered binds to `BindResourcesRaw` with empty `indices`.
 pub(super) fn render_to_target(
     backend: &mut CudaBackend,
     device: DeviceHandle,
     target: RenderTargetHandle,
     color_load: TargetLoad,
     commands: &[RenderCommand],
+    graph_staging: Option<&[u32]>,
 ) -> Result<()> {
     {
         let rt = backend
@@ -700,24 +766,67 @@ pub(super) fn render_to_target(
                 .context("CUDA/DX12: companion required for raster")?,
         )
     };
-    let fingerprint = raster_fingerprint(backend, target, color_load, commands)?;
 
     use super::buffer_phys::{CudaBufferReq, CudaPhysKind};
 
-    // Pre-declare VERTEX so deposit→Shared can win before any provisional Native sticks
-    // (combined compute+render graphs call this after the compute batch already ran).
+    // Lower typed/handle binds → frame-table routing before fingerprint / record.
+    // Graph submit passes pre-built staging; standalone render_to_target rebuilds it.
+    let (staging_data, lowered, has_bindings) =
+        prepare_cuda_render_commands(backend, commands, graph_staging)?;
+
+    // Pre-declare VERTEX / SHADER so deposit→Shared can win before provisional Native sticks.
     let mut vb_handles = Vec::new();
-    for command in commands {
-        if let RenderCommand::SetVertexBuffer { buffer, .. } = command {
-            backend.ensure_buffer_requirements(*buffer, CudaBufferReq::VERTEX)?;
-            if !vb_handles.contains(buffer) {
-                vb_handles.push(*buffer);
+    let mut shader_buffers = Vec::new();
+    for command in &lowered {
+        match command {
+            RenderCommand::SetVertexBuffer { buffer, .. } => {
+                backend.ensure_buffer_requirements(*buffer, CudaBufferReq::VERTEX)?;
+                if !vb_handles.contains(buffer) {
+                    vb_handles.push(*buffer);
+                }
+            }
+            RenderCommand::BindResourcesRaw {
+                indices,
+                frame_table_base,
+                ..
+            } => {
+                // Indices may be empty after lowering; staging row holds the real slots.
+                let _ = (indices, frame_table_base);
+            }
+            RenderCommand::BindResourcesTyped { handles } => {
+                for handle in handles {
+                    if matches!(
+                        handle.category(),
+                        ResourceCategory::Scattered | ResourceCategory::Broadcast
+                    ) {
+                        // ResourceHandle.index() is the bindless slot; resolve to buffer.
+                        if let Some(&buf) = backend.buffer_slots.get(&handle.index()) {
+                            backend.ensure_buffer_requirements(buf, CudaBufferReq::SHADER)?;
+                            if !shader_buffers.contains(&buf) {
+                                shader_buffers.push(buf);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Staging row may reference buffer slots without BindResourcesTyped surviving;
+    // ensure any staging index that maps to a buffer gets SHADER phys.
+    for &word in &staging_data {
+        if let Some(&buf) = backend.buffer_slots.get(&word) {
+            backend.ensure_buffer_requirements(buf, CudaBufferReq::SHADER)?;
+            if !shader_buffers.contains(&buf) {
+                shader_buffers.push(buf);
             }
         }
     }
 
-    // Flush/sync only when a twin DtoD must observe in-flight native CUDA writes.
-    let needs_twin_sync = vb_handles.iter().any(|handle| {
+    let fingerprint = raster_fingerprint(backend, target, color_load, &lowered, &staging_data)?;
+
+    // Flush/sync when twin DtoD must observe in-flight native CUDA writes (VB or shader).
+    let needs_twin_sync = vb_handles.iter().chain(shader_buffers.iter()).any(|handle| {
         backend.buffers.get(handle).is_some_and(|buf| {
             buf.phys_kind == CudaPhysKind::NativeAndTwin && buf.content_epoch != buf.shared_epoch
         })
@@ -741,9 +850,24 @@ pub(super) fn render_to_target(
 
     let alloc_stream = Arc::clone(&backend.device(device)?.alloc_stream);
     let mut vb_wait = 0u64;
-    for handle in &vb_handles {
+    let mut any_shared = false;
+    for handle in vb_handles.iter().chain(shader_buffers.iter()) {
+        if backend
+            .buffers
+            .get(handle)
+            .is_some_and(|b| b.phys_kind == CudaPhysKind::Shared)
+        {
+            any_shared = true;
+        }
         let fence = refresh_shared_vertex_backing(backend, device, *handle, &alloc_stream)?;
         vb_wait = vb_wait.max(fence);
+    }
+    // Immediate materialize/HtoD uses alloc_stream; make those bytes visible to DX12
+    // SRV/IA without a submission-worker flush (which would break retained stats).
+    if any_shared {
+        alloc_stream
+            .synchronize()
+            .context("CUDA/DX12: sync alloc stream before Shared DX12 read")?;
     }
     if vb_wait > 0 {
         companion.wait_queue(vb_wait)?;
@@ -756,15 +880,9 @@ pub(super) fn render_to_target(
     {
         if let Some(signal) = companion.try_reuse_raster_for_fingerprint(fingerprint)? {
             backend.render_targets.get_mut(&target).unwrap().last_dx12_fence = signal;
-            for handle in &vb_handles {
-                if let Some(shared) = backend
-                    .buffers
-                    .get(handle)
-                    .and_then(|buf| buf.shared.as_ref())
-                {
-                    shared
-                        .last_dx12_ia_fence
-                        .fetch_max(signal, Ordering::AcqRel);
+            for handle in vb_handles.iter().chain(shader_buffers.iter()) {
+                if let Some(shared) = backend.buffers.get(handle).and_then(|buf| buf.shared.as_ref()) {
+                    shared.last_dx12_ia_fence.fetch_max(signal, Ordering::AcqRel);
                 }
             }
             return Ok(());
@@ -772,6 +890,15 @@ pub(super) fn render_to_target(
     }
 
     let (slot_idx, list, _slot_generation) = companion.begin_raster_list()?;
+
+    companion.bindless.set_descriptor_heaps(&list);
+    let mut frame_table_row = None;
+    if has_bindings {
+        let row = companion
+            .frame_table
+            .record_prologue(&companion, &list, &staging_data)?;
+        frame_table_row = Some(row);
+    }
 
     let (width, height, rtv_offset, d3d12_resource) = {
         let rt = backend.render_targets.get(&target).unwrap();
@@ -823,8 +950,9 @@ pub(super) fn render_to_target(
 
     let mut current_stride = 24u32;
     let mut current_topology = PrimitiveTopology::TriangleList;
+    let mut current_pipeline: Option<PipelineHandle> = None;
 
-    for command in commands {
+    for command in &lowered {
         match command {
             RenderCommand::ClearDepth(_) => {
                 bail!("CUDA/DX12 raster: ClearDepth is not supported in the first slice");
@@ -836,6 +964,7 @@ pub(super) fn render_to_target(
                     .context("CUDA/DX12: invalid graphics pipeline")?;
                 current_stride = pipeline.vertex_stride;
                 current_topology = pipeline.topology;
+                current_pipeline = Some(*pipeline_handle);
                 unsafe {
                     list.SetGraphicsRootSignature(&pipeline.root_signature);
                     list.SetPipelineState(&pipeline.pipeline_state);
@@ -854,7 +983,6 @@ pub(super) fn render_to_target(
                     .shared
                     .as_ref()
                     .context("CUDA/DX12: vertex buffer missing shared backing")?;
-                // Account for CudaBuffer views that shift into a parent allocation.
                 let abs_offset = cuda_buf.offset + offset;
                 let nbytes = (cuda_buf.size - offset) as u32;
                 let gpu_va = unsafe { shared.d3d12_resource.GetGPUVirtualAddress() } + abs_offset;
@@ -868,9 +996,55 @@ pub(super) fn render_to_target(
             RenderCommand::SetIndexBuffer { .. } => {
                 bail!("CUDA/DX12 raster: indexed draws are not supported in the first slice");
             }
-            RenderCommand::BindResources { .. }
-            | RenderCommand::BindResourcesRaw { .. }
-            | RenderCommand::BindResourcesTyped { .. } => {}
+            RenderCommand::BindResources { .. } | RenderCommand::BindResourcesTyped { .. } => {
+                bail!("CUDA/DX12 raster: BindResources must be lowered before record");
+            }
+            RenderCommand::BindResourcesRaw {
+                indices: raw_indices,
+                user: raw_user,
+                frame_table_base,
+            } => {
+                if let Some(h) = current_pipeline {
+                    let pipeline = backend
+                        .pipelines
+                        .get(&h)
+                        .context("CUDA/DX12: invalid graphics pipeline")?;
+                    // Graph lowering clears `indices` into the staging table; validate from there.
+                    let staged: Vec<u32> = if raw_indices.is_empty() {
+                        let n = pipeline.push_constant_slot_kinds.len();
+                        let base = *frame_table_base as usize;
+                        staging_data
+                            .get(base..base.saturating_add(n))
+                            .unwrap_or(&[])
+                            .to_vec()
+                    } else {
+                        raw_indices.clone()
+                    };
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_bindless_slot_kinds(
+                            &staged,
+                            &pipeline.push_constant_slot_kinds,
+                            |idx| companion.bindless.registry.lock().unwrap().slot_kind(idx),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
+                }
+                let mut layout = PushLayout::default();
+                fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                set_frame_table_slots(
+                    &mut layout,
+                    companion.frame_table.selector_slot,
+                    companion.frame_table.table_slot,
+                );
+                unsafe {
+                    list.SetGraphicsRoot32BitConstants(
+                        0,
+                        (TOTAL_PUSH_BYTES / 4) as u32,
+                        &layout as *const _ as *const _,
+                        0,
+                    );
+                }
+            }
             RenderCommand::Draw {
                 vertex_count,
                 instance_count,
@@ -896,6 +1070,10 @@ pub(super) fn render_to_target(
     unsafe { list.ResourceBarrier(&[to_common]) };
 
     let signal = companion.finish_raster_list(slot_idx, fingerprint)?;
+    if let Some(row) = frame_table_row {
+        companion.frame_table.mark_row_submitted(row, signal);
+    }
+    companion.bindless.drain_reclaimed(unsafe { companion.fence.GetCompletedValue() });
     backend
         .graph_stats
         .raster_list_records
@@ -903,22 +1081,83 @@ pub(super) fn render_to_target(
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
     }
-    // CUDA must not rewrite Shared-primary VBs until this IA draw retires.
-    for handle in &vb_handles {
-        if let Some(shared) = backend
-            .buffers
-            .get(handle)
-            .and_then(|buf| buf.shared.as_ref())
-        {
-            shared
-                .last_dx12_ia_fence
-                .fetch_max(signal, Ordering::AcqRel);
+    for handle in vb_handles.iter().chain(shader_buffers.iter()) {
+        if let Some(shared) = backend.buffers.get(handle).and_then(|buf| buf.shared.as_ref()) {
+            shared.last_dx12_ia_fence.fetch_max(signal, Ordering::AcqRel);
         }
     }
     backend
         .raster_list_cache
         .insert(target, RasterListCache { fingerprint });
     Ok(())
+}
+
+fn prepare_cuda_render_commands(
+    backend: &CudaBackend,
+    commands: &[RenderCommand],
+    graph_staging: Option<&[u32]>,
+) -> Result<(Vec<u32>, Vec<RenderCommand>, bool)> {
+    crate::backend::with_layout_validation(|| {
+        crate::backend::validate_render_pass_bind_resources(
+            commands,
+            |h| {
+                backend.pipelines.get(&h).map(|p| {
+                    (
+                        p.binding_element_strides.clone(),
+                        p.shader_debug_name.clone(),
+                    )
+                })
+            },
+            |h| backend.buffers.get(&h).and_then(|b| b.element_stride),
+        )
+    })?;
+
+    // Scheme/task-graph already lowered binds into FrameTableStaging + BindResourcesRaw
+    // (empty indices, frame_table_base set). Prefer that staging for the companion prologue.
+    if let Some(data) = graph_staging {
+        let has_bindings = commands.iter().any(|c| {
+            matches!(
+                c,
+                RenderCommand::BindResourcesRaw { .. }
+                    | RenderCommand::BindResourcesTyped { .. }
+                    | RenderCommand::BindResources { .. }
+            )
+        }) || data.iter().any(|&w| w != 0);
+        return Ok((data.to_vec(), commands.to_vec(), has_bindings));
+    }
+
+    let mut staging = FrameTableStaging::new();
+    let lowered = commands
+        .iter()
+        .map(|cmd| match cmd {
+            RenderCommand::BindResources { buffers } => {
+                let indices: Vec<u32> = buffers
+                    .iter()
+                    .map(|h| {
+                        backend
+                            .buffers
+                            .get(h)
+                            .and_then(|b| b.slot)
+                            .with_context(|| format!("BindResources: buffer {h:?} has no registry slot"))
+                    })
+                    .collect::<Result<_>>()?;
+                let frame_table_base = staging.alloc_dispatch(indices.len() as u32);
+                staging.write_dispatch_indices(frame_table_base, &indices);
+                Ok(RenderCommand::BindResourcesRaw {
+                    indices: Vec::new(),
+                    user: Vec::new(),
+                    frame_table_base,
+                })
+            }
+            other => {
+                let batch =
+                    crate::frame_table::lower_render_pass_commands(&mut staging, std::slice::from_ref(other));
+                Ok(batch.into_iter().next().unwrap_or_else(|| other.clone()))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let has_bindings = staging.has_bindings();
+    Ok((staging.data, lowered, has_bindings))
 }
 
 /// Copy render-target color into a CUDA texture after waiting on the DX12 fence.
