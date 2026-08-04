@@ -95,6 +95,7 @@ fn raster_fingerprint(
     color_load: TargetLoad,
     commands: &[RenderCommand],
     staging_data: &[u32],
+    shader_buffers: &[BufferHandle],
 ) -> Result<u64> {
     let rt = backend
         .render_targets
@@ -180,6 +181,9 @@ fn raster_fingerprint(
             RenderCommand::BindResources { buffers } => {
                 for h in buffers {
                     h.hash(&mut hash);
+                    if let Some(buf) = backend.buffers.get(h) {
+                        buf.content_epoch.hash(&mut hash);
+                    }
                 }
             }
             RenderCommand::BindResourcesRaw {
@@ -195,8 +199,24 @@ fn raster_fingerprint(
                 for h in handles {
                     h.index().hash(&mut hash);
                     std::mem::discriminant(&h.category()).hash(&mut hash);
+                    if matches!(
+                        h.category(),
+                        ResourceCategory::Scattered | ResourceCategory::Broadcast
+                    ) {
+                        if let Some(&buf) = backend.buffer_slots.get(&h.index()) {
+                            if let Some(cuda_buf) = backend.buffers.get(&buf) {
+                                cuda_buf.content_epoch.hash(&mut hash);
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+    for handle in shader_buffers {
+        handle.hash(&mut hash);
+        if let Some(buf) = backend.buffers.get(handle) {
+            buf.content_epoch.hash(&mut hash);
         }
     }
     Ok(hash.finish())
@@ -939,7 +959,14 @@ pub(super) fn render_to_target(
         }
     }
 
-    let fingerprint = raster_fingerprint(backend, target, color_load, &lowered, &staging_data)?;
+    let fingerprint = raster_fingerprint(
+        backend,
+        target,
+        color_load,
+        &lowered,
+        &staging_data,
+        &shader_buffers,
+    )?;
 
     // Flush/sync when twin DtoD must observe in-flight native CUDA writes (IA or shader).
     let needs_twin_sync = ia_handles.iter().chain(shader_buffers.iter()).any(|handle| {

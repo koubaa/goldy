@@ -2335,9 +2335,6 @@ impl CudaBackend {
             }
         }
         // Shared-primary rewrites must not race an in-flight DX12 IA draw.
-        // CPU companion wait (not WaitExternalFence on the CUDA stream): stream-side
-        // external waits plus later cuStreamSynchronize/bind have returned
-        // CUDA_ERROR_NOT_SUPPORTED on this WDDM+D3D12 stack at surface teardown.
         let mut ia_wait = 0u64;
         for shared in &shared_primaries {
             ia_wait = ia_wait.max(shared.last_dx12_ia_fence.load(Ordering::Acquire));
@@ -2680,9 +2677,12 @@ impl CudaBackend {
                     Some(LedgerCompletion::CudaEvent(event)) => stream_waits.push(event),
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     Some(LedgerCompletion::Dx12Fence { companion, value }) => {
-                        // Unbound present fence (value 0) is not waitable yet; skip — DX12
-                        // slot/raster fences already order present reuse on this path.
-                        if value > 0 {
+                        // Device-side DX12→CUDA: cuWaitExternalSemaphoresAsync on the
+                        // submission stream. Only after Signal is published (value > 0).
+                        // Prefer skipping when the fence already completed (no interop node).
+                        // Present epochs should be CudaEvent (bridged on present_stream);
+                        // this path is for residual Dx12Fence producers.
+                        if value > 0 && unsafe { companion.fence.GetCompletedValue() } < value {
                             dx12_stream_fence_waits.push((companion, value));
                         }
                     }
@@ -2700,9 +2700,10 @@ impl CudaBackend {
                     Some(LedgerCompletion::CudaEvent(event)) => host_waits.push(event),
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     Some(LedgerCompletion::Dx12Fence { companion, value }) => {
-                        // Match DX12: never HOL cpu_wait WAR/present fence epochs on the
-                        // submit worker. Demote to an async stream wait when bound.
-                        if value > 0 {
+                        // Match DX12 FPS policy: demote WAR/host_observed Dx12Fence epochs
+                        // to async stream waits rather than HOL cpu_wait on the worker.
+                        // Same Signal-before-wait / already-complete skip as sync.waits.
+                        if value > 0 && unsafe { companion.fence.GetCompletedValue() } < value {
                             dx12_stream_fence_waits.push((companion, value));
                         }
                     }
@@ -2761,6 +2762,72 @@ impl CudaBackend {
         if let Err(error) = device.submission_worker.enqueue(0, Box::new(job)) {
             tracing::warn!(?error, ctx, key, "CUDA: failed to enqueue retained-graph eviction");
         }
+    }
+
+    /// Drop a retained CUDA graph immediately (caller must have drained GPU work).
+    pub(super) fn destroy_retained_graph_sync(&mut self, ctx: ContextHandle, key: u64) {
+        let device_handle = match self.context(ctx) {
+            Ok(context) => context.device,
+            Err(_) => return,
+        };
+        let device = match self.devices.get(&device_handle) {
+            Some(device) => device,
+            None => return,
+        };
+        let mut guard = device.graph_registry.lock().unwrap();
+        guard.drain_retired(device.retired.load(Ordering::Acquire));
+        if let Some(partition) = guard.remove(ctx, key) {
+            drop(partition);
+            device.graph_stats.evictions.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn clear_device_retained_sync(&mut self, device_handle: crate::backend::DeviceHandle) {
+        let ctxs: Vec<_> = self
+            .contexts
+            .iter()
+            .filter_map(|(handle, context)| (context.device == device_handle).then_some(*handle))
+            .collect();
+        for ctx in &ctxs {
+            let keys: Vec<_> = self
+                .retained
+                .keys()
+                .filter(|(c, _)| *c == *ctx)
+                .copied()
+                .collect();
+            for (c, key) in keys {
+                self.retained.remove(&(c, key));
+                self.destroy_retained_graph_sync(c, key);
+            }
+        }
+        let device = match self.devices.get(&device_handle) {
+            Some(device) => device,
+            None => return,
+        };
+        let mut guard = device.graph_registry.lock().unwrap();
+        guard.drain_retired(device.retired.load(Ordering::Acquire));
+        for ctx in &ctxs {
+            for partition in guard.remove_context(*ctx) {
+                drop(partition);
+            }
+        }
+        guard.clear_pending_drops();
+    }
+
+    pub(super) fn drop_retained_graphs_holding_memory(
+        &mut self,
+        device_handle: crate::backend::DeviceHandle,
+        memory: &Arc<Mutex<CudaSlice<u8>>>,
+        stream: &CudaStream,
+        target_device_ptr: u64,
+    ) {
+        let device = match self.devices.get(&device_handle) {
+            Some(device) => device,
+            None => return,
+        };
+        let mut guard = device.graph_registry.lock().unwrap();
+        guard.drain_retired(device.retired.load(Ordering::Acquire));
+        guard.drop_graphs_holding_memory(memory, stream, target_device_ptr);
     }
 }
 

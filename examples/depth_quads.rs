@@ -301,14 +301,16 @@ impl ApplicationHandler for App {
             let window = Arc::new(
                 event_loop
                     .create_window(
-                        Window::default_attributes()
-                            .with_title("Goldy - Depth Quads (Scheme + Present)")
-                            .with_inner_size(winit::dpi::LogicalSize::new(900, 600)),
+                        common::hidden_window("Goldy - Depth Quads (Scheme + Present)", 900, 600),
                     )
                     .unwrap(),
             );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
+            if let Err(e) = self.render_frame() {
+                tracing::error!("First frame error: {e}");
+            }
+            common::reveal_window(&window);
             window.request_redraw();
         }
     }

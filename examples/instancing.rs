@@ -284,15 +284,21 @@ impl ApplicationHandler for App {
             let window = Arc::new(
                 event_loop
                     .create_window(
-                        Window::default_attributes()
-                            .with_title(format!("Goldy - Instancing ({} quads, Scheme + Present)", NUM_QUADS))
-                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                        common::hidden_window(
+                            format!("Goldy - Instancing ({} quads, Scheme + Present)", NUM_QUADS),
+                            800,
+                            800,
+                        ),
                     )
                     .expect("Failed to create window"),
             );
 
             match RenderState::new(window.clone()) {
-                Ok(state) => {
+                Ok(mut state) => {
+                    if let Err(e) = state.render() {
+                        tracing::error!("First frame error: {e}");
+                    }
+                    common::reveal_window(&window);
                     self.state = Some(state);
                     window.request_redraw();
                 }

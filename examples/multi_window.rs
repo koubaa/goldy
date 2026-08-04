@@ -458,13 +458,15 @@ impl App {
         let attrs = WindowAttributes::default()
             .with_title(format!("Goldy - {}", effect_type.title()))
             .with_inner_size(LogicalSize::new(500, 500))
-            .with_position(winit::dpi::LogicalPosition::new(position.0, position.1));
+            .with_position(winit::dpi::LogicalPosition::new(position.0, position.1))
+            .with_visible(false);
 
         let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
 
         let mut state = WindowState::new(window.clone(), ctx, &device, effect_type)?;
         state.render(ctx)?;
+        common::reveal_window(&window);
         window.request_redraw();
 
         self.windows.insert(window_id, state);

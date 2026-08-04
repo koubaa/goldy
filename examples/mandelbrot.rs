@@ -5,7 +5,7 @@
 //! Run with: `cargo run --example mandelbrot`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    shaders, Buffer, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
 };
@@ -119,7 +119,14 @@ impl App {
         let pipeline = Self::create_pipeline(&device, &shader, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let uniform = retained_pool.acquire_buffer_sized::<Uniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+        let uniform = retained_pool.acquire_buffer_with_data(
+            &[Uniforms {
+                center: self.center,
+                zoom: self.zoom,
+                _padding: 0.0,
+            }],
+            BufferKind::Broadcast,
+        )?;
 
         let mut scheme = Scheme::new(&ctx);
         let (width, height) = surface.size();
@@ -230,14 +237,20 @@ impl ApplicationHandler for App {
             let window = Arc::new(
                 event_loop
                     .create_window(
-                        Window::default_attributes()
-                            .with_title("Goldy - Mandelbrot (Scheme + Present, Arrows=pan, +/-=zoom, R=reset)")
-                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                        common::hidden_window(
+                            "Goldy - Mandelbrot (Scheme + Present, Arrows=pan, +/-=zoom, R=reset)",
+                            800,
+                            800,
+                        ),
                     )
                     .unwrap(),
             );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
+            if let Err(e) = self.render_frame() {
+                tracing::error!("First frame error: {e}");
+            }
+            common::reveal_window(&window);
             window.request_redraw();
         }
     }

@@ -3,6 +3,20 @@
 use goldy::{Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SurfaceExchange};
 use std::time::{Duration, Instant};
 use winit::event_loop::ActiveEventLoop;
+use winit::window::{Window, WindowAttributes};
+
+/// Window attributes for examples that reveal only after the first frame is ready.
+pub fn hidden_window(title: impl Into<String>, width: u32, height: u32) -> WindowAttributes {
+    Window::default_attributes()
+        .with_title(title.into())
+        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+        .with_visible(false)
+}
+
+/// Show a window after GPU init and an initial present path have completed.
+pub fn reveal_window(window: &Window) {
+    window.set_visible(true);
+}
 
 /// Rolling frame timestamps for windowed FPS (e.g. last 5s at exit).
 #[allow(dead_code)]
@@ -82,7 +96,6 @@ pub fn run_limit_secs() -> Option<f64> {
 }
 
 /// Exit the event loop once the run limit elapses so `Drop` can print `GOLDY_PERF`.
-#[allow(dead_code)]
 pub fn exit_if_timed_out(event_loop: &ActiveEventLoop, start: Instant) {
     if let Some(limit) = run_limit_secs() {
         if start.elapsed() >= Duration::from_secs_f64(limit) {

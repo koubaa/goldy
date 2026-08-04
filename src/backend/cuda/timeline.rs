@@ -17,7 +17,10 @@ pub(super) enum LedgerCompletion {
     CudaEvent(Arc<CudaEvent>),
     /// DX12 companion fence signaled on the presentation DIRECT queue.
     ///
-    /// `value` may be 0 until [`bind_dx12_fence_value`] runs at Signal time.
+    /// Present publishes [`LedgerCompletion::CudaEvent`] (bridged on `present_stream`).
+    /// This variant remains for residual fence-ledger producers; `value` may be 0 until
+    /// [`bind_dx12_fence_value`] runs at Signal time.
+    #[allow(dead_code)]
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     Dx12Fence {
         companion: Arc<Dx12Companion>,
@@ -188,7 +191,8 @@ pub(super) fn mark_recorded(ledger: &EventLedger, value: u64) {
     }
 }
 
-/// Fill the DX12 fence value for a present ledger entry at Signal time (not earlier).
+/// Fill the DX12 fence value for a fence ledger entry at Signal time (not earlier).
+#[allow(dead_code)] // paired with LedgerCompletion::Dx12Fence for residual producers
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 pub(super) fn bind_dx12_fence_value(ledger: &EventLedger, timeline: u64, fence_value: u64) {
     if let Some(entry) = ledger.lock().unwrap().get_mut(&timeline) {

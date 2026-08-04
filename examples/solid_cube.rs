@@ -400,14 +400,16 @@ impl ApplicationHandler for App {
             let window = Arc::new(
                 event_loop
                     .create_window(
-                        Window::default_attributes()
-                            .with_title("Goldy - Solid Cube (Scheme + Present)")
-                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
+                        common::hidden_window("Goldy - Solid Cube (Scheme + Present)", 800, 800),
                     )
                     .unwrap(),
             );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
+            if let Err(e) = self.render_frame() {
+                tracing::error!("First frame error: {e}");
+            }
+            common::reveal_window(&window);
             window.request_redraw();
         }
     }

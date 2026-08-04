@@ -230,25 +230,22 @@ impl ApplicationHandler for App {
             let window = Arc::new(
                 event_loop
                     .create_window(
-                        Window::default_attributes()
-                            .with_title("Goldy - Animated Triangle (Scheme + Present)")
-                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                        common::hidden_window("Goldy - Animated Triangle (Scheme + Present)", 800, 600),
                     )
                     .unwrap(),
             );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
+            if let Err(e) = self.render_frame() {
+                tracing::error!("First frame error: {e}");
+            }
+            common::reveal_window(&window);
             window.request_redraw();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(perf_start) = self.perf_start else {
-            return;
-        };
-        if perf_start.elapsed() >= Duration::from_secs_f64(Self::soak_secs()) {
-            event_loop.exit();
-        }
+        common::exit_if_timed_out(event_loop, self.perf_start.unwrap_or_else(Instant::now));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
