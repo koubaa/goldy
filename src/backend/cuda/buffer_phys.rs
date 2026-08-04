@@ -96,11 +96,7 @@ pub(super) fn leak_shared_buffer_slice(slice: CudaSlice<u8>) {
 
 impl CudaBackend {
     /// Merge `req` into the buffer and materialize / promote as needed.
-    pub(super) fn ensure_buffer_requirements(
-        &mut self,
-        buffer: BufferHandle,
-        req: CudaBufferReq,
-    ) -> Result<()> {
+    pub(super) fn ensure_buffer_requirements(&mut self, buffer: BufferHandle, req: CudaBufferReq) -> Result<()> {
         if req.is_empty() {
             return Ok(());
         }
@@ -146,9 +142,7 @@ impl CudaBackend {
             CudaPhysKind::Native | CudaPhysKind::Shared | CudaPhysKind::NativeAndTwin
                 if compatible(old_kind, target) => {}
             other => {
-                bail!(
-                    "CUDA: unsupported buffer promotion {other:?} → {target:?} (req={new_req:?})"
-                );
+                bail!("CUDA: unsupported buffer promotion {other:?} → {target:?} (req={new_req:?})");
             }
         }
         Ok(())
@@ -208,10 +202,7 @@ impl CudaBackend {
             .get(&parent)
             .context("CUDA: sync view: invalid parent")?
             .clone_meta();
-        let view_buf = self
-            .buffers
-            .get_mut(&view)
-            .context("CUDA: sync view: invalid view")?;
+        let view_buf = self.buffers.get_mut(&view).context("CUDA: sync view: invalid view")?;
         view_buf.memory = parent_meta.memory;
         view_buf.shared = parent_meta.shared;
         view_buf.shared_epoch = parent_meta.shared_epoch;
@@ -224,12 +215,7 @@ impl CudaBackend {
     fn materialize_deferred(&mut self, buffer: BufferHandle, target: CudaPhysKind) -> Result<()> {
         let (device, capacity, pending, size) = {
             let buf = self.buffers.get_mut(&buffer).unwrap();
-            (
-                buf.device,
-                buf.capacity,
-                buf.pending_init.take(),
-                buf.size,
-            )
+            (buf.device, buf.capacity, buf.pending_init.take(), buf.size)
         };
         match target {
             CudaPhysKind::Native | CudaPhysKind::NativeAndTwin => {
@@ -264,14 +250,8 @@ impl CudaBackend {
                 self.write_buffer_physical(buffer, 0, &data[..n as usize])?;
             }
         }
-        self.graph_stats
-            .buffer_materializations
-            .fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(
-            buffer,
-            ?target,
-            "CUDA: materialized deferred buffer"
-        );
+        self.graph_stats.buffer_materializations.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(buffer, ?target, "CUDA: materialized deferred buffer");
         Ok(())
     }
 
@@ -291,8 +271,7 @@ impl CudaBackend {
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let backing = create_shared_buffer_backing(&companion, &cuda_ctx, &stream, capacity)?;
         // SAFETY: mapped external alloc; freed only via SharedBufferBacking drop after leak.
-        let slice =
-            unsafe { stream.upgrade_device_ptr::<u8>(backing.import.device_ptr, capacity.max(4) as usize) };
+        let slice = unsafe { stream.upgrade_device_ptr::<u8>(backing.import.device_ptr, capacity.max(4) as usize) };
         let buf = self.buffers.get_mut(&buffer).unwrap();
         buf.memory = Some(Arc::new(Mutex::new(slice)));
         buf.shared = Some(Arc::new(backing));
@@ -373,45 +352,31 @@ impl CudaBackend {
                 )
             }
             .context("CUDA: Native→Shared DtoD")?;
-            stream
-                .synchronize()
-                .context("CUDA: Native→Shared synchronize")?;
+            stream.synchronize().context("CUDA: Native→Shared synchronize")?;
         }
 
         // Drop native allocation (not external).
         drop(old_memory);
 
         // SAFETY: mapped external alloc; freed only via SharedBufferBacking drop after leak.
-        let slice =
-            unsafe { stream.upgrade_device_ptr::<u8>(backing.import.device_ptr, capacity.max(4) as usize) };
+        let slice = unsafe { stream.upgrade_device_ptr::<u8>(backing.import.device_ptr, capacity.max(4) as usize) };
         let buf = self.buffers.get_mut(&buffer).unwrap();
         buf.memory = Some(Arc::new(Mutex::new(slice)));
         buf.shared = Some(Arc::new(backing));
         buf.shared_epoch = buf.content_epoch;
         buf.phys_kind = CudaPhysKind::Shared;
         buf.memory_is_external = true;
-        self.graph_stats
-            .buffer_promotions
-            .fetch_add(1, Ordering::Relaxed);
+        self.graph_stats.buffer_promotions.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(buffer, "CUDA: promoted Native → Shared");
         self.register_buffer_bindless_descriptor(buffer)?;
         Ok(())
     }
 
     /// Shared → NativeAndTwin: allocate native, copy bytes, keep import as twin.
-    fn promote_shared_to_native_and_twin(
-        &mut self,
-        buffer: BufferHandle,
-        capacity: u64,
-    ) -> Result<()> {
+    fn promote_shared_to_native_and_twin(&mut self, buffer: BufferHandle, capacity: u64) -> Result<()> {
         let (device, size, offset, shared) = {
             let buf = self.buffers.get(&buffer).unwrap();
-            (
-                buf.device,
-                buf.size,
-                buf.offset,
-                buf.shared.clone(),
-            )
+            (buf.device, buf.size, buf.offset, buf.shared.clone())
         };
         let Some(shared) = shared else {
             bail!("CUDA: promote Shared without shared backing");
@@ -434,9 +399,7 @@ impl CudaBackend {
                 .context("CUDA/DX12: wait CUDA fence before Shared promote")?;
         }
         let worker = Arc::clone(&self.device(device)?.submission_worker);
-        worker
-            .flush()
-            .context("CUDA: flush worker before Shared promote")?;
+        worker.flush().context("CUDA: flush worker before Shared promote")?;
         self.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
 
         // Take the external slice Arc so we can leak it after copy (Drop must not free).
@@ -461,26 +424,17 @@ impl CudaBackend {
             let nbytes = size as usize;
             let src_ptr = shared.import.device_ptr;
             let dst_ptr = {
-                let view = native
-                    .try_slice_mut(0..nbytes)
-                    .context("CUDA: promote dst view")?;
+                let view = native.try_slice_mut(0..nbytes).context("CUDA: promote dst view")?;
                 let (ptr, _) = view.device_ptr(&gpu.alloc_stream);
                 ptr
             };
             // Account for CudaBuffer views that shift into a parent allocation.
             let src_ptr = src_ptr + offset;
             unsafe {
-                cudarc::driver::result::memcpy_dtod_async(
-                    dst_ptr,
-                    src_ptr,
-                    nbytes,
-                    gpu.alloc_stream.cu_stream(),
-                )
+                cudarc::driver::result::memcpy_dtod_async(dst_ptr, src_ptr, nbytes, gpu.alloc_stream.cu_stream())
             }
             .context("CUDA: promote Shared→native DtoD")?;
-            gpu.alloc_stream
-                .synchronize()
-                .context("CUDA: promote synchronize")?;
+            gpu.alloc_stream.synchronize().context("CUDA: promote synchronize")?;
         }
 
         match Arc::try_unwrap(old_memory) {
@@ -530,12 +484,7 @@ impl CudaBackend {
     }
 
     /// Write into already-physical memory (no deferred staging).
-    pub(super) fn write_buffer_physical(
-        &mut self,
-        buffer: BufferHandle,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<()> {
+    pub(super) fn write_buffer_physical(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         let device = self.buffers.get(&buffer).unwrap().device;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let buffer_ref = self.buffers.get(&buffer).unwrap();
@@ -601,12 +550,9 @@ fn ops_touch_memory(ops: &[super::pending_submit::CudaOp], memory: &Arc<Mutex<Cu
     ops.iter().any(|op| match op {
         CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } => Arc::ptr_eq(m, memory),
         CudaOp::Copy { src, dst, .. } => Arc::ptr_eq(src, memory) || Arc::ptr_eq(dst, memory),
-        CudaOp::Launch {
-            keep_alive_buffers, ..
+        CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
+            keep_alive_buffers.iter().any(|m| Arc::ptr_eq(m, memory))
         }
-        | CudaOp::LaunchIndirect {
-            keep_alive_buffers, ..
-        } => keep_alive_buffers.iter().any(|m| Arc::ptr_eq(m, memory)),
         CudaOp::CopyTextureToBuffer { dst, .. } => Arc::ptr_eq(dst, memory),
         _ => false,
     })

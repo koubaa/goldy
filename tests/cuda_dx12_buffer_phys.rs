@@ -8,9 +8,9 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    test_support, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    test_support, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad,
+    TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use std::sync::Arc;
 
@@ -144,11 +144,7 @@ fn acquire_with_data_raster_lands_shared() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(
-        adapter
-            .request_device(&DeviceDescriptor::default())
-            .expect("device"),
-    );
+    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -211,11 +207,7 @@ fn separate_deposit_then_draw_promotes_to_shared() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(
-        adapter
-            .request_device(&DeviceDescriptor::default())
-            .expect("device"),
-    );
+    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -287,11 +279,7 @@ fn compute_then_raster_lands_native_and_twin() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(
-        adapter
-            .request_device(&DeviceDescriptor::default())
-            .expect("device"),
-    );
+    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let vs_fs = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("gfx");
     let pipeline = RenderPipeline::new(
@@ -363,11 +351,7 @@ fn shared_then_kernel_promotes_without_invalidating_schemes() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(
-        adapter
-            .request_device(&DeviceDescriptor::default())
-            .expect("device"),
-    );
+    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let vs_fs = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("gfx");
     let pipeline = RenderPipeline::new(
@@ -463,11 +447,7 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(
-        adapter
-            .request_device(&DeviceDescriptor::default())
-            .expect("device"),
-    );
+    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -589,10 +569,7 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
             .expect("consume")
             .to_vec();
         let (r, g, b) = sample_centroid(&pixels);
-        assert!(
-            expect(r, g, b),
-            "frame {frame_i}: stale Shared content ({r},{g},{b})"
-        );
+        assert!(expect(r, g, b), "frame {frame_i}: stale Shared content ({r},{g},{b})");
         assert_eq!(
             test_support::cuda_buffer_phys_kind(&device, &vertex_buffer),
             Some("shared"),

@@ -1,10 +1,10 @@
 //! Owned CUDA submits executed on the per-device submission worker.
 
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+use super::dx12_companion::{cuda_wait_fence, Dx12Companion};
 use super::retained_graph::{self, CudaGraphStats, GraphRegistry};
 use super::timeline::{self, EventLedger};
 use super::{CudaBufferArg, CudaLaunchArg, CudaSubmitContext};
-#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-use super::dx12_companion::{cuda_wait_fence, Dx12Companion};
 use crate::backend::submission_worker::PendingSubmit;
 use crate::backend::{ContextHandle, DeferredHostWrite};
 use crate::timeline::TimelineValue;
@@ -777,7 +777,10 @@ fn run_dynamic_prefix(
     host_waits: &[Arc<CudaEvent>],
     deferred_writes: &[MaterializedHostWrite],
     stream_waits: &[Arc<CudaEvent>],
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))] dx12_stream_fence_waits: &[(Arc<Dx12Companion>, u64)],
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))] dx12_stream_fence_waits: &[(
+        Arc<Dx12Companion>,
+        u64,
+    )],
 ) -> Result<()> {
     for event in host_waits {
         timeline::host_wait_event(event)?;

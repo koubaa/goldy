@@ -445,8 +445,7 @@ impl Dx12Companion {
         let signal = self.next_fence_value();
         self.execute_and_signal(&[Some(cmd)], signal)?;
         slot.fence_value.store(signal, Ordering::Release);
-        self.raster_slot
-            .store((idx as u64).wrapping_add(1), Ordering::Release);
+        self.raster_slot.store((idx as u64).wrapping_add(1), Ordering::Release);
         Ok(Some(signal))
     }
 

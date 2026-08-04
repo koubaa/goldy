@@ -243,10 +243,8 @@ pub(super) fn create_shared_buffer_backing(
     }
 
     // Zero via driver API (not a CudaSlice) so we never risk cuMemFree on the mapping.
-    unsafe {
-        cudarc::driver::result::memset_d8_async(import.device_ptr, 0, size as usize, stream.cu_stream())
-    }
-    .context("CUDA/DX12: cuMemsetD8Async on shared buffer failed")?;
+    unsafe { cudarc::driver::result::memset_d8_async(import.device_ptr, 0, size as usize, stream.cu_stream()) }
+        .context("CUDA/DX12: cuMemsetD8Async on shared buffer failed")?;
     stream
         .synchronize()
         .context("CUDA/DX12: synchronize after shared buffer memset")?;
@@ -320,9 +318,7 @@ pub(super) fn import_shared_buffer(
     handle: HANDLE,
     size: u64,
 ) -> Result<CudaImportedBuffer> {
-    cuda_ctx
-        .bind_to_thread()
-        .context("CUDA/DX12: bind for buffer import")?;
+    cuda_ctx.bind_to_thread().context("CUDA/DX12: bind for buffer import")?;
 
     let mem_desc = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
         type_: sys::CUexternalMemoryHandleType::CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE,

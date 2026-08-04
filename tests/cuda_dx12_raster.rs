@@ -9,9 +9,9 @@
 use goldy::types::BackendType;
 use goldy::{
     BufferKind, Color, ComputePipeline, DeviceDescriptor, IndexFormat, Instance, MemoryExchange, NodeAccess,
-    PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool,
-    Sampler, SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad,
-    TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler,
+    SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags,
+    TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -21,9 +21,7 @@ use std::num::NonZeroIsize;
 use std::sync::Arc;
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
 fn try_cuda_instance() -> Option<Instance> {
     // SAFETY: test process; GOLDY_BACKEND is read during Instance::new.
@@ -760,10 +758,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
         let _ = grant.claim(&mut submission).expect("warmup claim").consume();
     }
 
-    let mut prev_binds = device
-        .cuda_path_stats_for_test()
-        .expect("stats")
-        .shared_vb_binds;
+    let mut prev_binds = device.cuda_path_stats_for_test().expect("stats").shared_vb_binds;
 
     for (frame_i, (color, expect_pixel)) in frames.iter().enumerate() {
         let verts = [
@@ -787,10 +782,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
             .expect("consume")
             .to_vec();
 
-        let binds = device
-            .cuda_path_stats_for_test()
-            .expect("stats")
-            .shared_vb_binds;
+        let binds = device.cuda_path_stats_for_test().expect("stats").shared_vb_binds;
         assert!(
             binds > prev_binds,
             "frame {frame_i}: expected shared VB refresh after retain (binds {binds} <= prev {prev_binds})"
@@ -1132,9 +1124,17 @@ fn cuda_raster_bindless_tint_change_rerecords() {
         .bind_withdraw(&mut scheme, &readback)
         .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume").to_vec();
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
     let (r, g, b) = sample(&pixels);
-    assert!(r < 0.25 && g > 0.5 && b < 0.25, "frame1 expected green, got ({r},{g},{b})");
+    assert!(
+        r < 0.25 && g > 0.5 && b < 0.25,
+        "frame1 expected green, got ({r},{g},{b})"
+    );
 
     // Frame 2: blue tint — changed bindings must not replay the green list.
     let mut scheme = Scheme::new(&ctx);
@@ -1158,9 +1158,17 @@ fn cuda_raster_bindless_tint_change_rerecords() {
         .bind_withdraw(&mut scheme, &readback)
         .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume").to_vec();
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
     let (r, g, b) = sample(&pixels);
-    assert!(r < 0.25 && g < 0.25 && b > 0.5, "frame2 expected blue, got ({r},{g},{b})");
+    assert!(
+        r < 0.25 && g < 0.25 && b > 0.5,
+        "frame2 expected blue, got ({r},{g},{b})"
+    );
 }
 
 #[test]

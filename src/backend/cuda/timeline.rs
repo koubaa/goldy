@@ -40,12 +40,10 @@ impl CompletionSnap {
         match completion {
             LedgerCompletion::CudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::Dx12Fence { companion, value } => {
-                (*value > 0).then(|| Self::Dx12Fence {
-                    companion: Arc::clone(companion),
-                    value: *value,
-                })
-            }
+            LedgerCompletion::Dx12Fence { companion, value } => (*value > 0).then(|| Self::Dx12Fence {
+                companion: Arc::clone(companion),
+                value: *value,
+            }),
         }
     }
 

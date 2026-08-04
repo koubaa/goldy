@@ -147,10 +147,7 @@ fn raster_fingerprint(
             }
             RenderCommand::ClearDepth(depth) => depth.to_bits().hash(&mut hash),
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
-                let cuda_buf = backend
-                    .buffers
-                    .get(buffer)
-                    .context("CUDA/DX12: invalid index buffer")?;
+                let cuda_buf = backend.buffers.get(buffer).context("CUDA/DX12: invalid index buffer")?;
                 buffer.hash(&mut hash);
                 offset.hash(&mut hash);
                 format.hash(&mut hash);
@@ -594,8 +591,8 @@ fn refresh_shared_vertex_backing(
     buffer: BufferHandle,
     stream: &Arc<cudarc::driver::CudaStream>,
 ) -> Result<u64> {
-    use cudarc::driver::DevicePtr;
     use super::buffer_phys::{CudaBufferReq, CudaPhysKind};
+    use cudarc::driver::DevicePtr;
 
     backend.ensure_buffer_requirements(buffer, CudaBufferReq::VERTEX)?;
 
@@ -620,13 +617,8 @@ fn refresh_shared_vertex_backing(
             // Flush/sync so DX12 IA observes the bytes (avoids Signal/DX12 fence races).
             if shared.pending_host_sync.swap(false, Ordering::AcqRel) {
                 let worker = Arc::clone(&backend.device(device)?.submission_worker);
-                worker
-                    .flush()
-                    .context("CUDA/DX12: flush before Shared VB host sync")?;
-                backend
-                    .graph_stats
-                    .worker_flushes
-                    .fetch_add(1, Ordering::Relaxed);
+                worker.flush().context("CUDA/DX12: flush before Shared VB host sync")?;
+                backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
                 for context in backend.contexts.values().filter(|context| context.device == device) {
                     context
                         .stream
@@ -634,10 +626,7 @@ fn refresh_shared_vertex_backing(
                         .context("CUDA/DX12: sync context stream before Shared VB bind")?;
                 }
             }
-            backend
-                .graph_stats
-                .shared_vb_binds
-                .fetch_add(1, Ordering::Relaxed);
+            backend.graph_stats.shared_vb_binds.fetch_add(1, Ordering::Relaxed);
             Ok(shared.last_cuda_fence.load(Ordering::Acquire))
         }
         CudaPhysKind::NativeAndTwin => {
@@ -660,12 +649,8 @@ fn refresh_shared_vertex_backing(
                 );
                 let cuda_ctx = Arc::clone(&backend.device(device)?.ctx);
                 let capacity = backend.buffers.get(&buffer).unwrap().capacity.max(4);
-                let backing = super::dx12_interop::create_shared_buffer_backing(
-                    &companion,
-                    &cuda_ctx,
-                    stream,
-                    capacity,
-                )?;
+                let backing =
+                    super::dx12_interop::create_shared_buffer_backing(&companion, &cuda_ctx, stream, capacity)?;
                 let old = backend
                     .buffers
                     .get_mut(&buffer)
@@ -714,15 +699,8 @@ fn refresh_shared_vertex_backing(
                 ptr
             };
             let dst_ptr = shared.import.device_ptr;
-            unsafe {
-                cudarc::driver::result::memcpy_dtod_async(
-                    dst_ptr,
-                    src_ptr,
-                    nbytes,
-                    stream.cu_stream(),
-                )
-            }
-            .context("CUDA/DX12: DtoD refresh into shared VB failed")?;
+            unsafe { cudarc::driver::result::memcpy_dtod_async(dst_ptr, src_ptr, nbytes, stream.cu_stream()) }
+                .context("CUDA/DX12: DtoD refresh into shared VB failed")?;
 
             let companion = companion(backend, device)?;
             let value = companion.next_fence_value();
@@ -734,15 +712,12 @@ fn refresh_shared_vertex_backing(
             )?;
             shared.last_cuda_fence.store(value, Ordering::Release);
             backend.buffers.get_mut(&buffer).unwrap().shared_epoch = content_epoch;
-            backend
-                .graph_stats
-                .shared_vb_binds
-                .fetch_add(1, Ordering::Relaxed);
+            backend.graph_stats.shared_vb_binds.fetch_add(1, Ordering::Relaxed);
             Ok(value)
         }
-        other => bail!(
-            "CUDA/DX12: vertex buffer phys_kind={other:?} after VERTEX ensure (expected Shared or NativeAndTwin)"
-        ),
+        other => {
+            bail!("CUDA/DX12: vertex buffer phys_kind={other:?} after VERTEX ensure (expected Shared or NativeAndTwin)")
+        }
     }
 }
 
@@ -785,16 +760,14 @@ pub(super) fn render_to_target(
 
     // Lower typed/handle binds → frame-table routing before fingerprint / record.
     // Graph submit passes pre-built staging; standalone render_to_target rebuilds it.
-    let (staging_data, lowered, has_bindings) =
-        prepare_cuda_render_commands(backend, commands, graph_staging)?;
+    let (staging_data, lowered, has_bindings) = prepare_cuda_render_commands(backend, commands, graph_staging)?;
 
     // Pre-declare VERTEX / SHADER so deposit→Shared can win before provisional Native sticks.
     let mut ia_handles = Vec::new();
     let mut shader_buffers = Vec::new();
     for command in &lowered {
         match command {
-            RenderCommand::SetVertexBuffer { buffer, .. }
-            | RenderCommand::SetIndexBuffer { buffer, .. } => {
+            RenderCommand::SetVertexBuffer { buffer, .. } | RenderCommand::SetIndexBuffer { buffer, .. } => {
                 backend.ensure_buffer_requirements(*buffer, CudaBufferReq::VERTEX)?;
                 if !ia_handles.contains(buffer) {
                     ia_handles.push(*buffer);
@@ -842,19 +815,15 @@ pub(super) fn render_to_target(
 
     // Flush/sync when twin DtoD must observe in-flight native CUDA writes (IA or shader).
     let needs_twin_sync = ia_handles.iter().chain(shader_buffers.iter()).any(|handle| {
-        backend.buffers.get(handle).is_some_and(|buf| {
-            buf.phys_kind == CudaPhysKind::NativeAndTwin && buf.content_epoch != buf.shared_epoch
-        })
+        backend
+            .buffers
+            .get(handle)
+            .is_some_and(|buf| buf.phys_kind == CudaPhysKind::NativeAndTwin && buf.content_epoch != buf.shared_epoch)
     });
     if needs_twin_sync {
         let worker = Arc::clone(&backend.device(device)?.submission_worker);
-        worker
-            .flush()
-            .context("CUDA/DX12: flush before twin VB refresh")?;
-        backend
-            .graph_stats
-            .worker_flushes
-            .fetch_add(1, Ordering::Relaxed);
+        worker.flush().context("CUDA/DX12: flush before twin VB refresh")?;
+        backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
         for context in backend.contexts.values().filter(|context| context.device == device) {
             context
                 .stream
@@ -1009,10 +978,7 @@ pub(super) fn render_to_target(
                 unsafe { list.IASetVertexBuffers(*slot, Some(&[view])) };
             }
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
-                let cuda_buf = backend
-                    .buffers
-                    .get(buffer)
-                    .context("CUDA/DX12: invalid index buffer")?;
+                let cuda_buf = backend.buffers.get(buffer).context("CUDA/DX12: invalid index buffer")?;
                 if *offset >= cuda_buf.size {
                     bail!("CUDA/DX12: index buffer offset out of range");
                 }
@@ -1047,10 +1013,7 @@ pub(super) fn render_to_target(
                     let staged: Vec<u32> = if raw_indices.is_empty() {
                         let n = pipeline.push_constant_slot_kinds.len();
                         let base = *frame_table_base as usize;
-                        staging_data
-                            .get(base..base.saturating_add(n))
-                            .unwrap_or(&[])
-                            .to_vec()
+                        staging_data.get(base..base.saturating_add(n)).unwrap_or(&[]).to_vec()
                     } else {
                         raw_indices.clone()
                     };
@@ -1122,11 +1085,10 @@ pub(super) fn render_to_target(
     if let Some(row) = frame_table_row {
         companion.frame_table.mark_row_submitted(row, signal);
     }
-    companion.bindless.drain_reclaimed(unsafe { companion.fence.GetCompletedValue() });
-    backend
-        .graph_stats
-        .raster_list_records
-        .fetch_add(1, Ordering::Relaxed);
+    companion
+        .bindless
+        .drain_reclaimed(unsafe { companion.fence.GetCompletedValue() });
+    backend.graph_stats.raster_list_records.fetch_add(1, Ordering::Relaxed);
     if let Some(rt) = backend.render_targets.get_mut(&target) {
         rt.last_dx12_fence = signal;
     }
@@ -1150,12 +1112,10 @@ fn prepare_cuda_render_commands(
         crate::backend::validate_render_pass_bind_resources(
             commands,
             |h| {
-                backend.pipelines.get(&h).map(|p| {
-                    (
-                        p.binding_element_strides.clone(),
-                        p.shader_debug_name.clone(),
-                    )
-                })
+                backend
+                    .pipelines
+                    .get(&h)
+                    .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
             },
             |h| backend.buffers.get(&h).and_then(|b| b.element_stride),
         )
@@ -1199,8 +1159,7 @@ fn prepare_cuda_render_commands(
                 })
             }
             other => {
-                let batch =
-                    crate::frame_table::lower_render_pass_commands(&mut staging, std::slice::from_ref(other));
+                let batch = crate::frame_table::lower_render_pass_commands(&mut staging, std::slice::from_ref(other));
                 Ok(batch.into_iter().next().unwrap_or_else(|| other.clone()))
             }
         })

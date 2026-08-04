@@ -1245,10 +1245,7 @@ impl Device {
     /// Late-physicalization kind for a buffer handle (`"deferred"|"native"|"shared"|"native_and_twin"`).
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
     #[doc(hidden)]
-    pub fn cuda_buffer_phys_kind_for_test(
-        &self,
-        buffer: crate::backend::BufferHandle,
-    ) -> Option<&'static str> {
+    pub fn cuda_buffer_phys_kind_for_test(&self, buffer: crate::backend::BufferHandle) -> Option<&'static str> {
         let mut guard = self.inner.backend.lock().unwrap();
         guard
             .as_mut()

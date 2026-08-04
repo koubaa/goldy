@@ -214,10 +214,7 @@ impl Drop for App {
         };
         let now = Instant::now();
         let elapsed = perf_start.elapsed().as_secs_f64();
-        let (window_frames, window_secs, fps) = self
-            .fps_window
-            .stats(now)
-            .unwrap_or((0, 0.0, 0.0));
+        let (window_frames, window_secs, fps) = self.fps_window.stats(now).unwrap_or((0, 0.0, 0.0));
         println!(
             "GOLDY_PERF: frames={} elapsed={elapsed:.2}s last_{:.0}s_fps={fps:.1} (window_frames={window_frames} window_secs={window_secs:.2} present=Auto soak={:.0}s)",
             self.frame_count,
@@ -288,8 +285,14 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     println!("Goldy Triangle Example (Scheme + Present)");
-    println!("PresentMode::Auto (vsync). Auto-exits after {:.0}s soak.", App::soak_secs());
-    println!("Reports FPS over the last {:.0}s window at exit.", App::fps_window_secs());
+    println!(
+        "PresentMode::Auto (vsync). Auto-exits after {:.0}s soak.",
+        App::soak_secs()
+    );
+    println!(
+        "Reports FPS over the last {:.0}s window at exit.",
+        App::fps_window_secs()
+    );
     println!("Press Escape or close window to exit early.\n");
 
     let event_loop = EventLoop::new()?;

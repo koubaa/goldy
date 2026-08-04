@@ -9,9 +9,8 @@
 use super::dx12_companion::Dx12Companion;
 use crate::backend::shared::TOTAL_PUSH_BYTES;
 use crate::frame_table::{
-    staging_row_payload_byte_offset, staging_selector_byte_offset, FRAME_TABLE_MAX_ROWS,
-    FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_STAGING_BYTES, FRAME_TABLE_TABLE_U32S,
-    FRAME_TABLE_USER_SLOT_BASE,
+    staging_row_payload_byte_offset, staging_selector_byte_offset, FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE,
+    FRAME_TABLE_STAGING_BYTES, FRAME_TABLE_TABLE_U32S, FRAME_TABLE_USER_SLOT_BASE,
 };
 use crate::types::{AddressMode, BindlessSlotKind, FilterMode, SamplerDesc, TextureFormat};
 use anyhow::{bail, Context as _, Result};
@@ -34,6 +33,7 @@ pub(super) enum DescriptorCategory {
     BufferCbv,
     TextureSrv,
     TextureUav,
+    #[allow(dead_code)] // sampler heap uses `occupy_sampler`, not resource `occupy`
     Sampler,
 }
 
@@ -121,8 +121,7 @@ impl BindlessRegistry {
     }
 
     pub fn drain_reclaimed(&mut self, completed: u64) {
-        self.pending_reclaim
-            .retain(|(_, _, retire_at)| *retire_at > completed);
+        self.pending_reclaim.retain(|(_, _, retire_at)| *retire_at > completed);
     }
 }
 
@@ -420,9 +419,8 @@ impl CompanionFrameTable {
         }
 
         // Pack selector word + row payload into staging (same layout as DX12).
-        let staging = unsafe {
-            std::slice::from_raw_parts_mut(self.staging_mapped, FRAME_TABLE_STAGING_BYTES as usize)
-        };
+        let staging =
+            unsafe { std::slice::from_raw_parts_mut(self.staging_mapped, FRAME_TABLE_STAGING_BYTES as usize) };
         let sel_off = staging_selector_byte_offset(row) as usize;
         staging[sel_off..sel_off + 4].copy_from_slice(&row.to_le_bytes());
         let payload_off = staging_row_payload_byte_offset(row) as usize;
@@ -720,30 +718,15 @@ mod tests {
 
     #[test]
     fn category_maps_to_slot_kind() {
-        assert_eq!(
-            DescriptorCategory::BufferSrv.slot_kind(),
-            BindlessSlotKind::ReadOnlySrv
-        );
-        assert_eq!(
-            DescriptorCategory::BufferUav.slot_kind(),
-            BindlessSlotKind::StorageUav
-        );
+        assert_eq!(DescriptorCategory::BufferSrv.slot_kind(), BindlessSlotKind::ReadOnlySrv);
+        assert_eq!(DescriptorCategory::BufferUav.slot_kind(), BindlessSlotKind::StorageUav);
         assert_eq!(
             DescriptorCategory::TextureSrv.slot_kind(),
             BindlessSlotKind::ReadOnlySrv
         );
-        assert_eq!(
-            DescriptorCategory::TextureUav.slot_kind(),
-            BindlessSlotKind::StorageUav
-        );
-        assert_eq!(
-            DescriptorCategory::BufferCbv.slot_kind(),
-            BindlessSlotKind::UniformCbv
-        );
-        assert_eq!(
-            DescriptorCategory::Sampler.slot_kind(),
-            BindlessSlotKind::ReadOnlySrv
-        );
+        assert_eq!(DescriptorCategory::TextureUav.slot_kind(), BindlessSlotKind::StorageUav);
+        assert_eq!(DescriptorCategory::BufferCbv.slot_kind(), BindlessSlotKind::UniformCbv);
+        assert_eq!(DescriptorCategory::Sampler.slot_kind(), BindlessSlotKind::ReadOnlySrv);
     }
 
     #[test]
@@ -761,9 +744,6 @@ mod tests {
         let err = reg
             .occupy(MAX_BINDLESS_CBV_SRV_UAV, DescriptorCategory::BufferSrv)
             .expect_err("slot at heap size must fail");
-        assert!(
-            err.to_string().contains("exceeds heap size"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("exceeds heap size"), "unexpected error: {err}");
     }
 }

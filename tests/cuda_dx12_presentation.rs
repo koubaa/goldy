@@ -9,8 +9,8 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    ComputePipeline, DeviceDescriptor, Instance, PresentMode, RequestAdapterOptions, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange,
+    ComputePipeline, DeviceDescriptor, Instance, PresentMode, RequestAdapterOptions, Scheme, ShaderModule,
+    SurfaceConfig, SurfaceExchange,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -20,9 +20,7 @@ use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
 /// CUDA+DX12 companion / DXGI present is not safe to run concurrently in-process:
 /// parallel `request_device` + present against the same adapter deadlocks (observed as
@@ -77,9 +75,8 @@ impl Drop for TestWindow {
 
 impl HasWindowHandle for TestWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let mut handle = Win32WindowHandle::new(
-            NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?,
-        );
+        let mut handle =
+            Win32WindowHandle::new(NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?);
         handle.hinstance = None;
         Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
     }
@@ -87,9 +84,7 @@ impl HasWindowHandle for TestWindow {
 
 impl HasDisplayHandle for TestWindow {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(unsafe {
-            DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
-        })
+        Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new())) })
     }
 }
 
@@ -105,9 +100,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId tid) {
 
 #[test]
 fn cuda_device_attaches_dx12_companion_or_skips() {
-    let _guard = CUDA_DX12_PRESENT_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = CUDA_DX12_PRESENT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -126,9 +119,7 @@ fn cuda_device_attaches_dx12_companion_or_skips() {
 
 #[test]
 fn cuda_compute_to_present_multi_frame() {
-    let _guard = CUDA_DX12_PRESENT_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = CUDA_DX12_PRESENT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -179,9 +170,8 @@ fn cuda_compute_to_present_multi_frame() {
 
         // Present publishes completion on the Goldy/CUDA timeline. Waiting on the
         // compute submit value must succeed (same namespace; present >= compute).
-        goldy::test_support::wait_until(&ctx, compute_tv).unwrap_or_else(|e| {
-            panic!("frame {frame_i}: wait_until({compute_tv}) failed: {e:#}")
-        });
+        goldy::test_support::wait_until(&ctx, compute_tv)
+            .unwrap_or_else(|e| panic!("frame {frame_i}: wait_until({compute_tv}) failed: {e:#}"));
         assert!(
             goldy::test_support::gpu_progress(&ctx) >= compute_tv,
             "frame {frame_i}: progress {} < compute {compute_tv}",

@@ -9,10 +9,9 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PresentMode,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool,
-    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat,
-    TextureKind, Vertex2D,
+    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PresentMode, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -23,9 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
 fn try_cuda_instance() -> Option<Instance> {
     // SAFETY: test process; GOLDY_BACKEND is read during Instance::new.
@@ -74,9 +71,8 @@ impl Drop for TestWindow {
 
 impl HasWindowHandle for TestWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let mut handle = Win32WindowHandle::new(
-            NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?,
-        );
+        let mut handle =
+            Win32WindowHandle::new(NonZeroIsize::new(self.hwnd.0 as isize).ok_or(HandleError::Unavailable)?);
         handle.hinstance = None;
         Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
     }
@@ -84,9 +80,7 @@ impl HasWindowHandle for TestWindow {
 
 impl HasDisplayHandle for TestWindow {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(unsafe {
-            DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
-        })
+        Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new())) })
     }
 }
 
@@ -503,11 +497,7 @@ fn cuda_offscreen_rt_recreate_stress() {
             .bind_withdraw(&mut scheme, &readback)
             .expect("withdraw");
         let mut submission = scheme.submit().expect("submit");
-        let _pixels = grant
-            .claim(&mut submission)
-            .expect("claim")
-            .consume()
-            .expect("consume");
+        let _pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume");
         total += t0.elapsed();
     }
     eprintln!(
@@ -622,7 +612,11 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
         }
         scheme.copy_to_present(&rt, &lease);
         let mut submission = scheme.submit().expect("submit");
-        present_tx.claim(&mut submission).expect("claim").consume().expect("present");
+        present_tx
+            .claim(&mut submission)
+            .expect("claim")
+            .consume()
+            .expect("present");
     }
 
     // Correct order (surface while ctx alive).
@@ -703,7 +697,11 @@ fn cuda_teardown_context_before_surface_after_raster_present() {
         }
         scheme.copy_to_present(&rt, &lease);
         let mut submission = scheme.submit().expect("submit");
-        present_tx.claim(&mut submission).expect("claim").consume().expect("present");
+        present_tx
+            .claim(&mut submission)
+            .expect("claim")
+            .consume()
+            .expect("present");
     }
 
     // Intentional reverse order (ctx before surface) — backend must tolerate it.

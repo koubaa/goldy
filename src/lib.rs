@@ -330,9 +330,7 @@ pub mod test_support {
                     return None;
                 }
                 let adapter = instance.request_adapter(&RequestAdapterOptions::default()).ok()?;
-                let device = adapter
-                    .request_device(&DeviceDescriptor::default())
-                    .ok()?;
+                let device = adapter.request_device(&DeviceDescriptor::default()).ok()?;
                 Some(Arc::new(device))
             })
             .clone()

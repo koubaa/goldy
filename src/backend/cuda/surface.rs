@@ -788,7 +788,10 @@ pub(super) fn take_present_gpu_work(
                 recorded: false,
             },
         );
-        backend.graph_stats.present_completion_events.fetch_add(1, Ordering::Relaxed);
+        backend
+            .graph_stats
+            .present_completion_events
+            .fetch_add(1, Ordering::Relaxed);
         backend.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
         PresentCompletion::CudaEvent(present_event)
     };
@@ -800,10 +803,7 @@ pub(super) fn take_present_gpu_work(
         // CUDA before we Queue.Signal a higher present return fence (see module docs).
         if submit_tv > 0 {
             worker
-                .wait_submitted_if_scheduled(
-                    submit_tv,
-                    submission_worker::submission_horizon(&next_timeline),
-                )
+                .wait_submitted_if_scheduled(submit_tv, submission_worker::submission_horizon(&next_timeline))
                 .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
         }
         direct_cuda_complete
@@ -843,9 +843,7 @@ pub(super) fn take_present_gpu_work(
     let height = scratch.shared.height;
     // Prefer a stashed DX12 raster RT over CUDA-written imported scratch.
     let (color_src, color_src_state) = match present_source {
-        Some(PresentSource::Dx12Raster { resource, fence: _ }) => {
-            (resource, PresentColorSrcState::Common)
-        }
+        Some(PresentSource::Dx12Raster { resource, fence: _ }) => (resource, PresentColorSrcState::Common),
         Some(PresentSource::CudaScratch { .. }) | None => (
             scratch.shared.d3d12_resource.clone(),
             PresentColorSrcState::UnorderedAccess,
@@ -1346,9 +1344,7 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
 
     // See wait_device_idle_for_surface: drain cudarc sticky error_state after DX12 idle.
     if let Err(e) = cuda_ctx.check_err() {
-        tracing::warn!(
-            "CUDA/DX12: cleared sticky context error before surface resource sync: {e:?}"
-        );
+        tracing::warn!("CUDA/DX12: cleared sticky context error before surface resource sync: {e:?}");
     }
 
     if cuda_device_has_pending_work(backend, device) {
@@ -1401,9 +1397,7 @@ fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle)
     // returns that sticky error via check_err before touching the driver. Drain it
     // only after DX12 is idle so subsequent stream syncs reflect real CUDA state.
     if let Err(e) = cuda_ctx.check_err() {
-        tracing::warn!(
-            "CUDA/DX12: cleared sticky context error before surface teardown sync: {e:?}"
-        );
+        tracing::warn!("CUDA/DX12: cleared sticky context error before surface teardown sync: {e:?}");
     }
 
     cuda_ctx

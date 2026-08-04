@@ -16,9 +16,7 @@ use std::num::NonZeroIsize;
 use std::sync::Arc;
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
 const TRIANGLE_SHADER: &str = r#"
 struct VertexInput { float2 position : POSITION; float4 color : COLOR; };
@@ -262,7 +260,10 @@ fn cuda_compute_to_present_retained_steady_state() {
     let stats = device.cuda_path_stats_for_test().expect("CUDA stats must be available");
     // Present-bound launches are rewritten onto CUDA-owned staging and captured; the
     // imported scratch export stays in the fixed GraphWithTail (CopyTexture + fence).
-    assert_eq!(stats.rematerialize_fallbacks, 0, "retained replay must not rematerialize");
+    assert_eq!(
+        stats.rematerialize_fallbacks, 0,
+        "retained replay must not rematerialize"
+    );
     assert_eq!(stats.present_handoffs, 0, "scratch present must use submit-tail signal");
     assert_eq!(stats.worker_flushes, 0, "scratch present must not flush the worker");
     assert!(
@@ -279,8 +280,5 @@ fn cuda_compute_to_present_retained_steady_state() {
         stats.fallbacks, 0,
         "compute-to-present must not fall back to Ops replay after staging rewrite"
     );
-    assert_eq!(
-        stats.shared_vb_binds, 0,
-        "compute-to-present has no vertex binds"
-    );
+    assert_eq!(stats.shared_vb_binds, 0, "compute-to-present has no vertex binds");
 }
