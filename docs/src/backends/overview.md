@@ -206,11 +206,13 @@ D3D12 fence imported as a CUDA external semaphore. This is zero-copy between CUD
 and DX12; a GPU blit into the non-shareable swapchain image remains. Adapter
 mismatch, WARP, and linked-node adapters fail at device creation. A first-slice
 raster path is also available under the same feature gate: offscreen
-`Rgba32Float` render targets, indexed and non-indexed point/line/triangle
-pipelines (Slang → DXIL), bindless render bindings, optional DX12-only depth
-attachments / depth-stencil PSOs / `ClearDepth`, and `CopyRenderTarget` into
-present scratch / CUDA textures. Depth is not CUDA-imported (compute cannot
-sample it yet); stencil ops remain off. Vulkan interop is not supported.
+`Rgba32Float` and `Rgba8Unorm` render targets, indexed and non-indexed
+point/line/triangle pipelines (Slang → DXIL), bindless render bindings, optional
+DX12-only depth attachments / depth-stencil PSOs / `ClearDepth`, and
+`CopyRenderTarget` into present scratch / CUDA textures. Present from either
+color format uses a DX12 compute blit into the BGRA8 swapchain. Depth is not
+CUDA-imported (compute cannot sample it yet); stencil ops remain off. Vulkan
+interop is not supported.
 
 Enable with the `cuda` Cargo feature (`--no-default-features --features cuda`
 auto-selects CUDA; in default builds use `GOLDY_BACKEND=cuda`):
@@ -225,9 +227,15 @@ Texture notes for CUDA:
 
 - Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`,
   `Rgba16Float`, `Rgba32Float`. **BGRA is rejected** (no matching CUDA array swizzle).
-- Writable shader access (`DirectSpatial<T>`) initially requires a storage-compatible
-  format: `DirectSpatial<float4>` ↔ `Rgba32Float` only. Upload/copy/readback of other
-  supported formats still works.
+- Writable shader access (`DirectSpatial<T>`) requires a **size-matched** element↔format
+  pair (CUDA surfaces have no typed-UAV conversion):
+  - `DirectSpatial<float4>` ↔ `Rgba32Float`
+  - `DirectSpatial<half4>` ↔ `Rgba16Float`
+  - `DirectSpatial<uint8_t4>` ↔ `Rgba8Unorm` (Slang has no `uchar4` alias)
+  - Upload/copy/readback of other supported sampled formats still works.
+- Surfaces still expose `Rgba32Float` scratch for `DirectSpatial<float4>` compute-to-surface.
+- `DeviceCapabilities` on CUDA advertise `preferred_surface_format = Rgba32Float` and
+  `preferred_render_target_format = Rgba8Unorm` (no BGRA in supported lists).
 - CUDA has no separate sampler object — filtering is baked into each `CUtexObject`.
   A dispatch may use at most one distinct `Filter` configuration; additional distinct
   samplers are rejected.

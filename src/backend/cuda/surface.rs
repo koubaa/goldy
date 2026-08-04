@@ -87,6 +87,7 @@ struct PresentListCache {
     generation: u64,
     color_src_ptr: usize,
     color_src_state: Option<PresentColorSrcState>,
+    color_src_format: Option<crate::types::TextureFormat>,
     blit_target_ptr: usize,
     backbuffer_ptr: usize,
     image_index: usize,
@@ -120,7 +121,11 @@ pub(super) enum PresentSource {
     CudaScratch { cuda_complete: u64 },
     /// DX12 raster RT; present blits this resource. Same-queue submission order
     /// after `render_to_target` is enough — no extra queue Wait on `fence`.
-    Dx12Raster { resource: ID3D12Resource, fence: u64 },
+    Dx12Raster {
+        resource: ID3D12Resource,
+        fence: u64,
+        format: crate::types::TextureFormat,
+    },
 }
 
 fn present_source_fence(source: &Option<PresentSource>) -> u64 {
@@ -884,11 +889,16 @@ pub(super) fn take_present_gpu_work(
     let width = scratch.shared.width;
     let height = scratch.shared.height;
     // Prefer a stashed DX12 raster RT over CUDA-written imported scratch.
-    let (color_src, color_src_state) = match present_source {
-        Some(PresentSource::Dx12Raster { resource, fence: _ }) => (resource, PresentColorSrcState::Common),
+    let (color_src, color_src_state, color_src_format) = match present_source {
+        Some(PresentSource::Dx12Raster {
+            resource,
+            fence: _,
+            format,
+        }) => (resource, PresentColorSrcState::Common, format),
         Some(PresentSource::CudaScratch { .. }) | None => (
             scratch.shared.d3d12_resource.clone(),
             PresentColorSrcState::UnorderedAccess,
+            SURFACE_COMPUTE_FORMAT,
         ),
     };
     let backbuffer = state.backbuffers[image_index].clone();
@@ -901,6 +911,7 @@ pub(super) fn take_present_gpu_work(
         generation: state.present_generation,
         color_src_ptr: color_src.as_raw() as usize,
         color_src_state: Some(color_src_state),
+        color_src_format: Some(color_src_format),
         blit_target_ptr: blit_target.as_raw() as usize,
         backbuffer_ptr: backbuffer.as_raw() as usize,
         image_index,
@@ -916,6 +927,7 @@ pub(super) fn take_present_gpu_work(
             && prior.generation == cache_entry.generation
             && prior.color_src_ptr == cache_entry.color_src_ptr
             && prior.color_src_state == cache_entry.color_src_state
+            && prior.color_src_format == cache_entry.color_src_format
             && prior.blit_target_ptr == cache_entry.blit_target_ptr
             && prior.backbuffer_ptr == cache_entry.backbuffer_ptr
             && prior.image_index == cache_entry.image_index
@@ -927,14 +939,21 @@ pub(super) fn take_present_gpu_work(
     companion.as_ref(); // keep alive
     let blit = &state.blit;
     if !reuse_list {
-        blit.write_descriptors(&companion.device, image_index, &color_src, &blit_target);
+        blit.write_descriptors(
+            &companion.device,
+            image_index,
+            &color_src,
+            &blit_target,
+            color_src_format,
+        )?;
     }
 
     let allocator = companion.present_slots[present_slot].allocator.clone();
     let list = companion.present_slots[present_slot].list.clone();
     let blit_pipe = PresentBlitPipeline {
         root_signature: state.blit.root_signature.clone(),
-        pso: state.blit.pso.clone(),
+        pso_float: state.blit.pso_float.clone(),
+        pso_unorm8: state.blit.pso_unorm8.clone(),
         srv_uav_heap: state.blit.srv_uav_heap.clone(),
         descriptor_size: state.blit.descriptor_size,
     };
@@ -953,6 +972,7 @@ pub(super) fn take_present_gpu_work(
         companion,
         color_src,
         color_src_state,
+        color_src_format,
         blit_target,
         backbuffer,
         backbuffer_from_common,
@@ -1051,6 +1071,7 @@ struct CudaDx12PresentGpuWork {
     companion: Arc<Dx12Companion>,
     color_src: ID3D12Resource,
     color_src_state: PresentColorSrcState,
+    color_src_format: crate::types::TextureFormat,
     blit_target: ID3D12Resource,
     backbuffer: ID3D12Resource,
     backbuffer_from_common: bool,
@@ -1094,6 +1115,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
                 self.image_index,
                 &self.color_src,
                 self.color_src_state,
+                self.color_src_format,
                 &self.blit_target,
                 &self.backbuffer,
                 self.backbuffer_from_common,
@@ -1237,7 +1259,8 @@ fn ensure_scratch(backend: &mut CudaBackend, surface: SurfaceHandle, image_index
             image_index,
             &shared.d3d12_resource,
             &shared.blit_target,
-        );
+            SURFACE_COMPUTE_FORMAT,
+        )?;
     }
 
     let texture_handle = backend.next_texture;

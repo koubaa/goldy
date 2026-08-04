@@ -72,12 +72,25 @@ pub(super) fn format_info(format: TextureFormat) -> Result<CudaFormatInfo> {
     Ok(info)
 }
 
-/// True when a `DirectSpatial<{element}>` shader parameter can write `format`
-/// without a compile-time surface format attribute.
+/// True when a `DirectSpatial<{element}>` shader parameter can write `format`.
 ///
-/// Initial contract: only `float4` ↔ [`TextureFormat::Rgba32Float`].
+/// CUDA surface stores are raw typed writes (no DX12-style typed UAV conversion),
+/// so the element type byte size must match the texture format:
+/// - `float4` ↔ [`TextureFormat::Rgba32Float`] (16 bytes)
+/// - `half4` ↔ [`TextureFormat::Rgba16Float`] (8 bytes)
+/// - `uint8_t4` / `vector<uint8_t, 4>` ↔ [`TextureFormat::Rgba8Unorm`] (4 bytes)
+///
+/// Slang does not define CUDA's `uchar4` alias; use `uint8_t4`.
 pub(super) fn storage_shader_compatible(element: &str, format: TextureFormat) -> bool {
-    matches!((element.trim(), format), ("float4", TextureFormat::Rgba32Float))
+    let element = element.trim();
+    matches!(
+        (element, format),
+        ("float4", TextureFormat::Rgba32Float)
+            | ("half4", TextureFormat::Rgba16Float)
+            | ("uint8_t4", TextureFormat::Rgba8Unorm)
+            | ("vector<uint8_t, 4>", TextureFormat::Rgba8Unorm)
+            | ("vector<uint8_t,4>", TextureFormat::Rgba8Unorm)
+    )
 }
 
 /// Sampler configuration CUDA can represent in a single texture object.
@@ -722,9 +735,17 @@ mod tests {
     }
 
     #[test]
-    fn storage_compat_float4_rgba32() {
+    fn storage_compat_size_matched_pairs() {
         assert!(storage_shader_compatible("float4", TextureFormat::Rgba32Float));
+        assert!(storage_shader_compatible("half4", TextureFormat::Rgba16Float));
+        assert!(storage_shader_compatible("uint8_t4", TextureFormat::Rgba8Unorm));
+        assert!(storage_shader_compatible("vector<uint8_t, 4>", TextureFormat::Rgba8Unorm));
+        // Mismatched sizes / types must stay rejected (no typed UAV conversion).
         assert!(!storage_shader_compatible("float4", TextureFormat::Rgba8Unorm));
+        assert!(!storage_shader_compatible("float4", TextureFormat::Rgba16Float));
+        assert!(!storage_shader_compatible("half4", TextureFormat::Rgba32Float));
+        assert!(!storage_shader_compatible("uint8_t4", TextureFormat::Rgba32Float));
+        assert!(!storage_shader_compatible("uchar4", TextureFormat::Rgba8Unorm));
         assert!(!storage_shader_compatible("float", TextureFormat::Rgba32Float));
     }
 

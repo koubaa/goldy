@@ -110,7 +110,7 @@ This can significantly reduce build times and binary size.
 | `vulkan` | Windows, Linux (any platform with a Vulkan loader) | Broadest platform support; implies `graphics` |
 | `dx12` | Windows only | Gated by `#[cfg(target_os = "windows")]` — the feature is ignored on other platforms; implies `graphics` |
 | `metal` | macOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms; implies `graphics` |
-| `cuda` | Any platform with CUDA toolkit | Compute prototype; on Windows with `cuda+graphics+dx12`, DX12 presentation companion + first-slice raster (incl. indexed draws and DX12-only depth) are enabled. Does not imply `graphics` by itself. Vulkan interop still pending. |
+| `cuda` | Any platform with CUDA toolkit | Compute prototype; on Windows with `cuda+graphics+dx12`, DX12 presentation companion + first-slice raster (`Rgba32Float` / `Rgba8Unorm`, indexed draws, DX12-only depth) are enabled. Does not imply `graphics` by itself. Vulkan interop still pending. |
 | `webgpu` | Cross-platform | **In progress** — via wgpu; does not imply `graphics` |
 
 On macOS, the default backend is native Metal. Goldy does not require MoltenVK.

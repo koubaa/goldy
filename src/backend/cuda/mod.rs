@@ -2,9 +2,9 @@
 //!
 //! With `cuda` + `graphics` + `dx12` on Windows, presentation and a first-slice
 //! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
-//! textures and DX12 presents them; offscreen `Rgba32Float` render targets and
-//! indexed / non-indexed graphics pipelines (point/line/triangle list+strip) are
-//! also supported, including optional DX12-only depth attachments and
+//! textures and DX12 presents them; offscreen `Rgba32Float` / `Rgba8Unorm` render
+//! targets and indexed / non-indexed graphics pipelines (point/line/triangle list+strip)
+//! are also supported, including optional DX12-only depth attachments and
 //! depth-stencil PSOs (depth is not CUDA-imported). Buffer handles are late-physicalized:
 //! acquire reserves identity only; scheme usage chooses Shared (deposit→IA), Native
 //! (compute), or NativeAndTwin (compute→IA). Bindless render bindings use the
@@ -851,7 +851,8 @@ impl CudaBackend {
                     if !storage_shader_compatible(element, tex.format) {
                         anyhow::bail!(
                             "CUDA: DirectSpatial<{element}> writable access requires a \
-                             storage-compatible format (float4 ↔ Rgba32Float); got {:?}",
+                             size-matched format (float4↔Rgba32Float, half4↔Rgba16Float, \
+                             uint8_t4↔Rgba8Unorm); got {:?}",
                             tex.format
                         );
                     }
@@ -1906,7 +1907,7 @@ impl CudaBackend {
                         // Fast path: copy into surface present scratch → stash the DX12 RT
                         // so present can blit it directly (no CUDA array round-trip).
                         if let Some((surf, image_index)) = surface::scratch_slot_for_texture(self, *dst) {
-                            let (d3d12_resource, fence) = {
+                            let (d3d12_resource, fence, format) = {
                                 let rt = self
                                     .render_targets
                                     .get(src)
@@ -1931,7 +1932,7 @@ impl CudaBackend {
                                         dst_tex.height
                                     );
                                 }
-                                (rt.d3d12_resource.clone(), rt.last_dx12_fence)
+                                (rt.d3d12_resource.clone(), rt.last_dx12_fence, rt.format)
                             };
                             if let Some(slot) = self
                                 .surfaces
@@ -1942,6 +1943,7 @@ impl CudaBackend {
                                 slot.present_source = Some(surface::PresentSource::Dx12Raster {
                                     resource: d3d12_resource,
                                     fence,
+                                    format,
                                 });
                             }
                         } else {
@@ -3115,6 +3117,11 @@ impl GpuBackend for CudaBackend {
 
     fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
         crate::device::DeviceCapabilities {
+            // Surfaces expose shared Rgba32Float scratch (DirectSpatial<float4>); swapchain is BGRA8.
+            preferred_surface_format: TextureFormat::Rgba32Float,
+            preferred_render_target_format: TextureFormat::Rgba8Unorm,
+            supported_surface_formats: vec![TextureFormat::Rgba32Float],
+            supported_render_target_formats: vec![TextureFormat::Rgba32Float, TextureFormat::Rgba8Unorm],
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_decommit_supported: false,
@@ -4622,12 +4629,12 @@ impl GpuBackend for CudaBackend {
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             Some(RetainedEntry::PresentRenderTarget(target)) => {
-                let (resource, fence) = {
+                let (resource, fence, format) = {
                     let target = self
                         .render_targets
                         .get(&target)
                         .context("CUDA/DX12: retained present target disappeared")?;
-                    (target.d3d12_resource.clone(), target.last_dx12_fence)
+                    (target.d3d12_resource.clone(), target.last_dx12_fence, target.format)
                 };
                 for state in self.surfaces.values_mut() {
                     let Some(current) = state.current_texture_handle else {
@@ -4642,6 +4649,7 @@ impl GpuBackend for CudaBackend {
                         slot.present_source = Some(surface::PresentSource::Dx12Raster {
                             resource: resource.clone(),
                             fence,
+                            format,
                         });
                         return Ok(Some(self.gpu_progress(ctx)));
                     }
@@ -5672,6 +5680,41 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         {
             assert_eq!(val, (i as u32 + 1) * 2, "work[{i}]");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_capabilities_publish_cuda_format_limits() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA capabilities test: {error:#}");
+                return Ok(());
+            }
+        };
+        let caps = backend.adapter_capabilities(0);
+        assert_eq!(caps.preferred_surface_format, TextureFormat::Rgba32Float);
+        assert_eq!(caps.supported_surface_formats, vec![TextureFormat::Rgba32Float]);
+        assert_eq!(caps.preferred_render_target_format, TextureFormat::Rgba8Unorm);
+        assert_eq!(
+            caps.supported_render_target_formats,
+            vec![TextureFormat::Rgba32Float, TextureFormat::Rgba8Unorm]
+        );
+        assert!(
+            !caps
+                .supported_surface_formats
+                .iter()
+                .any(|f| matches!(f, TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb)),
+            "CUDA must not advertise BGRA surface formats"
+        );
+        assert!(
+            !caps
+                .supported_render_target_formats
+                .iter()
+                .any(|f| matches!(f, TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb)),
+            "CUDA must not advertise BGRA render-target formats"
+        );
         Ok(())
     }
 

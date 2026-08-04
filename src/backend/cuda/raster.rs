@@ -2,7 +2,8 @@
 //!
 //! Scope:
 //! - Windows + `cuda` + `graphics` + `dx12`
-//! - Color-only [`TextureFormat::Rgba32Float`] render targets (optional DX12-only depth)
+//! - Color [`TextureFormat::Rgba32Float`] and [`TextureFormat::Rgba8Unorm`] render targets
+//!   (optional DX12-only depth)
 //! - Indexed and non-indexed draws (`PointList` / `LineList` / `LineStrip` /
 //!   `TriangleList` / `TriangleStrip`)
 //! - Bindless render resources via companion SM 6.6 heaps (CUDA registry slot =
@@ -39,8 +40,10 @@ use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, RECT};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-/// First-slice color format for CUDA/DX12 offscreen targets.
-pub(super) const RASTER_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
+/// Supported offscreen color formats for CUDA/DX12 raster.
+pub(super) fn is_raster_color_format(format: TextureFormat) -> bool {
+    matches!(format, TextureFormat::Rgba32Float | TextureFormat::Rgba8Unorm)
+}
 
 pub(super) struct CudaGraphicsPipeline {
     pub device: DeviceHandle,
@@ -101,6 +104,7 @@ fn raster_fingerprint(
     target.hash(&mut hash);
     rt.width.hash(&mut hash);
     rt.height.hash(&mut hash);
+    rt.format.hash(&mut hash);
     rt.depth_format.hash(&mut hash);
     match color_load {
         TargetLoad::Clear(color) => {
@@ -339,8 +343,10 @@ pub(super) fn create_pipeline(
     target_format: TextureFormat,
     depth_stencil: Option<&DepthStencilState>,
 ) -> Result<PipelineHandle> {
-    if target_format != RASTER_COLOR_FORMAT {
-        bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} targets are supported (got {target_format:?})");
+    if !is_raster_color_format(target_format) {
+        bail!(
+            "CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm targets are supported (got {target_format:?})"
+        );
     }
     let companion = companion(backend, device)?;
     let device_com = companion.device.clone();
@@ -527,8 +533,10 @@ pub(super) fn create_render_target(
     color_format: TextureFormat,
     depth_format: Option<DepthFormat>,
 ) -> Result<RenderTargetHandle> {
-    if color_format != RASTER_COLOR_FORMAT {
-        bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} render targets are supported (got {color_format:?})");
+    if !is_raster_color_format(color_format) {
+        bail!(
+            "CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm render targets are supported (got {color_format:?})"
+        );
     }
     if width == 0 || height == 0 {
         bail!("CUDA/DX12 raster: render target dimensions must be non-zero");

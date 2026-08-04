@@ -118,7 +118,7 @@ fn red_triangle_vertices() -> [Vertex2D; 3] {
 }
 
 #[test]
-fn cuda_raster_rejects_depth_and_wrong_format() {
+fn cuda_raster_rejects_bgra_format() {
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -139,18 +139,102 @@ fn cuda_raster_rejects_depth_and_wrong_format() {
         &shader,
         &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: TextureFormat::Bgra8Unorm,
             topology: PrimitiveTopology::TriangleList,
             depth_stencil: None,
         },
     ) {
-        Ok(_) => panic!("Rgba8Unorm must be rejected in first raster slice"),
+        Ok(_) => panic!("Bgra8Unorm must be rejected for CUDA raster"),
         Err(e) => e,
     };
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("Rgba32Float") || msg.contains("only"),
+        msg.contains("Rgba32Float") || msg.contains("Rgba8Unorm") || msg.contains("only"),
         "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn cuda_raster_rgba8_triangle_readback() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    assert_eq!(device.backend_type(), BackendType::Cuda);
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: Vertex2D::layout(),
+            target_format: TextureFormat::Rgba8Unorm,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: None,
+        },
+    )
+    .expect("rgba8 graphics pipeline");
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let vertices = red_triangle_vertices();
+    let vertex_buffer = pool
+        .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
+        .expect("vertex buffer");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba8Unorm, None)
+        .expect("rgba8 render target");
+    {
+        let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&vertex_buffer, goldy::NodeAccess::Read);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit rgba8 raster");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    assert_eq!(pixels.len(), 64 * 64 * 4);
+    let x = 32usize;
+    let y = 28usize;
+    let offset = (y * 64 + x) * 4;
+    let r = pixels[offset];
+    let g = pixels[offset + 1];
+    let b = pixels[offset + 2];
+    assert!(
+        r > 128 && g < 64 && b < 64,
+        "expected red triangle pixel at ({x},{y}), got ({r},{g},{b})"
     );
 }
 
