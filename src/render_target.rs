@@ -78,6 +78,9 @@ impl RenderTarget {
 impl Drop for RenderTarget {
     fn drop(&mut self) {
         self.stamp.mark_dead();
+        if let Ok(mut backend) = self._device.inner.backend.lock() {
+            backend.destroy_render_target(self.handle);
+        }
     }
 }
 

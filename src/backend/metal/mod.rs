@@ -654,6 +654,10 @@ impl GpuBackend for MetalBackend {
         render_target::create_with_depth(&mut self.state, device, width, height, color_format, depth_format)
     }
 
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        render_target::destroy(&mut self.state, target);
+    }
+
     fn render_to_target(
         &mut self,
         device: DeviceHandle,

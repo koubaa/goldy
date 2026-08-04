@@ -132,12 +132,21 @@ pub fn dx12_debug_mode() -> bool {
     false
 }
 
+/// CUDA retained-path counters exposed for structural integration tests.
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub mod cuda_test_stats {
+    pub use crate::backend::cuda::{CudaGraphStats, CudaGraphStatsSnapshot};
+}
+
 /// Test helpers for `--lib` and integration tests.
 ///
 /// - [`test_support::mock_device`] / [`test_support::with_mock`]: pure software; safe to run in parallel.
-/// - [`test_support::SerialGpuDevice`]: real GPU device for unit tests that touch DX12/Vulkan/Metal.
-///   On DX12 WARP, holds a process-wide lock for the device lifetime so lib tests do not
-///   interleave WARP work (same rationale as `test_threads = 1` in compute_integration).
+/// - [`test_support::SerialGpuDevice`]: real GPU device for unit tests.
+///   - DX12 WARP: process-wide mutex for the device lifetime (WARP is not parallel-safe).
+///   - CUDA + `graphics+dx12`: process-wide **shared** device (companion attached once);
+///     each test uses its own [`crate::Context`]. An RwLock gate lets shared-device tests
+///     run concurrently while exclusive raw-`CudaBackend` / stats tests take a write lock.
 #[doc(hidden)]
 pub mod test_support {
     use crate::backend::mock::MockBackend;
@@ -145,6 +154,8 @@ pub mod test_support {
     use crate::{BackendType, Device, DeviceType};
     use std::ops::Deref;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
     pub fn mock_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
@@ -194,6 +205,13 @@ pub mod test_support {
         with_mock(device, |m| {
             m.recorded_deferred_host_writes.iter().any(|batch| !batch.is_empty())
         })
+    }
+
+    /// CUDA late-physicalization kind for a buffer parcel (`deferred`/`native`/`shared`/`native_and_twin`).
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub fn cuda_buffer_phys_kind(device: &Device, parcel: &crate::Parcel) -> Option<&'static str> {
+        let handle = parcel.buffer_handle()?;
+        device.cuda_buffer_phys_kind_for_test(handle)
     }
 
     /// Count buffer entries in the first recorded `ResourceBarrier` on the mock backend.
@@ -282,11 +300,57 @@ pub mod test_support {
         parcel.last_referenced_on(ctx.backend_handle())
     }
 
-    /// Process-wide gate for DX12 WARP lib tests. MockBackend never takes this lock.
+    /// Process-wide gate for DX12 WARP lib tests (device-per-test, exclusive).
     static WARP_LIB_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn warp_lib_test_serial() -> &'static Mutex<()> {
         WARP_LIB_TEST_SERIAL.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Shared CUDA device for the lib-test process (companion attached once).
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    static SHARED_CUDA_LIB_DEVICE: OnceLock<Option<Arc<Device>>> = OnceLock::new();
+
+    /// Readers = shared-device tests (parallel contexts). Writer = exclusive raw backend / stats.
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    static CUDA_LIB_GATE: OnceLock<RwLock<()>> = OnceLock::new();
+
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn cuda_lib_gate() -> &'static RwLock<()> {
+        CUDA_LIB_GATE.get_or_init(|| RwLock::new(()))
+    }
+
+    /// Process-wide CUDA lib-test device (one companion attach for the whole run).
+    ///
+    /// Returns `None` when the active backend is not CUDA or device creation fails.
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub fn shared_cuda_lib_device() -> Option<Arc<Device>> {
+        SHARED_CUDA_LIB_DEVICE
+            .get_or_init(|| {
+                let instance = Instance::new().ok()?;
+                if instance.backend_type() != BackendType::Cuda {
+                    return None;
+                }
+                let adapter = instance.request_adapter(&RequestAdapterOptions::default()).ok()?;
+                let device = adapter.request_device(&DeviceDescriptor::default()).ok()?;
+                Some(Arc::new(device))
+            })
+            .clone()
+    }
+
+    /// Shared-device tests: hold for the test lifetime so exclusive backends wait.
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub fn cuda_lib_shared_gate() -> RwLockReadGuard<'static, ()> {
+        cuda_lib_gate().read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Exclusive ownership of the shared CUDA lib-test device.
+    ///
+    /// Blocks shared-device readers. Use for raw `CudaBackend` / graph-stats tests and
+    /// fixtures that assert on the device-global deferred VRAM ring.
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub fn cuda_lib_exclusive_gate() -> RwLockWriteGuard<'static, ()> {
+        cuda_lib_gate().write().unwrap_or_else(|e| e.into_inner())
     }
 
     fn env_force_warp() -> bool {
@@ -312,13 +376,23 @@ pub mod test_support {
         }
     }
 
-    /// Real GPU [`Device`] for `--lib` tests, with WARP serialization when needed.
+    #[allow(dead_code)] // held for RAII lock lifetime
+    enum SerialGuard {
+        None,
+        Warp(MutexGuard<'static, ()>),
+        #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+        CudaShared(RwLockReadGuard<'static, ()>),
+        #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+        CudaExclusive(RwLockWriteGuard<'static, ()>),
+    }
+
+    /// Real GPU [`Device`] for `--lib` tests.
     ///
-    /// Drop order releases the device before the optional WARP lock so the next
-    /// serialized test can create a fresh device safely.
+    /// Drop order releases the device borrow before optional guards so the next
+    /// fixture can proceed safely.
     pub struct SerialGpuDevice {
         device: Device,
-        _warp_guard: Option<MutexGuard<'static, ()>>,
+        _guard: SerialGuard,
     }
 
     impl Default for SerialGpuDevice {
@@ -330,7 +404,7 @@ pub mod test_support {
     impl SerialGpuDevice {
         /// Default adapter (`RequestAdapterOptions::default`, honors `GOLDY_DX12_FORCE_WARP`).
         pub fn new() -> Self {
-            Self::from_adapter_factory(|instance| {
+            Self::from_adapter_factory(false, |instance| {
                 instance
                     .request_adapter(&RequestAdapterOptions::default())
                     .expect("adapter")
@@ -339,7 +413,7 @@ pub mod test_support {
 
         /// Prefer an adapter of `preferred` type, unless `GOLDY_DX12_FORCE_WARP=1` (then WARP).
         pub fn preferring(preferred: DeviceType) -> Self {
-            Self::from_adapter_factory(|instance| {
+            Self::from_adapter_factory(false, |instance| {
                 if env_force_warp() && instance.backend_type() == BackendType::Dx12 {
                     return instance
                         .request_adapter(&RequestAdapterOptions {
@@ -358,22 +432,51 @@ pub mod test_support {
             })
         }
 
-        fn from_adapter_factory(select: impl FnOnce(&Instance) -> Adapter) -> Self {
+        /// Sole ownership of the CUDA shared lib-test device (or a private device elsewhere).
+        ///
+        /// Use when the test asserts on device-global deferred VRAM state. On CUDA this
+        /// takes the exclusive gate and drains leftover deferred payloads after idle.
+        pub fn exclusive() -> Self {
+            Self::from_adapter_factory(true, |instance| {
+                instance
+                    .request_adapter(&RequestAdapterOptions::default())
+                    .expect("adapter")
+            })
+        }
+
+        fn from_adapter_factory(
+            #[allow(unused_variables)] exclusive: bool,
+            select: impl FnOnce(&Instance) -> Adapter,
+        ) -> Self {
             let instance = Instance::new().expect("Instance::new");
             let adapter = select(&instance);
 
-            // Lock before `request_device` when the selected adapter is WARP — adapter
-            // selection is cheap/non-racy; device open is what must be serialized.
-            let _warp_guard = if is_dx12_warp_adapter(&instance, &adapter) {
-                Some(warp_lib_test_serial().lock().unwrap())
+            #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+            if instance.backend_type() == BackendType::Cuda {
+                drop(instance);
+                let shared = shared_cuda_lib_device().expect("shared CUDA lib-test device");
+                let device = (*shared).clone();
+                let _guard = if exclusive {
+                    let gate = cuda_lib_exclusive_gate();
+                    device.wait_idle_and_drain_deferred_for_test();
+                    SerialGuard::CudaExclusive(gate)
+                } else {
+                    SerialGuard::CudaShared(cuda_lib_shared_gate())
+                };
+                return Self { device, _guard };
+            }
+
+            // WARP: lock before `request_device` — adapter selection is cheap/non-racy.
+            let _guard = if is_dx12_warp_adapter(&instance, &adapter) {
+                SerialGuard::Warp(warp_lib_test_serial().lock().unwrap_or_else(|e| e.into_inner()))
             } else {
-                None
+                SerialGuard::None
             };
 
             let device = adapter.request_device(&DeviceDescriptor::default()).expect("device");
             drop(instance);
 
-            Self { device, _warp_guard }
+            Self { device, _guard }
         }
     }
 

@@ -1230,6 +1230,11 @@ impl GpuBackend for MockBackend {
     }
 
     #[cfg(feature = "graphics")]
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        self.render_targets.remove(&target);
+    }
+
+    #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
         device: DeviceHandle,

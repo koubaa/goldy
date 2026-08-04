@@ -717,8 +717,12 @@ pub(crate) trait ContextDestroyHandle: Send {
 
 /// Drain GPU work then release resources for a detached context.
 pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
-    let _ = handle.wait();
-    let _ = handle.finish();
+    if let Err(e) = handle.wait() {
+        tracing::error!("context destroy wait failed: {e:#}");
+    }
+    if let Err(e) = handle.finish() {
+        tracing::error!("context destroy finish failed: {e:#}");
+    }
 }
 
 /// Like [`destroy_context`] for an already-unlocked concrete backend (tests, `destroy_device`).
@@ -1276,6 +1280,12 @@ pub(crate) trait GpuBackend:
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
+    /// Destroy a render target created by [`Self::create_render_target_with_depth`].
+    ///
+    /// Must free backend GPU resources and recycle descriptor-heap slots (DX12 RTV/DSV).
+    /// Omitting this leaks slots until the heap overflows and the driver AVs.
+    #[cfg(feature = "graphics")]
+    fn destroy_render_target(&mut self, target: RenderTargetHandle);
     #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
@@ -1789,7 +1799,7 @@ pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBac
         }
         #[cfg(feature = "cuda")]
         BackendType::Cuda => {
-            tracing::info!("Creating CUDA backend (compute-only)");
+            tracing::info!("Creating CUDA backend");
             Ok(Box::new(cuda::CudaBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),

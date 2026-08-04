@@ -1,5 +1,7 @@
 //! Owned CUDA submits executed on the per-device submission worker.
 
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+use super::dx12_companion::{cuda_wait_fence, Dx12Companion};
 use super::retained_graph::{self, CudaGraphStats, GraphRegistry};
 use super::timeline::{self, EventLedger};
 use super::{CudaBufferArg, CudaLaunchArg, CudaSubmitContext};
@@ -34,6 +36,12 @@ pub(super) struct CudaPendingSubmit {
     pub event_ledger: EventLedger,
     /// Cross-context GPU waits (`SubmitSync.waits`).
     pub stream_waits: Vec<Arc<CudaEvent>>,
+    /// DX12 fence values to wait on the submission stream before GPU work.
+    ///
+    /// Also used for demoted WAR/`host_observed` Dx12Fence epochs — never CPU-wait those
+    /// on the worker (matches DX12's measured FPS policy).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub dx12_stream_fence_waits: Vec<(Arc<Dx12Companion>, u64)>,
     /// Host waits before deferred writes / GPU enqueue.
     pub host_waits: Vec<Arc<CudaEvent>>,
     pub deferred_writes: Vec<MaterializedHostWrite>,
@@ -48,12 +56,16 @@ pub(super) enum CudaSubmitBody {
     CaptureAndLaunch {
         key: u64,
         ops: Vec<CudaOp>,
+        tail: Vec<CudaOp>,
         registry: Arc<Mutex<GraphRegistry>>,
         stats: Arc<CudaGraphStats>,
     },
     /// Launch a previously retained CUDA graph.
     LaunchRetained {
         key: u64,
+        tail: Vec<CudaOp>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        scratch_images: Vec<(crate::backend::SurfaceHandle, usize)>,
         registry: Arc<Mutex<GraphRegistry>>,
         stats: Arc<CudaGraphStats>,
     },
@@ -65,6 +77,7 @@ pub(super) struct MaterializedHostWrite {
     pub data: Arc<[u8]>,
 }
 
+#[derive(Clone)]
 pub(super) enum CudaOp {
     Launch {
         label: Option<&'static str>,
@@ -143,6 +156,20 @@ pub(super) enum CudaOp {
         src: Arc<super::texture::CudaTextureResource>,
         dst: Arc<super::texture::CudaTextureResource>,
     },
+    /// Wait on a D3D12 fence imported as a CUDA external semaphore (raster → compute handoff).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    WaitExternalFence {
+        cuda_ctx: Arc<cudarc::driver::CudaContext>,
+        semaphore: SendExternalSemaphore,
+        value: u64,
+    },
+    /// Signal the companion fence after all preceding CUDA scratch writes complete.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    SignalExternalFence {
+        cuda_ctx: Arc<cudarc::driver::CudaContext>,
+        semaphore: SendExternalSemaphore,
+        value: u64,
+    },
     CopyTextureToBuffer {
         texture: Arc<super::texture::CudaTextureResource>,
         x: u32,
@@ -155,18 +182,93 @@ pub(super) enum CudaOp {
     },
 }
 
+/// `CUexternalSemaphore` is a driver handle; Goldy only uses it from the submission worker.
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+#[derive(Clone, Copy)]
+pub(super) struct SendExternalSemaphore(pub cudarc::driver::sys::CUexternalSemaphore);
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+// SAFETY: handle is process-local and only touched under Goldy's submit serialization.
+unsafe impl Send for SendExternalSemaphore {}
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+unsafe impl Sync for SendExternalSemaphore {}
+
 /// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
 ///
-/// Kernel launches (direct and indirect) are capture-safe. `memset` / `memcpy` via cudarc
-/// have been observed to invalidate `THREAD_LOCAL` stream capture on this driver stack, so
-/// clears and copies stay on the command-replay path until an explicit-graph or capture-safe
-/// copy path lands.
-pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
-    if ops.is_empty() {
-        return false;
+/// Kernel launches (direct and indirect) are capture-safe when they only touch
+/// driver-owned allocations. Launches that would write imported D3D12/external surface
+/// scratch are rewritten onto CUDA-owned staging before this check (with a
+/// `CopyTexture` export left in the non-capturable tail).
+pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
+    match op {
+        CudaOp::Launch {
+            keep_alive_textures, ..
+        }
+        | CudaOp::LaunchIndirect {
+            keep_alive_textures, ..
+        } => !keep_alive_textures.iter().any(|tex| tex.is_imported()),
+        _ => false,
     }
-    ops.iter()
-        .all(|op| matches!(op, CudaOp::Launch { .. } | CudaOp::LaunchIndirect { .. }))
+}
+
+pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
+    !ops.is_empty() && ops.iter().all(op_is_graph_safe)
+}
+
+pub(super) fn split_graph_core_and_tail(ops: Vec<CudaOp>) -> (Vec<CudaOp>, Vec<CudaOp>) {
+    let split = ops.iter().position(|op| !op_is_graph_safe(op)).unwrap_or(ops.len());
+    let mut core = ops;
+    let tail = core.split_off(split);
+    (core, tail)
+}
+
+pub(super) fn strip_external_fence_ops(ops: Vec<CudaOp>) -> Vec<CudaOp> {
+    ops.into_iter()
+        .filter(|op| {
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                !matches!(
+                    op,
+                    CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. }
+                )
+            }
+            #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+            {
+                let _ = op;
+                true
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod graph_safe_tests {
+    use super::*;
+
+    #[test]
+    fn empty_ops_are_not_graph_safe() {
+        assert!(!ops_are_graph_safe(&[]));
+    }
+
+    #[test]
+    fn clear_ops_are_not_graph_safe() {
+        // Graph capture rejects clears/copies; only kernel launches without imported
+        // textures are safe. A Clear with a dummy Arc is enough to hit the `_ => false` arm.
+        let Ok(ctx) = cudarc::driver::CudaContext::new(0) else {
+            eprintln!("skip: no CUDA device");
+            return;
+        };
+        let stream = ctx.default_stream();
+        let Ok(slice) = stream.alloc_zeros::<u8>(16) else {
+            eprintln!("skip: alloc failed");
+            return;
+        };
+        let op = CudaOp::Clear {
+            memory: Arc::new(Mutex::new(slice)),
+            abs_offset: 0,
+            size: 16,
+        };
+        assert!(!ops_are_graph_safe(&[op]));
+    }
 }
 
 pub(super) fn ops_contain_indirect(ops: &[CudaOp]) -> bool {
@@ -227,6 +329,8 @@ pub(super) fn collect_pins(
                 textures.push(Arc::clone(src));
                 textures.push(Arc::clone(dst));
             }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {}
             CudaOp::CopyTextureToBuffer { texture, dst, .. } => {
                 textures.push(Arc::clone(texture));
                 buffers.push(Arc::clone(dst));
@@ -391,6 +495,28 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 super::texture::memcpy_array_to_array(stream, src, dst)?;
                 if validate {
                     maybe_validate_sync(stream, "CopyTexture")?;
+                }
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::WaitExternalFence {
+                cuda_ctx,
+                semaphore,
+                value,
+            } => {
+                super::dx12_companion::cuda_wait_fence(cuda_ctx, semaphore.0, stream.cu_stream(), *value)?;
+                if validate {
+                    maybe_validate_sync(stream, "WaitExternalFence")?;
+                }
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::SignalExternalFence {
+                cuda_ctx,
+                semaphore,
+                value,
+            } => {
+                super::dx12_companion::cuda_signal_fence(cuda_ctx, semaphore.0, stream.cu_stream(), *value)?;
+                if validate {
+                    maybe_validate_sync(stream, "SignalExternalFence")?;
                 }
             }
             CudaOp::CopyTextureToBuffer {
@@ -608,6 +734,10 @@ pub(super) fn finalize_indirect_capture(
             | CudaOp::CopyTextureToBuffer { .. } => {
                 anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
             }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {
+                anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
+            }
         }
     }
     Ok(())
@@ -647,6 +777,10 @@ fn run_dynamic_prefix(
     host_waits: &[Arc<CudaEvent>],
     deferred_writes: &[MaterializedHostWrite],
     stream_waits: &[Arc<CudaEvent>],
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))] dx12_stream_fence_waits: &[(
+        Arc<Dx12Companion>,
+        u64,
+    )],
 ) -> Result<()> {
     for event in host_waits {
         timeline::host_wait_event(event)?;
@@ -667,6 +801,16 @@ fn run_dynamic_prefix(
         stream
             .wait(event)
             .context("CUDA: stream wait on producer event failed")?;
+    }
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    for (companion, value) in dx12_stream_fence_waits {
+        cuda_wait_fence(
+            &companion.cuda_ctx,
+            companion.cuda_semaphore,
+            stream.cu_stream(),
+            *value,
+        )
+        .with_context(|| format!("CUDA/DX12: stream wait on fence {value} failed"))?;
     }
     Ok(())
 }
@@ -700,6 +844,8 @@ impl PendingSubmit for CudaPendingSubmit {
             &self.host_waits,
             &self.deferred_writes,
             &self.stream_waits,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            &self.dx12_stream_fence_waits,
         )?;
 
         match self.body {
@@ -709,6 +855,7 @@ impl PendingSubmit for CudaPendingSubmit {
             CudaSubmitBody::CaptureAndLaunch {
                 key,
                 ops,
+                tail,
                 registry,
                 stats,
             } => {
@@ -751,8 +898,16 @@ impl PendingSubmit for CudaPendingSubmit {
                 }
                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 maybe_validate_sync(&self.stream, "graph launch after capture")?;
+                execute_ops(&self.stream, &tail, true)?;
             }
-            CudaSubmitBody::LaunchRetained { key, registry, stats } => {
+            CudaSubmitBody::LaunchRetained {
+                key,
+                tail,
+                registry,
+                stats,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    scratch_images: _,
+            } => {
                 let ctx = self.context.handle;
                 {
                     let mut guard = registry.lock().unwrap();
@@ -765,6 +920,7 @@ impl PendingSubmit for CudaPendingSubmit {
                 }
                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 maybe_validate_sync(&self.stream, "retained graph launch")?;
+                execute_ops(&self.stream, &tail, true)?;
             }
         }
 

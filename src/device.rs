@@ -871,6 +871,20 @@ impl Device {
         })
     }
 
+    /// Wait for all GPU work, then drop deferred VRAM payloads (test fixture reset).
+    ///
+    /// Used by [`crate::test_support::SerialGpuDevice::exclusive`] after taking exclusive
+    /// ownership of the shared CUDA lib-test device. Not `cfg(test)`-only because
+    /// `test_support` is linked into integration tests as well.
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub(crate) fn wait_idle_and_drain_deferred_for_test(&self) {
+        {
+            let mut backend = self.inner.backend.lock().unwrap();
+            let _ = backend.device_wait_idle(self.inner.handle);
+        }
+        self.vram_allocator().drain();
+    }
+
     /// Returns `true` if the device has been permanently lost.
     ///
     /// After this returns `true`, all further submit / wait calls will fail with
@@ -1203,6 +1217,42 @@ impl Device {
             .downcast_mut::<crate::backend::mock::MockBackend>()
             .expect("Device::with_mock_backend: backend is not MockBackend");
         f(mock)
+    }
+
+    /// Snapshot CUDA retained-frame counters for integration tests.
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    pub fn cuda_path_stats_for_test(&self) -> Option<crate::cuda_test_stats::CudaGraphStatsSnapshot> {
+        let mut guard = self.inner.backend.lock().unwrap();
+        guard
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<crate::backend::cuda::CudaBackend>()
+            .map(|backend| backend.graph_stats_snapshot())
+    }
+
+    /// Live CUDA graph-stats handle for unit tests (shared-device safe).
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    pub fn cuda_graph_stats_for_test(&self) -> Option<std::sync::Arc<crate::cuda_test_stats::CudaGraphStats>> {
+        let mut guard = self.inner.backend.lock().unwrap();
+        guard
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<crate::backend::cuda::CudaBackend>()
+            .map(|backend| backend.graph_stats())
+    }
+
+    /// Late-physicalization kind for a buffer handle (`"deferred"|"native"|"shared"|"native_and_twin"`).
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    #[doc(hidden)]
+    pub fn cuda_buffer_phys_kind_for_test(&self, buffer: crate::backend::BufferHandle) -> Option<&'static str> {
+        let mut guard = self.inner.backend.lock().unwrap();
+        guard
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<crate::backend::cuda::CudaBackend>()
+            .and_then(|backend| backend.buffer_phys_kind_for_test(buffer))
     }
 
     /// Access the inner [`MockBackend`] for test introspection.

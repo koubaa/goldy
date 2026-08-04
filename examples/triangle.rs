@@ -10,6 +10,7 @@ use goldy::{
     SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -18,6 +19,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
+use common::FpsWindow;
 
 struct App {
     instance: Instance,
@@ -33,7 +35,9 @@ struct App {
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     frame_count: u64,
-    start_time: std::time::Instant,
+    /// Set after GPU init; FPS excludes startup / shader compile.
+    perf_start: Option<Instant>,
+    fps_window: FpsWindow,
 }
 
 impl App {
@@ -52,8 +56,19 @@ impl App {
             scene_rt: None,
             scheme: None,
             frame_count: 0,
-            start_time: std::time::Instant::now(),
+            perf_start: None,
+            fps_window: FpsWindow::new(5.0),
         })
+    }
+
+    /// Trailing FPS window in seconds.
+    fn fps_window_secs() -> f64 {
+        5.0
+    }
+
+    /// Soak duration before auto-exit (`GOLDY_EXAMPLE_TIMEOUT` / `EXAMPLE_TIMEOUT` override).
+    fn soak_secs() -> f64 {
+        common::run_limit_secs().unwrap_or(60.0)
     }
 
     fn create_pipeline(
@@ -130,6 +145,7 @@ impl App {
         self.present = Some(present);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
+        self.perf_start = Some(Instant::now());
         Ok(())
     }
 
@@ -145,6 +161,9 @@ impl App {
         self.present.as_ref().unwrap().claim(&mut submission)?.consume()?;
 
         self.frame_count += 1;
+        if self.perf_start.is_some() {
+            self.fps_window.record(Instant::now());
+        }
         Ok(())
     }
 
@@ -190,15 +209,17 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        let elapsed = self.start_time.elapsed().as_secs_f64();
-        let fps = if elapsed > 0.0 {
-            self.frame_count as f64 / elapsed
-        } else {
-            0.0
+        let Some(perf_start) = self.perf_start else {
+            return;
         };
+        let now = Instant::now();
+        let elapsed = perf_start.elapsed().as_secs_f64();
+        let (window_frames, window_secs, fps) = self.fps_window.stats(now).unwrap_or((0, 0.0, 0.0));
         println!(
-            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
-            self.frame_count
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s last_{:.0}s_fps={fps:.1} (window_frames={window_frames} window_secs={window_secs:.2} present=Auto soak={:.0}s)",
+            self.frame_count,
+            Self::fps_window_secs(),
+            Self::soak_secs()
         );
     }
 }
@@ -222,7 +243,12 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        common::exit_if_timed_out(event_loop, self.start_time);
+        let Some(perf_start) = self.perf_start else {
+            return;
+        };
+        if perf_start.elapsed() >= Duration::from_secs_f64(Self::soak_secs()) {
+            event_loop.exit();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -259,7 +285,15 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     println!("Goldy Triangle Example (Scheme + Present)");
-    println!("Press Escape or close window to exit\n");
+    println!(
+        "PresentMode::Auto (vsync). Auto-exits after {:.0}s soak.",
+        App::soak_secs()
+    );
+    println!(
+        "Reports FPS over the last {:.0}s window at exit.",
+        App::fps_window_secs()
+    );
+    println!("Press Escape or close window to exit early.\n");
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

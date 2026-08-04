@@ -63,7 +63,12 @@ pub(super) fn create_with_depth(
     Ok(handle)
 }
 
-/// Destroy a render target.
+/// Destroy a Metal offscreen render target (ARC drop frees GPU objects).
+pub(super) fn destroy(state: &mut MetalState, target: RenderTargetHandle) {
+    let _ = state.render_targets.remove(&target);
+}
+
+/// Render into an offscreen render target.
 pub(super) fn render_to(
     state: &mut MetalState,
     device_handle: DeviceHandle,

@@ -192,16 +192,32 @@ The Metal backend uses the `metal` crate (native Metal, not MoltenVK):
 
 ### CUDA Backend (in progress)
 
-Compute-only prototype targeting NVIDIA GPUs via the CUDA Driver API (**CUDA 13.1+**
+Compute-focused prototype targeting NVIDIA GPUs via the CUDA Driver API (**CUDA 13.1+**
 required for device-updatable graph nodes). Slang compiles to PTX; dispatches use the
-CUDA launch model. Does not imply the `graphics` feature (no raster, surfaces, or
-presentation). Buffer schemes, uploads/readbacks, timelines, **indirect dispatch**, and
-**2D textures/samplers** (CUDA arrays + texture/surface objects) work. Enable with the
-`cuda` Cargo feature (`--no-default-features --features cuda` auto-selects CUDA; in
-default builds use `GOLDY_BACKEND=cuda`):
+CUDA launch model. The `cuda` feature does not imply `graphics`. Buffer schemes,
+uploads/readbacks, timelines, **indirect dispatch**, and **2D textures/samplers**
+(CUDA arrays + texture/surface objects) work.
+
+**Windows presentation:** when `cuda`, `graphics`, and `dx12` are all enabled, each
+CUDA device opens a LUID-matched DX12 companion. Surface frames expose an
+`Rgba32Float` shared scratch texture (CUDA writes via `DirectSpatial<float4>`);
+present blits to the BGRA8 swapchain on the DX12 DIRECT queue using a shared
+D3D12 fence imported as a CUDA external semaphore. This is zero-copy between CUDA
+and DX12; a GPU blit into the non-shareable swapchain image remains. Adapter
+mismatch, WARP, and linked-node adapters fail at device creation. A first-slice
+raster path is also available under the same feature gate: offscreen
+`Rgba32Float` render targets, non-indexed point/line/triangle pipelines (Slang → DXIL), and
+`CopyRenderTarget` into present scratch / CUDA textures. Depth, indexed draws,
+and bindless render bindings are not in this slice. Vulkan interop is not
+supported.
+
+Enable with the `cuda` Cargo feature (`--no-default-features --features cuda`
+auto-selects CUDA; in default builds use `GOLDY_BACKEND=cuda`):
 
 ```bash
 cargo test --no-default-features --features cuda --test scheme_compute_integration
+# Windows presentation:
+GOLDY_BACKEND=cuda cargo run --example compute_to_surface --features examples
 ```
 
 Texture notes for CUDA:

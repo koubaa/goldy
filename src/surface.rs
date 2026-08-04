@@ -128,6 +128,11 @@ impl Surface {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        // Skip the backend call when the caller repeats the current size (common during
+        // interactive resize / DPI churn). Backends may still clamp; we re-read below.
+        if width == self.width && height == self.height {
+            return Ok(());
+        }
         tracing::debug!(width, height, "Resizing surface");
         let mut backend = self.backend.lock().unwrap();
         backend.surface_resize(self.handle, width, height)?;
@@ -399,6 +404,17 @@ mod tests {
 
         surface.resize(0, 0).unwrap();
 
+        assert_eq!(surface.size(), (800, 600));
+    }
+
+    #[test]
+    fn test_surface_resize_same_size_is_noop() {
+        let device = create_test_device();
+        let ctx = device.create_context().unwrap();
+        let window = MockWindow::new(800, 600);
+        let mut surface = Surface::new(&ctx, &window).unwrap();
+
+        surface.resize(800, 600).unwrap();
         assert_eq!(surface.size(), (800, 600));
     }
 

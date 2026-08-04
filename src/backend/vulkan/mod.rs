@@ -999,6 +999,10 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        render_target::destroy(&self.state.devices, &self.state.render_targets, target);
+    }
+
     fn create_texture(
         &mut self,
         device_handle: DeviceHandle,

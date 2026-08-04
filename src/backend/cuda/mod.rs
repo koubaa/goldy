@@ -1,4 +1,14 @@
-//! Compute-only CUDA backend prototype.
+//! Compute-focused CUDA backend (Slang → PTX → Driver API).
+//!
+//! With `cuda` + `graphics` + `dx12` on Windows, presentation and a first-slice
+//! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
+//! textures and DX12 presents them; offscreen `Rgba32Float` render targets and
+//! indexed / non-indexed graphics pipelines (point/line/triangle list+strip) are
+//! also supported. Buffer handles are late-physicalized: acquire reserves identity
+//! only; scheme usage chooses Shared (deposit→IA), Native (compute), or
+//! NativeAndTwin (compute→IA). Bindless render bindings use the companion's
+//! SM 6.6 descriptor heaps with CUDA registry slots as DX12 indices. Depth remains
+//! unsupported in this slice.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -17,7 +27,9 @@
 //!
 //! Retainable compute partitions whose bodies are kernel-launch-only are captured into
 //! CUDA graphs on first submit (`submit_graph_and_retain`) and relaunched on cache hits
-//! (`try_resubmit_retained`). Indirect dispatches use CUDA 13.1 device-updatable kernel
+//! (`try_resubmit_retained`). Present-bound launches that would write D3D12-imported
+//! scratch are rewritten onto CUDA-owned staging with a fixed `CopyTexture` export tail.
+//! Indirect dispatches use CUDA 13.1 device-updatable kernel
 //! nodes plus an in-graph updater; uploads, clears, copies, and other graph-unsafe ops fall
 //! back to Goldy command-list replay (with a worker-side DtoH resolve for indirect grids).
 //! Dynamic waits, deferred host writes, and completion events stay outside the captured graph.
@@ -27,6 +39,19 @@ mod retained_graph;
 mod runtime_module;
 mod texture;
 mod timeline;
+
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod buffer_phys;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod dx12_bindless;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod dx12_companion;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod dx12_interop;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod raster;
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+mod surface;
 
 use super::*;
 use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
@@ -40,7 +65,8 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
-use retained_graph::{CudaGraphStats, GraphRegistry};
+use retained_graph::GraphRegistry;
+pub use retained_graph::{CudaGraphStats, CudaGraphStatsSnapshot};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -48,14 +74,35 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use texture::{memcpy_htod_array, storage_shader_compatible, CudaSamplerKey, CudaTextureResource};
-use timeline::{EventLedger, LedgerEntry};
+use timeline::{EventLedger, LedgerCompletion, LedgerEntry};
 
 /// Logical retained entry under the backend lock (graphs themselves live on the worker).
+#[derive(Clone)]
 enum RetainedEntry {
-    /// Partition was captured; worker registry holds the [`OwnedCudaGraph`](retained_graph::OwnedCudaGraph).
-    Graph,
-    /// Graph-unsafe partition: replay stored Goldy commands each resubmit.
-    Commands(Vec<GraphCommand>),
+    /// Pure graph-safe core captured in the worker registry.
+    Graph {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        scratch_images: Vec<(SurfaceHandle, usize)>,
+        /// NativeAndTwin buffers the graph may write; dirty on each launch.
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        twin_dirty: Vec<BufferHandle>,
+    },
+    /// Graph-safe core plus pre-materialized boundary operations.
+    GraphWithTail {
+        tail: Vec<CudaOp>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        scratch_images: Vec<(SurfaceHandle, usize)>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        twin_dirty: Vec<BufferHandle>,
+    },
+    /// Fully pre-materialized operations. Replay never rematerializes commands.
+    Ops(Vec<CudaOp>),
+    /// Render partitions retain their high-level commands; DX12 list reuse happens in raster.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    Render(Vec<GraphCommand>),
+    /// Dynamic present boundary: point the current surface image at this raster target.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    PresentRenderTarget(RenderTargetHandle),
 }
 
 /// Soft cap on concurrent submission contexts per CUDA device.
@@ -99,6 +146,24 @@ pub(crate) struct CudaBackend {
     compute_pipelines: HashMap<ComputePipelineHandle, CudaComputePipeline>,
     retained: HashMap<(ContextHandle, u64), RetainedEntry>,
     graph_stats: Arc<CudaGraphStats>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    surfaces: HashMap<SurfaceHandle, surface::CudaSurfaceState>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pipelines: HashMap<PipelineHandle, raster::CudaGraphicsPipeline>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    render_targets: HashMap<RenderTargetHandle, raster::CudaRenderTarget>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    raster_list_cache: HashMap<RenderTargetHandle, raster::RasterListCache>,
+    /// D3D12 resources backing imported CUDA textures (bindless SRV/UAV writes).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    texture_dx12: HashMap<TextureHandle, windows::Win32::Graphics::Direct3D12::ID3D12Resource>,
+    /// CUDA external-memory imports that must outlive [`Self::textures`] views.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    texture_imports: HashMap<TextureHandle, dx12_interop::CudaImportedTexture>,
+    /// CUDA-owned Direct textures used to stage compute writes before export to
+    /// D3D12-imported present scratch (graph-capture safe core + CopyTexture tail).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    present_staging: HashMap<(u32, u32, TextureFormat), Arc<CudaTextureResource>>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -107,6 +172,12 @@ pub(crate) struct CudaBackend {
     next_slot: u32,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    next_surface: SurfaceHandle,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    next_pipeline: PipelineHandle,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    next_render_target: RenderTargetHandle,
 }
 
 struct CudaDevice {
@@ -124,6 +195,9 @@ struct CudaDevice {
     limits: CudaDeviceLimits,
     /// NVRTC-compiled updater for device-updatable indirect dispatch.
     indirect_updater: Arc<runtime_module::IndirectUpdater>,
+    /// DX12 presentation companion (cuda+graphics+dx12 on Windows only).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    dx12: Option<Arc<dx12_companion::Dx12Companion>>,
 }
 
 pub(super) struct CudaSubmitContext {
@@ -143,8 +217,15 @@ pub(super) struct CudaSubmitContext {
 pub(super) enum CudaDeferredDrop {
     Buffer {
         retire_at: u64,
+        /// Native CUDA alloc, or `None` when already leaked / deferred-unmaterialized.
         #[allow(dead_code)]
-        memory: Arc<Mutex<CudaSlice<u8>>>,
+        memory: Option<Arc<Mutex<CudaSlice<u8>>>>,
+        /// When set with [`CudaBuffer::memory_is_external`], drop order is leak-slice then twin.
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        #[allow(dead_code)]
+        shared: Option<Arc<dx12_interop::SharedBufferBacking>>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        memory_is_external: bool,
     },
     Texture {
         retire_at: u64,
@@ -157,6 +238,17 @@ pub(super) enum CudaDeferredDrop {
         module: Arc<CudaModule>,
         #[allow(dead_code)]
         function: CudaFunction,
+    },
+    /// Offscreen raster target: CUDA views before import before D3D12 (drop order).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    RenderTarget {
+        retire_at: u64,
+        #[allow(dead_code)]
+        cuda_texture: Arc<CudaTextureResource>,
+        #[allow(dead_code)]
+        import: dx12_interop::CudaImportedTexture,
+        #[allow(dead_code)]
+        d3d12_resource: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
     },
 }
 
@@ -183,17 +275,39 @@ struct CudaDestroyContext {
     stream: Arc<CudaStream>,
     worker: Arc<SubmissionWorker>,
     fence_shutdown: Arc<AtomicBool>,
-    fence_thread: Option<JoinHandle<()>>,
+    /// Joined in [`Self::wait`] before stream sync so the poller cannot race
+    /// `bind_to_thread` / `cuStreamSynchronize` (cudarc records Drop failures into
+    /// sticky `CudaContext::error_state`, which then poisons later teardown binds).
+    fence_thread: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    companion: Option<Arc<dx12_companion::Dx12Companion>>,
 }
 
 impl ContextDestroyHandle for CudaDestroyContext {
     fn wait(&self) -> Result<()> {
-        let _ = self.worker.flush();
-        self.stream.synchronize().context("CUDA: context destroy stream sync")
+        self.fence_shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.fence_thread.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        self.worker
+            .flush()
+            .context("CUDA: flush submission worker before context destroy")?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = self.companion.as_ref() {
+            // Unblock any stream-side WaitExternalFence before cuStreamSynchronize.
+            companion
+                .wait_idle()
+                .context("CUDA/DX12: companion wait_idle before context destroy sync")?;
+        }
+        self.stream.synchronize().context("CUDA: context destroy stream sync")?;
+        Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<()> {
-        crate::backend::signal_fence::join_fence_poller(&self.fence_shutdown, self.fence_thread);
+        // Poller was joined in `wait`; clear any residual handle.
+        if let Some(handle) = self.fence_thread.lock().unwrap().take() {
+            crate::backend::signal_fence::join_fence_poller(&self.fence_shutdown, Some(handle));
+        }
         Ok(())
     }
 }
@@ -227,24 +341,81 @@ fn drain_deletion_queue_up_to(queue: &Mutex<Vec<CudaDeferredDrop>>, retired: u64
             CudaDeferredDrop::Buffer { retire_at, .. }
             | CudaDeferredDrop::Texture { retire_at, .. }
             | CudaDeferredDrop::Pipeline { retire_at, .. } => *retire_at,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaDeferredDrop::RenderTarget { retire_at, .. } => *retire_at,
         };
         if retire_at > retired {
             kept.push(entry);
+            continue;
         }
-        // else drop entry (and its Arc payload) here
+        if let CudaDeferredDrop::Buffer {
+            memory,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            shared,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            memory_is_external,
+            ..
+        } = entry
+        {
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            if memory_is_external {
+                if let Some(mem) = memory {
+                    if let Ok(mutex) = Arc::try_unwrap(mem) {
+                        buffer_phys::leak_shared_buffer_slice(mutex.into_inner().unwrap_or_else(|e| e.into_inner()));
+                    }
+                }
+                drop(shared);
+                continue;
+            }
+            drop(memory);
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            drop(shared);
+            continue;
+        }
+        drop(entry);
     }
     *guard = kept;
 }
 
 struct CudaBuffer {
     device: DeviceHandle,
-    memory: Arc<Mutex<CudaSlice<u8>>>,
+    /// `None` while [`CudaPhysKind::Deferred`] (graphics+dx12); always `Some` otherwise.
+    memory: Option<Arc<Mutex<CudaSlice<u8>>>>,
     offset: u64,
     size: u64,
     capacity: u64,
     element_stride: Option<u32>,
     slot: Option<u32>,
     readback: bool,
+    /// Bumped on every host/GPU write that changes contents (retained raster fingerprint).
+    content_epoch: u64,
+    /// Parent allocation for [`GpuBackend::create_buffer_view`] slices (shares memory).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    parent: Option<BufferHandle>,
+    /// DX12-shareable twin for vertex IA, or the sole backing when phys is Shared.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    shared: Option<Arc<dx12_interop::SharedBufferBacking>>,
+    /// `content_epoch` last copied into [`Self::shared`] (NativeAndTwin only).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    shared_epoch: u64,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    phys_kind: buffer_phys::CudaPhysKind,
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    requirements: buffer_phys::CudaBufferReq,
+    /// Host bytes staged before first materialization (`acquire_buffer_with_data`).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pending_init: Option<Vec<u8>>,
+    /// `memory` aliases [`Self::shared`] import and must be leaked on drop.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    memory_is_external: bool,
+}
+
+impl CudaBuffer {
+    fn memory_arc(&self) -> Result<&Arc<Mutex<CudaSlice<u8>>>> {
+        self.memory
+            .as_ref()
+            .context("CUDA: buffer has no physical memory yet (deferred)")
+    }
 }
 
 struct CudaShader {
@@ -257,6 +428,7 @@ struct CudaShader {
 
 struct CudaSampler {
     device: DeviceHandle,
+    #[allow(dead_code)]
     desc: SamplerDesc,
     slot: u32,
     key: CudaSamplerKey,
@@ -276,6 +448,7 @@ struct CudaComputePipeline {
 }
 
 /// Host-side values pushed to `cuLaunchKernel` in shader parameter order.
+#[derive(Clone)]
 pub(super) enum CudaLaunchArg {
     Buffer(CudaBufferArg),
     /// `CUtexObject`, `CUsurfObject`, or ignored `SamplerState` word.
@@ -284,6 +457,21 @@ pub(super) enum CudaLaunchArg {
 }
 
 impl CudaBackend {
+    pub(crate) fn graph_stats_snapshot(&self) -> CudaGraphStatsSnapshot {
+        self.graph_stats.snapshot()
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    pub(crate) fn buffer_phys_kind_for_test(&self, buffer: BufferHandle) -> Option<&'static str> {
+        let buf = self.buffers.get(&buffer)?;
+        Some(match buf.phys_kind {
+            buffer_phys::CudaPhysKind::Deferred => "deferred",
+            buffer_phys::CudaPhysKind::Native => "native",
+            buffer_phys::CudaPhysKind::Shared => "shared",
+            buffer_phys::CudaPhysKind::NativeAndTwin => "native_and_twin",
+        })
+    }
+
     pub(crate) fn new() -> Result<Self> {
         ensure_cuda_toolkit_on_path();
         // `CUDA_LAUNCH_BLOCKING` must be set before driver work begins. Use a
@@ -327,19 +515,41 @@ impl CudaBackend {
             compute_pipelines: HashMap::new(),
             retained: HashMap::new(),
             graph_stats: Arc::new(CudaGraphStats::default()),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            surfaces: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            pipelines: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            render_targets: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            raster_list_cache: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            texture_dx12: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            texture_imports: HashMap::new(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            present_staging: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
             next_texture: 1,
             next_sampler: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_slot: dx12_bindless::USER_SLOT_BASE,
+            #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
             next_slot: 0,
             next_shader: 1,
             next_compute_pipeline: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_surface: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_pipeline: 1,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            next_render_target: 1,
         })
     }
 
-    #[cfg(test)]
-    fn graph_stats(&self) -> Arc<CudaGraphStats> {
+    pub(crate) fn graph_stats(&self) -> Arc<CudaGraphStats> {
         Arc::clone(&self.graph_stats)
     }
 
@@ -384,11 +594,17 @@ impl CudaBackend {
     ) -> Result<BufferHandle> {
         let capacity = capacity.max(logical_size).max(4);
         let gpu = self.device(device)?;
-        let memory = Arc::new(Mutex::new(
+        // Graphics+DX12: defer physical backing until scheme usage is known (Shared vs
+        // Native vs NativeAndTwin). Compute-only builds still allocate eagerly.
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let memory = None;
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        let memory = Some(Arc::new(Mutex::new(
             gpu.alloc_stream
                 .alloc_zeros::<u8>(capacity as usize)
                 .context("CUDA: alloc buffer")?,
-        ));
+        )));
+        let _ = gpu; // used in non-graphics branch
         let handle = self.next_buffer;
         self.next_buffer += 1;
         let slot = self.next_slot;
@@ -408,6 +624,21 @@ impl CudaBackend {
                 element_stride,
                 slot: Some(slot),
                 readback: false,
+                content_epoch: 0,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                parent: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared_epoch: 0,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                phys_kind: buffer_phys::CudaPhysKind::Deferred,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                requirements: buffer_phys::CudaBufferReq::empty(),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                pending_init: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                memory_is_external: false,
             },
         );
         Ok(handle)
@@ -464,7 +695,7 @@ impl CudaBackend {
     }
 
     fn buffer_arg(&self, stream: &Arc<CudaStream>, buffer: &CudaBuffer) -> Result<CudaBufferArg> {
-        let memory = buffer.memory.lock().unwrap();
+        let memory = buffer.memory_arc()?.lock().unwrap();
         let start = buffer.offset as usize;
         let end = (buffer.offset + buffer.size) as usize;
         let view = memory.try_slice(start..end).context("CUDA: buffer view out of range")?;
@@ -659,6 +890,83 @@ impl CudaBackend {
         slot
     }
 
+    /// Create a shareable D3D12 texture imported into CUDA and register bindless descriptors.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_shared_texture_resource(
+        &mut self,
+        device: DeviceHandle,
+        companion: &Arc<dx12_companion::Dx12Companion>,
+        cuda_ctx: &Arc<CudaContext>,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+        storage_slot: Option<u32>,
+        sampled_slot: Option<u32>,
+    ) -> Result<TextureHandle> {
+        use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL};
+        use windows::Win32::Graphics::Direct3D12::*;
+
+        let dxgi = dx12_bindless::texture_format_to_dxgi(format)?;
+        let mut resource_flags = D3D12_RESOURCE_FLAG_NONE;
+        if matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated) {
+            resource_flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        }
+        let (d3d12_resource, allocation_size) =
+            dx12_interop::create_shared_texture(&companion.device, width, height, dxgi, resource_flags)?;
+        let handle_nt = unsafe {
+            companion
+                .device
+                .CreateSharedHandle(&d3d12_resource, None, GENERIC_ALL.0, None)
+        }
+        .context("CUDA/DX12: CreateSharedHandle(texture) failed")?;
+        let import = dx12_interop::import_shared_texture(cuda_ctx, handle_nt, allocation_size, width, height, format)?;
+        unsafe {
+            let _ = CloseHandle(handle_nt);
+        }
+        if matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated) {
+            dx12_interop::init_resource_state(companion, &d3d12_resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)?;
+        }
+        let resource = CudaTextureResource::from_imported_array(
+            cuda_ctx,
+            import.level0(),
+            width,
+            height,
+            format,
+            access,
+            flags,
+            storage_slot,
+            sampled_slot,
+        )?;
+        // Keep import alive by leaking into a side table keyed by the texture — the
+        // D3D12 resource map holds the graphics object; import must outlive CUDA views.
+        // Store import on a dedicated map by retaining the SharedScratchTexture pattern
+        // via texture_dx12 + dropping import last through deferred drop of the Arc texture
+        // (array is borrowed; import must live in texture_imports).
+        let handle = self.next_texture;
+        self.next_texture += 1;
+        if let Some(slot) = storage_slot {
+            self.texture_slots.insert(slot, handle);
+            companion
+                .bindless
+                .write_texture_uav(&companion.device, slot, &d3d12_resource, format)?;
+        }
+        if let Some(slot) = sampled_slot {
+            self.texture_slots.insert(slot, handle);
+            companion
+                .bindless
+                .write_texture_srv(&companion.device, slot, &d3d12_resource, format)?;
+        }
+        self.texture_dx12.insert(handle, d3d12_resource);
+        // Pin import for the lifetime of the texture handle.
+        self.texture_imports.insert(handle, import);
+        let _ = device;
+        self.textures.insert(handle, resource);
+        Ok(handle)
+    }
+
     fn texture_device_is(&self, tex: &CudaTextureResource, device: DeviceHandle) -> bool {
         self.devices
             .get(&device)
@@ -670,7 +978,11 @@ impl CudaBackend {
         if offset + data.len() as u64 > buffer.size {
             anyhow::bail!("CUDA: write exceeds logical buffer size");
         }
-        let mut memory = buffer.memory.lock().unwrap();
+        let memory = buffer
+            .memory
+            .as_ref()
+            .context("CUDA: write_buffer_region on deferred buffer")?;
+        let mut memory = memory.lock().unwrap();
         let start = (buffer.offset + offset) as usize;
         let end = start + data.len();
         let mut view = memory
@@ -686,7 +998,11 @@ impl CudaBackend {
         } else {
             size
         };
-        let mut memory = buffer.memory.lock().unwrap();
+        let memory = buffer
+            .memory
+            .as_ref()
+            .context("CUDA: clear_buffer_region on deferred buffer")?;
+        let mut memory = memory.lock().unwrap();
         let start = (buffer.offset + offset) as usize;
         let end = start + clear_size as usize;
         let mut view = memory
@@ -722,14 +1038,14 @@ impl CudaBackend {
         let dst_abs = dst.offset + dst_offset;
         let byte_len = size as usize;
 
-        if Arc::ptr_eq(&src.memory, &dst.memory) {
+        if Arc::ptr_eq(src.memory_arc()?, dst.memory_arc()?) {
             // Same allocation: avoid simultaneous &/&mut CudaSlice views. A device temp
             // keeps both overlapping and non-overlapping self-copies memmove-safe.
             let mut temp = stream
                 .alloc_zeros::<u8>(byte_len)
                 .context("CUDA: alloc overlapping-copy scratch")?;
             {
-                let memory = src.memory.lock().unwrap();
+                let memory = src.memory_arc()?.lock().unwrap();
                 let src_view = memory
                     .try_slice(src_abs as usize..src_abs as usize + byte_len)
                     .context("CUDA: copy source out of bounds")?;
@@ -738,7 +1054,7 @@ impl CudaBackend {
                     .context("CUDA: same-alloc copy to scratch")?;
             }
             {
-                let mut memory = dst.memory.lock().unwrap();
+                let mut memory = dst.memory_arc()?.lock().unwrap();
                 let mut dst_view = memory
                     .try_slice_mut(dst_abs as usize..dst_abs as usize + byte_len)
                     .context("CUDA: copy destination out of bounds")?;
@@ -750,8 +1066,8 @@ impl CudaBackend {
         }
 
         // Distinct allocations: lock in pointer order to avoid AB/BA deadlocks.
-        let src_arc = Arc::clone(&src.memory);
-        let dst_arc = Arc::clone(&dst.memory);
+        let src_arc = Arc::clone(src.memory_arc()?);
+        let dst_arc = Arc::clone(dst.memory_arc()?);
         let src_ptr = Arc::as_ptr(&src_arc);
         let dst_ptr = Arc::as_ptr(&dst_arc);
         if src_ptr < dst_ptr {
@@ -1028,11 +1344,11 @@ impl CudaBackend {
         }
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let (mut keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
-        keep_alive_buffers.push(Arc::clone(&shape_buf.memory));
+        keep_alive_buffers.push(Arc::clone(shape_buf.memory_arc()?));
 
         let shape_abs_offset = shape_buf.offset + shape_offset;
         let shape_ptr = {
-            let memory = shape_buf.memory.lock().unwrap();
+            let memory = shape_buf.memory_arc()?.lock().unwrap();
             let (base, _sync) = memory.device_ptr(stream);
             base + shape_abs_offset
         };
@@ -1086,7 +1402,7 @@ impl CudaBackend {
             keep_alive_buffers,
             keep_alive_textures,
             shape_ptr,
-            shape_memory: Arc::clone(&shape_buf.memory),
+            shape_memory: Arc::clone(shape_buf.memory_arc()?),
             shape_abs_offset,
             node_slot_ptr,
             node_slot,
@@ -1113,7 +1429,7 @@ impl CudaBackend {
                     .buffers
                     .get(handle)
                     .with_context(|| format!("CUDA: registry key {index} references a destroyed buffer"))?;
-                buffers.push(Arc::clone(&buffer.memory));
+                buffers.push(Arc::clone(buffer.memory_arc()?));
             } else if let Some(handle) = self.texture_slots.get(&index) {
                 let texture = self
                     .textures
@@ -1129,7 +1445,217 @@ impl CudaBackend {
         Ok((buffers, textures))
     }
 
-    fn materialize_ops(&self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn ensure_requirements_for_commands(&mut self, commands: &[GpuCommand]) -> Result<()> {
+        use buffer_phys::CudaBufferReq;
+        // Collect (handle, req) then apply — avoids borrow issues while scanning.
+        let mut updates: Vec<(BufferHandle, CudaBufferReq)> = Vec::new();
+        let mut current_indices: Vec<u32> = Vec::new();
+        let mut frame_table: Option<&[u32]> = None;
+        for command in commands {
+            match command {
+                GpuCommand::FrameTableStaging { data } => {
+                    frame_table = Some(data.as_ref());
+                }
+                GpuCommand::BindResourcesRaw { indices, .. } => {
+                    current_indices.clone_from(indices);
+                }
+                GpuCommand::Dispatch { .. } => {
+                    for index in &current_indices {
+                        if let Some(handle) = self.buffer_slots.get(index) {
+                            updates.push((*handle, CudaBufferReq::KERNEL));
+                        }
+                    }
+                }
+                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                    // DispatchBatch does not emit BindResourcesRaw; indices live in FrameTableStaging.
+                    let entry_count = *count as usize;
+                    if entry_count == 0 {
+                        continue;
+                    }
+                    let needed = entry_count
+                        .checked_mul(DISPATCH_BATCH_STRIDE)
+                        .context("CUDA: DispatchBatch stride overflow")?;
+                    anyhow::ensure!(
+                        arg_data.len() >= needed,
+                        "CUDA: DispatchBatch arg_data len {} < {} entries × stride {}",
+                        arg_data.len(),
+                        entry_count,
+                        DISPATCH_BATCH_STRIDE
+                    );
+                    let mut bases = Vec::with_capacity(entry_count);
+                    for i in 0..entry_count {
+                        let base = i * DISPATCH_BATCH_STRIDE;
+                        let layout: PushLayout = *bytemuck::from_bytes(&arg_data[base..base + TOTAL_PUSH_BYTES]);
+                        bases.push(layout._reserved[dispatch_table_base_word_index()]);
+                    }
+                    // Infer buffer count from uniform frame-table spacing (same as materialize).
+                    let n_buffers = if entry_count >= 2 {
+                        bases[1].saturating_sub(bases[0]) as usize
+                    } else if let Some(table) = frame_table {
+                        // Single-entry batch should not occur, but fall back to remaining row words.
+                        table.len().saturating_sub(bases[0] as usize)
+                    } else {
+                        0
+                    };
+                    if n_buffers > 0 {
+                        let table = frame_table
+                            .context("CUDA: DispatchBatch requires FrameTableStaging when bindings are present")?;
+                        for &table_base in &bases {
+                            let start = table_base as usize;
+                            let end = start
+                                .checked_add(n_buffers)
+                                .context("CUDA: frame-table range overflow")?;
+                            anyhow::ensure!(
+                                end <= table.len(),
+                                "CUDA: DispatchBatch frame-table range [{start}, {end}) exceeds staging len {}",
+                                table.len()
+                            );
+                            for &index in &table[start..end] {
+                                if let Some(handle) = self.buffer_slots.get(&index) {
+                                    updates.push((*handle, CudaBufferReq::KERNEL));
+                                }
+                            }
+                        }
+                    }
+                    // Also honor any lingering BindResourcesRaw indices.
+                    for index in &current_indices {
+                        if let Some(handle) = self.buffer_slots.get(index) {
+                            updates.push((*handle, CudaBufferReq::KERNEL));
+                        }
+                    }
+                }
+                GpuCommand::DispatchIndirect { buffer, .. } => {
+                    updates.push((*buffer, CudaBufferReq::KERNEL | CudaBufferReq::TRANSFER));
+                    for index in &current_indices {
+                        if let Some(handle) = self.buffer_slots.get(index) {
+                            updates.push((*handle, CudaBufferReq::KERNEL));
+                        }
+                    }
+                }
+                GpuCommand::ClearBuffer { buffer, .. } => {
+                    updates.push((*buffer, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
+                }
+                GpuCommand::WriteBuffer { buffer, .. } => {
+                    updates.push((*buffer, CudaBufferReq::HOST_WRITE));
+                }
+                GpuCommand::CopyBuffer { src, dst, .. } => {
+                    updates.push((*src, CudaBufferReq::TRANSFER));
+                    updates.push((*dst, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
+                }
+                GpuCommand::CopyBufferToTexture { src, .. } => {
+                    updates.push((*src, CudaBufferReq::TRANSFER));
+                }
+                _ => {}
+            }
+        }
+        for (handle, req) in updates {
+            self.ensure_buffer_requirements(handle, req)?;
+        }
+        Ok(())
+    }
+
+    /// Buffers whose `memory` is the imported Shared primary (CUDA writes are DX12-visible).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn shared_primary_memories_written_by_ops(&self, ops: &[CudaOp]) -> Vec<Arc<dx12_interop::SharedBufferBacking>> {
+        let mut out = Vec::new();
+        for op in ops {
+            let written = match op {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => Some(memory),
+                CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => Some(dst),
+                _ => None,
+            };
+            let Some(written) = written else { continue };
+            for buf in self.buffers.values() {
+                if buf.phys_kind != buffer_phys::CudaPhysKind::Shared {
+                    continue;
+                }
+                let Some(mem) = buf.memory.as_ref() else { continue };
+                if Arc::ptr_eq(mem, written) {
+                    if let Some(shared) = buf.shared.as_ref() {
+                        if !out.iter().any(|s| Arc::ptr_eq(s, shared)) {
+                            out.push(Arc::clone(shared));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Retained Ops/Graph replays mutate native bytes without rematerializing; bump epochs so
+    /// NativeAndTwin DtoD refresh sees dirty content.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn bump_content_epochs_for_native_twin_writes(&mut self, ops: &[CudaOp]) {
+        let mut written: Vec<Arc<Mutex<CudaSlice<u8>>>> = Vec::new();
+        for op in ops {
+            match op {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+                    written.push(Arc::clone(memory));
+                }
+                CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => {
+                    written.push(Arc::clone(dst));
+                }
+                CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
+                    // Conservatively dirty all NativeAndTwin buffers pinned by the launch.
+                    written.extend(keep_alive_buffers.iter().cloned());
+                }
+                _ => {}
+            }
+        }
+        if written.is_empty() {
+            return;
+        }
+        for buf in self.buffers.values_mut() {
+            if buf.phys_kind != buffer_phys::CudaPhysKind::NativeAndTwin {
+                continue;
+            }
+            let Some(mem) = buf.memory.as_ref() else { continue };
+            if written.iter().any(|m| Arc::ptr_eq(m, mem)) {
+                buf.bump_content_epoch();
+            }
+        }
+    }
+
+    /// NativeAndTwin buffers whose memory is written by `ops` (for retained graph dirty lists).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn native_twin_buffers_written_by_ops(&self, ops: &[CudaOp]) -> Vec<BufferHandle> {
+        let mut memories = Vec::new();
+        for op in ops {
+            match op {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+                    memories.push(Arc::clone(memory));
+                }
+                CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => {
+                    memories.push(Arc::clone(dst));
+                }
+                CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
+                    memories.extend(keep_alive_buffers.iter().cloned())
+                }
+                _ => {}
+            }
+        }
+        if memories.is_empty() {
+            return Vec::new();
+        }
+        self.buffers
+            .iter()
+            .filter_map(|(handle, buf)| {
+                if buf.phys_kind != buffer_phys::CudaPhysKind::NativeAndTwin {
+                    return None;
+                }
+                let mem = buf.memory.as_ref()?;
+                memories.iter().any(|m| Arc::ptr_eq(m, mem)).then_some(*handle)
+            })
+            .collect()
+    }
+
+    fn materialize_ops(&mut self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            // Late-physicalize from this submit's usage before building CudaOps.
+            self.ensure_requirements_for_commands(commands)?;
+        }
         let mut ops = Vec::new();
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
@@ -1179,25 +1705,29 @@ impl CudaBackend {
                     )?);
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
-                    let buffer = self.buffers.get(buffer).context("CUDA: invalid clear buffer")?;
+                    let buffer = self.buffers.get_mut(buffer).context("CUDA: invalid clear buffer")?;
                     let clear_size = if *size == 0 {
                         buffer.size.saturating_sub(*offset)
                     } else {
                         *size
                     };
+                    // Invalidate shared DX12 VB twins used by raster.
+                    buffer.bump_content_epoch();
                     ops.push(CudaOp::Clear {
-                        memory: Arc::clone(&buffer.memory),
+                        memory: Arc::clone(buffer.memory_arc()?),
                         abs_offset: buffer.offset + *offset,
                         size: clear_size,
                     });
                 }
                 GpuCommand::WriteBuffer { buffer, offset, data } => {
-                    let buffer = self.buffers.get(buffer).context("CUDA: invalid write buffer")?;
+                    let buffer = self.buffers.get_mut(buffer).context("CUDA: invalid write buffer")?;
                     if *offset + data.len() as u64 > buffer.size {
                         anyhow::bail!("CUDA: write exceeds logical buffer size");
                     }
+                    // Invalidate shared DX12 VB twins used by raster (deposit / staging path).
+                    buffer.bump_content_epoch();
                     ops.push(CudaOp::Write {
-                        memory: Arc::clone(&buffer.memory),
+                        memory: Arc::clone(buffer.memory_arc()?),
                         abs_offset: buffer.offset + *offset,
                         data: data.to_vec(),
                     });
@@ -1210,20 +1740,23 @@ impl CudaBackend {
                     size,
                 } => {
                     let src_buf = self.buffers.get(src).context("CUDA: invalid copy source")?;
-                    let dst_buf = self.buffers.get(dst).context("CUDA: invalid copy destination")?;
-                    if src_buf.device != dst_buf.device {
+                    if src_buf.device != self.buffers.get(dst).context("CUDA: invalid copy destination")?.device {
                         anyhow::bail!("CUDA: copy across devices is not supported");
                     }
                     if *src_offset + *size > src_buf.size {
                         anyhow::bail!("CUDA: copy source range exceeds logical buffer size");
                     }
+                    let src_memory = Arc::clone(src_buf.memory_arc()?);
+                    let src_abs = src_buf.offset + *src_offset;
+                    let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid copy destination")?;
                     if *dst_offset + *size > dst_buf.size {
                         anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
                     }
+                    dst_buf.bump_content_epoch();
                     ops.push(CudaOp::Copy {
-                        src: Arc::clone(&src_buf.memory),
-                        src_abs: src_buf.offset + *src_offset,
-                        dst: Arc::clone(&dst_buf.memory),
+                        src: src_memory,
+                        src_abs,
+                        dst: Arc::clone(dst_buf.memory_arc()?),
                         dst_abs: dst_buf.offset + *dst_offset,
                         size: *size,
                     });
@@ -1325,7 +1858,7 @@ impl CudaBackend {
                         .get(dst)
                         .context("CUDA: invalid CopyBufferToTexture destination")?;
                     ops.push(CudaOp::CopyBufferToTexture {
-                        src: Arc::clone(&src_buf.memory),
+                        src: Arc::clone(src_buf.memory_arc()?),
                         src_abs: src_buf.offset + *src_offset,
                         src_row_pitch: *src_row_pitch,
                         texture: Arc::clone(dst_tex),
@@ -1359,13 +1892,109 @@ impl CudaBackend {
                         y: 0,
                         width: layout.width,
                         height: layout.height,
-                        dst: Arc::clone(&dst_buf.memory),
+                        dst: Arc::clone(dst_buf.memory_arc()?),
                         dst_abs: dst_buf.offset + layout.footprint_offset,
                         dst_row_pitch: layout.row_pitch,
                     });
                 }
-                GpuCommand::CopyRenderTarget { .. } => {
-                    anyhow::bail!("CUDA compute-only backend: CopyRenderTarget is not supported")
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    {
+                        // Fast path: copy into surface present scratch → stash the DX12 RT
+                        // so present can blit it directly (no CUDA array round-trip).
+                        if let Some((surf, image_index)) = surface::scratch_slot_for_texture(self, *dst) {
+                            let (d3d12_resource, fence) = {
+                                let rt = self
+                                    .render_targets
+                                    .get(src)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget source")?;
+                                let dst_tex = self
+                                    .textures
+                                    .get(dst)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget destination")?;
+                                if rt.cuda_texture.format != dst_tex.format {
+                                    anyhow::bail!(
+                                        "CUDA/DX12: CopyRenderTarget format mismatch ({:?} → {:?})",
+                                        rt.cuda_texture.format,
+                                        dst_tex.format
+                                    );
+                                }
+                                if rt.width != dst_tex.width || rt.height != dst_tex.height {
+                                    anyhow::bail!(
+                                        "CUDA/DX12: CopyRenderTarget size mismatch ({}x{} → {}x{})",
+                                        rt.width,
+                                        rt.height,
+                                        dst_tex.width,
+                                        dst_tex.height
+                                    );
+                                }
+                                (rt.d3d12_resource.clone(), rt.last_dx12_fence)
+                            };
+                            if let Some(slot) = self
+                                .surfaces
+                                .get_mut(&surf)
+                                .and_then(|s| s.scratch.get_mut(image_index))
+                                .and_then(|s| s.as_mut())
+                            {
+                                slot.present_source = Some(surface::PresentSource::Dx12Raster {
+                                    resource: d3d12_resource,
+                                    fence,
+                                });
+                            }
+                        } else {
+                            let (cuda_src, fence, device) = {
+                                let rt = self
+                                    .render_targets
+                                    .get(src)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget source")?;
+                                (Arc::clone(&rt.cuda_texture), rt.last_dx12_fence, rt.device)
+                            };
+                            let cuda_dst = Arc::clone(
+                                self.textures
+                                    .get(dst)
+                                    .context("CUDA/DX12: invalid CopyRenderTarget destination")?,
+                            );
+                            if cuda_src.format != cuda_dst.format {
+                                anyhow::bail!(
+                                    "CUDA/DX12: CopyRenderTarget format mismatch ({:?} → {:?})",
+                                    cuda_src.format,
+                                    cuda_dst.format
+                                );
+                            }
+                            if cuda_src.width != cuda_dst.width || cuda_src.height != cuda_dst.height {
+                                anyhow::bail!(
+                                    "CUDA/DX12: CopyRenderTarget size mismatch ({}x{} → {}x{})",
+                                    cuda_src.width,
+                                    cuda_src.height,
+                                    cuda_dst.width,
+                                    cuda_dst.height
+                                );
+                            }
+                            if fence > 0 {
+                                let companion = self
+                                    .devices
+                                    .get(&device)
+                                    .context("CUDA: invalid device")?
+                                    .dx12
+                                    .as_ref()
+                                    .context("CUDA/DX12: companion required for CopyRenderTarget")?;
+                                ops.push(CudaOp::WaitExternalFence {
+                                    cuda_ctx: Arc::clone(&companion.cuda_ctx),
+                                    semaphore: pending_submit::SendExternalSemaphore(companion.cuda_semaphore),
+                                    value: fence,
+                                });
+                            }
+                            ops.push(CudaOp::CopyTexture {
+                                src: cuda_src,
+                                dst: cuda_dst,
+                            });
+                        }
+                    }
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    {
+                        let _ = (src, dst);
+                        anyhow::bail!("CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows");
+                    }
                 }
             }
         }
@@ -1380,8 +2009,358 @@ impl CudaBackend {
     ) -> Result<crate::timeline::TimelineValue> {
         let effective = commands_with_sync_prologue(commands, sync);
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let ops = self.materialize_ops(&stream, &effective)?;
+        let mut ops = self.materialize_ops(&stream, &effective)?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            ops = self.rewrite_imported_present_launches(ops)?;
+        }
         self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
+    }
+
+    /// True when `texture` is a D3D12-imported surface scratch image.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn texture_is_surface_scratch(&self, texture: &Arc<CudaTextureResource>) -> bool {
+        self.surfaces.values().any(|state| {
+            state
+                .scratch
+                .iter()
+                .flatten()
+                .any(|slot| Arc::ptr_eq(&slot.shared.cuda_texture, texture))
+        })
+    }
+
+    /// CUDA-owned Direct staging texture matching an imported scratch image.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn ensure_present_staging(&mut self, imported: &CudaTextureResource) -> Result<Arc<CudaTextureResource>> {
+        let key = (imported.width, imported.height, imported.format);
+        if let Some(existing) = self.present_staging.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+        let staging = CudaTextureResource::create(
+            &imported.ctx,
+            imported.width,
+            imported.height,
+            imported.format,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+            None,
+        )?;
+        self.present_staging.insert(key, Arc::clone(&staging));
+        Ok(staging)
+    }
+
+    /// Retarget launches that write imported present scratch onto CUDA-owned staging,
+    /// then append `CopyTexture` staging→scratch exports for the non-capturable tail.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn retarget_launch_off_imported_scratch(
+        &mut self,
+        args: &mut [CudaLaunchArg],
+        keep_alive_textures: &mut Vec<Arc<CudaTextureResource>>,
+    ) -> Result<Vec<(Arc<CudaTextureResource>, Arc<CudaTextureResource>)>> {
+        let mut imports = Vec::new();
+        for texture in keep_alive_textures.iter() {
+            if texture.is_imported()
+                && self.texture_is_surface_scratch(texture)
+                && !imports
+                    .iter()
+                    .any(|existing: &Arc<CudaTextureResource>| Arc::ptr_eq(existing, texture))
+            {
+                imports.push(Arc::clone(texture));
+            }
+        }
+        let mut exports = Vec::with_capacity(imports.len());
+        for imported in imports {
+            let staging = self.ensure_present_staging(&imported)?;
+            let old_surf = imported.surf_object()?;
+            let new_surf = staging.surf_object()?;
+            for arg in args.iter_mut() {
+                if let CudaLaunchArg::Handle(handle) = arg {
+                    if *handle == old_surf {
+                        *handle = new_surf;
+                    }
+                }
+            }
+            for texture in keep_alive_textures.iter_mut() {
+                if Arc::ptr_eq(texture, &imported) {
+                    *texture = Arc::clone(&staging);
+                }
+            }
+            exports.push((staging, imported));
+        }
+        Ok(exports)
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn rewrite_imported_present_launches(&mut self, ops: Vec<CudaOp>) -> Result<Vec<CudaOp>> {
+        let mut out = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                CudaOp::Launch {
+                    label,
+                    function,
+                    module,
+                    workgroup_size,
+                    grid,
+                    mut args,
+                    keep_alive_buffers,
+                    mut keep_alive_textures,
+                } => {
+                    let exports = self.retarget_launch_off_imported_scratch(&mut args, &mut keep_alive_textures)?;
+                    out.push(CudaOp::Launch {
+                        label,
+                        function,
+                        module,
+                        workgroup_size,
+                        grid,
+                        args,
+                        keep_alive_buffers,
+                        keep_alive_textures,
+                    });
+                    for (src, dst) in exports {
+                        out.push(CudaOp::CopyTexture { src, dst });
+                    }
+                }
+                CudaOp::LaunchIndirect {
+                    label,
+                    function,
+                    module,
+                    workgroup_size,
+                    mut args,
+                    keep_alive_buffers,
+                    mut keep_alive_textures,
+                    shape_ptr,
+                    shape_memory,
+                    shape_abs_offset,
+                    node_slot_ptr,
+                    node_slot,
+                    status_ptr,
+                    status_memory,
+                    updater,
+                    updater_module,
+                    max_grid,
+                    max_threads_per_block,
+                    limits,
+                } => {
+                    let exports = self.retarget_launch_off_imported_scratch(&mut args, &mut keep_alive_textures)?;
+                    out.push(CudaOp::LaunchIndirect {
+                        label,
+                        function,
+                        module,
+                        workgroup_size,
+                        args,
+                        keep_alive_buffers,
+                        keep_alive_textures,
+                        shape_ptr,
+                        shape_memory,
+                        shape_abs_offset,
+                        node_slot_ptr,
+                        node_slot,
+                        status_ptr,
+                        status_memory,
+                        updater,
+                        updater_module,
+                        max_grid,
+                        max_threads_per_block,
+                        limits,
+                    });
+                    for (src, dst) in exports {
+                        out.push(CudaOp::CopyTexture { src, dst });
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        Ok(out)
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn scratch_images_touched_by_ops(&self, ops: &[CudaOp]) -> Vec<(SurfaceHandle, usize)> {
+        let mut touched = Vec::new();
+        for (surface_handle, state) in &self.surfaces {
+            for (image_index, slot) in state.scratch.iter().enumerate() {
+                let Some(slot) = slot.as_ref() else {
+                    continue;
+                };
+                let scratch = &slot.shared.cuda_texture;
+                let writes_scratch = ops.iter().any(|op| match op {
+                    CudaOp::Launch {
+                        keep_alive_textures, ..
+                    }
+                    | CudaOp::LaunchIndirect {
+                        keep_alive_textures, ..
+                    } => keep_alive_textures.iter().any(|texture| Arc::ptr_eq(texture, scratch)),
+                    CudaOp::WriteTexture { texture, .. } | CudaOp::CopyBufferToTexture { texture, .. } => {
+                        Arc::ptr_eq(texture, scratch)
+                    }
+                    CudaOp::CopyTexture { dst, .. } => Arc::ptr_eq(dst, scratch),
+                    _ => false,
+                });
+                if writes_scratch {
+                    touched.push((*surface_handle, image_index));
+                }
+            }
+        }
+        touched
+    }
+
+    /// CUDA graphs cannot capture launches that touch D3D12-imported external memory.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn ops_touch_external_buffers(&self, ops: &[CudaOp]) -> bool {
+        !self.shared_buffers_touched_by_ops(ops).is_empty()
+    }
+
+    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+    fn ops_touch_external_buffers(&self, _ops: &[CudaOp]) -> bool {
+        false
+    }
+
+    /// Collect buffer handles whose `memory` Arc is referenced by `ops` as a write
+    /// destination (or conservatively as a launch keep-alive).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn shared_buffers_touched_by_ops(&self, ops: &[CudaOp]) -> Vec<BufferHandle> {
+        let mut memories = Vec::new();
+        for op in ops {
+            match op {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+                    memories.push(Arc::clone(memory));
+                }
+                CudaOp::Copy { dst, .. } => memories.push(Arc::clone(dst)),
+                CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
+                    memories.extend(keep_alive_buffers.iter().cloned());
+                }
+                CudaOp::CopyTextureToBuffer { dst, .. } => memories.push(Arc::clone(dst)),
+                _ => {}
+            }
+        }
+        if memories.is_empty() {
+            return Vec::new();
+        }
+        self.buffers
+            .iter()
+            .filter_map(|(handle, buf)| {
+                // Only Shared-primary memory is an external import. NativeAndTwin's
+                // `shared` twin is separate from `memory` and is graph-safe to write.
+                if !buf.memory_is_external {
+                    return None;
+                }
+                let mem = buf.memory.as_ref()?;
+                memories.iter().any(|m| Arc::ptr_eq(m, mem)).then_some(*handle)
+            })
+            .collect()
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn prepare_surface_submit_ops_for_retained(
+        &mut self,
+        ctx: ContextHandle,
+        scratch_images: &[(SurfaceHandle, usize)],
+        ops: &mut Vec<CudaOp>,
+    ) -> Result<()> {
+        let touched = if scratch_images.is_empty() {
+            self.scratch_images_touched_by_ops(ops)
+        } else {
+            scratch_images.to_vec()
+        };
+        // Signal the companion fence when:
+        // - CUDA wrote surface scratch (present), or
+        // - CUDA wrote a Shared-primary buffer (imported D3D12 memory; IA reads it).
+        // Native+twin writes do NOT signal here — twin DtoD in raster owns that fence.
+        self.bump_content_epochs_for_native_twin_writes(ops);
+        let shared_primaries = self.shared_primary_memories_written_by_ops(ops);
+
+        let device_handle = self.context(ctx)?.device;
+        if touched.is_empty() && shared_primaries.is_empty() {
+            return Ok(());
+        }
+
+        let companion = Arc::clone(
+            self.device(device_handle)?
+                .dx12
+                .as_ref()
+                .context("CUDA/DX12: interop submit missing companion")?,
+        );
+        let mut waits = Vec::new();
+        for (surface_handle, image_index) in &touched {
+            let slot = self
+                .surfaces
+                .get_mut(surface_handle)
+                .and_then(|state| state.scratch.get_mut(*image_index))
+                .and_then(|slot| slot.as_mut())
+                .context("CUDA/DX12: scratch slot disappeared during submit")?;
+            let reuse_fence = slot.pending_scratch_reuse_fence.max(slot.dx12_complete);
+            if reuse_fence > 0 {
+                waits.push(CudaOp::WaitExternalFence {
+                    cuda_ctx: Arc::clone(&companion.cuda_ctx),
+                    semaphore: pending_submit::SendExternalSemaphore(companion.cuda_semaphore),
+                    value: reuse_fence,
+                });
+                slot.pending_scratch_reuse_fence = 0;
+                slot.dx12_complete = 0;
+            }
+        }
+        // Shared-primary rewrites must not race an in-flight DX12 IA draw.
+        // CPU companion wait (not WaitExternalFence on the CUDA stream): stream-side
+        // external waits plus later cuStreamSynchronize/bind have returned
+        // CUDA_ERROR_NOT_SUPPORTED on this WDDM+D3D12 stack at surface teardown.
+        let mut ia_wait = 0u64;
+        for shared in &shared_primaries {
+            ia_wait = ia_wait.max(shared.last_dx12_ia_fence.load(Ordering::Acquire));
+        }
+        if ia_wait > 0 {
+            companion
+                .cpu_wait(ia_wait)
+                .context("CUDA/DX12: wait IA fence before Shared buffer rewrite")?;
+        }
+        if !waits.is_empty() {
+            waits.append(ops);
+            *ops = waits;
+        }
+
+        // Scratch present still needs a companion Signal for DXGI. Shared-primary VB
+        // writes do NOT signal here: publishing a fence value before the worker runs,
+        // then letting DX12 Signal ahead of that pending CUDA Signal, yields
+        // cuSignalExternalSemaphoresAsync CUDA_ERROR_INVALID_VALUE. Raster instead
+        // host-syncs the deposit stream before IA (see refresh_shared_vertex_backing).
+        if touched.is_empty() {
+            for shared in &shared_primaries {
+                shared.pending_host_sync.store(true, Ordering::Release);
+            }
+            return Ok(());
+        }
+
+        let cuda_complete = companion.next_fence_value();
+        ops.push(CudaOp::SignalExternalFence {
+            cuda_ctx: Arc::clone(&companion.cuda_ctx),
+            semaphore: pending_submit::SendExternalSemaphore(companion.cuda_semaphore),
+            value: cuda_complete,
+        });
+        for (surface_handle, image_index) in touched {
+            if let Some(slot) = self
+                .surfaces
+                .get_mut(&surface_handle)
+                .and_then(|state| state.scratch.get_mut(image_index))
+                .and_then(|slot| slot.as_mut())
+            {
+                slot.present_source = Some(surface::PresentSource::CudaScratch { cuda_complete });
+            }
+        }
+        // Scratch submit may also have written Shared primaries in the same ops list.
+        for shared in shared_primaries {
+            shared.last_cuda_fence.store(cuda_complete, Ordering::Release);
+            shared.pending_host_sync.store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn prepare_surface_submit_ops(&mut self, ctx: ContextHandle, ops: &mut Vec<CudaOp>) -> Result<()> {
+        self.prepare_surface_submit_ops_for_retained(ctx, &[], ops)
+    }
+
+    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+    fn prepare_surface_submit_ops(&mut self, _ctx: ContextHandle, _ops: &mut Vec<CudaOp>) -> Result<()> {
+        Ok(())
     }
 
     fn flatten_graph_commands(commands: &[GraphCommand]) -> Result<Vec<GpuCommand>> {
@@ -1390,19 +2369,244 @@ impl CudaBackend {
             match cmd {
                 GraphCommand::Compute(c) => out.push(c.clone()),
                 GraphCommand::Render { .. } => {
-                    anyhow::bail!("CUDA compute-only backend: render graph commands are not supported")
+                    anyhow::bail!(
+                        "CUDA: GraphCommand::Render cannot be flattened into compute ops; \
+                         use submit_graph (blocking render_to_target between batches)"
+                    )
                 }
             }
         }
         Ok(out)
     }
 
+    /// True when the graph contains an offscreen render partition.
+    fn graph_has_render(commands: &[GraphCommand]) -> bool {
+        commands.iter().any(|c| matches!(c, GraphCommand::Render { .. }))
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn retarget_surface_scratch_commands(&self, commands: &mut [GraphCommand]) {
+        let mut replacements = HashMap::new();
+        for state in self.surfaces.values() {
+            let Some(current) = state.current_texture_handle else {
+                continue;
+            };
+            for slot in state.scratch.iter().flatten() {
+                replacements.insert(slot.texture_handle, current);
+            }
+        }
+        for command in commands {
+            let GraphCommand::Compute(GpuCommand::CopyRenderTarget { dst, .. }) = command else {
+                continue;
+            };
+            if let Some(current) = replacements.get(dst) {
+                *dst = *current;
+            }
+        }
+    }
+
+    fn submit_graph_with_renders(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(ctx);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    color_load,
+                    commands: render_cmds,
+                } => {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    {
+                        // Pre-declare VERTEX for deposit-only VBs/IBs so Copy lands Shared.
+                        // If the batch has a dispatch, skip — KERNEL+VERTEX must materialize
+                        // Native (then twin) without a Shared→NativeAndTwin promote mid-submit.
+                        let batch_has_dispatch = batch.iter().any(|c| {
+                            matches!(
+                                c,
+                                GpuCommand::Dispatch { .. }
+                                    | GpuCommand::DispatchIndirect { .. }
+                                    | GpuCommand::DispatchBatch { .. }
+                            )
+                        });
+                        if !batch_has_dispatch {
+                            for render in render_cmds.iter() {
+                                match render {
+                                    RenderCommand::SetVertexBuffer { buffer, .. }
+                                    | RenderCommand::SetIndexBuffer { buffer, .. } => {
+                                        self.ensure_buffer_requirements(*buffer, buffer_phys::CudaBufferReq::VERTEX)?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if !batch.is_empty() {
+                            let written_ia_buffer = render_cmds.iter().any(|render| {
+                                let buffer = match render {
+                                    RenderCommand::SetVertexBuffer { buffer, .. }
+                                    | RenderCommand::SetIndexBuffer { buffer, .. } => buffer,
+                                    _ => return false,
+                                };
+                                batch.iter().any(|compute| match compute {
+                                    GpuCommand::ClearBuffer { buffer: dst, .. }
+                                    | GpuCommand::WriteBuffer { buffer: dst, .. } => dst == buffer,
+                                    GpuCommand::CopyBuffer { dst, .. } => dst == buffer,
+                                    // Conservatively sync when any dispatch precedes an IA draw —
+                                    // the dispatch may have written VB/IB through bindless indices.
+                                    GpuCommand::Dispatch { .. } | GpuCommand::DispatchIndirect { .. } => true,
+                                    _ => false,
+                                })
+                            });
+                            // Capture before clear: Scheme emits FrameTableStaging in this batch.
+                            let graph_staging = batch.iter().find_map(|c| match c {
+                                GpuCommand::FrameTableStaging { data } => Some(Arc::clone(data)),
+                                _ => None,
+                            });
+                            last_tv = self.submit_commands(ctx, &batch, sync)?;
+                            if written_ia_buffer {
+                                // Compute may have rewritten native IA storage without a
+                                // WriteBuffer op; invalidate shared twins so raster DtoDs.
+                                for render in render_cmds.iter() {
+                                    let buffer = match render {
+                                        RenderCommand::SetVertexBuffer { buffer, .. }
+                                        | RenderCommand::SetIndexBuffer { buffer, .. } => buffer,
+                                        _ => continue,
+                                    };
+                                    if let Some(buf) = self.buffers.get_mut(buffer) {
+                                        if buf.phys_kind == buffer_phys::CudaPhysKind::NativeAndTwin {
+                                            buf.bump_content_epoch();
+                                        }
+                                    }
+                                }
+                                let needs_twin_sync = render_cmds.iter().any(|render| {
+                                    let buffer = match render {
+                                        RenderCommand::SetVertexBuffer { buffer, .. }
+                                        | RenderCommand::SetIndexBuffer { buffer, .. } => buffer,
+                                        _ => return false,
+                                    };
+                                    self.buffers.get(buffer).is_some_and(|buf| {
+                                        buf.phys_kind == buffer_phys::CudaPhysKind::NativeAndTwin
+                                            && buf.content_epoch != buf.shared_epoch
+                                    })
+                                });
+                                if needs_twin_sync {
+                                    let device = self.context_device(ctx);
+                                    let worker = Arc::clone(&self.device(device)?.submission_worker);
+                                    worker.flush().context("CUDA/DX12: flush before raster VB wait")?;
+                                    self.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
+                                    self.context(ctx)?
+                                        .stream
+                                        .synchronize()
+                                        .context("CUDA/DX12: synchronize compute before raster")?;
+                                }
+                            }
+                            batch.clear();
+                            let device = self.context_device(ctx);
+                            raster::render_to_target(
+                                self,
+                                device,
+                                *target,
+                                *color_load,
+                                render_cmds,
+                                graph_staging.as_deref(),
+                            )?;
+                        } else {
+                            let device = self.context_device(ctx);
+                            raster::render_to_target(self, device, *target, *color_load, render_cmds, None)?;
+                        }
+                    }
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    {
+                        let _ = (target, color_load, render_cmds);
+                        anyhow::bail!("CUDA: render graph commands require cuda+graphics+dx12 on Windows");
+                    }
+                }
+            }
+        }
+        if !batch.is_empty() {
+            last_tv = self.submit_commands(ctx, &batch, sync)?;
+        }
+        Ok(last_tv)
+    }
+
+    /// True when an empty Ops submit's sync only references DX12 fence ledger entries
+    /// (or has no CUDA-side host work). Such submits need no CUDA completion event.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn empty_ops_sync_is_dx12_fence_only(&self, ctx: ContextHandle, sync: Option<&SubmitSync>) -> Result<bool> {
+        let Some(sync) = sync else {
+            return Ok(true);
+        };
+        if !sync.cpu_waits.is_empty() || !sync.host_observed_waits.is_empty() || !sync.deferred_host_writes.is_empty() {
+            return Ok(false);
+        }
+        if sync.waits.is_empty() {
+            return Ok(true);
+        }
+        let device_handle = self.context(ctx)?.device;
+        let ledger = &self.device(device_handle)?.event_ledger;
+        for epoch in &sync.waits {
+            match timeline::lookup_completion(ledger, epoch.context, epoch.value) {
+                Some(LedgerCompletion::Dx12Fence { .. }) => {}
+                Some(LedgerCompletion::CudaEvent(_)) | None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     fn enqueue_submit(
         &mut self,
         ctx: ContextHandle,
         sync: Option<&SubmitSync>,
-        body: CudaSubmitBody,
+        mut body: CudaSubmitBody,
     ) -> Result<crate::timeline::TimelineValue> {
+        match &mut body {
+            CudaSubmitBody::Ops(ops) => {
+                self.prepare_surface_submit_ops(ctx, ops)?;
+            }
+            CudaSubmitBody::CaptureAndLaunch { ops, tail, .. } => {
+                if tail.is_empty() {
+                    self.prepare_surface_submit_ops(ctx, ops)?;
+                } else {
+                    self.prepare_surface_submit_ops(ctx, tail)?;
+                }
+            }
+            CudaSubmitBody::LaunchRetained {
+                tail,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                scratch_images,
+                ..
+            } => {
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, tail)?;
+                #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                self.prepare_surface_submit_ops(ctx, tail)?;
+            }
+        }
+        let sync_needs_work = sync.is_some_and(|sync| {
+            !sync.waits.is_empty()
+                || !sync.cpu_waits.is_empty()
+                || !sync.host_observed_waits.is_empty()
+                || !sync.deferred_host_writes.is_empty()
+        });
+        if matches!(&body, CudaSubmitBody::Ops(ops) if ops.is_empty()) && !sync_needs_work {
+            self.graph_stats.empty_submits_elided.fetch_add(1, Ordering::Relaxed);
+            return Ok(self.gpu_progress(ctx));
+        }
+        // Empty body + DX12-fence-only waits: nothing runs on the CUDA stream, so a
+        // completion event / stream join is pure overhead (raster-direct present path).
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if matches!(&body, CudaSubmitBody::Ops(ops) if ops.is_empty())
+            && self.empty_ops_sync_is_dx12_fence_only(ctx, sync)?
+        {
+            self.graph_stats.empty_submits_elided.fetch_add(1, Ordering::Relaxed);
+            return Ok(self.gpu_progress(ctx));
+        }
+
         let context = Arc::clone(self.context(ctx)?);
         let device_handle = context.device;
         let device = self.device(device_handle)?;
@@ -1420,43 +2624,68 @@ impl CudaBackend {
                 .new_event(None)
                 .context("CUDA: create completion event failed")?,
         );
+        self.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
         event_ledger.lock().unwrap().insert(
             fence_value,
             LedgerEntry {
                 context: ctx,
-                event: Arc::clone(&completion_event),
+                completion: LedgerCompletion::CudaEvent(Arc::clone(&completion_event)),
                 recorded: false,
             },
         );
 
         let mut stream_waits = Vec::new();
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let mut dx12_stream_fence_waits = Vec::new();
         let mut host_waits = Vec::new();
         let mut deferred_writes = Vec::new();
         if let Some(sync) = sync {
             for epoch in &sync.waits {
-                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value).with_context(|| {
-                    format!(
-                        "CUDA: cross-context wait missing event for context {:?} value {}",
-                        epoch.context, epoch.value
-                    )
-                })?;
-                stream_waits.push(event);
+                match timeline::lookup_completion(&event_ledger, epoch.context, epoch.value) {
+                    Some(LedgerCompletion::CudaEvent(event)) => stream_waits.push(event),
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    Some(LedgerCompletion::Dx12Fence { companion, value }) => {
+                        // Unbound present fence (value 0) is not waitable yet; skip — DX12
+                        // slot/raster fences already order present reuse on this path.
+                        if value > 0 {
+                            dx12_stream_fence_waits.push((companion, value));
+                        }
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "CUDA: cross-context wait missing event for context {:?} value {}",
+                            epoch.context,
+                            epoch.value
+                        );
+                    }
+                }
             }
             for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
-                let event = timeline::lookup_event(&event_ledger, epoch.context, epoch.value).with_context(|| {
-                    format!(
-                        "CUDA: host wait missing event for context {:?} value {}",
-                        epoch.context, epoch.value
-                    )
-                })?;
-                host_waits.push(event);
+                match timeline::lookup_completion(&event_ledger, epoch.context, epoch.value) {
+                    Some(LedgerCompletion::CudaEvent(event)) => host_waits.push(event),
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    Some(LedgerCompletion::Dx12Fence { companion, value }) => {
+                        // Match DX12: never HOL cpu_wait WAR/present fence epochs on the
+                        // submit worker. Demote to an async stream wait when bound.
+                        if value > 0 {
+                            dx12_stream_fence_waits.push((companion, value));
+                        }
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "CUDA: host wait missing event for context {:?} value {}",
+                            epoch.context,
+                            epoch.value
+                        );
+                    }
+                }
             }
             deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |handle| {
                 let buffer = self
                     .buffers
                     .get(&handle)
                     .with_context(|| format!("CUDA: deferred write invalid buffer {handle}"))?;
-                Ok((Arc::clone(&buffer.memory), buffer.offset))
+                Ok((Arc::clone(buffer.memory_arc()?), buffer.offset))
             })?;
         }
 
@@ -1467,6 +2696,8 @@ impl CudaBackend {
             completion_event,
             event_ledger,
             stream_waits,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            dx12_stream_fence_waits,
             host_waits,
             deferred_writes,
             body,
@@ -1503,14 +2734,33 @@ impl CudaBuffer {
     fn clone_meta(&self) -> Self {
         Self {
             device: self.device,
-            memory: Arc::clone(&self.memory),
+            memory: self.memory.as_ref().map(Arc::clone),
             offset: self.offset,
             size: self.size,
             capacity: self.capacity,
             element_stride: self.element_stride,
             slot: self.slot,
             readback: self.readback,
+            content_epoch: self.content_epoch,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            parent: self.parent,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            shared: self.shared.as_ref().map(Arc::clone),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            shared_epoch: self.shared_epoch,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            phys_kind: self.phys_kind,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            requirements: self.requirements,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            pending_init: self.pending_init.clone(),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            memory_is_external: self.memory_is_external,
         }
+    }
+
+    fn bump_content_epoch(&mut self) {
+        self.content_epoch = self.content_epoch.wrapping_add(1);
     }
 }
 
@@ -1760,8 +3010,25 @@ impl GpuBackendTimelineWait for CudaBackend {
         }
         let device_handle = self.context_device(ctx);
         let device = self.device(device_handle)?;
-        match timeline::lookup_event(&device.event_ledger, ctx, value) {
-            Some(event) => Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event }))),
+        match timeline::lookup_completion(&device.event_ledger, ctx, value) {
+            Some(LedgerCompletion::CudaEvent(event)) => {
+                Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            Some(LedgerCompletion::Dx12Fence {
+                companion,
+                value: fence_value,
+            }) => {
+                if fence_value == 0 {
+                    // Present TV reserved but not yet Signal'd — treat as not submitted.
+                    Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value })))
+                } else {
+                    Ok(Some(Box::new(timeline::Dx12FenceTimelineBlockingWait {
+                        companion,
+                        value: fence_value,
+                    })))
+                }
+            }
             // Match DX12: waiting on a never-submitted value still yields a timeout-capable
             // wait object (not an immediate Err that used to deadlock under classify+lock).
             None => Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value }))),
@@ -1792,13 +3059,33 @@ impl GpuBackendTimelineWait for CudaBackend {
 }
 
 #[cfg(feature = "graphics")]
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+impl GpuBackendPresentSplit for CudaBackend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn PresentGpuWork>> {
+        surface::take_present_gpu_work(self, frame, submit_tv)
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::finish_present(self, finish, submit_tv)
+    }
+}
+
+#[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
 impl GpuBackendPresentSplit for CudaBackend {
     fn take_present_gpu_work(
         &mut self,
         _frame: FrameToken,
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn PresentGpuWork>> {
-        Self::unsupported("presentation")
+        Self::unsupported("presentation (requires cuda+graphics+dx12 on Windows)")
     }
 
     fn finish_present(
@@ -1806,7 +3093,7 @@ impl GpuBackendPresentSplit for CudaBackend {
         _finish: PresentFinishState,
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        Self::unsupported("presentation")
+        Self::unsupported("presentation (requires cuda+graphics+dx12 on Windows)")
     }
 }
 
@@ -1854,26 +3141,40 @@ impl GpuBackend for CudaBackend {
         let alloc_stream = ctx.default_stream();
         let handle = self.next_device;
         self.next_device += 1;
-        self.devices.insert(
-            handle,
-            CudaDevice {
-                ctx,
-                alloc_stream,
-                submission_worker: Arc::new(SubmissionWorker::new(submission_worker::SUBMISSION_QUEUE_CAPACITY)),
-                next_timeline: Arc::new(AtomicU64::new(1)),
-                retired: Arc::new(AtomicU64::new(0)),
-                event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
-                deletion_queue: Arc::new(Mutex::new(Vec::new())),
-                graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
-                graph_stats: Arc::clone(&self.graph_stats),
-                limits,
-                indirect_updater,
-            },
-        );
+        let mut gpu = CudaDevice {
+            ctx,
+            alloc_stream,
+            submission_worker: Arc::new(SubmissionWorker::new(submission_worker::SUBMISSION_QUEUE_CAPACITY)),
+            next_timeline: Arc::new(AtomicU64::new(1)),
+            retired: Arc::new(AtomicU64::new(0)),
+            event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
+            deletion_queue: Arc::new(Mutex::new(Vec::new())),
+            graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
+            graph_stats: Arc::clone(&self.graph_stats),
+            limits,
+            indirect_updater,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            dx12: None,
+        };
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        surface::attach_companion(&mut gpu)
+            .with_context(|| format!("CUDA: attach DX12 presentation companion for adapter {adapter_id}"))?;
+        self.devices.insert(handle, gpu);
         Ok(handle)
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let surfaces: Vec<_> = self
+                .surfaces
+                .iter()
+                .filter_map(|(h, s)| (s.device == device).then_some(*h))
+                .collect();
+            for surface in surfaces {
+                surface::destroy_surface(self, surface);
+            }
+        }
         let contexts: Vec<_> = self
             .contexts
             .iter()
@@ -1882,14 +3183,39 @@ impl GpuBackend for CudaBackend {
         for ctx in contexts {
             let _ = destroy_context_mut(self, ctx);
         }
-        if let Some(gpu) = self.devices.remove(&device) {
+        if let Some(mut gpu) = self.devices.remove(&device) {
             let _ = gpu.submission_worker.flush();
             let _ = gpu.alloc_stream.synchronize();
             gpu.submission_worker.shutdown();
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                gpu.dx12 = None;
+            }
         }
         self.buffers.retain(|_, buffer| buffer.device != device);
         self.shaders.retain(|_, shader| shader.device != device);
         self.compute_pipelines.retain(|_, pipeline| pipeline.device != device);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            self.pipelines.retain(|_, p| p.device != device);
+            let rt_tex: Vec<_> = self
+                .render_targets
+                .iter()
+                .filter(|(_, rt)| rt.device == device)
+                .map(|(_, rt)| {
+                    // Find texture handles that alias the RT cuda_texture via slot map.
+                    rt.cuda_texture.storage_slot
+                })
+                .collect();
+            self.render_targets.retain(|_, rt| rt.device != device);
+            self.raster_list_cache.clear();
+            self.present_staging.clear();
+            for slot in rt_tex.into_iter().flatten() {
+                if let Some(tex) = self.texture_slots.remove(&slot) {
+                    self.textures.remove(&tex);
+                }
+            }
+        }
         self.buffer_slots.retain(|_, handle| self.buffers.contains_key(handle));
     }
 
@@ -1900,6 +3226,14 @@ impl GpuBackend for CudaBackend {
     fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
         let worker = Arc::clone(&self.device(device)?.submission_worker);
         let alloc_stream = Arc::clone(&self.device(device)?.alloc_stream);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let (present_stream, dx12) = {
+            let gpu = self.device(device)?;
+            (
+                gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
+                gpu.dx12.as_ref().map(Arc::clone),
+            )
+        };
         worker.flush()?;
         for context in self.contexts.values().filter(|context| context.device == device) {
             context
@@ -1915,7 +3249,17 @@ impl GpuBackend for CudaBackend {
                 &context.last_emitted,
             );
         }
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(stream) = present_stream {
+            stream
+                .synchronize()
+                .context("CUDA: present stream synchronize failed")?;
+        }
         alloc_stream.synchronize().context("CUDA: device wait idle failed")?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = dx12 {
+            companion.wait_idle()?;
+        }
         Ok(())
     }
 
@@ -1990,6 +3334,11 @@ impl GpuBackend for CudaBackend {
             .devices
             .get(&context.device)
             .map(|device| Arc::clone(&device.submission_worker));
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let companion = self
+            .devices
+            .get(&context.device)
+            .and_then(|d| d.dx12.as_ref().map(Arc::clone));
         if let Some(device) = self.devices.get(&context.device) {
             let retire_fallback = submission_worker::submission_horizon(&device.next_timeline);
             let job = pending_submit::CudaEvictContextGraphs {
@@ -2007,7 +3356,9 @@ impl GpuBackend for CudaBackend {
             stream: Arc::clone(&context.stream),
             worker: worker.unwrap_or_else(|| Arc::new(SubmissionWorker::new(1))),
             fence_shutdown: Arc::clone(&context.fence_shutdown),
-            fence_thread,
+            fence_thread: Mutex::new(fence_thread),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            companion,
         }))
     }
 
@@ -2069,21 +3420,73 @@ impl GpuBackend for CudaBackend {
                 device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Buffer {
                     retire_at,
                     memory: buffer.memory,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    shared: buffer.shared,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    memory_is_external: buffer.memory_is_external,
                 });
             }
         }
     }
 
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            // Stage host bytes on deferred buffers — do not force Native materialization
+            // before scheme usage is known (deposit→Shared path). Views stage into the parent.
+            let (is_deferred, parent, abs_offset, logical_size) = {
+                let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+                (buf.phys_kind.is_deferred(), buf.parent, buf.offset + offset, buf.size)
+            };
+            if is_deferred {
+                if offset + data.len() as u64 > logical_size {
+                    anyhow::bail!("CUDA: write exceeds logical buffer size");
+                }
+                let target = parent.unwrap_or(buffer);
+                let stage_offset = if parent.is_some() { abs_offset } else { offset };
+                let buf = self.buffers.get_mut(&target).context("CUDA: invalid buffer handle")?;
+                let pending_len = if parent.is_some() {
+                    buf.size as usize
+                } else {
+                    buf.size as usize
+                };
+                if stage_offset + data.len() as u64 > buf.size {
+                    anyhow::bail!("CUDA: write exceeds parent buffer size");
+                }
+                let mut pending = buf.pending_init.take().unwrap_or_else(|| vec![0u8; pending_len]);
+                if pending.len() < pending_len {
+                    pending.resize(pending_len, 0);
+                }
+                let start = stage_offset as usize;
+                pending[start..start + data.len()].copy_from_slice(data);
+                buf.pending_init = Some(pending);
+                buf.requirements |= buffer_phys::CudaBufferReq::HOST_WRITE;
+                buf.bump_content_epoch();
+                if let Some(view) = parent.map(|_| buffer) {
+                    // Keep view epoch in sync for retained fingerprints.
+                    if let Some(v) = self.buffers.get_mut(&view) {
+                        v.bump_content_epoch();
+                    }
+                }
+                return Ok(());
+            }
+            self.ensure_buffer_requirements(buffer, buffer_phys::CudaBufferReq::HOST_WRITE)?;
+        }
         self.sync_device_streams_for_immediate_api(
             self.buffers
                 .get(&buffer)
                 .map(|buffer| buffer.device)
                 .context("CUDA: invalid buffer handle")?,
         )?;
-        let buffer = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
-        let stream = Arc::clone(&self.device(buffer.device)?.alloc_stream);
-        Self::write_buffer_region(&stream, buffer, offset, data)
+        let device = {
+            let buffer = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
+            buffer.bump_content_epoch();
+            buffer.device
+        };
+        let stream = Arc::clone(&self.device(device)?.alloc_stream);
+        let buffer_ref = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+        Self::write_buffer_region(&stream, buffer_ref, offset, data)?;
+        Ok(())
     }
 
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
@@ -2100,13 +3503,28 @@ impl GpuBackend for CudaBackend {
             handle,
             CudaBuffer {
                 device,
-                memory,
+                memory: Some(memory),
                 offset: 0,
                 size,
                 capacity,
                 element_stride: None,
                 slot: None,
                 readback: true,
+                content_epoch: 0,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                parent: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared_epoch: 0,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                phys_kind: buffer_phys::CudaPhysKind::Native,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                requirements: buffer_phys::CudaBufferReq::empty(),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                pending_init: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                memory_is_external: false,
             },
         );
         Ok(handle)
@@ -2124,6 +3542,7 @@ impl GpuBackend for CudaBackend {
         // Ensure any context-stream copy into this staging buffer has retired.
         let worker = Arc::clone(&self.device(device)?.submission_worker);
         worker.flush()?;
+        self.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
         for context in self.contexts.values().filter(|context| context.device == device) {
             context
                 .stream
@@ -2131,11 +3550,15 @@ impl GpuBackend for CudaBackend {
                 .context("CUDA: readback context stream sync failed")?;
         }
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
-        let memory = buffer.memory.lock().unwrap();
+        let memory = buffer.memory_arc()?.lock().unwrap();
         let view = memory
             .try_slice(buffer.offset as usize..(buffer.offset as usize + output.len()))
             .context("CUDA: readback range out of bounds")?;
-        stream.memcpy_dtoh(&view, output).context("CUDA: DtoH readback failed")
+        stream
+            .memcpy_dtoh(&view, output)
+            .context("CUDA: DtoH readback failed")?;
+        self.graph_stats.dtoh_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
@@ -2218,9 +3641,51 @@ impl GpuBackend for CudaBackend {
     }
 
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let (is_deferred, parent, abs_offset, logical_size) = {
+                let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+                (buf.phys_kind.is_deferred(), buf.parent, buf.offset + offset, buf.size)
+            };
+            if is_deferred {
+                let clear_size = if size == 0 {
+                    logical_size.saturating_sub(offset)
+                } else {
+                    size
+                };
+                if offset.saturating_add(clear_size) > logical_size {
+                    anyhow::bail!("CUDA: clear exceeds logical buffer size");
+                }
+                let target = parent.unwrap_or(buffer);
+                let stage_offset = if parent.is_some() { abs_offset } else { offset };
+                let buf = self.buffers.get_mut(&target).context("CUDA: invalid buffer handle")?;
+                let pending_len = buf.size as usize;
+                let mut pending = buf.pending_init.take().unwrap_or_else(|| vec![0u8; pending_len]);
+                if pending.len() < pending_len {
+                    pending.resize(pending_len, 0);
+                }
+                let start = stage_offset as usize;
+                let end = start + clear_size as usize;
+                pending[start..end].fill(0);
+                buf.pending_init = Some(pending);
+                buf.requirements |= buffer_phys::CudaBufferReq::HOST_WRITE;
+                buf.bump_content_epoch();
+                if parent.is_some() {
+                    if let Some(v) = self.buffers.get_mut(&buffer) {
+                        v.bump_content_epoch();
+                    }
+                }
+                return Ok(());
+            }
+            self.ensure_buffer_requirements(
+                buffer,
+                buffer_phys::CudaBufferReq::TRANSFER | buffer_phys::CudaBufferReq::HOST_WRITE,
+            )?;
+        }
         self.sync_device_streams_for_immediate_api(device)?;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
-        let target = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+        let target = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
+        target.bump_content_epoch();
         Self::clear_buffer_region(&stream, target, offset, size)
     }
 
@@ -2261,9 +3726,10 @@ impl GpuBackend for CudaBackend {
         size: u64,
         element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
+        let parent_handle = parent;
         let parent = self
             .buffers
-            .get(&parent)
+            .get(&parent_handle)
             .context("CUDA: invalid parent buffer")?
             .clone_meta();
         if offset + size > parent.size {
@@ -2285,6 +3751,21 @@ impl GpuBackend for CudaBackend {
                 element_stride: element_stride.or(parent.element_stride),
                 slot: Some(slot),
                 readback: false,
+                content_epoch: parent.content_epoch,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                parent: Some(parent_handle),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared: parent.shared,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared_epoch: parent.shared_epoch,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                phys_kind: parent.phys_kind,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                requirements: parent.requirements,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                pending_init: None,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                memory_is_external: parent.memory_is_external,
             },
         );
         Ok(handle)
@@ -2297,6 +3778,41 @@ impl GpuBackend for CudaBackend {
         new_size: u64,
         preserve_contents: bool,
     ) -> Result<()> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let is_deferred = self
+                .buffers
+                .get(&buffer)
+                .map(|b| b.phys_kind.is_deferred())
+                .unwrap_or(false);
+            if is_deferred {
+                let buf = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
+                if buf.parent.is_some() {
+                    anyhow::bail!("CUDA: cannot resize a buffer view");
+                }
+                if buf.device != device {
+                    anyhow::bail!("CUDA: buffer belongs to another device");
+                }
+                let new_cap = new_size.max(4);
+                match &mut buf.pending_init {
+                    Some(pending) if preserve_contents => {
+                        pending.resize(new_size as usize, 0);
+                    }
+                    Some(pending) => {
+                        *pending = vec![0u8; new_size as usize];
+                    }
+                    None if preserve_contents || new_size > 0 => {
+                        // Unwritten deferred bytes are zeros; keep that contract after resize.
+                        buf.pending_init = Some(vec![0u8; new_size as usize]);
+                    }
+                    None => {}
+                }
+                buf.size = new_size;
+                buf.capacity = new_cap;
+                buf.bump_content_epoch();
+                return Ok(());
+            }
+        }
         let old = self
             .buffers
             .get(&buffer)
@@ -2314,7 +3830,7 @@ impl GpuBackend for CudaBackend {
         if preserve_contents {
             let copy_size = old.size.min(new_size);
             if copy_size > 0 {
-                let memory = old.memory.lock().unwrap();
+                let memory = old.memory_arc()?.lock().unwrap();
                 let src = memory
                     .try_slice(old.offset as usize..(old.offset + copy_size) as usize)
                     .context("CUDA: resize src")?;
@@ -2326,11 +3842,33 @@ impl GpuBackend for CudaBackend {
                     .context("CUDA: resize device-to-device copy")?;
             }
         }
+
+        if let Some(device) = self.devices.get(&device) {
+            let retire_at = submission_worker::submission_horizon(&device.next_timeline);
+            device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Buffer {
+                retire_at,
+                memory: old.memory,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                shared: old.shared,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                memory_is_external: old.memory_is_external,
+            });
+        }
+
         let target = self.buffers.get_mut(&buffer).expect("validated above");
-        target.memory = Arc::new(Mutex::new(replacement));
+        target.memory = Some(Arc::new(Mutex::new(replacement)));
         target.offset = 0;
         target.size = new_size;
         target.capacity = capacity;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            // Shared twin is size-specific; drop and recreate on next VB bind.
+            target.shared = None;
+            target.shared_epoch = 0;
+            target.phys_kind = buffer_phys::CudaPhysKind::Native;
+            target.memory_is_external = false;
+        }
+        target.bump_content_epoch();
         Ok(())
     }
 
@@ -2365,7 +3903,28 @@ impl GpuBackend for CudaBackend {
         self.shaders.remove(&shader);
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn create_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+    ) -> Result<PipelineHandle> {
+        raster::create_pipeline(
+            self,
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn create_pipeline(
         &mut self,
         _device: DeviceHandle,
@@ -2375,27 +3934,71 @@ impl GpuBackend for CudaBackend {
         _topology: PrimitiveTopology,
         _target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        Self::unsupported("graphics pipelines")
+        Self::unsupported("graphics pipelines (requires cuda+graphics+dx12 on Windows)")
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn render_pipeline_slot_access(&self, pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
+        self.pipelines
+            .get(&pipeline)
+            .map(|p| {
+                p.push_constant_slot_kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        Some(crate::types::BindlessSlotKind::StorageUav) => Some(ResourceAccess::ReadWrite),
+                        Some(crate::types::BindlessSlotKind::ReadOnlySrv) => Some(ResourceAccess::Read),
+                        Some(crate::types::BindlessSlotKind::UniformCbv) | None => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     #[cfg(feature = "graphics")]
-    fn destroy_pipeline(&mut self, _pipeline: PipelineHandle) {}
+    fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        raster::destroy_pipeline(self, pipeline);
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        let _ = pipeline;
+    }
 
     #[cfg(feature = "graphics")]
     fn create_pipeline_with_depth(
         &mut self,
-        _device: DeviceHandle,
-        _vertex_shader: ShaderHandle,
-        _fragment_shader: ShaderHandle,
-        _vertex_layout: &VertexBufferLayout,
-        _topology: PrimitiveTopology,
-        _target_format: TextureFormat,
-        _depth_stencil: Option<&DepthStencilState>,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        Self::unsupported("graphics pipelines")
+        if depth_stencil.is_some() {
+            return Self::unsupported("graphics pipelines with depth (first CUDA raster slice)");
+        }
+        self.create_pipeline(
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+        )
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn create_render_target_with_depth(
+        &mut self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<RenderTargetHandle> {
+        raster::create_render_target(self, device, width, height, color_format, depth_format)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn create_render_target_with_depth(
         &mut self,
         _device: DeviceHandle,
@@ -2404,10 +4007,33 @@ impl GpuBackend for CudaBackend {
         _color_format: TextureFormat,
         _depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
-        Self::unsupported("render targets")
+        Self::unsupported("render targets (requires cuda+graphics+dx12 on Windows)")
     }
 
     #[cfg(feature = "graphics")]
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            raster::destroy_render_target(self, target);
+        }
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        {
+            let _ = target;
+        }
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn render_to_target(
+        &mut self,
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
+        raster::render_to_target(self, device, target, color_load, commands, None)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn render_to_target(
         &mut self,
         _device: DeviceHandle,
@@ -2415,7 +4041,7 @@ impl GpuBackend for CudaBackend {
         _color_load: crate::types::TargetLoad,
         _commands: &[RenderCommand],
     ) -> Result<()> {
-        Self::unsupported("rendering")
+        Self::unsupported("rendering (requires cuda+graphics+dx12 on Windows)")
     }
 
     fn create_texture(
@@ -2427,13 +4053,31 @@ impl GpuBackend for CudaBackend {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        let gpu = self.device(device)?;
-        let ctx = Arc::clone(&gpu.ctx);
+        let ctx = Arc::clone(&self.device(device)?.ctx);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let companion = self.device(device)?.dx12.clone();
         let (storage_slot, sampled_slot) = match access {
             TextureKind::Interpolated => (None, Some(self.alloc_registry_slot())),
             TextureKind::Direct => (Some(self.alloc_registry_slot()), None),
             TextureKind::DirectInterpolated => (Some(self.alloc_registry_slot()), Some(self.alloc_registry_slot())),
         };
+
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = companion {
+            return self.create_shared_texture_resource(
+                device,
+                &companion,
+                &ctx,
+                width,
+                height,
+                format,
+                access,
+                flags,
+                storage_slot,
+                sampled_slot,
+            );
+        }
+
         let resource =
             CudaTextureResource::create(&ctx, width, height, format, access, flags, storage_slot, sampled_slot)?;
         let handle = self.next_texture;
@@ -2521,6 +4165,16 @@ impl GpuBackend for CudaBackend {
                 .map(|(h, _)| *h);
             if let Some(device_handle) = device_handle {
                 if let Some(device) = self.devices.get(&device_handle) {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    if let Some(companion) = device.dx12.as_ref() {
+                        let retire_at = companion.companion_fence_high_water().max(1);
+                        if let Some(slot) = resource.storage_slot {
+                            companion.bindless.defer_reclaim_resource(slot, retire_at);
+                        }
+                        if let Some(slot) = resource.sampled_slot {
+                            companion.bindless.defer_reclaim_resource(slot, retire_at);
+                        }
+                    }
                     let retire_at = submission_worker::submission_horizon(&device.next_timeline);
                     device
                         .deletion_queue
@@ -2528,6 +4182,12 @@ impl GpuBackend for CudaBackend {
                         .unwrap()
                         .push(CudaDeferredDrop::Texture { retire_at, resource });
                 }
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                // Drop CUDA views (resource above) before import before D3D12 resource.
+                let _ = self.texture_imports.remove(&texture);
+                let _ = self.texture_dx12.remove(&texture);
             }
         }
     }
@@ -2550,6 +4210,10 @@ impl GpuBackend for CudaBackend {
         let handle = self.next_sampler;
         self.next_sampler += 1;
         self.sampler_slots.insert(slot, handle);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(companion) = self.device(device)?.dx12.as_ref() {
+            companion.bindless.write_sampler(&companion.device, slot, desc)?;
+        }
         self.samplers.insert(
             handle,
             CudaSampler {
@@ -2565,6 +4229,13 @@ impl GpuBackend for CudaBackend {
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         if let Some(sampler) = self.samplers.remove(&sampler) {
             self.sampler_slots.remove(&sampler.slot);
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            if let Some(device) = self.devices.get(&sampler.device) {
+                if let Some(companion) = device.dx12.as_ref() {
+                    let retire_at = companion.companion_fence_high_water().max(1);
+                    companion.bindless.defer_reclaim_sampler(sampler.slot, retire_at);
+                }
+            }
         }
     }
 
@@ -2572,7 +4243,18 @@ impl GpuBackend for CudaBackend {
         self.samplers.get(&sampler).map(|s| s.slot)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn create_surface(
+        &mut self,
+        device: DeviceHandle,
+        window: &dyn raw_window_handle::HasWindowHandle,
+        display: &dyn raw_window_handle::HasDisplayHandle,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<SurfaceHandle> {
+        surface::create_surface(self, device, window, display, depth_format)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn create_surface(
         &mut self,
         _device: DeviceHandle,
@@ -2580,25 +4262,50 @@ impl GpuBackend for CudaBackend {
         _display: &dyn raw_window_handle::HasDisplayHandle,
         _depth_format: Option<DepthFormat>,
     ) -> Result<SurfaceHandle> {
-        Self::unsupported("surfaces")
+        Self::unsupported("surfaces (requires cuda+graphics+dx12 on Windows)")
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn destroy_surface(&mut self, surface: SurfaceHandle) {
+        surface::destroy_surface(self, surface);
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn destroy_surface(&mut self, _surface: SurfaceHandle) {}
 
-    #[cfg(feature = "graphics")]
-    fn surface_resize(&mut self, _surface: SurfaceHandle, _width: u32, _height: u32) -> Result<()> {
-        Self::unsupported("surfaces")
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+        surface::surface_resize(self, surface, width, height)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
+    fn surface_resize(&mut self, _surface: SurfaceHandle, _width: u32, _height: u32) -> Result<()> {
+        Self::unsupported("surfaces (requires cuda+graphics+dx12 on Windows)")
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
+        surface::surface_size(self, surface)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn surface_size(&self, _surface: SurfaceHandle) -> (u32, u32) {
         (0, 0)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_format(&self, surface: SurfaceHandle) -> TextureFormat {
+        surface::surface_format(self, surface)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn surface_format(&self, _surface: SurfaceHandle) -> TextureFormat {
         TextureFormat::Bgra8UnormSrgb
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn surface_set_present_mode(&mut self, surface: SurfaceHandle, mode: crate::types::PresentMode) -> Result<()> {
+        surface::surface_set_present_mode(self, surface, mode)
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
@@ -2631,16 +4338,29 @@ impl GpuBackend for CudaBackend {
         let gpu = self.device(device)?;
         gpu.submission_worker
             .wait_submitted_if_scheduled(value, submission_worker::submission_horizon(&gpu.next_timeline))?;
-        let event = {
+        {
             let ledger = gpu.event_ledger.lock().unwrap();
-            ledger
+            let entry = ledger
                 .get(&value)
-                .map(|entry| Arc::clone(&entry.event))
-                .with_context(|| format!("CUDA: timeline value {value} has not been submitted"))?
-        };
-        event
-            .synchronize()
-            .context("CUDA: device_wait_until event sync failed")?;
+                .with_context(|| format!("CUDA: timeline value {value} has not been submitted"))?;
+            match &entry.completion {
+                LedgerCompletion::CudaEvent(event) => event
+                    .synchronize()
+                    .context("CUDA: device_wait_until event sync failed")?,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::Dx12Fence {
+                    companion,
+                    value: fence_value,
+                } => {
+                    if *fence_value == 0 {
+                        anyhow::bail!("CUDA: timeline value {value} present fence not yet signaled");
+                    }
+                    companion
+                        .cpu_wait(*fence_value)
+                        .context("CUDA: device_wait_until DX12 fence wait failed")?;
+                }
+            }
+        }
         timeline::advance_device_retired(&gpu.event_ledger, &gpu.retired);
         for context in self.contexts.values().filter(|context| context.device == device) {
             timeline::poll_retire_events(
@@ -2684,6 +4404,19 @@ impl GpuBackend for CudaBackend {
         self.submit_commands(ctx, commands, sync)
     }
 
+    fn submit_graph(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        if Self::graph_has_render(commands) {
+            return self.submit_graph_with_renders(ctx, commands, sync);
+        }
+        let gpu_commands = Self::flatten_graph_commands(commands)?;
+        self.submit_commands(ctx, &gpu_commands, sync)
+    }
+
     fn submit_graph_and_retain(
         &mut self,
         ctx: ContextHandle,
@@ -2691,6 +4424,19 @@ impl GpuBackend for CudaBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
+        // Render partitions are not CUDA-graph-capturable; fall back to the blocking path.
+        if Self::graph_has_render(commands) {
+            if self.retained.remove(&(ctx, key)).is_some() {
+                self.enqueue_evict_retained(ctx, key);
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                self.retained
+                    .insert((ctx, key), RetainedEntry::Render(commands.to_vec()));
+            }
+            return self.submit_graph_with_renders(ctx, commands, sync);
+        }
+
         // Evict any previous artifact for this key before recording a replacement.
         if self.retained.remove(&(ctx, key)).is_some() {
             self.enqueue_evict_retained(ctx, key);
@@ -2699,28 +4445,85 @@ impl GpuBackend for CudaBackend {
         let gpu_commands = Self::flatten_graph_commands(commands)?;
         let effective = commands_with_sync_prologue(&gpu_commands, sync);
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let ops = self.materialize_ops(&stream, &effective)?;
+        let mut ops = self.materialize_ops(&stream, &effective)?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            ops = self.rewrite_imported_present_launches(ops)?;
+        }
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let direct_present_target = effective.iter().find_map(|command| {
+            let GpuCommand::CopyRenderTarget { src, dst } = command else {
+                return None;
+            };
+            surface::scratch_slot_for_texture(self, *dst).is_some().then_some(*src)
+        });
+        let stripped = pending_submit::strip_external_fence_ops(ops);
+        let (core, tail) = pending_submit::split_graph_core_and_tail(stripped);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let scratch_images = {
+            let mut all = core.clone();
+            all.extend(tail.iter().cloned());
+            self.scratch_images_touched_by_ops(&all)
+        };
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let twin_dirty = {
+            let mut all = core.clone();
+            all.extend(tail.iter().cloned());
+            self.native_twin_buffers_written_by_ops(&all)
+        };
 
-        if pending_submit::ops_are_graph_safe(&ops) && !retained_graph::cuda_launch_blocking_active() {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(target) = direct_present_target {
+            self.retained
+                .insert((ctx, key), RetainedEntry::PresentRenderTarget(target));
+            // No CUDA stream work / completion event — present uses the DX12 fence ledger.
+            // Sync waits on prior DX12 present fences are redundant with queue/raster ordering.
+            let _ = sync;
+            return Ok(self.gpu_progress(ctx));
+        }
+
+        if !core.is_empty()
+            && pending_submit::ops_are_graph_safe(&core)
+            && !retained_graph::cuda_launch_blocking_active()
+            && !self.ops_touch_external_buffers(&core)
+        {
             let device_handle = self.context(ctx)?.device;
             let device = self.device(device_handle)?;
             let body = CudaSubmitBody::CaptureAndLaunch {
                 key,
-                ops,
+                ops: core,
+                tail: tail.clone(),
                 registry: Arc::clone(&device.graph_registry),
                 stats: Arc::clone(&device.graph_stats),
             };
-            self.retained.insert((ctx, key), RetainedEntry::Graph);
+            let retained = if tail.is_empty() {
+                RetainedEntry::Graph {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    scratch_images,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    twin_dirty,
+                }
+            } else {
+                RetainedEntry::GraphWithTail {
+                    tail,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    scratch_images,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    twin_dirty,
+                }
+            };
+            self.retained.insert((ctx, key), retained);
             tracing::trace!(key, "CUDA: capturing retainable partition into CudaGraph");
             self.enqueue_submit(ctx, sync, body)
         } else {
             self.graph_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
-            self.retained
-                .insert((ctx, key), RetainedEntry::Commands(commands.to_vec()));
+            let mut ops = core;
+            ops.extend(tail);
+            self.retained.insert((ctx, key), RetainedEntry::Ops(ops.clone()));
             tracing::trace!(
                 key,
                 blocking = retained_graph::cuda_launch_blocking_active(),
-                "CUDA: retainable partition uses command-replay fallback"
+                "CUDA: retainable partition uses pre-materialized op fallback"
             );
             self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
         }
@@ -2732,27 +4535,99 @@ impl GpuBackend for CudaBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        match self.retained.get(&(ctx, key)) {
-            Some(RetainedEntry::Graph) => {
+        match self.retained.get(&(ctx, key)).cloned() {
+            Some(RetainedEntry::Graph {
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                scratch_images,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                twin_dirty,
+            }) => {
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                {
+                    for handle in twin_dirty {
+                        if let Some(buf) = self.buffers.get_mut(&handle) {
+                            buf.bump_content_epoch();
+                        }
+                    }
+                }
                 let device_handle = self.context(ctx)?.device;
                 let device = self.device(device_handle)?;
                 let body = CudaSubmitBody::LaunchRetained {
                     key,
+                    tail: Vec::new(),
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    scratch_images,
                     registry: Arc::clone(&device.graph_registry),
                     stats: Arc::clone(&device.graph_stats),
                 };
                 tracing::trace!(key, "CUDA: launching retained CudaGraph");
                 self.enqueue_submit(ctx, sync, body).map(Some)
             }
-            Some(RetainedEntry::Commands(commands)) => {
-                let commands = commands.clone();
-                let gpu_commands = Self::flatten_graph_commands(&commands)?;
-                let effective = commands_with_sync_prologue(&gpu_commands, sync);
-                let stream = Arc::clone(&self.context(ctx)?.stream);
-                let ops = self.materialize_ops(&stream, &effective)?;
-                self.graph_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
-                tracing::trace!(key, "CUDA: replaying retained GraphCommands");
+            Some(RetainedEntry::GraphWithTail {
+                tail,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                scratch_images,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                twin_dirty,
+            }) => {
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                {
+                    for handle in twin_dirty {
+                        if let Some(buf) = self.buffers.get_mut(&handle) {
+                            buf.bump_content_epoch();
+                        }
+                    }
+                }
+                let device_handle = self.context(ctx)?.device;
+                let device = self.device(device_handle)?;
+                let body = CudaSubmitBody::LaunchRetained {
+                    key,
+                    tail,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    scratch_images,
+                    registry: Arc::clone(&device.graph_registry),
+                    stats: Arc::clone(&device.graph_stats),
+                };
+                tracing::trace!(key, "CUDA: launching retained CudaGraph with tail");
+                self.enqueue_submit(ctx, sync, body).map(Some)
+            }
+            Some(RetainedEntry::Ops(ops)) => {
+                tracing::trace!(key, "CUDA: replaying retained pre-materialized ops");
                 self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops)).map(Some)
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            Some(RetainedEntry::Render(mut commands)) => {
+                self.retarget_surface_scratch_commands(&mut commands);
+                tracing::trace!(key, "CUDA: replaying retained render partition");
+                self.submit_graph_with_renders(ctx, &commands, sync).map(Some)
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            Some(RetainedEntry::PresentRenderTarget(target)) => {
+                let (resource, fence) = {
+                    let target = self
+                        .render_targets
+                        .get(&target)
+                        .context("CUDA/DX12: retained present target disappeared")?;
+                    (target.d3d12_resource.clone(), target.last_dx12_fence)
+                };
+                for state in self.surfaces.values_mut() {
+                    let Some(current) = state.current_texture_handle else {
+                        continue;
+                    };
+                    if let Some(slot) = state
+                        .scratch
+                        .iter_mut()
+                        .flatten()
+                        .find(|slot| slot.texture_handle == current)
+                    {
+                        slot.present_source = Some(surface::PresentSource::Dx12Raster {
+                            resource: resource.clone(),
+                            fence,
+                        });
+                        return Ok(Some(self.gpu_progress(ctx)));
+                    }
+                }
+                Ok(None)
             }
             None => Ok(None),
         }
@@ -2764,14 +4639,24 @@ impl GpuBackend for CudaBackend {
         }
     }
 
-    #[cfg(feature = "graphics")]
-    fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
-        Self::unsupported("frames")
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
+        surface::begin_frame(self, surface, ctx)
     }
 
-    #[cfg(feature = "graphics")]
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
+    fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
+        Self::unsupported("frames (requires cuda+graphics+dx12 on Windows)")
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        surface::submit_frame(self, frame)
+    }
+
+    #[cfg(all(feature = "graphics", not(all(feature = "dx12", target_os = "windows"))))]
     fn submit_frame(&mut self, _frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
-        Self::unsupported("frames")
+        Self::unsupported("frames (requires cuda+graphics+dx12 on Windows)")
     }
 
     fn create_compute_pipeline(
@@ -2880,6 +4765,47 @@ impl GpuBackend for CudaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+
+    #[allow(dead_code)] // held for RAII lock lifetime
+    enum CudaTestGate {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        Shared(RwLockReadGuard<'static, ()>),
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        Exclusive(RwLockWriteGuard<'static, ()>),
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        None,
+    }
+
+    struct CudaTestDevice {
+        device: Arc<crate::Device>,
+        _gate: CudaTestGate,
+    }
+
+    impl CudaTestDevice {
+        fn arc(&self) -> Arc<crate::Device> {
+            Arc::clone(&self.device)
+        }
+    }
+
+    impl std::ops::Deref for CudaTestDevice {
+        type Target = crate::Device;
+
+        fn deref(&self) -> &crate::Device {
+            &self.device
+        }
+    }
+
+    fn cuda_exclusive_guard() -> CudaTestGate {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            CudaTestGate::Exclusive(crate::test_support::cuda_lib_exclusive_gate())
+        }
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        {
+            CudaTestGate::None
+        }
+    }
 
     const DOUBLE_SLANG: &str = r#"
 [shader("compute")]
@@ -2921,6 +4847,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     }
 
     fn run_compute_dispatch_and_readback(shader_source: &str) -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -2997,16 +4924,11 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     }
 
     fn run_scheme_compute_and_withdraw(shader_source: &str) -> Result<()> {
-        let backend = match CudaBackend::new() {
-            Ok(backend) => backend,
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                return Ok(());
-            }
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
         };
-        let device = Arc::new(crate::Device::from_backend(Box::new(backend))?);
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, shader_source)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -3030,16 +4952,11 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 
     #[test]
     fn scheme_binds_two_goldy_buffers_in_parameter_order() -> Result<()> {
-        let backend = match CudaBackend::new() {
-            Ok(backend) => backend,
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                return Ok(());
-            }
+        let Some(device) = try_cuda_device()? else {
+            return Ok(());
         };
-        let device = Arc::new(crate::Device::from_backend(Box::new(backend))?);
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let input = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let output = pool.acquire_buffer_sized::<u32>(4, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_TWO_BUFFER_SLANG)?;
@@ -3058,26 +4975,67 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         Ok(())
     }
 
-    fn try_cuda_device() -> Result<Option<Arc<crate::Device>>> {
-        match CudaBackend::new() {
-            Ok(backend) => Ok(Some(Arc::new(crate::Device::from_backend(Box::new(backend))?))),
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                Ok(None)
+    fn try_cuda_device() -> Result<Option<CudaTestDevice>> {
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let Some(device) = crate::test_support::shared_cuda_lib_device() else {
+                eprintln!("skipping CUDA scheme test: no shared CUDA device");
+                return Ok(None);
+            };
+            return Ok(Some(CudaTestDevice {
+                device,
+                _gate: CudaTestGate::Shared(crate::test_support::cuda_lib_shared_gate()),
+            }));
+        }
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        {
+            match CudaBackend::new() {
+                Ok(backend) => Ok(Some(CudaTestDevice {
+                    device: Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                    _gate: CudaTestGate::None,
+                })),
+                Err(error) => {
+                    eprintln!("skipping CUDA scheme test: {error:#}");
+                    Ok(None)
+                }
             }
         }
     }
 
-    fn try_cuda_device_with_stats() -> Result<Option<(Arc<crate::Device>, Arc<CudaGraphStats>)>> {
-        match CudaBackend::new() {
-            Ok(backend) => {
-                let stats = backend.graph_stats();
-                stats.reset();
-                Ok(Some((Arc::new(crate::Device::from_backend(Box::new(backend))?), stats)))
-            }
-            Err(error) => {
-                eprintln!("skipping CUDA scheme test: {error:#}");
-                Ok(None)
+    fn try_cuda_device_with_stats() -> Result<Option<(CudaTestDevice, Arc<CudaGraphStats>)>> {
+        // Quiet counter window: exclusive against other shared-device / raw-backend tests.
+        let gate = cuda_exclusive_guard();
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        {
+            let Some(device) = crate::test_support::shared_cuda_lib_device() else {
+                eprintln!("skipping CUDA scheme test: no shared CUDA device");
+                return Ok(None);
+            };
+            let stats = device
+                .cuda_graph_stats_for_test()
+                .context("CUDA: shared device missing graph stats")?;
+            stats.reset();
+            return Ok(Some((CudaTestDevice { device, _gate: gate }, stats)));
+        }
+        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+        {
+            let _ = gate;
+            match CudaBackend::new() {
+                Ok(backend) => {
+                    let stats = backend.graph_stats();
+                    stats.reset();
+                    Ok(Some((
+                        CudaTestDevice {
+                            device: Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                            _gate: CudaTestGate::None,
+                        },
+                        stats,
+                    )))
+                }
+                Err(error) => {
+                    eprintln!("skipping CUDA scheme test: {error:#}");
+                    Ok(None)
+                }
             }
         }
     }
@@ -3097,7 +5055,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -3122,7 +5080,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_with_data(&[0xDEAD_BEEFu32], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -3146,7 +5104,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -3170,7 +5128,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(
             &device,
@@ -3208,7 +5166,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(2, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(
             &device,
@@ -3246,7 +5204,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         const N: usize = 64;
         let input: Vec<u32> = (0..N as u32).collect();
         let inp = pool.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
@@ -3286,7 +5244,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct Params {
@@ -3438,7 +5396,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, M2_FILL_SHADER)?;
@@ -3471,7 +5429,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
         let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let double_pipe =
@@ -3504,7 +5462,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         // Distinct pipeline objects so analysis emits two Dispatch commands, not DispatchBatch.
@@ -3544,7 +5502,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let src = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let y = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let z = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
@@ -3593,7 +5551,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buf = pool.acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)?;
         let pipe = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_ADD_TEN_SHADER)?)?;
 
@@ -3616,7 +5574,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
         let mid = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
@@ -3644,7 +5602,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         const N: usize = 64;
         let src: Vec<u32> = (1..=N as u32).collect();
         let dst = vec![0u32; N];
@@ -3700,6 +5658,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn overlapping_self_copy_is_memmove_safe() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -3749,6 +5708,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn resize_buffer_preserves_contents_on_device() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -3793,6 +5753,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn async_submit_wait_until_advances_progress() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -3854,7 +5815,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         let ctx_b = device.create_context()?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buf_a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let buf_b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
 
@@ -3898,7 +5859,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 init.push(0xCCCC_CCCCu32);
             }
         }
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buf = pool.acquire_buffer_with_data(&init, BufferKind::Scattered)?;
         let mut scheme = crate::Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 16 * 4, 32 * 4)?;
@@ -3975,7 +5936,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let pipeline =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
@@ -4031,7 +5992,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let pipeline = crate::ComputePipeline::new(
             &device,
@@ -4081,6 +6042,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     #[test]
     fn upload_write_commands_use_command_fallback_not_graph_capture() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -4118,12 +6080,21 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .try_resubmit_retained(ctx, 0xDEAD_F001, None)?
             .context("expected retained fallback entry")?;
         wait_for(&mut backend, ctx, tv)?;
-        assert!(stats.snapshot().fallbacks >= 2);
+        let replay = stats.snapshot();
+        assert_eq!(
+            replay.fallbacks, snap.fallbacks,
+            "pre-materialized fallback replay must not count another fallback"
+        );
+        assert_eq!(
+            replay.rematerialize_fallbacks, 0,
+            "pre-materialized fallback replay must not rematerialize"
+        );
         Ok(())
     }
 
     #[test]
     fn destroy_context_evicts_retained_graphs() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
             Ok(backend) => backend,
             Err(error) => {
@@ -4213,7 +6184,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
         let work_pipe =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let shape =
             pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
@@ -4254,6 +6225,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             "stable indirect resubmit must graph-launch: {after_first:?} vs {after_second:?}"
         );
         assert_eq!(scheme.replay_stats().records, 1);
+        #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 1);
         Ok(())
     }
@@ -4282,7 +6254,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
         let work_pipe =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let mut pool = crate::RetainedPool::new(device.arc());
         let shape =
             pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[5u32, 6, 7, 8], BufferKind::Scattered)?;

@@ -140,8 +140,10 @@ cuda = ["dep:cudarc"]
 update-screenshots = ["dep:image"]
 # Structured instrumentation with named observation points (zero-cost when disabled)
 instrumentation = ["dep:tracing-subscriber"]
-# Interactive `examples/*.rs` (winit); requires graphics for surfaces/present
-examples = ["dep:winit", "graphics"]
+# Interactive `examples/*.rs` (winit); requires graphics for surfaces/present.
+# Pulls instrumentation so examples can initialize `tracing_subscriber` under
+# `--no-default-features` backend-only builds (e.g. cuda+graphics+dx12).
+examples = ["dep:winit", "graphics", "instrumentation"]
 # Tracy profiler integration — connect the Tracy GUI for live CPU/GPU timeline profiling.
 # Zero-cost when disabled; when enabled, only collects when a profiler connects (on-demand).
 tracy = ["dep:tracy-client", "tracy-client/enable", "tracy-client/ondemand", "tracy-client/broadcast", "tracy-client/system-tracing", "tracy-client/context-switch-tracing"]

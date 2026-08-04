@@ -1,9 +1,9 @@
 //! Scheme render fixtures for FLIP screenshot tests and scheme render integration.
 
 use goldy::{
-    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad,
-    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BackendType, BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
+    TargetLoad, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 
@@ -19,21 +19,51 @@ pub fn create_device() -> Option<Device> {
         .ok()
 }
 
+/// CUDA raster only supports `Rgba32Float` color targets (first slice).
+fn color_target_format(device: &Device) -> TextureFormat {
+    if device.backend_type() == BackendType::Cuda {
+        TextureFormat::Rgba32Float
+    } else {
+        TextureFormat::Rgba8Unorm
+    }
+}
+
+/// Normalize GPU readback to RGBA8 for PNG comparison.
+fn pixels_as_rgba8(raw: Vec<u8>, format: TextureFormat, width: u32, height: u32) -> Vec<u8> {
+    match format {
+        TextureFormat::Rgba8Unorm => {
+            assert_eq!(raw.len(), (width * height * 4) as usize);
+            raw
+        }
+        TextureFormat::Rgba32Float => {
+            assert_eq!(raw.len(), (width * height * 16) as usize);
+            let floats: &[f32] = bytemuck::cast_slice(&raw);
+            floats
+                .iter()
+                .map(|&f| (f.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+                .collect()
+        }
+        other => panic!("unsupported screenshot readback format: {other:?}"),
+    }
+}
+
 pub fn scheme_render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {
+    let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
     let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
-    let readback = acquire_readback_texture(&mut pool, width, height, TextureFormat::Rgba8Unorm);
-    scheme_render_and_readback(
+    let readback = acquire_readback_texture(&mut pool, width, height, format);
+    let raw = scheme_render_and_readback(
         &ctx,
         width,
         height,
-        TextureFormat::Rgba8Unorm,
+        format,
         None,
         &readback,
         "clear",
         TargetLoad::Clear(color),
         |_pass| {},
-    )
+    );
+    pixels_as_rgba8(raw, format, width, height)
 }
 
 pub fn scheme_render_triangle(
@@ -43,6 +73,7 @@ pub fn scheme_render_triangle(
     clear_color: Color,
     vertices: [Vertex2D; 3],
 ) -> Vec<u8> {
+    let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
 
     let shader_source = r#"
@@ -78,7 +109,7 @@ pub fn scheme_render_triangle(
         &shader,
         &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: format,
             ..Default::default()
         },
     )
@@ -88,13 +119,13 @@ pub fn scheme_render_triangle(
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("vertex buffer");
-    let readback = acquire_readback_texture(&mut pool, width, height, TextureFormat::Rgba8Unorm);
+    let readback = acquire_readback_texture(&mut pool, width, height, format);
 
-    scheme_render_and_readback(
+    let raw = scheme_render_and_readback(
         &ctx,
         width,
         height,
-        TextureFormat::Rgba8Unorm,
+        format,
         None,
         &readback,
         "triangle",
@@ -105,7 +136,8 @@ pub fn scheme_render_triangle(
             pass.set_vertex_buffer(0, &vertex_buffer);
             pass.draw(0..3, 0..1);
         },
-    )
+    );
+    pixels_as_rgba8(raw, format, width, height)
 }
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -134,7 +166,13 @@ pub fn depth_vertex_layout() -> VertexBufferLayout {
     }
 }
 
-pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
+/// CUDA first-slice raster has no depth; callers should skip when this returns `None`.
+pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Option<Vec<u8>> {
+    if device.backend_type() == BackendType::Cuda {
+        return None;
+    }
+
+    let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
 
     let shader_source = include_str!("../../shaders/depth_test.slang");
@@ -146,7 +184,7 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
         &shader,
         &RenderPipelineDesc {
             vertex_layout: depth_vertex_layout(),
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: format,
             depth_stencil: Some(DepthStencilState {
                 format: DepthFormat::Depth32Float,
                 depth_write_enabled: true,
@@ -184,13 +222,13 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
     let green_vb = pool
         .acquire_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("green vb");
-    let readback = acquire_readback_texture(&mut pool, width, height, TextureFormat::Rgba8Unorm);
+    let readback = acquire_readback_texture(&mut pool, width, height, format);
 
-    scheme_render_and_readback(
+    let raw = scheme_render_and_readback(
         &ctx,
         width,
         height,
-        TextureFormat::Rgba8Unorm,
+        format,
         Some(DepthFormat::Depth32Float),
         &readback,
         "depth_occlusion",
@@ -205,10 +243,12 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
             pass.set_vertex_buffer(0, &green_vb);
             pass.draw(0..3, 0..1);
         },
-    )
+    );
+    Some(pixels_as_rgba8(raw, format, width, height))
 }
 
 pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
+    let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
     const RENDER_WIDTH: u32 = 512;
     const RENDER_HEIGHT: u32 = 512;
@@ -235,7 +275,7 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         &RenderPipelineDesc {
             vertex_layout: VertexBufferLayout::default(),
             topology: PrimitiveTopology::TriangleList,
-            target_format: TextureFormat::Rgba8Unorm,
+            target_format: format,
             ..Default::default()
         },
     )
@@ -264,13 +304,13 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         use_buffer_a = !use_buffer_a;
     }
 
-    let readback = acquire_readback_texture(&mut pool, RENDER_WIDTH, RENDER_HEIGHT, TextureFormat::Rgba8Unorm);
+    let readback = acquire_readback_texture(&mut pool, RENDER_WIDTH, RENDER_HEIGHT, format);
 
-    scheme_render_and_readback(
+    let raw = scheme_render_and_readback(
         &ctx,
         RENDER_WIDTH,
         RENDER_HEIGHT,
-        TextureFormat::Rgba8Unorm,
+        format,
         None,
         &readback,
         "gol_render",
@@ -281,5 +321,6 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             pass.set_pipeline(&render_pipeline);
             pass.draw(0..3, 0..1);
         },
-    )
+    );
+    pixels_as_rgba8(raw, format, RENDER_WIDTH, RENDER_HEIGHT)
 }

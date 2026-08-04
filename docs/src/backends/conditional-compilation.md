@@ -50,9 +50,24 @@ the GPGPU compute surface (storage images, sampling, copies, deposits/withdrawal
 backend automatically. In a default multi-backend build, opt in with
 `GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu`.
 
+On Windows, enabling `cuda` together with `graphics` and `dx12` (the usual case
+when adding `cuda` on top of default features) attaches a DX12 presentation
+companion to each CUDA device: LUID-matched DXGI adapter, shared float4 scratch
+textures, and swapchain present. The same gate enables a first-slice raster path
+(offscreen `Rgba32Float` targets + non-indexed point/line/triangle pipelines). Depth, indexed draws,
+and bindless render bindings remain unsupported until a later slice. Without that
+full gate, surface/present/raster APIs still return compute-only errors.
+
 ```bash
 # CUDA compute-only
 cargo test --no-default-features --features cuda --test scheme_compute_integration
+
+# CUDA + DX12 presentation + first-slice raster (Windows)
+cargo check --no-default-features --features cuda,graphics,dx12
+GOLDY_BACKEND=cuda cargo run --example compute_to_surface --features examples
+cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_raster
+cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_presentation
+cargo test --no-default-features --features cuda,graphics,dx12 --test cuda_dx12_surface_lifecycle
 ```
 
 ### Dependency Exclusion
@@ -78,8 +93,11 @@ cargo build --no-default-features --features vulkan
 # DX12-only build
 cargo build --no-default-features --features dx12
 
-# CUDA compute-only (no raster/surface/present)
+# CUDA compute-only (no raster; surfaces need dx12+graphics on Windows)
 cargo build --no-default-features --features cuda
+
+# CUDA + DX12 presentation companion (Windows)
+cargo build --no-default-features --features cuda,graphics,dx12
 ```
 
 This can significantly reduce build times and binary size.
@@ -91,7 +109,7 @@ This can significantly reduce build times and binary size.
 | `vulkan` | Windows, Linux (any platform with a Vulkan loader) | Broadest platform support; implies `graphics` |
 | `dx12` | Windows only | Gated by `#[cfg(target_os = "windows")]` — the feature is ignored on other platforms; implies `graphics` |
 | `metal` | macOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms; implies `graphics` |
-| `cuda` | Any platform with CUDA toolkit | **In progress** — compute prototype; does not imply `graphics` |
+| `cuda` | Any platform with CUDA toolkit | Compute prototype; on Windows with `cuda+graphics+dx12`, DX12 presentation companion is enabled. Does not imply `graphics` by itself. Raster / Vulkan interop still pending. |
 | `webgpu` | Cross-platform | **In progress** — via wgpu; does not imply `graphics` |
 
 On macOS, the default backend is native Metal. Goldy does not require MoltenVK.
