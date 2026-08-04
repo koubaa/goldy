@@ -58,6 +58,10 @@ pub(super) struct CudaSurfaceState {
     pub width: u32,
     pub height: u32,
     pub present_mode: crate::types::PresentMode,
+    /// Requested depth format (DX12-only depth resource; not CUDA-imported).
+    pub depth_format: Option<crate::types::DepthFormat>,
+    pub depth_texture: Option<ID3D12Resource>,
+    pub dsv_offset: Option<u32>,
     pub frame_latency_waitable: Option<SendSyncHandle>,
     /// Rotating present-slot index (0..MAX_FRAMES).
     pub current_frame: usize,
@@ -134,9 +138,6 @@ pub(super) fn create_surface(
     _display: &dyn raw_window_handle::HasDisplayHandle,
     depth_format: Option<crate::types::DepthFormat>,
 ) -> Result<SurfaceHandle> {
-    if depth_format.is_some() {
-        bail!("CUDA/DX12: depth buffers on surfaces are not supported in the first presentation slice");
-    }
     let companion = companion_ref(backend, device)?;
 
     let window_handle = window
@@ -213,6 +214,13 @@ pub(super) fn create_surface(
         backbuffers.push(buf);
     }
 
+    let (depth_texture, dsv_offset) = if let Some(df) = depth_format {
+        let (tex, offset) = companion.create_depth_texture(width, height, df)?;
+        (Some(tex), Some(offset))
+    } else {
+        (None, None)
+    };
+
     let blit = PresentBlitPipeline::create(&companion.device)?;
 
     let handle = backend.next_surface;
@@ -227,6 +235,9 @@ pub(super) fn create_surface(
             width,
             height,
             present_mode: crate::types::PresentMode::Fifo,
+            depth_format,
+            depth_texture,
+            dsv_offset,
             frame_latency_waitable,
             current_frame: 0,
             current_image_index: None,
@@ -241,7 +252,9 @@ pub(super) fn create_surface(
             scratch_pool: Vec::new(),
         },
     );
-    tracing::info!("CUDA/DX12: created surface {width}x{height} (compute format {SURFACE_COMPUTE_FORMAT:?})");
+    tracing::info!(
+        "CUDA/DX12: created surface {width}x{height} (compute format {SURFACE_COMPUTE_FORMAT:?}, depth={depth_format:?})"
+    );
     Ok(handle)
 }
 
@@ -250,6 +263,15 @@ pub(super) fn destroy_surface(backend: &mut CudaBackend, surface: SurfaceHandle)
         return;
     };
     let device = state.device;
+    // Free DSV slot before dropping depth texture.
+    if let Some(dsv) = state.dsv_offset.take() {
+        if let Some(gpu) = backend.devices.get(&device) {
+            if let Some(companion) = gpu.dx12.as_ref() {
+                companion.free_dsv_offset(dsv);
+            }
+        }
+    }
+    state.depth_texture = None;
     // CUDA may still be writing imported scratch; drain CUDA + DX12 before destroying
     // tex/surf objects and external memory.
     let mut live_slots: Vec<ScratchSlot> = state.scratch.iter_mut().filter_map(|s| s.take()).collect();
@@ -447,25 +469,45 @@ pub(super) fn surface_resize(backend: &mut CudaBackend, surface: SurfaceHandle, 
         };
         (companion.device.clone(), rtv_size)
     };
-    let state = backend.surfaces.get_mut(&surface).unwrap();
-    for i in 0..MAX_FRAMES {
-        let buf: ID3D12Resource =
-            unsafe { state.swapchain.GetBuffer(i as u32) }.context("CUDA/DX12: GetBuffer after resize")?;
-        let base = unsafe { state.rtv_heap.GetCPUDescriptorHandleForHeapStart() };
-        let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: base.ptr + i * rtv_size as usize,
-        };
-        unsafe { device_com.CreateRenderTargetView(&buf, None, cpu) };
-        state.backbuffers.push(buf);
+    {
+        let state = backend.surfaces.get_mut(&surface).unwrap();
+        for i in 0..MAX_FRAMES {
+            let buf: ID3D12Resource =
+                unsafe { state.swapchain.GetBuffer(i as u32) }.context("CUDA/DX12: GetBuffer after resize")?;
+            let base = unsafe { state.rtv_heap.GetCPUDescriptorHandleForHeapStart() };
+            let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: base.ptr + i * rtv_size as usize,
+            };
+            unsafe { device_com.CreateRenderTargetView(&buf, None, cpu) };
+            state.backbuffers.push(buf);
+        }
+        state.width = width;
+        state.height = height;
+        state.current_texture_handle = None;
+        state.current_image_index = None;
+        state.slot_fence = [0; MAX_FRAMES];
+        state.backbuffer_in_common = [true; MAX_FRAMES];
+        state.present_generation = state.present_generation.wrapping_add(1);
+        *state.present_cache.lock().unwrap() = [PresentListCache::default(); MAX_FRAMES];
     }
-    state.width = width;
-    state.height = height;
-    state.current_texture_handle = None;
-    state.current_image_index = None;
-    state.slot_fence = [0; MAX_FRAMES];
-    state.backbuffer_in_common = [true; MAX_FRAMES];
-    state.present_generation = state.present_generation.wrapping_add(1);
-    *state.present_cache.lock().unwrap() = [PresentListCache::default(); MAX_FRAMES];
+
+    // Recreate DX12-only depth at the new size (free old DSV first).
+    let (depth_format, old_dsv) = {
+        let state = backend.surfaces.get_mut(&surface).unwrap();
+        let df = state.depth_format;
+        let old = state.dsv_offset.take();
+        state.depth_texture = None;
+        (df, old)
+    };
+    if let Some(dsv) = old_dsv {
+        companion_ref(backend, device)?.free_dsv_offset(dsv);
+    }
+    if let Some(df) = depth_format {
+        let (tex, offset) = companion_ref(backend, device)?.create_depth_texture(width, height, df)?;
+        let state = backend.surfaces.get_mut(&surface).unwrap();
+        state.depth_texture = Some(tex);
+        state.dsv_offset = Some(offset);
+    }
 
     // Intentionally do not drain pending scratch here: cuDestroyExternalMemory /
     // pool insertion runs on the next acquire (`ensure_scratch`) so ResizeBuffers

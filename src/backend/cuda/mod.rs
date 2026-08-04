@@ -4,11 +4,11 @@
 //! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
 //! textures and DX12 presents them; offscreen `Rgba32Float` render targets and
 //! indexed / non-indexed graphics pipelines (point/line/triangle list+strip) are
-//! also supported. Buffer handles are late-physicalized: acquire reserves identity
-//! only; scheme usage chooses Shared (deposit→IA), Native (compute), or
-//! NativeAndTwin (compute→IA). Bindless render bindings use the companion's
-//! SM 6.6 descriptor heaps with CUDA registry slots as DX12 indices. Depth remains
-//! unsupported in this slice.
+//! also supported, including optional DX12-only depth attachments and
+//! depth-stencil PSOs (depth is not CUDA-imported). Buffer handles are late-physicalized:
+//! acquire reserves identity only; scheme usage chooses Shared (deposit→IA), Native
+//! (compute), or NativeAndTwin (compute→IA). Bindless render bindings use the
+//! companion's SM 6.6 descriptor heaps with CUDA registry slots as DX12 indices.
 //!
 //! Slang compiles `[goldy_compute]` (and plain compute) shaders to PTX. Launch
 //! arguments use Slang's CUDA ABI:
@@ -249,6 +249,9 @@ pub(super) enum CudaDeferredDrop {
         import: dx12_interop::CudaImportedTexture,
         #[allow(dead_code)]
         d3d12_resource: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        /// DX12-only depth; dropped with the color resource after timeline retire.
+        #[allow(dead_code)]
+        depth_texture: Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource>,
     },
 }
 
@@ -3921,6 +3924,7 @@ impl GpuBackend for CudaBackend {
             vertex_layout,
             topology,
             target_format,
+            None,
         )
     }
 
@@ -3973,17 +3977,32 @@ impl GpuBackend for CudaBackend {
         target_format: TextureFormat,
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        if depth_stencil.is_some() {
-            return Self::unsupported("graphics pipelines with depth (first CUDA raster slice)");
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            return raster::create_pipeline(
+                self,
+                device,
+                vertex_shader,
+                fragment_shader,
+                vertex_layout,
+                topology,
+                target_format,
+                depth_stencil,
+            );
         }
-        self.create_pipeline(
-            device,
-            vertex_shader,
-            fragment_shader,
-            vertex_layout,
-            topology,
-            target_format,
-        )
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        {
+            let _ = (
+                device,
+                vertex_shader,
+                fragment_shader,
+                vertex_layout,
+                topology,
+                target_format,
+                depth_stencil,
+            );
+            Self::unsupported("graphics pipelines (requires cuda+graphics+dx12 on Windows)")
+        }
     }
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]

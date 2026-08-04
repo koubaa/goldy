@@ -166,12 +166,8 @@ pub fn depth_vertex_layout() -> VertexBufferLayout {
     }
 }
 
-/// CUDA first-slice raster has no depth; callers should skip when this returns `None`.
+/// Near red (z=0.2) occludes far green (z=0.6) under Less depth compare.
 pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Option<Vec<u8>> {
-    if device.backend_type() == BackendType::Cuda {
-        return None;
-    }
-
     let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
 

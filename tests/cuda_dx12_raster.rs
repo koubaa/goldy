@@ -8,10 +8,11 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, IndexFormat, Instance, MemoryExchange, NodeAccess,
-    PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler,
-    SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags,
-    TextureFormat, TextureKind, Vertex2D,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat,
+    Instance, MemoryExchange, NodeAccess, PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Sampler, SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig,
+    SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -235,6 +236,145 @@ fn cuda_raster_triangle_readback() {
     assert!(
         r > 0.5 && g < 0.25 && b < 0.25,
         "expected red triangle pixel at ({x},{y}), got ({r},{g},{b})"
+    );
+}
+
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct DepthVertex {
+    position: [f32; 3],
+    color: [f32; 4],
+}
+impl goldy::StructuredBufferElement for DepthVertex {}
+
+fn depth_vertex_layout() -> VertexBufferLayout {
+    VertexBufferLayout {
+        stride: std::mem::size_of::<DepthVertex>() as u32,
+        attributes: vec![
+            VertexAttribute {
+                location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 0,
+            },
+            VertexAttribute {
+                location: 1,
+                format: VertexFormat::Float32x4,
+                offset: 12,
+            },
+        ],
+    }
+}
+
+const DEPTH_SHADER: &str = include_str!("../shaders/depth_test.slang");
+
+#[test]
+fn cuda_raster_depth_occlusion_readback() {
+    let Some(instance) = try_cuda_instance() else {
+        eprintln!("skip: no CUDA backend / adapters");
+        return;
+    };
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("CUDA adapter");
+    let device = Arc::new(
+        adapter
+            .request_device(&DeviceDescriptor::default())
+            .expect("DX12 companion must attach"),
+    );
+    assert_eq!(device.backend_type(), BackendType::Cuda);
+    let ctx = device.create_context().expect("context");
+
+    let shader = ShaderModule::from_slang(&device, DEPTH_SHADER).expect("shader");
+    let pipeline = RenderPipeline::new(
+        &device,
+        &shader,
+        &shader,
+        &RenderPipelineDesc {
+            vertex_layout: depth_vertex_layout(),
+            target_format: TextureFormat::Rgba32Float,
+            topology: PrimitiveTopology::TriangleList,
+            depth_stencil: Some(DepthStencilState {
+                format: DepthFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+            }),
+        },
+    )
+    .expect("depth pipeline");
+
+    let make_tri = |z: f32, color: [f32; 4]| -> [DepthVertex; 3] {
+        [
+            DepthVertex {
+                position: [-1.0, -1.0, z],
+                color,
+            },
+            DepthVertex {
+                position: [3.0, -1.0, z],
+                color,
+            },
+            DepthVertex {
+                position: [-1.0, 3.0, z],
+                color,
+            },
+        ]
+    };
+    let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
+    let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
+
+    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let red_vb = pool
+        .acquire_buffer_with_data(&red_verts, BufferKind::Scattered)
+        .expect("red vb");
+    let green_vb = pool
+        .acquire_buffer_with_data(&green_verts, BufferKind::Scattered)
+        .expect("green vb");
+    let readback = pool
+        .acquire_texture(
+            64,
+            64,
+            TextureFormat::Rgba32Float,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+            None,
+        )
+        .expect("readback texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let rt = scheme
+        .lease_render_target(64, 64, TextureFormat::Rgba32Float, Some(DepthFormat::Depth32Float))
+        .expect("depth render target");
+    {
+        let mut pass = scheme.render_pass("depth", &rt, TargetLoad::Clear(Color::BLACK));
+        pass.with_parcel(&red_vb, NodeAccess::Read);
+        pass.with_parcel(&green_vb, NodeAccess::Read);
+        pass.clear_depth(1.0);
+        pass.set_pipeline(&pipeline);
+        pass.set_vertex_buffer(0, &red_vb);
+        pass.draw(0..3, 0..1);
+        pass.set_vertex_buffer(0, &green_vb);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
+    let grant = MemoryExchange::new(scheme.context())
+        .bind_withdraw(&mut scheme, &readback)
+        .expect("withdraw");
+    let mut submission = scheme.submit().expect("submit");
+    let pixels = grant
+        .claim(&mut submission)
+        .expect("claim")
+        .consume()
+        .expect("consume")
+        .to_vec();
+
+    assert_eq!(pixels.len(), 64 * 64 * 16);
+    let offset = (32usize * 64 + 32) * 16;
+    let r = f32::from_le_bytes(pixels[offset..offset + 4].try_into().unwrap());
+    let g = f32::from_le_bytes(pixels[offset + 4..offset + 8].try_into().unwrap());
+    let b = f32::from_le_bytes(pixels[offset + 8..offset + 12].try_into().unwrap());
+    assert!(
+        r > 0.5 && g < 0.25 && b < 0.25,
+        "expected near red to occlude far green at center, got ({r},{g},{b})"
     );
 }
 
