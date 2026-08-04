@@ -42,7 +42,7 @@ pub(super) struct SharedScratchTexture {
     pub blit_target: ID3D12Resource,
 }
 
-pub(super) struct CudaImportedTexture {
+pub(in crate::backend) struct CudaImportedTexture {
     cuda_ctx: Arc<CudaContext>,
     external_memory: sys::CUexternalMemory,
     mipmapped: sys::CUmipmappedArray,

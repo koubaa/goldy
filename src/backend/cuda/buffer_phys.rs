@@ -443,7 +443,7 @@ impl CudaBackend {
             }
             Err(still_shared) => {
                 // Keep alive without cuMemFree — attach to twin for drop ordering.
-                tracing::warn!(
+                tracing::debug!(
                     "CUDA: promote Shared→native: external slice Arc still shared (count={})",
                     Arc::strong_count(&still_shared)
                 );

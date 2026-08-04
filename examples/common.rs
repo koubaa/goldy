@@ -82,6 +82,7 @@ pub fn run_limit_secs() -> Option<f64> {
 }
 
 /// Exit the event loop once the run limit elapses so `Drop` can print `GOLDY_PERF`.
+#[allow(dead_code)]
 pub fn exit_if_timed_out(event_loop: &ActiveEventLoop, start: Instant) {
     if let Some(limit) = run_limit_secs() {
         if start.elapsed() >= Duration::from_secs_f64(limit) {

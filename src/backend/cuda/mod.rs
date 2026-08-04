@@ -61,7 +61,8 @@ use crate::slang::virtual_main::CudaLaunchArgKind;
 use crate::types::{BufferResizeCost, DeviceType};
 use anyhow::{Context as _, Result};
 use cudarc::driver::{
-    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg,
+    sys, CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig,
+    PushKernelArg,
 };
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
@@ -275,6 +276,7 @@ impl ContextGpuProgress for CudaProgress {
 }
 
 struct CudaDestroyContext {
+    cuda_ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     worker: Arc<SubmissionWorker>,
     fence_shutdown: Arc<AtomicBool>,
@@ -284,6 +286,33 @@ struct CudaDestroyContext {
     fence_thread: Mutex<Option<JoinHandle<()>>>,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     companion: Option<Arc<dx12_companion::Dx12Companion>>,
+}
+
+/// After DX12 external-semaphore interop, `cuStreamSynchronize` can return
+/// `CUDA_ERROR_NOT_SUPPORTED` on some WDDM stacks. Drain sticky context state and
+/// treat that case as drained (companion fence already waited).
+fn cuda_context_stream_sync_after_interop(
+    cuda_ctx: &Arc<CudaContext>,
+    stream: &CudaStream,
+    label: &str,
+) -> Result<()> {
+    if let Err(e) = cuda_ctx.check_err() {
+        tracing::debug!("CUDA: cleared sticky context error before {label}: {e:?}");
+    }
+    cuda_ctx
+        .bind_to_thread()
+        .with_context(|| format!("CUDA: bind context before {label}"))?;
+    match stream.synchronize() {
+        Ok(()) => Ok(()),
+        Err(e) if e.0 == sys::CUresult::CUDA_ERROR_NOT_SUPPORTED => {
+            tracing::debug!(
+                "CUDA: {label} skipped (NOT_SUPPORTED on WDDM+D3D12 interop stack)"
+            );
+            let _ = cuda_ctx.check_err();
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("CUDA: {label}")),
+    }
 }
 
 impl ContextDestroyHandle for CudaDestroyContext {
@@ -302,7 +331,7 @@ impl ContextDestroyHandle for CudaDestroyContext {
                 .wait_idle()
                 .context("CUDA/DX12: companion wait_idle before context destroy sync")?;
         }
-        self.stream.synchronize().context("CUDA: context destroy stream sync")?;
+        cuda_context_stream_sync_after_interop(&self.cuda_ctx, &self.stream, "context destroy stream sync")?;
         Ok(())
     }
 
@@ -584,6 +613,7 @@ impl CudaBackend {
         Ok(())
     }
 
+    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
     fn unsupported<T>(operation: &str) -> Result<T> {
         anyhow::bail!("CUDA compute-only backend does not support {operation}")
     }
@@ -3362,7 +3392,9 @@ impl GpuBackend for CudaBackend {
         }
         let fence_thread = context.fence_thread.lock().unwrap().take();
         context.fence_shutdown.store(true, Ordering::Relaxed);
+        let cuda_ctx = Arc::clone(&self.devices.get(&context.device)?.ctx);
         Some(Box::new(CudaDestroyContext {
+            cuda_ctx,
             stream: Arc::clone(&context.stream),
             worker: worker.unwrap_or_else(|| Arc::new(SubmissionWorker::new(1))),
             fence_shutdown: Arc::clone(&context.fence_shutdown),

@@ -1413,7 +1413,7 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
 
     // See wait_device_idle_for_surface: drain cudarc sticky error_state after DX12 idle.
     if let Err(e) = cuda_ctx.check_err() {
-        tracing::warn!("CUDA/DX12: cleared sticky context error before surface resource sync: {e:?}");
+        tracing::debug!("CUDA/DX12: cleared sticky context error before surface resource sync: {e:?}");
     }
 
     if cuda_device_has_pending_work(backend, device) {
@@ -1466,7 +1466,7 @@ fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle)
     // returns that sticky error via check_err before touching the driver. Drain it
     // only after DX12 is idle so subsequent stream syncs reflect real CUDA state.
     if let Err(e) = cuda_ctx.check_err() {
-        tracing::warn!("CUDA/DX12: cleared sticky context error before surface teardown sync: {e:?}");
+        tracing::debug!("CUDA/DX12: cleared sticky context error before surface teardown sync: {e:?}");
     }
 
     cuda_ctx

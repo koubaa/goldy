@@ -393,7 +393,7 @@ impl WindowState {
         self.time_multiplier = 1.0;
     }
 
-    fn render(&mut self, ctx: &goldy::Context) -> anyhow::Result<()> {
+    fn render(&mut self, _ctx: &goldy::Context) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
