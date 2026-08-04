@@ -18,6 +18,10 @@ use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
+#[path = "common/cuda_dx12_present_lock.rs"]
+mod cuda_dx12_present_lock;
+use cuda_dx12_present_lock::CudaDx12PresentLock;
+
 const TRIANGLE_SHADER: &str = r#"
 struct VertexInput { float2 position : POSITION; float4 color : COLOR; };
 struct VertexOutput { float4 position : SV_Position; float4 color : COLOR; };
@@ -90,6 +94,7 @@ fn try_cuda_instance() -> Option<Instance> {
 
 #[test]
 fn cuda_raster_direct_retained_steady_state() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -210,6 +215,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId tid) {
 
 #[test]
 fn cuda_compute_to_present_retained_steady_state() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;

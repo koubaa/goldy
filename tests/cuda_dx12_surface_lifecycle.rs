@@ -24,6 +24,10 @@ use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
+#[path = "common/cuda_dx12_present_lock.rs"]
+mod cuda_dx12_present_lock;
+use cuda_dx12_present_lock::CudaDx12PresentLock;
+
 fn try_cuda_instance() -> Option<Instance> {
     // SAFETY: test process; GOLDY_BACKEND is read during Instance::new.
     unsafe { std::env::set_var("GOLDY_BACKEND", "cuda") };
@@ -144,6 +148,7 @@ fn present_one_fill(surface: &SurfaceExchange, pipeline: &ComputePipeline, ctx: 
 
 #[test]
 fn cuda_surface_resize_during_present_loop() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -185,6 +190,7 @@ fn cuda_surface_resize_during_present_loop() {
 
 #[test]
 fn cuda_surface_minimize_restore() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -227,6 +233,7 @@ fn cuda_surface_minimize_restore() {
 
 #[test]
 fn cuda_surface_destroy_with_inflight_submit() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -277,6 +284,7 @@ fn cuda_surface_destroy_with_inflight_submit() {
 
 #[test]
 fn cuda_surface_same_size_resize_is_cheap() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -341,6 +349,7 @@ fn cuda_surface_same_size_resize_is_cheap() {
 
 #[test]
 fn cuda_surface_resize_latency_microbench() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -509,6 +518,7 @@ fn cuda_offscreen_rt_recreate_stress() {
 
 #[test]
 fn cuda_surface_depth_create_and_resize() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -547,6 +557,7 @@ fn cuda_surface_depth_create_and_resize() {
 /// spinning_cube previously hit via App field layout (`ctx` before `surface`).
 #[test]
 fn cuda_teardown_surface_then_context_after_raster_present() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;
@@ -632,6 +643,7 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
 /// leave destroy_surface failing with sticky CUDA_ERROR_NOT_SUPPORTED.
 #[test]
 fn cuda_teardown_context_before_surface_after_raster_present() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;

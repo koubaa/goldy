@@ -24,6 +24,10 @@ use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, CW_USEDEFAULT, WS_OVERLAPPEDWINDOW};
 
+#[path = "common/cuda_dx12_present_lock.rs"]
+mod cuda_dx12_present_lock;
+use cuda_dx12_present_lock::CudaDx12PresentLock;
+
 fn try_cuda_instance() -> Option<Instance> {
     // SAFETY: test process; GOLDY_BACKEND is read during Instance::new.
     unsafe { std::env::set_var("GOLDY_BACKEND", "cuda") };
@@ -555,6 +559,7 @@ fn cuda_raster_indexed_triangle_readback() {
 
 #[test]
 fn cuda_raster_to_present_multi_frame() {
+    let _guard = CudaDx12PresentLock::acquire();
     let Some(instance) = try_cuda_instance() else {
         eprintln!("skip: no CUDA backend / adapters");
         return;

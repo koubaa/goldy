@@ -1019,7 +1019,8 @@ pub(super) fn finish_present(
     }
     if !finish.present_ok {
         bail!(
-            "CUDA/DX12: Present failed after copy submit (return_fence {} recorded for reuse)",
+            "CUDA/DX12: Present failed after copy submit (return_fence {} recorded for reuse; \
+             see prior 'CUDA/DX12: Present failed' log for HRESULT)",
             finish.return_fence
         );
     }
@@ -1143,7 +1144,10 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         // `return_fence` so allocator / scratch reuse stays guarded via finish_present.
         let present_ok = hr.is_ok();
         if !present_ok {
-            tracing::error!("CUDA/DX12: Present failed: {hr:?} (retiring copy fence {return_fence})");
+            tracing::error!(
+                "CUDA/DX12: Present failed: {hr:?} sync_interval={sync_interval} flags={flags:?} \
+                 (retiring copy fence {return_fence})"
+            );
         }
 
         // Publish present/copy completion on the Goldy timeline.

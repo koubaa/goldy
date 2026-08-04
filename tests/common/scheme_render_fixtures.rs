@@ -1,7 +1,7 @@
 //! Scheme render fixtures for FLIP screenshot tests and scheme render integration.
 
 use goldy::{
-    BackendType, BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
     TargetLoad, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
@@ -19,13 +19,9 @@ pub fn create_device() -> Option<Device> {
         .ok()
 }
 
-/// CUDA raster only supports `Rgba32Float` color targets (first slice).
+/// Prefer the device's advertised render-target format (CUDA: `Rgba8Unorm`).
 fn color_target_format(device: &Device) -> TextureFormat {
-    if device.backend_type() == BackendType::Cuda {
-        TextureFormat::Rgba32Float
-    } else {
-        TextureFormat::Rgba8Unorm
-    }
+    device.capabilities().preferred_render_target_format
 }
 
 /// Normalize GPU readback to RGBA8 for PNG comparison.
@@ -167,7 +163,7 @@ pub fn depth_vertex_layout() -> VertexBufferLayout {
 }
 
 /// Near red (z=0.2) occludes far green (z=0.6) under Less depth compare.
-pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Option<Vec<u8>> {
+pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
     let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
 
@@ -240,7 +236,7 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
             pass.draw(0..3, 0..1);
         },
     );
-    Some(pixels_as_rgba8(raw, format, width, height))
+    pixels_as_rgba8(raw, format, width, height)
 }
 
 pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
