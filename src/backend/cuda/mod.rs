@@ -239,6 +239,17 @@ pub(super) enum CudaDeferredDrop {
         #[allow(dead_code)]
         function: CudaFunction,
     },
+    /// Offscreen raster target: CUDA views before import before D3D12 (drop order).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    RenderTarget {
+        retire_at: u64,
+        #[allow(dead_code)]
+        cuda_texture: Arc<CudaTextureResource>,
+        #[allow(dead_code)]
+        import: dx12_interop::CudaImportedTexture,
+        #[allow(dead_code)]
+        d3d12_resource: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    },
 }
 
 struct CudaProgress {
@@ -330,6 +341,8 @@ fn drain_deletion_queue_up_to(queue: &Mutex<Vec<CudaDeferredDrop>>, retired: u64
             CudaDeferredDrop::Buffer { retire_at, .. }
             | CudaDeferredDrop::Texture { retire_at, .. }
             | CudaDeferredDrop::Pipeline { retire_at, .. } => *retire_at,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            CudaDeferredDrop::RenderTarget { retire_at, .. } => *retire_at,
         };
         if retire_at > retired {
             kept.push(entry);

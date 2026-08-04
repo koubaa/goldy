@@ -540,7 +540,7 @@ pub(super) fn create_render_target(
         .bindless
         .write_texture_uav(&companion.device, storage_slot, &d3d12_resource, color_format)?;
 
-    let rtv_offset = companion.alloc_rtv_offset();
+    let rtv_offset = companion.alloc_rtv_offset()?;
     let rtv = unsafe {
         let mut h = companion.rtv_heap.GetCPUDescriptorHandleForHeapStart();
         h.ptr += (rtv_offset as usize) * companion.rtv_descriptor_size as usize;
@@ -576,8 +576,67 @@ pub(super) fn create_render_target(
     Ok(handle)
 }
 
+/// Destroy an offscreen render target: recycle RTV/bindless slots, drop imported
+/// backing in CUDA→import→D3D12 order, and evict retained entries that reference it.
 pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTargetHandle) {
-    let _ = backend.render_targets.remove(&target);
+    use super::{submission_worker, CudaDeferredDrop, RetainedEntry};
+    use crate::backend::{GpuCommand, GraphCommand};
+
+    let Some(rt) = backend.render_targets.remove(&target) else {
+        return;
+    };
+    backend.raster_list_cache.remove(&target);
+
+    let stale: Vec<_> = backend
+        .retained
+        .iter()
+        .filter_map(|(&(ctx, key), entry)| {
+            let touches = match entry {
+                RetainedEntry::PresentRenderTarget(t) => *t == target,
+                RetainedEntry::Render(commands) => commands.iter().any(|cmd| match cmd {
+                    GraphCommand::Render { target: t, .. } => *t == target,
+                    GraphCommand::Compute(GpuCommand::CopyRenderTarget { src, .. }) => *src == target,
+                    _ => false,
+                }),
+                RetainedEntry::Ops(_) | RetainedEntry::Graph { .. } | RetainedEntry::GraphWithTail { .. } => false,
+            };
+            touches.then_some((ctx, key))
+        })
+        .collect();
+    for (ctx, key) in stale {
+        if backend.retained.remove(&(ctx, key)).is_some() {
+            backend.enqueue_evict_retained(ctx, key);
+        }
+    }
+
+    let device = rt.device;
+    let rtv_offset = rt.rtv_offset;
+    let last_dx12_fence = rt.last_dx12_fence;
+    let storage_slot = rt.cuda_texture.storage_slot;
+
+    if let Some(slot) = storage_slot {
+        if let Some(tex) = backend.texture_slots.remove(&slot) {
+            let _ = backend.textures.remove(&tex);
+            let _ = backend.texture_dx12.remove(&tex);
+        }
+    }
+
+    if let Some(gpu) = backend.devices.get(&device) {
+        if let Some(companion) = gpu.dx12.as_ref() {
+            let retire_at = companion.companion_fence_high_water().max(last_dx12_fence).max(1);
+            if let Some(slot) = storage_slot {
+                companion.bindless.defer_reclaim_resource(slot, retire_at);
+            }
+            companion.free_rtv_offset(rtv_offset);
+        }
+        let retire_at = submission_worker::submission_horizon(&gpu.next_timeline);
+        gpu.deletion_queue.lock().unwrap().push(CudaDeferredDrop::RenderTarget {
+            retire_at,
+            cuda_texture: rt.cuda_texture,
+            import: rt.import,
+            d3d12_resource: rt.d3d12_resource,
+        });
+    }
 }
 
 /// Ensure VERTEX physicalization and return a companion fence DX12 must wait on

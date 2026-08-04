@@ -24,6 +24,9 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
 
+/// Max offscreen RTV descriptors in the companion RTV heap.
+pub(super) const MAX_RTV_DESCRIPTORS: u32 = 64;
+
 /// 8-byte Windows LUID shared by DXGI and `cuDeviceGetLuid`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct AdapterLuid {
@@ -120,7 +123,10 @@ pub(super) struct Dx12Companion {
     /// RTV descriptor heap for offscreen raster targets.
     pub rtv_heap: ID3D12DescriptorHeap,
     pub rtv_descriptor_size: u32,
+    /// High-water mark for never-recycled RTV slots (prefer [`Self::free_rtv_offsets`]).
     pub next_rtv_offset: AtomicU64,
+    /// Recycled RTV heap offsets from destroyed offscreen targets.
+    pub free_rtv_offsets: std::sync::Mutex<Vec<u32>>,
     /// SM 6.6 bindless heaps + root signature (IA + directly-indexed descriptors).
     pub bindless: super::dx12_bindless::BindlessHeaps,
     /// Device-level frame-table (selector/table at protocol slots 0/1).
@@ -228,7 +234,7 @@ impl Dx12Companion {
 
         let rtv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
             Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-            NumDescriptors: 64,
+            NumDescriptors: MAX_RTV_DESCRIPTORS,
             Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
             NodeMask: 0,
         };
@@ -282,6 +288,7 @@ impl Dx12Companion {
             rtv_heap,
             rtv_descriptor_size,
             next_rtv_offset: AtomicU64::new(0),
+            free_rtv_offsets: std::sync::Mutex::new(Vec::new()),
             bindless,
             frame_table,
             graphics_root_signature,
@@ -359,9 +366,27 @@ impl Dx12Companion {
         Ok(())
     }
 
-    /// Allocate the next RTV heap offset (monotonic).
-    pub fn alloc_rtv_offset(&self) -> u32 {
-        self.next_rtv_offset.fetch_add(1, Ordering::AcqRel) as u32
+    /// Allocate an RTV heap offset (recycles freed slots; fails if the heap is exhausted).
+    pub fn alloc_rtv_offset(&self) -> Result<u32> {
+        if let Some(offset) = self.free_rtv_offsets.lock().unwrap().pop() {
+            return Ok(offset);
+        }
+        let next = self.next_rtv_offset.fetch_add(1, Ordering::AcqRel);
+        if next >= MAX_RTV_DESCRIPTORS as u64 {
+            // Leave the counter past the limit so subsequent allocs keep failing loudly.
+            bail!(
+                "CUDA/DX12: RTV heap exhausted ({MAX_RTV_DESCRIPTORS} offscreen targets); \
+                 destroy unused render targets to recycle descriptors"
+            );
+        }
+        Ok(next as u32)
+    }
+
+    /// Return an RTV offset to the free list for reuse.
+    pub fn free_rtv_offset(&self, offset: u32) {
+        if offset < MAX_RTV_DESCRIPTORS {
+            self.free_rtv_offsets.lock().unwrap().push(offset);
+        }
     }
 
     /// Reset the next raster command allocator/list (waits only that slot's prior fence).

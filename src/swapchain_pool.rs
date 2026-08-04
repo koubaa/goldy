@@ -59,7 +59,11 @@ impl SwapchainPoolInner {
         };
         let mut surface = self.surface.write().unwrap();
         // Generation already advanced when the pending request was recorded.
-        surface.resize(width, height)?;
+        if let Err(err) = surface.resize(width, height) {
+            // Restore so a later acquire / present-mode change can retry.
+            *self.pending_resize.lock().unwrap() = Some((width, height));
+            return Err(err);
+        }
         Ok(())
     }
 }
