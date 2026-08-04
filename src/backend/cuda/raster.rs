@@ -46,7 +46,6 @@ pub(super) struct CudaGraphicsPipeline {
     pub root_signature: ID3D12RootSignature,
     pub vertex_stride: u32,
     pub topology: PrimitiveTopology,
-    pub push_constant_categories: Vec<Option<ResourceCategory>>,
     pub push_constant_slot_kinds: Vec<Option<BindlessSlotKind>>,
     pub binding_element_strides: Vec<Option<u32>>,
     pub shader_debug_name: String,
@@ -346,7 +345,6 @@ pub(super) fn create_pipeline(
     let (vs_dxil, _vs_refl) = compile_stage_dxil(vs, crate::slang::SlangStage::Vertex)?;
     let (fs_dxil, fs_refl) = compile_stage_dxil(fs, crate::slang::SlangStage::Fragment)?;
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
-    let push_constant_categories = fs_refl.push_constant_categories.clone();
     let push_constant_slot_kinds = fs_refl.push_constant_slot_kinds.clone();
     let binding_element_strides = fs_refl.binding_element_strides.clone();
 
@@ -465,7 +463,6 @@ pub(super) fn create_pipeline(
             root_signature,
             vertex_stride: vertex_layout.stride,
             topology,
-            push_constant_categories,
             push_constant_slot_kinds,
             binding_element_strides,
             shader_debug_name,

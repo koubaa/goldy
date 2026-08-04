@@ -1233,7 +1233,7 @@ impl Device {
     /// Live CUDA graph-stats handle for unit tests (shared-device safe).
     #[cfg(feature = "cuda")]
     #[doc(hidden)]
-    pub fn cuda_graph_stats_for_test(&self) -> Option<std::sync::Arc<crate::backend::cuda::CudaGraphStats>> {
+    pub fn cuda_graph_stats_for_test(&self) -> Option<std::sync::Arc<crate::cuda_test_stats::CudaGraphStats>> {
         let mut guard = self.inner.backend.lock().unwrap();
         guard
             .as_mut()

@@ -136,7 +136,7 @@ pub fn dx12_debug_mode() -> bool {
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub mod cuda_test_stats {
-    pub use crate::backend::cuda::CudaGraphStatsSnapshot;
+    pub use crate::backend::cuda::{CudaGraphStats, CudaGraphStatsSnapshot};
 }
 
 /// Test helpers for `--lib` and integration tests.

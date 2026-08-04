@@ -65,8 +65,7 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
-pub use retained_graph::CudaGraphStatsSnapshot;
-pub(crate) use retained_graph::CudaGraphStats;
+pub use retained_graph::{CudaGraphStats, CudaGraphStatsSnapshot};
 use retained_graph::{GraphRegistry};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;

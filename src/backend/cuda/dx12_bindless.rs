@@ -100,10 +100,12 @@ impl BindlessRegistry {
         self.category(slot).map(|c| c.slot_kind())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_resource(&self, slot: u32) -> bool {
         self.resource_slots.contains_key(&slot)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_sampler(&self, slot: u32) -> bool {
         self.sampler_slots.contains_key(&slot)
     }
@@ -248,6 +250,7 @@ impl BindlessHeaps {
         Ok(())
     }
 
+    #[allow(dead_code)] // uniform CBV bindless path (first raster slice uses frame table)
     pub fn write_buffer_cbv(
         &self,
         device: &ID3D12Device,
@@ -733,6 +736,23 @@ mod tests {
             DescriptorCategory::TextureUav.slot_kind(),
             BindlessSlotKind::StorageUav
         );
+        assert_eq!(
+            DescriptorCategory::BufferCbv.slot_kind(),
+            BindlessSlotKind::UniformCbv
+        );
+        assert_eq!(
+            DescriptorCategory::Sampler.slot_kind(),
+            BindlessSlotKind::ReadOnlySrv
+        );
+    }
+
+    #[test]
+    fn registry_occupies_sampler() {
+        let mut reg = BindlessRegistry::new();
+        assert!(reg.occupy_sampler(0).is_ok());
+        assert!(reg.has_sampler(0));
+        reg.defer_reclaim(0, true, 5);
+        assert!(!reg.has_sampler(0));
     }
 
     #[test]

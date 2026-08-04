@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Process-visible counters for capture / launch / fallback / eviction / resize.
-#[derive(Debug, Default)]
-pub(crate) struct CudaGraphStats {
+#[doc(hidden)]
+pub struct CudaGraphStats {
     pub captures: AtomicU64,
     pub launches: AtomicU64,
     pub fallbacks: AtomicU64,
@@ -38,6 +38,33 @@ pub(crate) struct CudaGraphStats {
     pub surface_resize_teardown_ns: AtomicU64,
     /// Number of retained partitions evicted because they touched destroyed scratch.
     pub surface_resize_evictions: AtomicU64,
+}
+
+impl Default for CudaGraphStats {
+    fn default() -> Self {
+        Self {
+            captures: AtomicU64::new(0),
+            launches: AtomicU64::new(0),
+            fallbacks: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            empty_submits_elided: AtomicU64::new(0),
+            completion_events: AtomicU64::new(0),
+            present_completion_events: AtomicU64::new(0),
+            worker_flushes: AtomicU64::new(0),
+            present_handoffs: AtomicU64::new(0),
+            buffer_materializations: AtomicU64::new(0),
+            buffer_promotions: AtomicU64::new(0),
+            shared_vb_binds: AtomicU64::new(0),
+            dtoh_calls: AtomicU64::new(0),
+            rematerialize_fallbacks: AtomicU64::new(0),
+            present_list_records: AtomicU64::new(0),
+            raster_list_records: AtomicU64::new(0),
+            surface_resizes: AtomicU64::new(0),
+            surface_resize_idle_ns: AtomicU64::new(0),
+            surface_resize_teardown_ns: AtomicU64::new(0),
+            surface_resize_evictions: AtomicU64::new(0),
+        }
+    }
 }
 
 impl CudaGraphStats {
