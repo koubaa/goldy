@@ -876,6 +876,7 @@ impl Device {
     /// Used by [`crate::test_support::SerialGpuDevice::exclusive`] after taking exclusive
     /// ownership of the shared CUDA lib-test device. Not `cfg(test)`-only because
     /// `test_support` is linked into integration tests as well.
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
     pub(crate) fn wait_idle_and_drain_deferred_for_test(&self) {
         {
             let mut backend = self.inner.backend.lock().unwrap();

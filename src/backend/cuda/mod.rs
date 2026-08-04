@@ -4416,8 +4416,11 @@ impl GpuBackend for CudaBackend {
             if self.retained.remove(&(ctx, key)).is_some() {
                 self.enqueue_evict_retained(ctx, key);
             }
-            self.retained
-                .insert((ctx, key), RetainedEntry::Render(commands.to_vec()));
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                self.retained
+                    .insert((ctx, key), RetainedEntry::Render(commands.to_vec()));
+            }
             return self.submit_graph_with_renders(ctx, commands, sync);
         }
 

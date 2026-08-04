@@ -153,7 +153,9 @@ pub mod test_support {
     use crate::device::{Adapter, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::{BackendType, Device, DeviceType};
     use std::ops::Deref;
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
+    use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
     pub fn mock_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
