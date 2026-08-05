@@ -109,6 +109,10 @@ impl CudaBackend {
             if let Some(buf) = self.buffers.get_mut(&buffer) {
                 buf.requirements |= req;
             }
+            // View has its own bindless slot; register a sub-range SRV/CBV on the twin.
+            if req.contains(CudaBufferReq::SHADER) || req.contains(CudaBufferReq::VERTEX) {
+                self.register_buffer_bindless_descriptor(buffer)?;
+            }
             return Ok(());
         }
         let (_device, old_req, old_kind, capacity) = {
@@ -209,6 +213,33 @@ impl CudaBackend {
         view_buf.phys_kind = parent_meta.phys_kind;
         view_buf.memory_is_external = parent_meta.memory_is_external;
         view_buf.content_epoch = parent_meta.content_epoch;
+        Ok(())
+    }
+
+    /// Drop view aliases of `parent`'s memory Arc so promote can `try_unwrap` / leak cleanly.
+    fn detach_child_view_memory(&mut self, parent: BufferHandle) {
+        let children: Vec<BufferHandle> = self
+            .buffers
+            .iter()
+            .filter_map(|(h, b)| (b.parent == Some(parent)).then_some(*h))
+            .collect();
+        for view in children {
+            if let Some(buf) = self.buffers.get_mut(&view) {
+                buf.memory = None;
+            }
+        }
+    }
+
+    /// Refresh every view of `parent` after a promote changes physical backing.
+    fn sync_all_views_from_parent(&mut self, parent: BufferHandle) -> Result<()> {
+        let children: Vec<BufferHandle> = self
+            .buffers
+            .iter()
+            .filter_map(|(h, b)| (b.parent == Some(parent)).then_some(*h))
+            .collect();
+        for view in children {
+            self.sync_view_from_parent(view, parent)?;
+        }
         Ok(())
     }
 
@@ -374,6 +405,7 @@ impl CudaBackend {
         self.graph_stats.buffer_promotions.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(buffer, "CUDA: promoted Native → Shared");
         self.register_buffer_bindless_descriptor(buffer)?;
+        self.sync_all_views_from_parent(buffer)?;
         Ok(())
     }
 
@@ -422,6 +454,10 @@ impl CudaBackend {
         }
         worker.flush().context("CUDA: flush worker after retained eviction")?;
 
+        // Views alias the parent's Shared CudaSlice Arc (count was parent+views).
+        // Detach them so try_unwrap can leak the external slice without cuMemFree.
+        self.detach_child_view_memory(buffer);
+
         // Take the external slice Arc so we can leak it after copy (Drop must not free).
         let old_memory = self
             .buffers
@@ -461,10 +497,11 @@ impl CudaBackend {
                 leak_shared_buffer_slice(mutex.into_inner().unwrap_or_else(|e| e.into_inner()));
             }
             Err(still_shared) => {
-                // Keep alive without cuMemFree — attach to twin for drop ordering.
-                tracing::warn!(
-                    "CUDA: promote Shared→native: external slice Arc still shared (count={})",
-                    Arc::strong_count(&still_shared)
+                // Retained ops or another alias still holds the Arc — forget so Drop
+                // cannot cuMemFree the import (owned by SharedBufferBacking).
+                tracing::debug!(
+                    count = Arc::strong_count(&still_shared),
+                    "CUDA: promote Shared→native: external slice Arc still shared after view detach; leaking"
                 );
                 std::mem::forget(still_shared);
             }
@@ -477,6 +514,7 @@ impl CudaBackend {
         buf.shared_epoch = u64::MAX;
         buf.phys_kind = CudaPhysKind::NativeAndTwin;
         self.graph_stats.buffer_promotions.fetch_add(1, Ordering::Relaxed);
+        self.sync_all_views_from_parent(buffer)?;
         tracing::debug!(buffer, "CUDA: promoted Shared → NativeAndTwin");
         Ok(())
     }
@@ -585,7 +623,7 @@ impl CudaBackend {
 
     /// Register a companion SRV (or CBV for Broadcast) at the buffer's CUDA slot.
     pub(super) fn register_buffer_bindless_descriptor(&mut self, buffer: BufferHandle) -> Result<()> {
-        let (device, slot, size, stride, kind, shared) = {
+        let (device, slot, size, stride, kind, offset, shared) = {
             let buf = self
                 .buffers
                 .get(&buffer)
@@ -596,6 +634,7 @@ impl CudaBackend {
                 buf.size,
                 buf.element_stride.unwrap_or(4),
                 buf.kind,
+                buf.offset,
                 buf.shared.clone(),
             )
         };
@@ -620,6 +659,7 @@ impl CudaBackend {
             )?;
         } else {
             let view_stride = stride.max(4);
+            let first_element = (offset / u64::from(view_stride)) as u32;
             // NumElements must not imply a view larger than the resource (D3D12 removes the
             // device / drops draws). Use the view stride, not the logical element stride.
             let num_elements = (size / u64::from(view_stride)).max(1) as u32;
@@ -627,6 +667,7 @@ impl CudaBackend {
                 &companion.device,
                 slot,
                 &shared.d3d12_resource,
+                first_element,
                 num_elements,
                 view_stride,
             )?;

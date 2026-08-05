@@ -836,7 +836,8 @@ fn refresh_shared_vertex_backing(
                 let (ptr, _sync) = view.device_ptr(stream);
                 ptr
             };
-            let dst_ptr = shared.import.device_ptr;
+            // Twin is the full parent import; view-sized copies must land at the view offset.
+            let dst_ptr = shared.import.device_ptr + offset;
             unsafe { cudarc::driver::result::memcpy_dtod_async(dst_ptr, src_ptr, nbytes, stream.cu_stream()) }
                 .context("CUDA/DX12: DtoD refresh into shared VB failed")?;
 
