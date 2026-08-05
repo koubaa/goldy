@@ -249,7 +249,6 @@ impl BindlessHeaps {
         Ok(())
     }
 
-    #[allow(dead_code)] // uniform CBV bindless path (first raster slice uses frame table)
     pub fn write_buffer_cbv(
         &self,
         device: &ID3D12Device,

@@ -6,6 +6,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 /// Window attributes for examples that reveal only after the first frame is ready.
+#[allow(dead_code)]
 pub fn hidden_window(title: impl Into<String>, width: u32, height: u32) -> WindowAttributes {
     Window::default_attributes()
         .with_title(title.into())

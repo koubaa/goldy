@@ -761,19 +761,9 @@ fn refresh_shared_vertex_backing(
                     .as_ref()
                     .context("CUDA/DX12: Shared VB missing backing")?,
             );
-            // Deposit-only path: CUDA wrote the import without a companion Signal.
-            // Flush/sync so DX12 IA observes the bytes (avoids Signal/DX12 fence races).
-            if shared.pending_host_sync.swap(false, Ordering::AcqRel) {
-                let worker = Arc::clone(&backend.device(device)?.submission_worker);
-                worker.flush().context("CUDA/DX12: flush before Shared VB host sync")?;
-                backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
-                for context in backend.contexts.values().filter(|context| context.device == device) {
-                    context
-                        .stream
-                        .synchronize()
-                        .context("CUDA/DX12: sync context stream before Shared VB bind")?;
-                }
-            }
+            // CUDA writes into the import end with SignalExternalFence → last_cuda_fence.
+            // DX12 must Wait that value before Execute (device-side). Do not host-sync the
+            // context stream here: Wait on the companion fence is the interop barrier.
             backend.graph_stats.shared_vb_binds.fetch_add(1, Ordering::Relaxed);
             Ok(shared.last_cuda_fence.load(Ordering::Acquire))
         }

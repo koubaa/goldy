@@ -583,9 +583,9 @@ impl CudaBackend {
         Ok(())
     }
 
-    /// Register a companion SRV (or CBV for broadcast-sized) at the buffer's CUDA slot.
+    /// Register a companion SRV (or CBV for Broadcast) at the buffer's CUDA slot.
     pub(super) fn register_buffer_bindless_descriptor(&mut self, buffer: BufferHandle) -> Result<()> {
-        let (device, slot, size, stride, shared) = {
+        let (device, slot, size, stride, kind, shared) = {
             let buf = self
                 .buffers
                 .get(&buffer)
@@ -595,6 +595,7 @@ impl CudaBackend {
                 buf.slot,
                 buf.size,
                 buf.element_stride.unwrap_or(4),
+                buf.kind,
                 buf.shared.clone(),
             )
         };
@@ -609,17 +610,27 @@ impl CudaBackend {
             .dx12
             .as_ref()
             .context("CUDA/DX12: companion required for bindless descriptor")?;
-        let view_stride = stride.max(4);
-        // NumElements must not imply a view larger than the resource (D3D12 removes the
-        // device / drops draws). Use the view stride, not the logical element stride.
-        let num_elements = (size / u64::from(view_stride)).max(1) as u32;
-        companion.bindless.write_buffer_srv(
-            &companion.device,
-            slot,
-            &shared.d3d12_resource,
-            num_elements,
-            view_stride,
-        )?;
+        if kind == crate::types::BufferKind::Broadcast {
+            // Graphics shaders bind Broadcast as ConstantBuffer<> (UniformCbv).
+            companion.bindless.write_buffer_cbv(
+                &companion.device,
+                slot,
+                &shared.d3d12_resource,
+                size,
+            )?;
+        } else {
+            let view_stride = stride.max(4);
+            // NumElements must not imply a view larger than the resource (D3D12 removes the
+            // device / drops draws). Use the view stride, not the logical element stride.
+            let num_elements = (size / u64::from(view_stride)).max(1) as u32;
+            companion.bindless.write_buffer_srv(
+                &companion.device,
+                slot,
+                &shared.d3d12_resource,
+                num_elements,
+                view_stride,
+            )?;
+        }
         Ok(())
     }
 }

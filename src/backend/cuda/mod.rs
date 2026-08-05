@@ -417,6 +417,8 @@ struct CudaBuffer {
     size: u64,
     capacity: u64,
     element_stride: Option<u32>,
+    /// Access kind from create — Broadcast needs a CBV on the DX12 companion heap.
+    kind: BufferKind,
     slot: Option<u32>,
     readback: bool,
     /// Bumped on every host/GPU write that changes contents (retained raster fingerprint).
@@ -624,8 +626,13 @@ impl CudaBackend {
         logical_size: u64,
         capacity: u64,
         element_stride: Option<u32>,
+        kind: BufferKind,
     ) -> Result<BufferHandle> {
-        let capacity = capacity.max(logical_size).max(4);
+        let mut capacity = capacity.max(logical_size).max(4);
+        // D3D12 CBVs require a 256-byte aligned range that fits in the resource.
+        if kind == BufferKind::Broadcast {
+            capacity = capacity.max((logical_size + 255) & !255);
+        }
         let gpu = self.device(device)?;
         // Graphics+DX12: defer physical backing until scheme usage is known (Shared vs
         // Native vs NativeAndTwin). Compute-only builds still allocate eagerly.
@@ -655,6 +662,7 @@ impl CudaBackend {
                 size: logical_size,
                 capacity,
                 element_stride,
+                kind,
                 slot: Some(slot),
                 readback: false,
                 content_epoch: 0,
@@ -1023,6 +1031,8 @@ impl CudaBackend {
             .try_slice_mut(start..end)
             .context("CUDA: write range out of bounds")?;
         stream.memcpy_htod(data, &mut view).context("CUDA: HtoD write failed")?;
+        // Deposit staging uses alloc_stream; submit copies on the context stream.
+        stream.synchronize().context("CUDA: sync alloc stream after host write")?;
         pending_submit::maybe_validate_sync(stream, "immediate WriteBuffer")
     }
 
@@ -1617,10 +1627,10 @@ impl CudaBackend {
         out
     }
 
-    /// Retained Ops/Graph replays mutate native bytes without rematerializing; bump epochs so
-    /// NativeAndTwin DtoD refresh sees dirty content.
+    /// Retained Ops/Graph replays mutate buffer bytes without rematerializing; bump epochs
+    /// so raster fingerprints and NativeAndTwin DtoD refresh see dirty content.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    fn bump_content_epochs_for_native_twin_writes(&mut self, ops: &[CudaOp]) {
+    fn bump_content_epochs_for_retained_writes(&mut self, ops: &[CudaOp]) {
         let mut written: Vec<Arc<Mutex<CudaSlice<u8>>>> = Vec::new();
         for op in ops {
             match op {
@@ -1631,7 +1641,6 @@ impl CudaBackend {
                     written.push(Arc::clone(dst));
                 }
                 CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
-                    // Conservatively dirty all NativeAndTwin buffers pinned by the launch.
                     written.extend(keep_alive_buffers.iter().cloned());
                 }
                 _ => {}
@@ -1641,14 +1650,21 @@ impl CudaBackend {
             return;
         }
         for buf in self.buffers.values_mut() {
-            if buf.phys_kind != buffer_phys::CudaPhysKind::NativeAndTwin {
+            let Some(mem) = buf.memory.as_ref() else {
+                continue;
+            };
+            if !written.iter().any(|m| Arc::ptr_eq(m, mem)) {
                 continue;
             }
-            let Some(mem) = buf.memory.as_ref() else { continue };
-            if written.iter().any(|m| Arc::ptr_eq(m, mem)) {
-                buf.bump_content_epoch();
-            }
+            buf.bump_content_epoch();
+            // Shared-primary coherence is published by SignalExternalFence in
+            // prepare_surface_submit_ops_for_retained — do not mark pending_host_sync.
         }
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn bump_content_epochs_for_native_twin_writes(&mut self, ops: &[CudaOp]) {
+        self.bump_content_epochs_for_retained_writes(ops);
     }
 
     /// NativeAndTwin buffers whose memory is written by `ops` (for retained graph dirty lists).
@@ -2349,18 +2365,10 @@ impl CudaBackend {
             *ops = waits;
         }
 
-        // Scratch present still needs a companion Signal for DXGI. Shared-primary VB
-        // writes do NOT signal here: publishing a fence value before the worker runs,
-        // then letting DX12 Signal ahead of that pending CUDA Signal, yields
-        // cuSignalExternalSemaphoresAsync CUDA_ERROR_INVALID_VALUE. Raster instead
-        // host-syncs the deposit stream before IA (see refresh_shared_vertex_backing).
-        if touched.is_empty() {
-            for shared in &shared_primaries {
-                shared.pending_host_sync.store(true, Ordering::Release);
-            }
-            return Ok(());
-        }
-
+        // Scratch present and Shared-primary buffer writes both need a CUDA→DX12 fence
+        // Signal so the DIRECT queue can Wait before reading imported memory. Publishing
+        // `last_cuda_fence` before the worker runs is safe as long as DX12 always
+        // `wait_queue`s that value before Signal'ing past it (see refresh_shared_vertex_backing).
         let cuda_complete = companion.next_fence_value();
         ops.push(CudaOp::SignalExternalFence {
             cuda_ctx: Arc::clone(&companion.cuda_ctx),
@@ -2377,7 +2385,6 @@ impl CudaBackend {
                 slot.present_source = Some(surface::PresentSource::CudaScratch { cuda_complete });
             }
         }
-        // Scratch submit may also have written Shared primaries in the same ops list.
         for shared in shared_primaries {
             shared.last_cuda_fence.store(cuda_complete, Ordering::Release);
             shared.pending_host_sync.store(false, Ordering::Release);
@@ -2841,6 +2848,7 @@ impl CudaBuffer {
             size: self.size,
             capacity: self.capacity,
             element_stride: self.element_stride,
+            kind: self.kind,
             slot: self.slot,
             readback: self.readback,
             content_epoch: self.content_epoch,
@@ -3496,11 +3504,11 @@ impl GpuBackend for CudaBackend {
         &mut self,
         device: DeviceHandle,
         size: u64,
-        _access: BufferKind,
+        access: BufferKind,
         element_stride: Option<u32>,
         _flags: BufferFlags,
     ) -> Result<BufferHandle> {
-        self.create_storage_buffer(device, size, size, element_stride)
+        self.create_storage_buffer(device, size, size, element_stride, access)
     }
 
     fn create_buffer_with_capacity(
@@ -3508,15 +3516,14 @@ impl GpuBackend for CudaBackend {
         device: DeviceHandle,
         initial_size: u64,
         capacity: u64,
-        _access: BufferKind,
+        access: BufferKind,
         element_stride: Option<u32>,
         _flags: BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
         let capacity = capacity.max(initial_size);
-        Ok((
-            self.create_storage_buffer(device, initial_size, capacity, element_stride)?,
-            capacity,
-        ))
+        let handle = self.create_storage_buffer(device, initial_size, capacity, element_stride, access)?;
+        let stored = self.buffers.get(&handle).map(|b| b.capacity).unwrap_or(capacity);
+        Ok((handle, stored))
     }
 
     fn destroy_buffer(&mut self, buffer: BufferHandle) {
@@ -3617,6 +3624,7 @@ impl GpuBackend for CudaBackend {
                 size,
                 capacity,
                 element_stride: None,
+                kind: BufferKind::Scattered,
                 slot: None,
                 readback: true,
                 content_epoch: 0,
@@ -3858,6 +3866,7 @@ impl GpuBackend for CudaBackend {
                 size,
                 capacity: size,
                 element_stride: element_stride.or(parent.element_stride),
+                kind: parent.kind,
                 slot: Some(slot),
                 readback: false,
                 content_epoch: parent.content_epoch,
@@ -4693,15 +4702,11 @@ impl GpuBackend for CudaBackend {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 scratch_images,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                twin_dirty,
+                twin_dirty: _,
             }) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 {
-                    for handle in twin_dirty {
-                        if let Some(buf) = self.buffers.get_mut(&handle) {
-                            buf.bump_content_epoch();
-                        }
-                    }
+                    self.bump_content_epochs_for_retained_writes(&tail);
                 }
                 let device_handle = self.context(ctx)?.device;
                 let device = self.device(device_handle)?;
@@ -4717,6 +4722,8 @@ impl GpuBackend for CudaBackend {
                 self.enqueue_submit(ctx, sync, body).map(Some)
             }
             Some(RetainedEntry::Ops(ops)) => {
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                self.bump_content_epochs_for_retained_writes(&ops);
                 tracing::trace!(key, "CUDA: replaying retained pre-materialized ops");
                 self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops)).map(Some)
             }

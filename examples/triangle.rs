@@ -10,7 +10,7 @@ use goldy::{
     SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
