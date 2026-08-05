@@ -20,8 +20,8 @@
 //! for `submit_tv` (so the tail `SignalExternalFence` has been issued) before the
 //! present copy's return fence is signaled.
 
-use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_companion::PresentCommandSlot;
+use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_interop::{
     record_present_copy, PresentBlitPipeline, PresentColorSrcState, SharedScratchTexture, SURFACE_COMPUTE_FORMAT,
     SWAPCHAIN_DXGI_FORMAT,
@@ -930,9 +930,7 @@ pub(super) fn take_present_gpu_work(
     let allow_tearing = companion.allow_tearing;
     let present_cache = Arc::clone(&state.present_cache);
     let present_cmd_slots = Arc::clone(&state.present_cmd_slots);
-    let slot_generation = present_cmd_slots[present_slot]
-        .generation
-        .load(Ordering::Acquire);
+    let slot_generation = present_cmd_slots[present_slot].generation.load(Ordering::Acquire);
     let cache_entry = PresentListCache {
         generation: state.present_generation,
         slot_generation,

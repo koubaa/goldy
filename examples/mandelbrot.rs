@@ -5,9 +5,9 @@
 //! Run with: `cargo run --example mandelbrot`
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    shaders, Buffer, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -236,13 +236,11 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        common::hidden_window(
-                            "Goldy - Mandelbrot (Scheme + Present, Arrows=pan, +/-=zoom, R=reset)",
-                            800,
-                            800,
-                        ),
-                    )
+                    .create_window(common::hidden_window(
+                        "Goldy - Mandelbrot (Scheme + Present, Arrows=pan, +/-=zoom, R=reset)",
+                        800,
+                        800,
+                    ))
                     .unwrap(),
             );
             self.window = Some(window.clone());

@@ -283,13 +283,11 @@ impl ApplicationHandler for App {
         if self.state.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        common::hidden_window(
-                            format!("Goldy - Instancing ({} quads, Scheme + Present)", NUM_QUADS),
-                            800,
-                            800,
-                        ),
-                    )
+                    .create_window(common::hidden_window(
+                        format!("Goldy - Instancing ({} quads, Scheme + Present)", NUM_QUADS),
+                        800,
+                        800,
+                    ))
                     .expect("Failed to create window"),
             );
 

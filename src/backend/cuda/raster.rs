@@ -199,10 +199,7 @@ fn raster_fingerprint(
                 for h in handles {
                     h.index().hash(&mut hash);
                     std::mem::discriminant(&h.category()).hash(&mut hash);
-                    if matches!(
-                        h.category(),
-                        ResourceCategory::Scattered | ResourceCategory::Broadcast
-                    ) {
+                    if matches!(h.category(), ResourceCategory::Scattered | ResourceCategory::Broadcast) {
                         if let Some(&buf) = backend.buffer_slots.get(&h.index()) {
                             if let Some(cuda_buf) = backend.buffers.get(&buf) {
                                 cuda_buf.content_epoch.hash(&mut hash);
@@ -364,9 +361,7 @@ pub(super) fn create_pipeline(
     depth_stencil: Option<&DepthStencilState>,
 ) -> Result<PipelineHandle> {
     if !is_raster_color_format(target_format) {
-        bail!(
-            "CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm targets are supported (got {target_format:?})"
-        );
+        bail!("CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm targets are supported (got {target_format:?})");
     }
     let companion = companion(backend, device)?;
     let device_com = companion.device.clone();
@@ -554,9 +549,7 @@ pub(super) fn create_render_target(
     depth_format: Option<DepthFormat>,
 ) -> Result<RenderTargetHandle> {
     if !is_raster_color_format(color_format) {
-        bail!(
-            "CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm render targets are supported (got {color_format:?})"
-        );
+        bail!("CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm render targets are supported (got {color_format:?})");
     }
     if width == 0 || height == 0 {
         bail!("CUDA/DX12 raster: render target dimensions must be non-zero");
@@ -653,9 +646,7 @@ pub(super) fn create_render_target(
             last_dx12_fence: 0,
         },
     );
-    tracing::debug!(
-        "CUDA/DX12: created render target {handle} ({width}x{height}, depth={depth_format:?})"
-    );
+    tracing::debug!("CUDA/DX12: created render target {handle} ({width}x{height}, depth={depth_format:?})");
     Ok(handle)
 }
 
@@ -950,14 +941,7 @@ pub(super) fn render_to_target(
         }
     }
 
-    let fingerprint = raster_fingerprint(
-        backend,
-        target,
-        color_load,
-        &lowered,
-        &staging_data,
-        &shader_buffers,
-    )?;
+    let fingerprint = raster_fingerprint(backend, target, color_load, &lowered, &staging_data, &shader_buffers)?;
 
     // Flush/sync when twin DtoD must observe in-flight native CUDA writes (IA or shader).
     let needs_twin_sync = ia_handles.iter().chain(shader_buffers.iter()).any(|handle| {

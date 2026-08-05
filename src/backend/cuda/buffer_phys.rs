@@ -439,10 +439,7 @@ impl CudaBackend {
         worker.flush().context("CUDA: flush worker before Shared promote")?;
         self.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
 
-        let old_memory = self
-            .buffers
-            .get(&buffer)
-            .and_then(|buf| buf.memory.clone());
+        let old_memory = self.buffers.get(&buffer).and_then(|buf| buf.memory.clone());
         let gpu = self.device(device)?;
         let target_device_ptr = shared.import.device_ptr + offset;
         let stream = Arc::clone(&gpu.alloc_stream);
@@ -651,12 +648,9 @@ impl CudaBackend {
             .context("CUDA/DX12: companion required for bindless descriptor")?;
         if kind == crate::types::BufferKind::Broadcast {
             // Graphics shaders bind Broadcast as ConstantBuffer<> (UniformCbv).
-            companion.bindless.write_buffer_cbv(
-                &companion.device,
-                slot,
-                &shared.d3d12_resource,
-                size,
-            )?;
+            companion
+                .bindless
+                .write_buffer_cbv(&companion.device, slot, &shared.d3d12_resource, size)?;
         } else {
             let view_stride = stride.max(4);
             let first_element = (offset / u64::from(view_stride)) as u32;

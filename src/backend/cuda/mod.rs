@@ -309,9 +309,7 @@ pub(super) fn cuda_context_stream_sync_after_interop(
     match stream.synchronize() {
         Ok(()) => Ok(()),
         Err(e) if e.0 == sys::CUresult::CUDA_ERROR_NOT_SUPPORTED => {
-            tracing::debug!(
-                "CUDA: {label} skipped (NOT_SUPPORTED on WDDM+D3D12 interop stack)"
-            );
+            tracing::debug!("CUDA: {label} skipped (NOT_SUPPORTED on WDDM+D3D12 interop stack)");
             let _ = cuda_ctx.check_err();
             Ok(())
         }
@@ -614,11 +612,7 @@ impl CudaBackend {
             )
         };
         worker.flush()?;
-        cuda_context_stream_sync_after_interop(
-            &cuda_ctx,
-            &alloc_stream,
-            "sync alloc stream for immediate API",
-        )?;
+        cuda_context_stream_sync_after_interop(&cuda_ctx, &alloc_stream, "sync alloc stream for immediate API")?;
         for context in self.contexts.values().filter(|context| context.device == device) {
             timeline::poll_retire_events(
                 &context.event_ledger,
@@ -1049,7 +1043,9 @@ impl CudaBackend {
             .context("CUDA: write range out of bounds")?;
         stream.memcpy_htod(data, &mut view).context("CUDA: HtoD write failed")?;
         // Deposit staging uses alloc_stream; submit copies on the context stream.
-        stream.synchronize().context("CUDA: sync alloc stream after host write")?;
+        stream
+            .synchronize()
+            .context("CUDA: sync alloc stream after host write")?;
         pending_submit::maybe_validate_sync(stream, "immediate WriteBuffer")
     }
 
@@ -2813,12 +2809,7 @@ impl CudaBackend {
             .filter_map(|(handle, context)| (context.device == device_handle).then_some(*handle))
             .collect();
         for ctx in &ctxs {
-            let keys: Vec<_> = self
-                .retained
-                .keys()
-                .filter(|(c, _)| *c == *ctx)
-                .copied()
-                .collect();
+            let keys: Vec<_> = self.retained.keys().filter(|(c, _)| *c == *ctx).copied().collect();
             for (c, key) in keys {
                 self.retained.remove(&(c, key));
                 self.destroy_retained_graph_sync(c, key);
@@ -4631,10 +4622,8 @@ impl GpuBackend for CudaBackend {
 
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         if let Some((target, surface)) = direct_present {
-            self.retained.insert(
-                (ctx, key),
-                RetainedEntry::PresentRenderTarget { target, surface },
-            );
+            self.retained
+                .insert((ctx, key), RetainedEntry::PresentRenderTarget { target, surface });
             // No CUDA stream work / completion event — present uses the DX12 fence ledger.
             // Sync waits on prior DX12 present fences are redundant with queue/raster ordering.
             let _ = sync;
@@ -4727,7 +4716,7 @@ impl GpuBackend for CudaBackend {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 scratch_images,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                twin_dirty: _,
+                    twin_dirty: _,
             }) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 {

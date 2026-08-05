@@ -739,7 +739,10 @@ mod tests {
         assert!(storage_shader_compatible("float4", TextureFormat::Rgba32Float));
         assert!(storage_shader_compatible("half4", TextureFormat::Rgba16Float));
         assert!(storage_shader_compatible("uint8_t4", TextureFormat::Rgba8Unorm));
-        assert!(storage_shader_compatible("vector<uint8_t, 4>", TextureFormat::Rgba8Unorm));
+        assert!(storage_shader_compatible(
+            "vector<uint8_t, 4>",
+            TextureFormat::Rgba8Unorm
+        ));
         // Mismatched sizes / types must stay rejected (no typed UAV conversion).
         assert!(!storage_shader_compatible("float4", TextureFormat::Rgba8Unorm));
         assert!(!storage_shader_compatible("float4", TextureFormat::Rgba16Float));

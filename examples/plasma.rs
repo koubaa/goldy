@@ -221,9 +221,11 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        common::hidden_window("Goldy - Plasma Effect (Scheme + Present)", 800, 600),
-                    )
+                    .create_window(common::hidden_window(
+                        "Goldy - Plasma Effect (Scheme + Present)",
+                        800,
+                        600,
+                    ))
                     .unwrap(),
             );
             self.window = Some(window.clone());

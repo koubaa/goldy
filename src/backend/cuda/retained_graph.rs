@@ -280,9 +280,8 @@ impl GraphRegistry {
                 drop(partition);
             }
         }
-        self.pending_drops.retain(|(_, partition)| {
-            !partition_holds_memory(partition, memory, stream, target_device_ptr)
-        });
+        self.pending_drops
+            .retain(|(_, partition)| !partition_holds_memory(partition, memory, stream, target_device_ptr));
     }
 }
 

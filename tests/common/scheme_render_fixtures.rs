@@ -1,9 +1,9 @@
 //! Scheme render fixtures for FLIP screenshot tests and scheme render integration.
 
 use goldy::{
-    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
-    TargetLoad, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad,
+    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 

@@ -11,8 +11,8 @@ use goldy::{
     BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat,
     Instance, MemoryExchange, NodeAccess, PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RetainedPool, Sampler, SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig,
-    SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,

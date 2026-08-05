@@ -221,9 +221,7 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        common::hidden_window("Goldy - Metaballs (Scheme + Present)", 800, 800),
-                    )
+                    .create_window(common::hidden_window("Goldy - Metaballs (Scheme + Present)", 800, 800))
                     .unwrap(),
             );
             self.window = Some(window.clone());
