@@ -2,11 +2,14 @@
 //!
 //! Scope:
 //! - Windows + `cuda` + `graphics` + `dx12`
-//! - Color-only [`TextureFormat::Rgba32Float`] render targets
+//! - Color [`TextureFormat::Rgba32Float`] and [`TextureFormat::Rgba8Unorm`] render targets
+//!   (optional DX12-only depth)
 //! - Indexed and non-indexed draws (`PointList` / `LineList` / `LineStrip` /
 //!   `TriangleList` / `TriangleStrip`)
 //! - Bindless render resources via companion SM 6.6 heaps (CUDA registry slot =
-//!   DX12 descriptor index); no depth yet
+//!   DX12 descriptor index)
+//! - Depth attachments + depth-stencil PSOs (`DepthStencilState`); depth is not
+//!   CUDA-imported (compute cannot sample it yet); stencil ops remain off
 //!
 //! Vertex / index buffers stay on native CUDA allocations for compute. A shareable
 //! D3D12 twin is created lazily for IA; contents are refreshed with a device-to-device
@@ -26,8 +29,8 @@ use crate::backend::shared::{fill_frame_table_dispatch, set_frame_table_slots, P
 use crate::backend::{BufferHandle, DeviceHandle, PipelineHandle, RenderCommand, RenderTargetHandle, TextureHandle};
 use crate::frame_table::FrameTableStaging;
 use crate::types::{
-    BindlessSlotKind, IndexFormat, PrimitiveTopology, ResourceCategory, TargetLoad, TextureFlags, TextureFormat,
-    TextureKind, VertexBufferLayout, VertexFormat,
+    BindlessSlotKind, CompareFunction, DepthFormat, DepthStencilState, IndexFormat, PrimitiveTopology,
+    ResourceCategory, TargetLoad, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout, VertexFormat,
 };
 use anyhow::{bail, Context as _, Result};
 use std::hash::{Hash, Hasher};
@@ -37,8 +40,10 @@ use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, RECT};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-/// First-slice color format for CUDA/DX12 offscreen targets.
-pub(super) const RASTER_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
+/// Supported offscreen color formats for CUDA/DX12 raster.
+pub(super) fn is_raster_color_format(format: TextureFormat) -> bool {
+    matches!(format, TextureFormat::Rgba32Float | TextureFormat::Rgba8Unorm)
+}
 
 pub(super) struct CudaGraphicsPipeline {
     pub device: DeviceHandle,
@@ -67,6 +72,10 @@ pub(super) struct CudaRenderTarget {
     pub import: CudaImportedTexture,
     pub d3d12_resource: ID3D12Resource,
     pub rtv_offset: u32,
+    /// DX12-only depth (not CUDA-imported).
+    pub depth_format: Option<DepthFormat>,
+    pub depth_texture: Option<ID3D12Resource>,
+    pub dsv_offset: Option<u32>,
     /// Companion fence value signaled after the last `render_to_target`.
     pub last_dx12_fence: u64,
 }
@@ -86,6 +95,7 @@ fn raster_fingerprint(
     color_load: TargetLoad,
     commands: &[RenderCommand],
     staging_data: &[u32],
+    shader_buffers: &[BufferHandle],
 ) -> Result<u64> {
     let rt = backend
         .render_targets
@@ -95,6 +105,8 @@ fn raster_fingerprint(
     target.hash(&mut hash);
     rt.width.hash(&mut hash);
     rt.height.hash(&mut hash);
+    rt.format.hash(&mut hash);
+    rt.depth_format.hash(&mut hash);
     match color_load {
         TargetLoad::Clear(color) => {
             0u8.hash(&mut hash);
@@ -169,6 +181,9 @@ fn raster_fingerprint(
             RenderCommand::BindResources { buffers } => {
                 for h in buffers {
                     h.hash(&mut hash);
+                    if let Some(buf) = backend.buffers.get(h) {
+                        buf.content_epoch.hash(&mut hash);
+                    }
                 }
             }
             RenderCommand::BindResourcesRaw {
@@ -184,8 +199,21 @@ fn raster_fingerprint(
                 for h in handles {
                     h.index().hash(&mut hash);
                     std::mem::discriminant(&h.category()).hash(&mut hash);
+                    if matches!(h.category(), ResourceCategory::Scattered | ResourceCategory::Broadcast) {
+                        if let Some(&buf) = backend.buffer_slots.get(&h.index()) {
+                            if let Some(cuda_buf) = backend.buffers.get(&buf) {
+                                cuda_buf.content_epoch.hash(&mut hash);
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+    for handle in shader_buffers {
+        handle.hash(&mut hash);
+        if let Some(buf) = backend.buffers.get(handle) {
+            buf.content_epoch.hash(&mut hash);
         }
     }
     Ok(hash.finish())
@@ -226,6 +254,19 @@ fn index_format_to_dxgi(format: IndexFormat) -> DXGI_FORMAT {
     match format {
         IndexFormat::Uint16 => DXGI_FORMAT_R16_UINT,
         IndexFormat::Uint32 => DXGI_FORMAT_R32_UINT,
+    }
+}
+
+fn compare_to_d3d12(compare: CompareFunction) -> D3D12_COMPARISON_FUNC {
+    match compare {
+        CompareFunction::Never => D3D12_COMPARISON_FUNC_NEVER,
+        CompareFunction::Less => D3D12_COMPARISON_FUNC_LESS,
+        CompareFunction::Equal => D3D12_COMPARISON_FUNC_EQUAL,
+        CompareFunction::LessEqual => D3D12_COMPARISON_FUNC_LESS_EQUAL,
+        CompareFunction::Greater => D3D12_COMPARISON_FUNC_GREATER,
+        CompareFunction::NotEqual => D3D12_COMPARISON_FUNC_NOT_EQUAL,
+        CompareFunction::GreaterEqual => D3D12_COMPARISON_FUNC_GREATER_EQUAL,
+        CompareFunction::Always => D3D12_COMPARISON_FUNC_ALWAYS,
     }
 }
 
@@ -317,9 +358,10 @@ pub(super) fn create_pipeline(
     vertex_layout: &VertexBufferLayout,
     topology: PrimitiveTopology,
     target_format: TextureFormat,
+    depth_stencil: Option<&DepthStencilState>,
 ) -> Result<PipelineHandle> {
-    if target_format != RASTER_COLOR_FORMAT {
-        bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} targets are supported (got {target_format:?})");
+    if !is_raster_color_format(target_format) {
+        bail!("CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm targets are supported (got {target_format:?})");
     }
     let companion = companion(backend, device)?;
     let device_com = companion.device.clone();
@@ -377,6 +419,29 @@ pub(super) fn create_pipeline(
         })
         .collect();
 
+    let (depth_stencil_desc, dsv_format) = if let Some(ds) = depth_stencil {
+        let desc = D3D12_DEPTH_STENCIL_DESC {
+            DepthEnable: true.into(),
+            DepthWriteMask: if ds.depth_write_enabled {
+                D3D12_DEPTH_WRITE_MASK_ALL
+            } else {
+                D3D12_DEPTH_WRITE_MASK_ZERO
+            },
+            DepthFunc: compare_to_d3d12(ds.depth_compare),
+            StencilEnable: false.into(),
+            ..Default::default()
+        };
+        (desc, super::dx12_companion::depth_format_to_dxgi(ds.format))
+    } else {
+        (
+            D3D12_DEPTH_STENCIL_DESC {
+                DepthEnable: false.into(),
+                ..Default::default()
+            },
+            DXGI_FORMAT_UNKNOWN,
+        )
+    };
+
     let rtv_dxgi = format_to_dxgi(target_format)?;
     let pso_desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
         pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
@@ -427,6 +492,7 @@ pub(super) fn create_pipeline(
             ForcedSampleCount: 0,
             ConservativeRaster: D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF,
         },
+        DepthStencilState: depth_stencil_desc,
         InputLayout: D3D12_INPUT_LAYOUT_DESC {
             pInputElementDescs: input_elements.as_ptr(),
             NumElements: input_elements.len() as u32,
@@ -443,6 +509,7 @@ pub(super) fn create_pipeline(
             DXGI_FORMAT_UNKNOWN,
             DXGI_FORMAT_UNKNOWN,
         ],
+        DSVFormat: dsv_format,
         SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         ..Default::default()
     };
@@ -479,13 +546,10 @@ pub(super) fn create_render_target(
     width: u32,
     height: u32,
     color_format: TextureFormat,
-    depth_format: Option<crate::types::DepthFormat>,
+    depth_format: Option<DepthFormat>,
 ) -> Result<RenderTargetHandle> {
-    if depth_format.is_some() {
-        bail!("CUDA/DX12 raster: depth buffers are not supported in the first slice");
-    }
-    if color_format != RASTER_COLOR_FORMAT {
-        bail!("CUDA/DX12 raster: only {RASTER_COLOR_FORMAT:?} render targets are supported (got {color_format:?})");
+    if !is_raster_color_format(color_format) {
+        bail!("CUDA/DX12 raster: only Rgba32Float and Rgba8Unorm render targets are supported (got {color_format:?})");
     }
     if width == 0 || height == 0 {
         bail!("CUDA/DX12 raster: render target dimensions must be non-zero");
@@ -550,6 +614,13 @@ pub(super) fn create_render_target(
         companion.device.CreateRenderTargetView(&d3d12_resource, None, rtv);
     }
 
+    let (depth_texture, dsv_offset) = if let Some(df) = depth_format {
+        let (tex, offset) = companion.create_depth_texture(width, height, df)?;
+        (Some(tex), Some(offset))
+    } else {
+        (None, None)
+    };
+
     let tex_handle = backend.next_texture;
     backend.next_texture += 1;
     backend.texture_slots.insert(storage_slot, tex_handle);
@@ -569,10 +640,13 @@ pub(super) fn create_render_target(
             import,
             d3d12_resource,
             rtv_offset,
+            depth_format,
+            depth_texture,
+            dsv_offset,
             last_dx12_fence: 0,
         },
     );
-    tracing::debug!("CUDA/DX12: created render target {handle} ({width}x{height})");
+    tracing::debug!("CUDA/DX12: created render target {handle} ({width}x{height}, depth={depth_format:?})");
     Ok(handle)
 }
 
@@ -592,7 +666,7 @@ pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTar
         .iter()
         .filter_map(|(&(ctx, key), entry)| {
             let touches = match entry {
-                RetainedEntry::PresentRenderTarget(t) => *t == target,
+                RetainedEntry::PresentRenderTarget { target: t, .. } => *t == target,
                 RetainedEntry::Render(commands) => commands.iter().any(|cmd| match cmd {
                     GraphCommand::Render { target: t, .. } => *t == target,
                     GraphCommand::Compute(GpuCommand::CopyRenderTarget { src, .. }) => *src == target,
@@ -611,8 +685,10 @@ pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTar
 
     let device = rt.device;
     let rtv_offset = rt.rtv_offset;
+    let dsv_offset = rt.dsv_offset;
     let last_dx12_fence = rt.last_dx12_fence;
     let storage_slot = rt.cuda_texture.storage_slot;
+    let depth_texture = rt.depth_texture;
 
     if let Some(slot) = storage_slot {
         if let Some(tex) = backend.texture_slots.remove(&slot) {
@@ -628,6 +704,9 @@ pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTar
                 companion.bindless.defer_reclaim_resource(slot, retire_at);
             }
             companion.free_rtv_offset(rtv_offset);
+            if let Some(dsv) = dsv_offset {
+                companion.free_dsv_offset(dsv);
+            }
         }
         let retire_at = submission_worker::submission_horizon(&gpu.next_timeline);
         gpu.deletion_queue.lock().unwrap().push(CudaDeferredDrop::RenderTarget {
@@ -635,6 +714,7 @@ pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTar
             cuda_texture: rt.cuda_texture,
             import: rt.import,
             d3d12_resource: rt.d3d12_resource,
+            depth_texture,
         });
     }
 }
@@ -672,19 +752,9 @@ fn refresh_shared_vertex_backing(
                     .as_ref()
                     .context("CUDA/DX12: Shared VB missing backing")?,
             );
-            // Deposit-only path: CUDA wrote the import without a companion Signal.
-            // Flush/sync so DX12 IA observes the bytes (avoids Signal/DX12 fence races).
-            if shared.pending_host_sync.swap(false, Ordering::AcqRel) {
-                let worker = Arc::clone(&backend.device(device)?.submission_worker);
-                worker.flush().context("CUDA/DX12: flush before Shared VB host sync")?;
-                backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
-                for context in backend.contexts.values().filter(|context| context.device == device) {
-                    context
-                        .stream
-                        .synchronize()
-                        .context("CUDA/DX12: sync context stream before Shared VB bind")?;
-                }
-            }
+            // CUDA writes into the import end with SignalExternalFence → last_cuda_fence.
+            // DX12 must Wait that value before Execute (device-side). Do not host-sync the
+            // context stream here: Wait on the companion fence is the interop barrier.
             backend.graph_stats.shared_vb_binds.fetch_add(1, Ordering::Relaxed);
             Ok(shared.last_cuda_fence.load(Ordering::Acquire))
         }
@@ -757,7 +827,8 @@ fn refresh_shared_vertex_backing(
                 let (ptr, _sync) = view.device_ptr(stream);
                 ptr
             };
-            let dst_ptr = shared.import.device_ptr;
+            // Twin is the full parent import; view-sized copies must land at the view offset.
+            let dst_ptr = shared.import.device_ptr + offset;
             unsafe { cudarc::driver::result::memcpy_dtod_async(dst_ptr, src_ptr, nbytes, stream.cu_stream()) }
                 .context("CUDA/DX12: DtoD refresh into shared VB failed")?;
 
@@ -870,7 +941,7 @@ pub(super) fn render_to_target(
         }
     }
 
-    let fingerprint = raster_fingerprint(backend, target, color_load, &lowered, &staging_data)?;
+    let fingerprint = raster_fingerprint(backend, target, color_load, &lowered, &staging_data, &shader_buffers)?;
 
     // Flush/sync when twin DtoD must observe in-flight native CUDA writes (IA or shader).
     let needs_twin_sync = ia_handles.iter().chain(shader_buffers.iter()).any(|handle| {
@@ -912,7 +983,15 @@ pub(super) fn render_to_target(
             .synchronize()
             .context("CUDA/DX12: sync alloc stream before Shared DX12 read")?;
     }
+    // Deposit Copy → Shared publishes `last_cuda_fence` before the worker runs
+    // `cuSignalExternalSemaphoresAsync`. DX12 must not Queue.Signal a higher value
+    // until that CUDA signal is *submitted* (Wait alone is insufficient → INVALID_VALUE).
     if vb_wait > 0 {
+        let worker = Arc::clone(&backend.device(device)?.submission_worker);
+        worker
+            .flush()
+            .context("CUDA/DX12: flush worker before Shared VB fence wait")?;
+        backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
         companion.wait_queue(vb_wait)?;
     }
 
@@ -943,26 +1022,46 @@ pub(super) fn render_to_target(
         frame_table_row = Some(row);
     }
 
-    let (width, height, rtv_offset, d3d12_resource) = {
+    let (width, height, rtv_offset, d3d12_resource, depth_texture, dsv_offset) = {
         let rt = backend.render_targets.get(&target).unwrap();
-        (rt.width, rt.height, rt.rtv_offset, rt.d3d12_resource.clone())
+        (
+            rt.width,
+            rt.height,
+            rt.rtv_offset,
+            rt.d3d12_resource.clone(),
+            rt.depth_texture.clone(),
+            rt.dsv_offset,
+        )
     };
+
+    let clear_depth = lowered
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::ClearDepth(d) => Some(*d),
+            _ => None,
+        })
+        .unwrap_or(1.0);
 
     let to_rt = transition(
         &d3d12_resource,
         D3D12_RESOURCE_STATE_COMMON,
         D3D12_RESOURCE_STATE_RENDER_TARGET,
     );
-    unsafe { list.ResourceBarrier(&[to_rt]) };
+    let mut barriers = vec![to_rt];
+    if let Some(ref depth_res) = depth_texture {
+        barriers.push(transition(
+            depth_res,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        ));
+    }
+    unsafe { list.ResourceBarrier(&barriers) };
 
     let rtv = unsafe {
         let mut h = companion.rtv_heap.GetCPUDescriptorHandleForHeapStart();
         h.ptr += (rtv_offset as usize) * companion.rtv_descriptor_size as usize;
         h
     };
-    unsafe {
-        list.OMSetRenderTargets(1, Some(&rtv), false, None);
-    }
 
     match color_load {
         TargetLoad::Clear(color) => {
@@ -970,6 +1069,22 @@ pub(super) fn render_to_target(
             unsafe { list.ClearRenderTargetView(rtv, &clear, None) };
         }
         TargetLoad::Load | TargetLoad::Discard => {}
+    }
+
+    if let Some(dsv_off) = dsv_offset {
+        let dsv = unsafe {
+            let mut h = companion.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+            h.ptr += (dsv_off as usize) * companion.dsv_descriptor_size as usize;
+            h
+        };
+        unsafe {
+            list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, clear_depth, 0, None);
+            list.OMSetRenderTargets(1, Some(&rtv), false, Some(&dsv));
+        }
+    } else {
+        unsafe {
+            list.OMSetRenderTargets(1, Some(&rtv), false, None);
+        }
     }
 
     let viewport = D3D12_VIEWPORT {
@@ -998,7 +1113,7 @@ pub(super) fn render_to_target(
     for command in &lowered {
         match command {
             RenderCommand::ClearDepth(_) => {
-                bail!("CUDA/DX12 raster: ClearDepth is not supported in the first slice");
+                // Applied at pass begin (matches shipped DX12).
             }
             RenderCommand::SetPipeline(pipeline_handle) => {
                 let pipeline = backend
@@ -1138,7 +1253,15 @@ pub(super) fn render_to_target(
         D3D12_RESOURCE_STATE_RENDER_TARGET,
         D3D12_RESOURCE_STATE_COMMON,
     );
-    unsafe { list.ResourceBarrier(&[to_common]) };
+    let mut end_barriers = vec![to_common];
+    if let Some(ref depth_res) = depth_texture {
+        end_barriers.push(transition(
+            depth_res,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            D3D12_RESOURCE_STATE_COMMON,
+        ));
+    }
+    unsafe { list.ResourceBarrier(&end_barriers) };
 
     let signal = companion.finish_raster_list(slot_idx, fingerprint)?;
     if let Some(row) = frame_table_row {

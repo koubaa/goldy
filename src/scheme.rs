@@ -2289,7 +2289,10 @@ impl Drop for Scheme {
         clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
 
         let hw = self.ctx.high_water_timeline();
-        if hw > 0 {
+        let progress = self.ctx.gpu_progress();
+        // Skip when already retired: wait_until → finish_timeline_wait used to flush the
+        // submission worker even when progress >= hw, deadlocking multi-window teardown.
+        if hw > 0 && progress < hw {
             let _ = self.ctx.wait_until(hw);
         }
         self.submit_state.release_backend_retained_graphs(&self.ctx);

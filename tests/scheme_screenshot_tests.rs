@@ -177,10 +177,7 @@ fn scheme_depth_occlusion() {
         return;
     };
 
-    let Some(pixels) = scheme_render_depth_occlusion(&device, 64, 64) else {
-        eprintln!("Skipping test: CUDA raster has no depth (first slice)");
-        return;
-    };
+    let pixels = scheme_render_depth_occlusion(&device, 64, 64);
     run_screenshot_test(
         "depth_occlusion",
         "tests/screenshots/depth_occlusion.png",

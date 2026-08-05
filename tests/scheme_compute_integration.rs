@@ -4173,7 +4173,8 @@ mod imp {
         assert!(msg.contains("BGRA") || msg.contains("Bgra"), "{msg}");
     }
 
-    /// CUDA writable shaders require storage-compatible formats (float4 ↔ Rgba32Float).
+    /// CUDA writable shaders require size-matched element↔format pairs
+    /// (`float4`↔`Rgba32Float`; `float4`+`Rgba8Unorm` is rejected).
     fn cuda_rejects_unorm_writable_shader_access(device: &Device) {
         if device.backend_type() != BackendType::Cuda {
             return;
@@ -4201,9 +4202,112 @@ mod imp {
         assert!(err.is_err(), "DirectSpatial<float4> + Rgba8Unorm must fail on CUDA");
         let msg = format!("{:#}", err.unwrap_err());
         assert!(
-            msg.contains("storage-compatible") || msg.contains("Rgba32Float") || msg.contains("float4"),
+            msg.contains("size-matched")
+                || msg.contains("storage-compatible")
+                || msg.contains("Rgba32Float")
+                || msg.contains("float4"),
             "{msg}"
         );
+    }
+
+    /// CUDA `DirectSpatial<uint8_t4>` may write `Rgba8Unorm` (size-matched surface store).
+    fn cuda_uint8_t4_writes_rgba8_unorm(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        const SHADER: &str = r#"
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(8, 8, 1)]
+        void cs_main(DirectSpatial<uint8_t4> output, ThreadId id) {
+            uint2 dims;
+            output.GetDimensions(dims.x, dims.y);
+            if (id.x < dims.x && id.y < dims.y) {
+                output[int2(id.x, id.y)] = uint8_t4(uint8_t(255), uint8_t(0), uint8_t(0), uint8_t(255));
+            }
+        }
+        "#;
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, SHADER).expect("uint8_t4 shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let width = 8u32;
+        let height = 8u32;
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let texture = pool
+            .acquire_texture(
+                width,
+                height,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("rgba8 texture");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_u8", &pipeline)
+            .with_parcel(&texture, NodeAccess::Write)
+            .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit uint8_t4 write");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
+        assert_eq!(loan[0], 255, "R");
+        assert_eq!(loan[1], 0, "G");
+        assert_eq!(loan[2], 0, "B");
+        assert_eq!(loan[3], 255, "A");
+    }
+
+    /// CUDA `DirectSpatial<half4>` may write `Rgba16Float` (size-matched surface store).
+    fn cuda_half4_writes_rgba16_float(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        const SHADER: &str = r#"
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(8, 8, 1)]
+        void cs_main(DirectSpatial<half4> output, ThreadId id) {
+            uint2 dims;
+            output.GetDimensions(dims.x, dims.y);
+            if (id.x < dims.x && id.y < dims.y) {
+                output[int2(id.x, id.y)] = half4(1.0h, 0.0h, 0.0h, 1.0h);
+            }
+        }
+        "#;
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, SHADER).expect("half4 shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let width = 8u32;
+        let height = 8u32;
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let texture = pool
+            .acquire_texture(
+                width,
+                height,
+                TextureFormat::Rgba16Float,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("rgba16 texture");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_h4", &pipeline)
+            .with_parcel(&texture, NodeAccess::Write)
+            .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &texture)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit half4 write");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("grant read");
+        // IEEE-754 binary16: 1.0 = 0x3C00, 0.0 = 0x0000
+        let halves: &[u16] = bytemuck::cast_slice(&loan);
+        assert_eq!(halves[0], 0x3C00, "R half bits");
+        assert_eq!(halves[1], 0x0000, "G half bits");
+        assert_eq!(halves[2], 0x0000, "B half bits");
+        assert_eq!(halves[3], 0x3C00, "A half bits");
     }
 
     /// CUDA bakes sampler state into each CUtexObject; distinct Filters in one dispatch are rejected.
@@ -4376,6 +4480,8 @@ mod imp {
         trial!(scheme_return_transient_texture_invalidates_retained_scheme);
         trial!(cuda_rejects_bgra_texture);
         trial!(cuda_rejects_unorm_writable_shader_access);
+        trial!(cuda_uint8_t4_writes_rgba8_unorm);
+        trial!(cuda_half4_writes_rgba16_float);
         trial!(cuda_rejects_multiple_distinct_samplers);
 
         let mut args = libtest_mimic::Arguments::from_args();

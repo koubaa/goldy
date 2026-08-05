@@ -13,10 +13,17 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::{
     D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12DescriptorHeap,
-    ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12RootSignature, D3D12_COMMAND_LIST_TYPE_DIRECT,
-    D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
-    D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-    D3D12_FENCE_FLAG_SHARED,
+    ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Resource, ID3D12RootSignature, D3D12_CLEAR_VALUE,
+    D3D12_CLEAR_VALUE_0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
+    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_DEPTH_STENCIL_VALUE,
+    D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+    D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_FENCE_FLAG_SHARED, D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES,
+    D3D12_HEAP_TYPE_DEFAULT, D3D12_MEMORY_POOL_UNKNOWN, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_COMMON, D3D12_TEXTURE_LAYOUT_UNKNOWN,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT,
+    DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5, DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE,
@@ -26,6 +33,19 @@ use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFIN
 
 /// Max offscreen RTV descriptors in the companion RTV heap.
 pub(super) const MAX_RTV_DESCRIPTORS: u32 = 64;
+
+/// Max DSV descriptors (offscreen RTs + surfaces); matches RTV capacity.
+pub(super) const MAX_DSV_DESCRIPTORS: u32 = 64;
+
+pub(super) fn depth_format_to_dxgi(format: crate::types::DepthFormat) -> DXGI_FORMAT {
+    match format {
+        crate::types::DepthFormat::Depth16Unorm => DXGI_FORMAT_D16_UNORM,
+        crate::types::DepthFormat::Depth24Plus => DXGI_FORMAT_D32_FLOAT,
+        crate::types::DepthFormat::Depth24PlusStencil8 => DXGI_FORMAT_D24_UNORM_S8_UINT,
+        crate::types::DepthFormat::Depth32Float => DXGI_FORMAT_D32_FLOAT,
+        crate::types::DepthFormat::Depth32FloatStencil8 => DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+    }
+}
 
 /// 8-byte Windows LUID shared by DXGI and `cuDeviceGetLuid`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -127,6 +147,13 @@ pub(super) struct Dx12Companion {
     pub next_rtv_offset: AtomicU64,
     /// Recycled RTV heap offsets from destroyed offscreen targets.
     pub free_rtv_offsets: std::sync::Mutex<Vec<u32>>,
+    /// DSV descriptor heap for offscreen RTs and surfaces (DX12-only depth; not CUDA-imported).
+    pub dsv_heap: ID3D12DescriptorHeap,
+    pub dsv_descriptor_size: u32,
+    /// High-water mark for never-recycled DSV slots (prefer [`Self::free_dsv_offsets`]).
+    pub next_dsv_offset: AtomicU64,
+    /// Recycled DSV heap offsets from destroyed depth targets.
+    pub free_dsv_offsets: std::sync::Mutex<Vec<u32>>,
     /// SM 6.6 bindless heaps + root signature (IA + directly-indexed descriptors).
     pub bindless: super::dx12_bindless::BindlessHeaps,
     /// Device-level frame-table (selector/table at protocol slots 0/1).
@@ -242,6 +269,16 @@ impl Dx12Companion {
             .context("CUDA/DX12: CreateDescriptorHeap(RTV) failed")?;
         let rtv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
 
+        let dsv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+            NumDescriptors: MAX_DSV_DESCRIPTORS,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            NodeMask: 0,
+        };
+        let dsv_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&dsv_heap_desc) }
+            .context("CUDA/DX12: CreateDescriptorHeap(DSV) failed")?;
+        let dsv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV) };
+
         let bindless = super::dx12_bindless::BindlessHeaps::create(&device)?;
         let frame_table = super::dx12_bindless::CompanionFrameTable::create(&device, &bindless)?;
         let graphics_root_signature = bindless.root_signature.clone();
@@ -289,6 +326,10 @@ impl Dx12Companion {
             rtv_descriptor_size,
             next_rtv_offset: AtomicU64::new(0),
             free_rtv_offsets: std::sync::Mutex::new(Vec::new()),
+            dsv_heap,
+            dsv_descriptor_size,
+            next_dsv_offset: AtomicU64::new(0),
+            free_dsv_offsets: std::sync::Mutex::new(Vec::new()),
             bindless,
             frame_table,
             graphics_root_signature,
@@ -389,6 +430,87 @@ impl Dx12Companion {
         }
     }
 
+    /// Allocate a DSV heap offset (recycles freed slots; fails if the heap is exhausted).
+    pub fn alloc_dsv_offset(&self) -> Result<u32> {
+        if let Some(offset) = self.free_dsv_offsets.lock().unwrap().pop() {
+            return Ok(offset);
+        }
+        let next = self.next_dsv_offset.fetch_add(1, Ordering::AcqRel);
+        if next >= MAX_DSV_DESCRIPTORS as u64 {
+            bail!(
+                "CUDA/DX12: DSV heap exhausted ({MAX_DSV_DESCRIPTORS} depth targets); \
+                 destroy unused render targets / surfaces to recycle descriptors"
+            );
+        }
+        Ok(next as u32)
+    }
+
+    /// Return a DSV offset to the free list for reuse.
+    pub fn free_dsv_offset(&self, offset: u32) {
+        if offset < MAX_DSV_DESCRIPTORS {
+            self.free_dsv_offsets.lock().unwrap().push(offset);
+        }
+    }
+
+    /// Create a DX12-only depth texture + DSV (not CUDA-imported).
+    pub fn create_depth_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: crate::types::DepthFormat,
+    ) -> Result<(ID3D12Resource, u32)> {
+        let dxgi = depth_format_to_dxgi(format);
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+        let depth_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: width.max(1) as u64,
+            Height: height.max(1),
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: dxgi,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+        };
+        let depth_clear = D3D12_CLEAR_VALUE {
+            Format: dxgi,
+            Anonymous: D3D12_CLEAR_VALUE_0 {
+                DepthStencil: D3D12_DEPTH_STENCIL_VALUE { Depth: 1.0, Stencil: 0 },
+            },
+        };
+        let mut depth_tex: Option<ID3D12Resource> = None;
+        unsafe {
+            self.device.CreateCommittedResource(
+                &heap_properties,
+                D3D12_HEAP_FLAG_NONE,
+                &depth_desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                Some(&depth_clear),
+                &mut depth_tex,
+            )
+        }
+        .context("CUDA/DX12: CreateCommittedResource(depth) failed")?;
+        let depth_tex = depth_tex.context("CUDA/DX12: CreateCommittedResource(depth) returned null")?;
+
+        let dsv_offset = self.alloc_dsv_offset()?;
+        let dsv_handle = unsafe {
+            let mut handle = self.dsv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (dsv_offset as usize) * self.dsv_descriptor_size as usize;
+            handle
+        };
+        unsafe {
+            self.device.CreateDepthStencilView(&depth_tex, None, dsv_handle);
+        }
+        Ok((depth_tex, dsv_offset))
+    }
+
     /// Reset the next raster command allocator/list (waits only that slot's prior fence).
     ///
     /// Prefers a GPU-retired slot so warmup can populate multiple retained copies
@@ -475,8 +597,14 @@ impl Dx12Companion {
     }
 
     /// Reset retained present lists after retirement so they release swapchain resources.
+    #[allow(dead_code)]
     pub fn invalidate_present_lists(&self) -> Result<()> {
-        for slot in &self.present_slots {
+        self.invalidate_command_slots(&self.present_slots)
+    }
+
+    /// Wait + Reset + bump generation for an arbitrary present/raster slot pool.
+    pub fn invalidate_command_slots(&self, slots: &[PresentCommandSlot]) -> Result<()> {
+        for slot in slots {
             let prev = slot.fence_value.load(Ordering::Acquire);
             if prev > 0 {
                 self.cpu_wait(prev)?;
@@ -486,8 +614,33 @@ impl Dx12Companion {
             unsafe { slot.list.Close() }.context("CUDA/DX12: close invalidated present list")?;
             slot.generation.fetch_add(1, Ordering::AcqRel);
             slot.retained_fingerprint.store(0, Ordering::Release);
+            slot.fence_value.store(0, Ordering::Release);
         }
         Ok(())
+    }
+
+    /// Per-surface present allocator/list pool (multi-window must not share these).
+    pub fn create_present_command_slots(&self) -> Result<Vec<PresentCommandSlot>> {
+        let mut present_slots = Vec::with_capacity(MAX_FRAMES);
+        for _ in 0..MAX_FRAMES {
+            let allocator: ID3D12CommandAllocator =
+                unsafe { self.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                    .context("CUDA/DX12: CreateCommandAllocator(present surface) failed")?;
+            let list: ID3D12GraphicsCommandList = unsafe {
+                self.device
+                    .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
+            }
+            .context("CUDA/DX12: CreateCommandList(present surface) failed")?;
+            unsafe { list.Close() }.context("CUDA/DX12: Close surface present command list")?;
+            present_slots.push(PresentCommandSlot {
+                allocator,
+                list,
+                fence_value: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
+                retained_fingerprint: AtomicU64::new(0),
+            });
+        }
+        Ok(present_slots)
     }
 
     /// Highest fence value known for companion-owned work (init + raster/present slots).

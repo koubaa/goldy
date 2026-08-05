@@ -299,16 +299,16 @@ impl ApplicationHandler for App {
         if self.state.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        Window::default_attributes()
-                            .with_title("Goldy - Starfield")
-                            .with_inner_size(winit::dpi::LogicalSize::new(1024, 768)),
-                    )
+                    .create_window(common::hidden_window("Goldy - Starfield", 1024, 768))
                     .expect("Failed to create window"),
             );
 
             match RenderState::new(window.clone()) {
-                Ok(state) => {
+                Ok(mut state) => {
+                    if let Err(e) = state.render() {
+                        tracing::error!("First frame error: {e}");
+                    }
+                    common::reveal_window(&window);
                     self.state = Some(state);
                     window.request_redraw();
                 }

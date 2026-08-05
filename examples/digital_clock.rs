@@ -335,16 +335,21 @@ impl Drop for App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let attrs = Window::default_attributes()
-                .with_title("Goldy - Clock (Scheme + Present, Space: pause, Click: color)")
-                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+            let attrs = common::hidden_window(
+                "Goldy - Clock (Scheme + Present, Space: pause, Click: color)",
+                1280,
+                720,
+            );
 
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
             self.window = Some(window.clone());
 
             if let Err(e) = self.init_gpu(&window) {
                 tracing::error!("Failed to initialize GPU: {}", e);
+            } else if let Err(e) = self.render_frame() {
+                tracing::error!("First frame error: {e}");
             }
+            common::reveal_window(&window);
             window.request_redraw();
         }
     }

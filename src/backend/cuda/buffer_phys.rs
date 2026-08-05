@@ -21,7 +21,7 @@ use super::CudaBackend;
 use crate::backend::BufferHandle;
 use anyhow::{bail, Context as _, Result};
 use bitflags::bitflags;
-use cudarc::driver::{CudaSlice, DevicePtr};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -108,6 +108,10 @@ impl CudaBackend {
             // Mirror requirements on the view for diagnostics / later ensure short-circuit.
             if let Some(buf) = self.buffers.get_mut(&buffer) {
                 buf.requirements |= req;
+            }
+            // View has its own bindless slot; register a sub-range SRV/CBV on the twin.
+            if req.contains(CudaBufferReq::SHADER) || req.contains(CudaBufferReq::VERTEX) {
+                self.register_buffer_bindless_descriptor(buffer)?;
             }
             return Ok(());
         }
@@ -209,6 +213,33 @@ impl CudaBackend {
         view_buf.phys_kind = parent_meta.phys_kind;
         view_buf.memory_is_external = parent_meta.memory_is_external;
         view_buf.content_epoch = parent_meta.content_epoch;
+        Ok(())
+    }
+
+    /// Drop view aliases of `parent`'s memory Arc so promote can `try_unwrap` / leak cleanly.
+    fn detach_child_view_memory(&mut self, parent: BufferHandle) {
+        let children: Vec<BufferHandle> = self
+            .buffers
+            .iter()
+            .filter_map(|(h, b)| (b.parent == Some(parent)).then_some(*h))
+            .collect();
+        for view in children {
+            if let Some(buf) = self.buffers.get_mut(&view) {
+                buf.memory = None;
+            }
+        }
+    }
+
+    /// Refresh every view of `parent` after a promote changes physical backing.
+    fn sync_all_views_from_parent(&mut self, parent: BufferHandle) -> Result<()> {
+        let children: Vec<BufferHandle> = self
+            .buffers
+            .iter()
+            .filter_map(|(h, b)| (b.parent == Some(parent)).then_some(*h))
+            .collect();
+        for view in children {
+            self.sync_view_from_parent(view, parent)?;
+        }
         Ok(())
     }
 
@@ -321,7 +352,13 @@ impl CudaBackend {
             )
         };
 
-        self.evict_retained_touching_memory(&old_memory);
+        let stream = Arc::clone(&self.device(device)?.alloc_stream);
+        let target_device_ptr = {
+            let guard = old_memory.lock().unwrap();
+            let (ptr, _) = guard.device_ptr(&stream);
+            ptr + offset
+        };
+        self.evict_retained_touching_memory(&old_memory, &stream, target_device_ptr, false);
 
         let companion = Arc::clone(
             self.device(device)?
@@ -330,7 +367,6 @@ impl CudaBackend {
                 .context("CUDA/DX12: Shared promote requires companion")?,
         );
         let cuda_ctx = Arc::clone(&self.device(device)?.ctx);
-        let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let backing = create_shared_buffer_backing(&companion, &cuda_ctx, &stream, capacity)?;
 
         if size > 0 {
@@ -369,6 +405,7 @@ impl CudaBackend {
         self.graph_stats.buffer_promotions.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(buffer, "CUDA: promoted Native → Shared");
         self.register_buffer_bindless_descriptor(buffer)?;
+        self.sync_all_views_from_parent(buffer)?;
         Ok(())
     }
 
@@ -402,6 +439,22 @@ impl CudaBackend {
         worker.flush().context("CUDA: flush worker before Shared promote")?;
         self.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
 
+        let old_memory = self.buffers.get(&buffer).and_then(|buf| buf.memory.clone());
+        let gpu = self.device(device)?;
+        let target_device_ptr = shared.import.device_ptr + offset;
+        let stream = Arc::clone(&gpu.alloc_stream);
+        if let Some(ref memory) = old_memory {
+            self.evict_retained_touching_memory(memory, &stream, target_device_ptr, true);
+            self.evict_retained_for_buffer(buffer, memory, &stream, target_device_ptr, true);
+            self.drop_retained_graphs_holding_memory(device, memory, &stream, target_device_ptr);
+            self.clear_device_retained_sync(device);
+        }
+        worker.flush().context("CUDA: flush worker after retained eviction")?;
+
+        // Views alias the parent's Shared CudaSlice Arc (count was parent+views).
+        // Detach them so try_unwrap can leak the external slice without cuMemFree.
+        self.detach_child_view_memory(buffer);
+
         // Take the external slice Arc so we can leak it after copy (Drop must not free).
         let old_memory = self
             .buffers
@@ -410,7 +463,6 @@ impl CudaBackend {
             .memory
             .take()
             .context("CUDA: promote Shared without memory")?;
-        self.evict_retained_touching_memory(&old_memory);
 
         let gpu = self.device(device)?;
         gpu.ctx
@@ -442,10 +494,11 @@ impl CudaBackend {
                 leak_shared_buffer_slice(mutex.into_inner().unwrap_or_else(|e| e.into_inner()));
             }
             Err(still_shared) => {
-                // Keep alive without cuMemFree — attach to twin for drop ordering.
-                tracing::warn!(
-                    "CUDA: promote Shared→native: external slice Arc still shared (count={})",
-                    Arc::strong_count(&still_shared)
+                // Retained ops or another alias still holds the Arc — forget so Drop
+                // cannot cuMemFree the import (owned by SharedBufferBacking).
+                tracing::debug!(
+                    count = Arc::strong_count(&still_shared),
+                    "CUDA: promote Shared→native: external slice Arc still shared after view detach; leaking"
                 );
                 std::mem::forget(still_shared);
             }
@@ -458,19 +511,28 @@ impl CudaBackend {
         buf.shared_epoch = u64::MAX;
         buf.phys_kind = CudaPhysKind::NativeAndTwin;
         self.graph_stats.buffer_promotions.fetch_add(1, Ordering::Relaxed);
+        self.sync_all_views_from_parent(buffer)?;
         tracing::debug!(buffer, "CUDA: promoted Shared → NativeAndTwin");
         Ok(())
     }
 
     /// Drop retained entries whose ops keep `memory` alive.
-    fn evict_retained_touching_memory(&mut self, memory: &Arc<Mutex<CudaSlice<u8>>>) {
+    fn evict_retained_touching_memory(
+        &mut self,
+        memory: &Arc<Mutex<CudaSlice<u8>>>,
+        stream: &CudaStream,
+        target_device_ptr: u64,
+        sync_destroy: bool,
+    ) {
         let keys: Vec<_> = self
             .retained
             .iter()
             .filter_map(|((ctx, key), entry)| {
                 let touches = match entry {
-                    super::RetainedEntry::Ops(ops) => ops_touch_memory(ops, memory),
-                    super::RetainedEntry::GraphWithTail { tail, .. } => ops_touch_memory(tail, memory),
+                    super::RetainedEntry::Ops(ops) => ops_touch_memory(ops, memory, stream, target_device_ptr),
+                    super::RetainedEntry::GraphWithTail { tail, .. } => {
+                        ops_touch_memory(tail, memory, stream, target_device_ptr)
+                    }
                     _ => false,
                 };
                 touches.then_some((*ctx, *key))
@@ -478,7 +540,71 @@ impl CudaBackend {
             .collect();
         for (ctx, key) in keys {
             if self.retained.remove(&(ctx, key)).is_some() {
-                self.enqueue_evict_retained(ctx, key);
+                if sync_destroy {
+                    self.destroy_retained_graph_sync(ctx, key);
+                } else {
+                    self.enqueue_evict_retained(ctx, key);
+                }
+            }
+        }
+    }
+
+    /// Evict retained CUDA graphs that still reference `buffer` (registry keep-alive).
+    fn evict_retained_for_buffer(
+        &mut self,
+        buffer: BufferHandle,
+        memory: &Arc<Mutex<CudaSlice<u8>>>,
+        stream: &CudaStream,
+        target_device_ptr: u64,
+        sync_destroy: bool,
+    ) {
+        let keys: Vec<_> = self
+            .retained
+            .iter()
+            .filter_map(|((ctx, key), entry)| {
+                let touches = match entry {
+                    super::RetainedEntry::Graph {
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        twin_dirty,
+                        ..
+                    } => {
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        {
+                            twin_dirty.contains(&buffer)
+                        }
+                        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                        {
+                            false
+                        }
+                    }
+                    super::RetainedEntry::GraphWithTail {
+                        tail,
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        twin_dirty,
+                        ..
+                    } => {
+                        let tail_hit = ops_touch_memory(tail, memory, stream, target_device_ptr);
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        {
+                            tail_hit || twin_dirty.contains(&buffer)
+                        }
+                        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                        {
+                            tail_hit
+                        }
+                    }
+                    _ => false,
+                };
+                touches.then_some((*ctx, *key))
+            })
+            .collect();
+        for (ctx, key) in keys {
+            if self.retained.remove(&(ctx, key)).is_some() {
+                if sync_destroy {
+                    self.destroy_retained_graph_sync(ctx, key);
+                } else {
+                    self.enqueue_evict_retained(ctx, key);
+                }
             }
         }
     }
@@ -492,9 +618,9 @@ impl CudaBackend {
         Ok(())
     }
 
-    /// Register a companion SRV (or CBV for broadcast-sized) at the buffer's CUDA slot.
+    /// Register a companion SRV (or CBV for Broadcast) at the buffer's CUDA slot.
     pub(super) fn register_buffer_bindless_descriptor(&mut self, buffer: BufferHandle) -> Result<()> {
-        let (device, slot, size, stride, shared) = {
+        let (device, slot, size, stride, kind, offset, shared) = {
             let buf = self
                 .buffers
                 .get(&buffer)
@@ -504,6 +630,8 @@ impl CudaBackend {
                 buf.slot,
                 buf.size,
                 buf.element_stride.unwrap_or(4),
+                buf.kind,
+                buf.offset,
                 buf.shared.clone(),
             )
         };
@@ -518,17 +646,26 @@ impl CudaBackend {
             .dx12
             .as_ref()
             .context("CUDA/DX12: companion required for bindless descriptor")?;
-        let view_stride = stride.max(4);
-        // NumElements must not imply a view larger than the resource (D3D12 removes the
-        // device / drops draws). Use the view stride, not the logical element stride.
-        let num_elements = (size / u64::from(view_stride)).max(1) as u32;
-        companion.bindless.write_buffer_srv(
-            &companion.device,
-            slot,
-            &shared.d3d12_resource,
-            num_elements,
-            view_stride,
-        )?;
+        if kind == crate::types::BufferKind::Broadcast {
+            // Graphics shaders bind Broadcast as ConstantBuffer<> (UniformCbv).
+            companion
+                .bindless
+                .write_buffer_cbv(&companion.device, slot, &shared.d3d12_resource, size)?;
+        } else {
+            let view_stride = stride.max(4);
+            let first_element = (offset / u64::from(view_stride)) as u32;
+            // NumElements must not imply a view larger than the resource (D3D12 removes the
+            // device / drops draws). Use the view stride, not the logical element stride.
+            let num_elements = (size / u64::from(view_stride)).max(1) as u32;
+            companion.bindless.write_buffer_srv(
+                &companion.device,
+                slot,
+                &shared.d3d12_resource,
+                first_element,
+                num_elements,
+                view_stride,
+            )?;
+        }
         Ok(())
     }
 }
@@ -545,15 +682,48 @@ fn compatible(have: CudaPhysKind, want: CudaPhysKind) -> bool {
     }
 }
 
-fn ops_touch_memory(ops: &[super::pending_submit::CudaOp], memory: &Arc<Mutex<CudaSlice<u8>>>) -> bool {
+fn ops_touch_memory(
+    ops: &[super::pending_submit::CudaOp],
+    memory: &Arc<Mutex<CudaSlice<u8>>>,
+    stream: &CudaStream,
+    target_device_ptr: u64,
+) -> bool {
     use super::pending_submit::CudaOp;
     ops.iter().any(|op| match op {
-        CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } => Arc::ptr_eq(m, memory),
-        CudaOp::Copy { src, dst, .. } => Arc::ptr_eq(src, memory) || Arc::ptr_eq(dst, memory),
-        CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
-            keep_alive_buffers.iter().any(|m| Arc::ptr_eq(m, memory))
+        CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } => {
+            memory_slices_same(m, memory, stream, target_device_ptr)
         }
-        CudaOp::CopyTextureToBuffer { dst, .. } => Arc::ptr_eq(dst, memory),
+        CudaOp::Copy { src, dst, .. } => {
+            memory_slices_same(src, memory, stream, target_device_ptr)
+                || memory_slices_same(dst, memory, stream, target_device_ptr)
+        }
+        CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
+            keep_alive_buffers
+                .iter()
+                .any(|m| memory_slices_same(m, memory, stream, target_device_ptr))
+        }
+        CudaOp::CopyTextureToBuffer { dst, .. } => memory_slices_same(dst, memory, stream, target_device_ptr),
         _ => false,
     })
+}
+
+fn memory_slices_same(
+    candidate: &Arc<Mutex<CudaSlice<u8>>>,
+    memory: &Arc<Mutex<CudaSlice<u8>>>,
+    stream: &CudaStream,
+    target_device_ptr: u64,
+) -> bool {
+    if Arc::ptr_eq(candidate, memory) {
+        return true;
+    }
+    memory_slice_covers_ptr(candidate, stream, target_device_ptr)
+}
+
+fn memory_slice_covers_ptr(candidate: &Arc<Mutex<CudaSlice<u8>>>, stream: &CudaStream, ptr: u64) -> bool {
+    let Ok(candidate_guard) = candidate.try_lock() else {
+        return false;
+    };
+    let (base_ptr, _) = candidate_guard.device_ptr(stream);
+    let len = candidate_guard.len();
+    ptr >= base_ptr && ptr < base_ptr + len as u64
 }

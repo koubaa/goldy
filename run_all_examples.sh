@@ -7,6 +7,7 @@
 #
 # Usage:
 #   GOLDY_BACKEND=vk ./run_all_examples.sh          # normal
+#   GOLDY_BACKEND=cuda ./run_all_examples.sh         # enables cuda feature + CUDA backend
 #   SLEEP_BETWEEN=3 ./run_all_examples.sh            # 3s sleep between examples
 #   EXAMPLE_TIMEOUT=10 ./run_all_examples.sh         # auto-exit each example after 10s
 #   VULKAN_VALIDATE=1 ./run_all_examples.sh          # with validation layers
@@ -18,6 +19,14 @@ cd "$SCRIPT_DIR"
 
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-0}"
 EXAMPLE_TIMEOUT="${EXAMPLE_TIMEOUT:-0}"
+
+CARGO_FEATURES="examples"
+case "${GOLDY_BACKEND,,}" in
+    cuda)
+        CARGO_FEATURES="examples,cuda"
+        echo "GOLDY_BACKEND=cuda: building with --features $CARGO_FEATURES"
+        ;;
+esac
 
 if [[ "${VULKAN_VALIDATE:-0}" == "1" ]]; then
     export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
@@ -36,6 +45,19 @@ done < <(grep -A1 '\[\[example\]\]' Cargo.toml | grep 'name = ' | sed 's/.*name 
 
 if [[ ${#EXAMPLES[@]} -eq 0 ]]; then
     echo "ERROR: No examples found in Cargo.toml"
+    exit 1
+fi
+
+echo ""
+echo "========================================"
+echo "Building all examples (--features $CARGO_FEATURES)"
+echo "========================================"
+cargo build --examples --features "$CARGO_FEATURES"
+
+# On Windows cargo puts binaries in target/debug/examples/*.exe
+EXAMPLE_BIN_DIR="target/debug/examples"
+if [[ ! -d "$EXAMPLE_BIN_DIR" ]]; then
+    echo "ERROR: Example binaries not found in $EXAMPLE_BIN_DIR"
     exit 1
 fi
 
@@ -58,7 +80,15 @@ for i in "${!EXAMPLES[@]}"; do
     echo "========================================"
 
     start_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
-    output=$(cargo run --example "$name" --features examples 2>&1) || true
+    example_bin="$EXAMPLE_BIN_DIR/${name}.exe"
+    if [[ ! -f "$example_bin" ]]; then
+        example_bin="$EXAMPLE_BIN_DIR/$name"
+    fi
+    if [[ ! -f "$example_bin" ]]; then
+        echo "ERROR: Example binary not found for $name"
+        exit 1
+    fi
+    output=$("$example_bin" 2>&1) || true
     end_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
 
     echo "$output"

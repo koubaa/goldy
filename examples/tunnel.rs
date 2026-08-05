@@ -221,15 +221,19 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        Window::default_attributes()
-                            .with_title("Goldy - Tunnel Effect (Scheme + Present)")
-                            .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
-                    )
+                    .create_window(common::hidden_window(
+                        "Goldy - Tunnel Effect (Scheme + Present)",
+                        800,
+                        800,
+                    ))
                     .unwrap(),
             );
             self.window = Some(window.clone());
             self.init_gpu(&window).unwrap();
+            if let Err(e) = self.render_frame() {
+                tracing::error!("First frame error: {e}");
+            }
+            common::reveal_window(&window);
             window.request_redraw();
         }
     }

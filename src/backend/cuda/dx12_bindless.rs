@@ -192,6 +192,7 @@ impl BindlessHeaps {
         device: &ID3D12Device,
         slot: u32,
         resource: &ID3D12Resource,
+        first_element: u32,
         num_elements: u32,
         stride: u32,
     ) -> Result<()> {
@@ -205,7 +206,7 @@ impl BindlessHeaps {
             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
                 Buffer: D3D12_BUFFER_SRV {
-                    FirstElement: 0,
+                    FirstElement: first_element as u64,
                     NumElements: num_elements.max(1),
                     StructureByteStride: stride.max(4),
                     Flags: D3D12_BUFFER_SRV_FLAG_NONE,
@@ -223,6 +224,7 @@ impl BindlessHeaps {
         device: &ID3D12Device,
         slot: u32,
         resource: &ID3D12Resource,
+        first_element: u32,
         num_elements: u32,
         stride: u32,
     ) -> Result<()> {
@@ -235,7 +237,7 @@ impl BindlessHeaps {
             ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
             Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
                 Buffer: D3D12_BUFFER_UAV {
-                    FirstElement: 0,
+                    FirstElement: first_element as u64,
                     NumElements: num_elements.max(1),
                     StructureByteStride: stride.max(4),
                     CounterOffsetInBytes: 0,
@@ -249,7 +251,6 @@ impl BindlessHeaps {
         Ok(())
     }
 
-    #[allow(dead_code)] // uniform CBV bindless path (first raster slice uses frame table)
     pub fn write_buffer_cbv(
         &self,
         device: &ID3D12Device,
@@ -381,8 +382,8 @@ impl CompanionFrameTable {
         let (staging, staging_mapped) = create_upload_staging(device)?;
 
         // Protocol slots 0/1 hold selector / table UAVs (Metal-style fixed indices).
-        bindless.write_buffer_uav(device, 0, &selector, 1, 4)?;
-        bindless.write_buffer_uav(device, 1, &device_table, FRAME_TABLE_TABLE_U32S as u32, 4)?;
+        bindless.write_buffer_uav(device, 0, &selector, 0, 1, 4)?;
+        bindless.write_buffer_uav(device, 1, &device_table, 0, FRAME_TABLE_TABLE_U32S as u32, 4)?;
 
         Ok(Self {
             selector,

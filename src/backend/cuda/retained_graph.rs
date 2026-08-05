@@ -6,7 +6,7 @@
 //! on the teardown path.
 
 use anyhow::{Context as _, Result};
-use cudarc::driver::{sys, CudaModule, CudaSlice, CudaStream};
+use cudarc::driver::{sys, CudaModule, CudaSlice, CudaStream, DevicePtr};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -257,6 +257,65 @@ impl GraphRegistry {
     pub fn drain_retired(&mut self, retired: u64) {
         self.pending_drops.retain(|(retire_at, _)| *retire_at > retired);
     }
+
+    /// Drop active and pending graphs that keep `memory` alive (GPU must be idle).
+    pub fn clear_pending_drops(&mut self) {
+        self.pending_drops.clear();
+    }
+
+    pub fn drop_graphs_holding_memory(
+        &mut self,
+        memory: &Arc<Mutex<CudaSlice<u8>>>,
+        stream: &CudaStream,
+        target_device_ptr: u64,
+    ) {
+        let keys: Vec<_> = self
+            .graphs
+            .iter()
+            .filter(|(_, partition)| partition_holds_memory(partition, memory, stream, target_device_ptr))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            if let Some(partition) = self.graphs.remove(&key) {
+                drop(partition);
+            }
+        }
+        self.pending_drops
+            .retain(|(_, partition)| !partition_holds_memory(partition, memory, stream, target_device_ptr));
+    }
+}
+
+fn partition_holds_memory(
+    partition: &CudaRetainedPartition,
+    memory: &Arc<Mutex<CudaSlice<u8>>>,
+    stream: &CudaStream,
+    target_device_ptr: u64,
+) -> bool {
+    partition
+        .buffers
+        .iter()
+        .any(|buf| memory_slices_same(buf, memory, stream, target_device_ptr))
+}
+
+fn memory_slices_same(
+    candidate: &Arc<Mutex<CudaSlice<u8>>>,
+    memory: &Arc<Mutex<CudaSlice<u8>>>,
+    stream: &CudaStream,
+    target_device_ptr: u64,
+) -> bool {
+    if Arc::ptr_eq(candidate, memory) {
+        return true;
+    }
+    memory_slice_covers_ptr(candidate, stream, target_device_ptr)
+}
+
+fn memory_slice_covers_ptr(candidate: &Arc<Mutex<CudaSlice<u8>>>, stream: &CudaStream, ptr: u64) -> bool {
+    let Ok(candidate_guard) = candidate.try_lock() else {
+        return false;
+    };
+    let (base_ptr, _) = candidate_guard.device_ptr(stream);
+    let len = candidate_guard.len();
+    ptr >= base_ptr && ptr < base_ptr + len as u64
 }
 
 /// True when the driver is in launch-blocking mode (incompatible with stream capture).

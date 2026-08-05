@@ -52,7 +52,7 @@ fn make_device() -> (Device, goldy::test_support::CbReuseOverride) {
     (device, cb)
 }
 
-/// CUDA writable `DirectSpatial<float4>` requires storage-compatible `Rgba32Float`.
+/// CUDA writable `DirectSpatial<float4>` requires size-matched `Rgba32Float`.
 fn writable_texture_format(device: &Device) -> TextureFormat {
     if device.backend_type() == BackendType::Cuda {
         TextureFormat::Rgba32Float

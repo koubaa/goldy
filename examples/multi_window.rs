@@ -128,7 +128,6 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowAttributes, WindowId},
 };
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct QuadVertex {
@@ -231,7 +230,6 @@ struct WindowState {
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     pipeline: RenderPipeline,
-    shader: ShaderModule,
     effect_type: EffectType,
     start_time: Instant,
     paused: bool,
@@ -338,7 +336,6 @@ impl WindowState {
             scheme,
             scene_rt,
             pipeline,
-            shader,
             effect_type,
             start_time: Instant::now(),
             paused: false,
@@ -393,7 +390,7 @@ impl WindowState {
         self.time_multiplier = 1.0;
     }
 
-    fn render(&mut self, ctx: &goldy::Context) -> anyhow::Result<()> {
+    fn render(&mut self, _ctx: &goldy::Context) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
@@ -409,17 +406,18 @@ impl WindowState {
         Ok(())
     }
 
-    fn handle_resize(&mut self, device: &goldy::Device, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            let _ = self.surface.resize(width, height);
-            match Self::create_pipeline(device, &self.shader, &self.surface) {
-                Ok(pipeline) => {
-                    self.pipeline = pipeline;
-                    self.rerecord_scheme();
-                }
-                Err(e) => tracing::error!("[{}] Failed to recreate pipeline: {}", self.effect_type.title(), e),
-            }
+    fn handle_resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
         }
+        let (prev_w, prev_h) = self.surface.size();
+        // Pipeline does not depend on surface size; skip no-op Resized events
+        // (winit often fires these on reveal) so we don't recompile Slang→DXIL.
+        if prev_w == width && prev_h == height {
+            return;
+        }
+        let _ = self.surface.resize(width, height);
+        self.rerecord_scheme();
     }
 }
 
@@ -458,13 +456,15 @@ impl App {
         let attrs = WindowAttributes::default()
             .with_title(format!("Goldy - {}", effect_type.title()))
             .with_inner_size(LogicalSize::new(500, 500))
-            .with_position(winit::dpi::LogicalPosition::new(position.0, position.1));
+            .with_position(winit::dpi::LogicalPosition::new(position.0, position.1))
+            .with_visible(false);
 
         let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
 
         let mut state = WindowState::new(window.clone(), ctx, &device, effect_type)?;
         state.render(ctx)?;
+        common::reveal_window(&window);
         window.request_redraw();
 
         self.windows.insert(window_id, state);
@@ -563,9 +563,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {}
             WindowEvent::Resized(new_size) => {
                 if let Some(s) = self.windows.get_mut(&window_id) {
-                    if let Some(device) = self.device.as_ref() {
-                        s.handle_resize(device, new_size.width, new_size.height);
-                    }
+                    s.handle_resize(new_size.width, new_size.height);
                 }
             }
             _ => {}

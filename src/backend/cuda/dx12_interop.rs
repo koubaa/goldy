@@ -42,7 +42,7 @@ pub(super) struct SharedScratchTexture {
     pub blit_target: ID3D12Resource,
 }
 
-pub(super) struct CudaImportedTexture {
+pub(in crate::backend) struct CudaImportedTexture {
     cuda_ctx: Arc<CudaContext>,
     external_memory: sys::CUexternalMemory,
     mipmapped: sys::CUmipmappedArray,
@@ -542,17 +542,20 @@ mod tests {
     }
 }
 
-/// Cached compute PSO that converts float4 UAV → BGRA8 UAV.
+/// Cached compute PSOs that convert float4 or R8G8B8A8 UAV → BGRA8 UAV.
 pub(super) struct PresentBlitPipeline {
     pub root_signature: ID3D12RootSignature,
-    pub pso: ID3D12PipelineState,
+    /// `Texture2D<float4>` source (shared float4 scratch / Rgba32Float RT).
+    pub pso_float: ID3D12PipelineState,
+    /// `Texture2D<unorm float4>` source (`Rgba8Unorm` RT).
+    pub pso_unorm8: ID3D12PipelineState,
     pub srv_uav_heap: ID3D12DescriptorHeap,
     pub descriptor_size: u32,
 }
 
 impl PresentBlitPipeline {
     pub fn create(device: &ID3D12Device) -> Result<Self> {
-        let hlsl = r#"
+        let hlsl_float = r#"
 Texture2D<float4> SrcTex : register(t0);
 RWTexture2D<unorm float4> DstTex : register(u0);
 [numthreads(8, 8, 1)]
@@ -563,12 +566,25 @@ void main(uint3 id : SV_DispatchThreadID) {
     DstTex[id.xy] = SrcTex.Load(int3(id.xy, 0));
 }
 "#;
+        let hlsl_unorm8 = r#"
+Texture2D<unorm float4> SrcTex : register(t0);
+RWTexture2D<unorm float4> DstTex : register(u0);
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    uint w, h;
+    DstTex.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+    DstTex[id.xy] = SrcTex.Load(int3(id.xy, 0));
+}
+"#;
+
+        // Shared root signature from the float path; unorm PSO reuses it.
         let mut shader: Option<ID3DBlob> = None;
         let mut errors: Option<ID3DBlob> = None;
         let hr = unsafe {
             D3DCompile(
-                hlsl.as_ptr() as *const _,
-                hlsl.len(),
+                hlsl_float.as_ptr() as *const _,
+                hlsl_float.len(),
                 windows::core::PCSTR::null(),
                 None,
                 None,
@@ -590,7 +606,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                 })
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .unwrap_or_default();
-            bail!("CUDA/DX12: D3DCompile present blit failed: {msg}");
+            bail!("CUDA/DX12: D3DCompile present blit (float) failed: {msg}");
         }
         let shader = shader.context("CUDA/DX12: null blit shader blob")?;
 
@@ -646,18 +662,65 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
         .context("CUDA/DX12: CreateRootSignature(blit)")?;
 
-        let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-            pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
-            CS: D3D12_SHADER_BYTECODE {
-                pShaderBytecode: unsafe { shader.GetBufferPointer() },
-                BytecodeLength: unsafe { shader.GetBufferSize() },
-            },
-            NodeMask: 0,
-            CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
-            Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
+        let pso_float: ID3D12PipelineState = {
+            let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
+                CS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: unsafe { shader.GetBufferPointer() },
+                    BytecodeLength: unsafe { shader.GetBufferSize() },
+                },
+                NodeMask: 0,
+                CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
+                Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
+            };
+            unsafe { device.CreateComputePipelineState(&pso_desc) }
+                .context("CUDA/DX12: CreateComputePipelineState(blit float)")?
         };
-        let pso: ID3D12PipelineState = unsafe { device.CreateComputePipelineState(&pso_desc) }
-            .context("CUDA/DX12: CreateComputePipelineState(blit)")?;
+
+        let pso_unorm8 = {
+            let mut u8_shader: Option<ID3DBlob> = None;
+            let mut u8_errors: Option<ID3DBlob> = None;
+            let hr = unsafe {
+                D3DCompile(
+                    hlsl_unorm8.as_ptr() as *const _,
+                    hlsl_unorm8.len(),
+                    windows::core::PCSTR::null(),
+                    None,
+                    None,
+                    windows::core::s!("main"),
+                    windows::core::s!("cs_5_1"),
+                    0,
+                    0,
+                    &mut u8_shader,
+                    Some(&mut u8_errors),
+                )
+            };
+            if hr.is_err() {
+                let msg = u8_errors
+                    .as_ref()
+                    .map(|e| {
+                        let ptr = unsafe { e.GetBufferPointer() } as *const u8;
+                        let len = unsafe { e.GetBufferSize() };
+                        unsafe { std::slice::from_raw_parts(ptr, len) }
+                    })
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                bail!("CUDA/DX12: D3DCompile present blit (unorm8) failed: {msg}");
+            }
+            let u8_shader = u8_shader.context("CUDA/DX12: null unorm8 blit shader blob")?;
+            let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
+                CS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: unsafe { u8_shader.GetBufferPointer() },
+                    BytecodeLength: unsafe { u8_shader.GetBufferSize() },
+                },
+                NodeMask: 0,
+                CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
+                Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
+            };
+            unsafe { device.CreateComputePipelineState(&pso_desc) }
+                .context("CUDA/DX12: CreateComputePipelineState(blit unorm8)")?
+        };
 
         let heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
             Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -672,14 +735,39 @@ void main(uint3 id : SV_DispatchThreadID) {
 
         Ok(Self {
             root_signature,
-            pso,
+            pso_float,
+            pso_unorm8,
             srv_uav_heap,
             descriptor_size,
         })
     }
 
+    fn srv_dxgi(src_format: TextureFormat) -> Result<DXGI_FORMAT> {
+        Ok(match src_format {
+            TextureFormat::Rgba32Float => DXGI_FORMAT_R32G32B32A32_FLOAT,
+            TextureFormat::Rgba8Unorm => DXGI_FORMAT_R8G8B8A8_UNORM,
+            other => bail!("CUDA/DX12: present blit unsupported source format {other:?}"),
+        })
+    }
+
+    pub fn pso_for(&self, src_format: TextureFormat) -> Result<&ID3D12PipelineState> {
+        Ok(match src_format {
+            TextureFormat::Rgba32Float => &self.pso_float,
+            TextureFormat::Rgba8Unorm => &self.pso_unorm8,
+            other => bail!("CUDA/DX12: present blit unsupported source format {other:?}"),
+        })
+    }
+
     /// Write SRV(src) + UAV(dst) descriptors for slot `idx`.
-    pub fn write_descriptors(&self, device: &ID3D12Device, idx: usize, src: &ID3D12Resource, dst: &ID3D12Resource) {
+    pub fn write_descriptors(
+        &self,
+        device: &ID3D12Device,
+        idx: usize,
+        src: &ID3D12Resource,
+        dst: &ID3D12Resource,
+        src_format: TextureFormat,
+    ) -> Result<()> {
+        let srv_format = Self::srv_dxgi(src_format)?;
         let base = unsafe { self.srv_uav_heap.GetCPUDescriptorHandleForHeapStart() };
         let srv = D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: base.ptr + (idx * 2) as usize * self.descriptor_size as usize,
@@ -688,7 +776,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             ptr: base.ptr + (idx * 2 + 1) as usize * self.descriptor_size as usize,
         };
         let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
-            Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+            Format: srv_format,
             ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
@@ -712,6 +800,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             },
         };
         unsafe { device.CreateUnorderedAccessView(dst, None, Some(&uav_desc), uav) };
+        Ok(())
     }
 
     pub fn gpu_table_handle(&self, idx: usize) -> D3D12_GPU_DESCRIPTOR_HANDLE {
@@ -722,7 +811,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 }
 
-/// Where the float4 present-blit source sits before the copy.
+/// Where the present-blit color source sits before the copy.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PresentColorSrcState {
     /// CUDA-written imported scratch (UAV).
@@ -731,13 +820,14 @@ pub(super) enum PresentColorSrcState {
     Common,
 }
 
-/// Record float→BGRA blit + CopyResource(blit→backbuffer) + present barriers.
+/// Record color→BGRA blit + CopyResource(blit→backbuffer) + present barriers.
 pub(super) fn record_present_copy(
     list: &ID3D12GraphicsCommandList,
     blit: &PresentBlitPipeline,
     slot_idx: usize,
     color_src: &ID3D12Resource,
     color_src_state: PresentColorSrcState,
+    color_src_format: TextureFormat,
     blit_target: &ID3D12Resource,
     backbuffer: &ID3D12Resource,
     backbuffer_from_common: bool,
@@ -756,7 +846,8 @@ pub(super) fn record_present_copy(
     let b0 = transition(color_src, src_before, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     unsafe { list.ResourceBarrier(&[b0]) };
 
-    unsafe { list.SetPipelineState(&blit.pso) };
+    let pso = blit.pso_for(color_src_format)?;
+    unsafe { list.SetPipelineState(pso) };
     unsafe { list.SetComputeRootSignature(&blit.root_signature) };
     unsafe {
         list.SetDescriptorHeaps(&[Some(blit.srv_uav_heap.clone())]);

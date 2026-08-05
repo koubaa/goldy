@@ -271,10 +271,7 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("Goldy — Compute to Surface")
-            .with_inner_size(winit::dpi::LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
-            .with_visible(false);
+        let attrs = common::hidden_window("Goldy — Compute to Surface", INITIAL_WIDTH, INITIAL_HEIGHT);
 
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
@@ -284,7 +281,12 @@ impl ApplicationHandler for App {
             return;
         }
 
-        window.set_visible(true);
+        if let Some(state) = &mut self.state {
+            if let Err(e) = render_frame(state) {
+                tracing::error!("First frame error: {e}");
+            }
+        }
+        common::reveal_window(&window);
         window.request_redraw();
     }
 
