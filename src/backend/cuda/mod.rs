@@ -101,9 +101,13 @@ enum RetainedEntry {
     /// Render partitions retain their high-level commands; DX12 list reuse happens in raster.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     Render(Vec<GraphCommand>),
-    /// Dynamic present boundary: point the current surface image at this raster target.
+    /// Dynamic present boundary: blit this raster target for `surface`'s *current*
+    /// swapchain image. Scratch textures rotate per frame; do not pin a fixed scratch.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    PresentRenderTarget(RenderTargetHandle),
+    PresentRenderTarget {
+        target: RenderTargetHandle,
+        surface: SurfaceHandle,
+    },
 }
 
 /// Soft cap on concurrent submission contexts per CUDA device.
@@ -291,7 +295,7 @@ struct CudaDestroyContext {
 /// After DX12 external-semaphore interop, `cuStreamSynchronize` can return
 /// `CUDA_ERROR_NOT_SUPPORTED` on some WDDM stacks. Drain sticky context state and
 /// treat that case as drained (companion fence already waited).
-fn cuda_context_stream_sync_after_interop(
+pub(super) fn cuda_context_stream_sync_after_interop(
     cuda_ctx: &Arc<CudaContext>,
     stream: &CudaStream,
     label: &str,
@@ -596,13 +600,26 @@ impl CudaBackend {
     }
 
     fn sync_device_streams_for_immediate_api(&mut self, device: DeviceHandle) -> Result<()> {
-        let worker = Arc::clone(&self.device(device)?.submission_worker);
+        // Immediate host writes (deposit staging, clear, resize) run on `alloc_stream`.
+        // Do **not** host-synchronize submission context streams here: on WDDM+D3D12 they
+        // carry WaitExternalFence/SignalExternalFence and `cuStreamSynchronize` deposits
+        // sticky CUDA_ERROR_NOT_SUPPORTED (or AVs). Deposit pools already epoch-gate
+        // staging reuse via gpu_progress; surface teardown waits DX12 before those syncs.
+        let (worker, alloc_stream, cuda_ctx) = {
+            let gpu = self.device(device)?;
+            (
+                Arc::clone(&gpu.submission_worker),
+                Arc::clone(&gpu.alloc_stream),
+                Arc::clone(&gpu.ctx),
+            )
+        };
         worker.flush()?;
+        cuda_context_stream_sync_after_interop(
+            &cuda_ctx,
+            &alloc_stream,
+            "sync alloc stream for immediate API",
+        )?;
         for context in self.contexts.values().filter(|context| context.device == device) {
-            context
-                .stream
-                .synchronize()
-                .context("CUDA: sync context stream for immediate API")?;
             timeline::poll_retire_events(
                 &context.event_ledger,
                 &context.completed,
@@ -3148,8 +3165,14 @@ impl GpuBackendTimelineWait for CudaBackend {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let context = Arc::clone(self.context(ctx)?);
         let device_handle = context.device;
-        if let Some(device) = self.devices.get(&device_handle) {
-            device.submission_worker.flush()?;
+        // When the timeline has already retired, skip worker flush. Flush joins the
+        // submission thread; if it is blocked in cuWaitExternalSemaphoresAsync (common
+        // at multi-window teardown), Scheme::drop would hang forever even though
+        // gpu_progress >= value.
+        if self.gpu_progress(ctx) < value {
+            if let Some(device) = self.devices.get(&device_handle) {
+                device.submission_worker.flush()?;
+            }
         }
         timeline::poll_retire_events(
             &context.event_ledger,
@@ -4585,11 +4608,11 @@ impl GpuBackend for CudaBackend {
             ops = self.rewrite_imported_present_launches(ops)?;
         }
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        let direct_present_target = effective.iter().find_map(|command| {
+        let direct_present = effective.iter().find_map(|command| {
             let GpuCommand::CopyRenderTarget { src, dst } = command else {
                 return None;
             };
-            surface::scratch_slot_for_texture(self, *dst).is_some().then_some(*src)
+            surface::scratch_slot_for_texture(self, *dst).map(|(surf, _)| (*src, surf))
         });
         let stripped = pending_submit::strip_external_fence_ops(ops);
         let (core, tail) = pending_submit::split_graph_core_and_tail(stripped);
@@ -4607,9 +4630,11 @@ impl GpuBackend for CudaBackend {
         };
 
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        if let Some(target) = direct_present_target {
-            self.retained
-                .insert((ctx, key), RetainedEntry::PresentRenderTarget(target));
+        if let Some((target, surface)) = direct_present {
+            self.retained.insert(
+                (ctx, key),
+                RetainedEntry::PresentRenderTarget { target, surface },
+            );
             // No CUDA stream work / completion event — present uses the DX12 fence ledger.
             // Sync waits on prior DX12 present fences are redundant with queue/raster ordering.
             let _ = sync;
@@ -4734,7 +4759,7 @@ impl GpuBackend for CudaBackend {
                 self.submit_graph_with_renders(ctx, &commands, sync).map(Some)
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            Some(RetainedEntry::PresentRenderTarget(target)) => {
+            Some(RetainedEntry::PresentRenderTarget { target, surface }) => {
                 let (resource, fence, format) = {
                     let target = self
                         .render_targets
@@ -4742,23 +4767,26 @@ impl GpuBackend for CudaBackend {
                         .context("CUDA/DX12: retained present target disappeared")?;
                     (target.d3d12_resource.clone(), target.last_dx12_fence, target.format)
                 };
-                for state in self.surfaces.values_mut() {
-                    let Some(current) = state.current_texture_handle else {
-                        continue;
-                    };
-                    if let Some(slot) = state
-                        .scratch
-                        .iter_mut()
-                        .flatten()
-                        .find(|slot| slot.texture_handle == current)
-                    {
-                        slot.present_source = Some(surface::PresentSource::Dx12Raster {
-                            resource: resource.clone(),
-                            fence,
-                            format,
-                        });
-                        return Ok(Some(self.gpu_progress(ctx)));
-                    }
+                let Some(state) = self.surfaces.get_mut(&surface) else {
+                    return Ok(None);
+                };
+                let Some(current) = state.current_texture_handle else {
+                    return Ok(None);
+                };
+                let image_index = state
+                    .scratch
+                    .iter()
+                    .position(|slot| slot.as_ref().is_some_and(|s| s.texture_handle == current));
+                let Some(image_index) = image_index else {
+                    return Ok(None);
+                };
+                if let Some(slot) = state.scratch.get_mut(image_index).and_then(|s| s.as_mut()) {
+                    slot.present_source = Some(surface::PresentSource::Dx12Raster {
+                        resource,
+                        fence,
+                        format,
+                    });
+                    return Ok(Some(self.gpu_progress(ctx)));
                 }
                 Ok(None)
             }

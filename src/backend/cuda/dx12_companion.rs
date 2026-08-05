@@ -598,8 +598,14 @@ impl Dx12Companion {
     }
 
     /// Reset retained present lists after retirement so they release swapchain resources.
+    #[allow(dead_code)]
     pub fn invalidate_present_lists(&self) -> Result<()> {
-        for slot in &self.present_slots {
+        self.invalidate_command_slots(&self.present_slots)
+    }
+
+    /// Wait + Reset + bump generation for an arbitrary present/raster slot pool.
+    pub fn invalidate_command_slots(&self, slots: &[PresentCommandSlot]) -> Result<()> {
+        for slot in slots {
             let prev = slot.fence_value.load(Ordering::Acquire);
             if prev > 0 {
                 self.cpu_wait(prev)?;
@@ -609,8 +615,31 @@ impl Dx12Companion {
             unsafe { slot.list.Close() }.context("CUDA/DX12: close invalidated present list")?;
             slot.generation.fetch_add(1, Ordering::AcqRel);
             slot.retained_fingerprint.store(0, Ordering::Release);
+            slot.fence_value.store(0, Ordering::Release);
         }
         Ok(())
+    }
+
+    /// Per-surface present allocator/list pool (multi-window must not share these).
+    pub fn create_present_command_slots(&self) -> Result<Vec<PresentCommandSlot>> {
+        let mut present_slots = Vec::with_capacity(MAX_FRAMES);
+        for _ in 0..MAX_FRAMES {
+            let allocator: ID3D12CommandAllocator =
+                unsafe { self.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                    .context("CUDA/DX12: CreateCommandAllocator(present surface) failed")?;
+            let list: ID3D12GraphicsCommandList =
+                unsafe { self.device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None) }
+                    .context("CUDA/DX12: CreateCommandList(present surface) failed")?;
+            unsafe { list.Close() }.context("CUDA/DX12: Close surface present command list")?;
+            present_slots.push(PresentCommandSlot {
+                allocator,
+                list,
+                fence_value: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
+                retained_fingerprint: AtomicU64::new(0),
+            });
+        }
+        Ok(present_slots)
     }
 
     /// Highest fence value known for companion-owned work (init + raster/present slots).

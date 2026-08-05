@@ -675,7 +675,7 @@ pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTar
         .iter()
         .filter_map(|(&(ctx, key), entry)| {
             let touches = match entry {
-                RetainedEntry::PresentRenderTarget(t) => *t == target,
+                RetainedEntry::PresentRenderTarget { target: t, .. } => *t == target,
                 RetainedEntry::Render(commands) => commands.iter().any(|cmd| match cmd {
                     GraphCommand::Render { target: t, .. } => *t == target,
                     GraphCommand::Compute(GpuCommand::CopyRenderTarget { src, .. }) => *src == target,
@@ -999,7 +999,15 @@ pub(super) fn render_to_target(
             .synchronize()
             .context("CUDA/DX12: sync alloc stream before Shared DX12 read")?;
     }
+    // Deposit Copy → Shared publishes `last_cuda_fence` before the worker runs
+    // `cuSignalExternalSemaphoresAsync`. DX12 must not Queue.Signal a higher value
+    // until that CUDA signal is *submitted* (Wait alone is insufficient → INVALID_VALUE).
     if vb_wait > 0 {
+        let worker = Arc::clone(&backend.device(device)?.submission_worker);
+        worker
+            .flush()
+            .context("CUDA/DX12: flush worker before Shared VB fence wait")?;
+        backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
         companion.wait_queue(vb_wait)?;
     }
 
