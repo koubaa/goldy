@@ -232,10 +232,18 @@ pub(super) enum CudaDeferredDrop {
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         memory_is_external: bool,
     },
+    /// Imported shared textures: field order is load-bearing (CUDA views → import → D3D12).
     Texture {
         retire_at: u64,
         #[allow(dead_code)]
         resource: Arc<CudaTextureResource>,
+        /// External memory + mipmapped array; must outlive [`Self::Texture::resource`].
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        #[allow(dead_code)]
+        import: Option<dx12_interop::CudaImportedTexture>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        #[allow(dead_code)]
+        d3d12_resource: Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource>,
     },
     Pipeline {
         retire_at: u64,
@@ -4454,6 +4462,12 @@ impl GpuBackend for CudaBackend {
             if let Some(slot) = resource.sampled_slot {
                 self.texture_slots.remove(&slot);
             }
+            // Pull import/D3D12 out of the live maps now, but keep them alive until after
+            // `resource` drops — the CUarray is borrowed from the mapped mipmapped array.
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            let import = self.texture_imports.remove(&texture);
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            let d3d12_resource = self.texture_dx12.remove(&texture);
             let device_handle = self
                 .devices
                 .iter()
@@ -4476,14 +4490,23 @@ impl GpuBackend for CudaBackend {
                         .deletion_queue
                         .lock()
                         .unwrap()
-                        .push(CudaDeferredDrop::Texture { retire_at, resource });
+                        .push(CudaDeferredDrop::Texture {
+                            retire_at,
+                            resource,
+                            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                            import,
+                            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                            d3d12_resource,
+                        });
+                    return;
                 }
             }
+            // No device / deletion queue: drop CUDA views before import before D3D12.
+            drop(resource);
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             {
-                // Drop CUDA views (resource above) before import before D3D12 resource.
-                let _ = self.texture_imports.remove(&texture);
-                let _ = self.texture_dx12.remove(&texture);
+                drop(import);
+                drop(d3d12_resource);
             }
         }
     }
@@ -6631,6 +6654,85 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let snap = stats.snapshot();
         assert_eq!(snap.captures, 0, "clear+indirect must not capture: {snap:?}");
         assert!(snap.fallbacks >= 1, "clear+indirect should fallback: {snap:?}");
+        Ok(())
+    }
+
+    /// Regression for premature DX12↔CUDA import teardown on texture replace.
+    ///
+    /// `destroy_texture` must keep the external-memory import alive with the deferred
+    /// CUDA views. Dropping the import first left a borrowed `CUarray` dangling; the
+    /// next shared-texture create then failed with
+    /// `cuMipmappedArrayGetLevel` / `CUDA_ERROR_ILLEGAL_ADDRESS` (ekrano mask-atlas
+    /// 1×1 → 64×64 resize).
+    #[test]
+    fn shared_texture_replace_keeps_import_alive_until_views_drop() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA shared texture replace test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+
+        let small = backend.create_texture(
+            device,
+            1,
+            1,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_DST,
+        )?;
+        backend.write_texture(small, &[255, 255, 255, 255], 1, 1)?;
+        backend.destroy_texture(small);
+
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if backend.device(device)?.dx12.is_some() {
+            let queue = backend.device(device)?.deletion_queue.lock().unwrap();
+            let deferred_with_import = queue.iter().any(|entry| {
+                matches!(
+                    entry,
+                    CudaDeferredDrop::Texture {
+                        import: Some(_),
+                        d3d12_resource: Some(_),
+                        ..
+                    }
+                )
+            });
+            assert!(
+                deferred_with_import,
+                "destroy_texture must defer DX12 import+resource with the CUDA views"
+            );
+        }
+
+        // Immediate recreate+upload is the failure mode for an early import drop.
+        let large = backend.create_texture(
+            device,
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_DST,
+        )?;
+        let pixels = vec![128u8; 64 * 64 * 4];
+        backend
+            .write_texture(large, &pixels, 64, 64)
+            .context("write after replace (import must still be valid)")?;
+        backend.destroy_texture(large);
+
+        let again = backend.create_texture(
+            device,
+            32,
+            32,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::DirectInterpolated,
+            TextureFlags::COPY_DST,
+        )?;
+        let pixels = vec![64u8; 32 * 32 * 4];
+        backend.write_texture(again, &pixels, 32, 32)?;
+        backend.destroy_texture(again);
+        backend.device_wait_idle(device)?;
         Ok(())
     }
 }
