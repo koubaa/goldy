@@ -454,6 +454,7 @@ impl CudaBuffer {
     }
 }
 
+#[derive(Clone)]
 struct CudaShader {
     device: DeviceHandle,
     source: String,
@@ -480,8 +481,8 @@ struct CudaComputeKernel {
 
 struct CudaComputePipeline {
     device: DeviceHandle,
-    /// Source shader — kept so format-specialized PTX variants can be compiled lazily.
-    shader: ShaderHandle,
+    /// Shader snapshot for lazy format specialization (`ShaderModule` may already be destroyed).
+    shader: CudaShader,
     workgroup_size: [u32; 3],
     slot_access: Vec<Option<ResourceAccess>>,
     /// Author param order for `[goldy_compute]`; empty for plain Slang compute (all-buffer fallback).
@@ -853,11 +854,7 @@ impl CudaBackend {
             }
         }
 
-        let shader = self
-            .shaders
-            .get(&pipeline.shader)
-            .context("CUDA: pipeline shader was destroyed")?;
-        let (ptx, _, _, _) = self.compile_compute_ptx_with_specs(shader, specs)?;
+        let (ptx, _, _, _) = self.compile_compute_ptx_with_specs(&pipeline.shader, specs)?;
         let kernel = self.load_compute_kernel(pipeline.device, &ptx)?;
 
         let mut variants = pipeline.variants.lock().unwrap();
@@ -1473,6 +1470,11 @@ impl CudaBackend {
             .context("CUDA: invalid compute pipeline")?;
         let specs = self.resolve_storage_texture_specs(&pipeline.launch_layout, indices)?;
         let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
+        // Format-specialized PTX variants are not CUDA-graph-safe in multi-dispatch
+        // partitions (GraphWithTail relaunch faults). Identity DirectSpatial stays capturable.
+        let graph_capture_ok = specs
+            .iter()
+            .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
         let limits = self.device(pipeline.device)?.limits;
         validate_launch_config(
             &limits,
@@ -1496,6 +1498,7 @@ impl CudaBackend {
             args: launch_args,
             keep_alive_buffers,
             keep_alive_textures,
+            graph_capture_ok,
         })
     }
 
@@ -1530,6 +1533,9 @@ impl CudaBackend {
         }
         let specs = self.resolve_storage_texture_specs(&pipeline.launch_layout, indices)?;
         let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
+        let graph_capture_ok = specs
+            .iter()
+            .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let (mut keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
         keep_alive_buffers.push(Arc::clone(shape_buf.memory_arc()?));
@@ -1586,6 +1592,7 @@ impl CudaBackend {
             args: launch_args,
             keep_alive_buffers,
             keep_alive_textures,
+            graph_capture_ok,
             shape_ptr,
             shape_memory: Arc::clone(shape_buf.memory_arc()?),
             shape_abs_offset,
@@ -2297,6 +2304,7 @@ impl CudaBackend {
                     mut args,
                     keep_alive_buffers,
                     mut keep_alive_textures,
+                    graph_capture_ok,
                 } => {
                     let exports = self.retarget_launch_off_imported_scratch(&mut args, &mut keep_alive_textures)?;
                     out.push(CudaOp::Launch {
@@ -2308,6 +2316,7 @@ impl CudaBackend {
                         args,
                         keep_alive_buffers,
                         keep_alive_textures,
+                        graph_capture_ok,
                     });
                     for (src, dst) in exports {
                         out.push(CudaOp::CopyTexture { src, dst });
@@ -2321,6 +2330,7 @@ impl CudaBackend {
                     mut args,
                     keep_alive_buffers,
                     mut keep_alive_textures,
+                    graph_capture_ok,
                     shape_ptr,
                     shape_memory,
                     shape_abs_offset,
@@ -2343,6 +2353,7 @@ impl CudaBackend {
                         args,
                         keep_alive_buffers,
                         keep_alive_textures,
+                        graph_capture_ok,
                         shape_ptr,
                         shape_memory,
                         shape_abs_offset,
@@ -4768,6 +4779,7 @@ impl GpuBackend for CudaBackend {
         }
 
         if !core.is_empty()
+            && tail.is_empty()
             && pending_submit::ops_are_graph_safe(&core)
             && !retained_graph::cuda_launch_blocking_active()
             && !self.ops_touch_external_buffers(&core)
@@ -4959,20 +4971,40 @@ impl GpuBackend for CudaBackend {
         if shader.device != device {
             anyhow::bail!("CUDA: shader belongs to another device");
         }
+        let shader_snapshot = shader.clone();
         let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader)?;
         let identity = self.load_compute_kernel(device, &ptx)?;
+
+        // Preload float4↔Rgba8Unorm specialization when every DirectSpatial slot is float4.
+        // Lazy cuModuleLoad on first specialized launch can deadlock / fault under CUDA's
+        // default lazy module loading while other kernels are in flight on the stream.
+        let mut variants = HashMap::new();
+        let storage_elements: Vec<&str> = launch_layout
+            .iter()
+            .filter_map(|kind| match kind {
+                CudaLaunchArgKind::StorageTexture { element } => Some(element.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !storage_elements.is_empty() && storage_elements.iter().all(|element| *element == "float4") {
+            let specs = vec![CudaStorageTextureSpec::Float4Rgba8Unorm; storage_elements.len()];
+            let (spec_ptx, _, _, _) = self.compile_compute_ptx_with_specs(&shader_snapshot, &specs)?;
+            let kernel = self.load_compute_kernel(device, &spec_ptx)?;
+            variants.insert(specs, kernel);
+        }
+
         let handle = self.next_compute_pipeline;
         self.next_compute_pipeline += 1;
         self.compute_pipelines.insert(
             handle,
             CudaComputePipeline {
                 device,
-                shader: compute_shader,
+                shader: shader_snapshot,
                 workgroup_size,
                 slot_access,
                 launch_layout,
                 identity,
-                variants: Mutex::new(HashMap::new()),
+                variants: Mutex::new(variants),
             },
         );
         Ok(handle)

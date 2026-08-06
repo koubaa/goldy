@@ -88,6 +88,10 @@ pub(super) enum CudaOp {
         args: Vec<CudaLaunchArg>,
         keep_alive_buffers: Vec<Arc<Mutex<CudaSlice<u8>>>>,
         keep_alive_textures: Vec<Arc<super::texture::CudaTextureResource>>,
+        /// False for format-specialized PTX variants. Those kernels force the
+        /// partition onto op-list retention: capturing a graph prefix and replaying
+        /// the specialized kernel in a tail (`GraphWithTail`) has faulted on relaunch.
+        graph_capture_ok: bool,
     },
     /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
     /// path resolves the shape via DtoH on the worker stream.
@@ -99,6 +103,8 @@ pub(super) enum CudaOp {
         args: Vec<CudaLaunchArg>,
         keep_alive_buffers: Vec<Arc<Mutex<CudaSlice<u8>>>>,
         keep_alive_textures: Vec<Arc<super::texture::CudaTextureResource>>,
+        /// See [`CudaOp::Launch::graph_capture_ok`].
+        graph_capture_ok: bool,
         /// Absolute device address of the 12-byte [`DispatchShape`].
         shape_ptr: u64,
         shape_memory: Arc<Mutex<CudaSlice<u8>>>,
@@ -201,11 +207,15 @@ unsafe impl Sync for SendExternalSemaphore {}
 pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
     match op {
         CudaOp::Launch {
-            keep_alive_textures, ..
+            keep_alive_textures,
+            graph_capture_ok,
+            ..
         }
         | CudaOp::LaunchIndirect {
-            keep_alive_textures, ..
-        } => !keep_alive_textures.iter().any(|tex| tex.is_imported()),
+            keep_alive_textures,
+            graph_capture_ok,
+            ..
+        } => *graph_capture_ok && !keep_alive_textures.iter().any(|tex| tex.is_imported()),
         _ => false,
     }
 }

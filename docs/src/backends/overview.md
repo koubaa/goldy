@@ -231,7 +231,8 @@ Texture notes for CUDA:
   typed-UAV emulation for convertible pairs:
   - `DirectSpatial<float4>` ↔ `Rgba32Float` (identity surface store)
   - `DirectSpatial<float4>` ↔ `Rgba8Unorm` (lazy PTX specialization: pack/unpack view over
-    `uint8_t4`, DX12-style `round(saturate(x)*255)` on store)
+    `uint8_t4`, DX12-style `round(saturate(x)*255)` on store). Partitions that launch this
+    specialized variant use scheme op-list retention rather than CUDA graph capture.
   - `DirectSpatial<half4>` ↔ `Rgba16Float`
   - `DirectSpatial<uint8_t4>` ↔ `Rgba8Unorm` (Slang has no `uchar4` alias)
   - Upload/copy/readback of other supported sampled formats still works.

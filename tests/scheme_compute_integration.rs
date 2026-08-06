@@ -4333,6 +4333,58 @@ mod imp {
         assert_eq!(loan_u[3], 255);
     }
 
+    /// Same `DirectSpatial<float4>`→`Rgba8Unorm` kernel must survive CUDA graph resubmit.
+    fn cuda_float4_rgba8_retained_resubmit(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        let _cb = goldy::test_support::CbReuseOverride::force_enabled();
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let width = 8u32;
+        let height = 8u32;
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let texture = pool
+            .acquire_texture(
+                width,
+                height,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("rgba8 texture");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&texture, NodeAccess::Write)
+            .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
+        for frame_i in 0..4u32 {
+            let mut frame = scheme
+                .submit()
+                .unwrap_or_else(|e| panic!("submit frame {frame_i}: {e:#}"));
+            frame
+                .wait_until_settled()
+                .unwrap_or_else(|e| panic!("settle frame {frame_i}: {e:#}"));
+        }
+        assert_eq!(
+            scheme.replay_stats().records,
+            1,
+            "worker should capture once and resubmit"
+        );
+        assert!(
+            scheme.replay_stats().resubmit_hits >= 3,
+            "expected graph/CB resubmits, got {:?}",
+            scheme.replay_stats()
+        );
+        let output = read_texture_via_scheme_copy(&ctx, &texture);
+        assert_eq!(output[0], 255, "R");
+        assert_eq!(output[1], 0, "G");
+        assert_eq!(output[2], 0, "B");
+        assert_eq!(output[3], 255, "A");
+    }
+
     /// CUDA `DirectSpatial<uint8_t4>` may write `Rgba8Unorm` (size-matched surface store).
     fn cuda_uint8_t4_writes_rgba8_unorm(device: &Device) {
         if device.backend_type() != BackendType::Cuda {
@@ -4605,6 +4657,7 @@ mod imp {
         trial!(cuda_float4_writes_rgba8_unorm);
         trial!(cuda_float4_rgba8_rmw);
         trial!(cuda_float4_variant_cache_float_then_unorm);
+        trial!(cuda_float4_rgba8_retained_resubmit);
         trial!(cuda_uint8_t4_writes_rgba8_unorm);
         trial!(cuda_half4_writes_rgba16_float);
         trial!(cuda_rejects_multiple_distinct_samplers);
