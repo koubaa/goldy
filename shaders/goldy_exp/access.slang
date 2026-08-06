@@ -71,11 +71,63 @@ implementing goldy_exp;
 #if defined(__METAL__)
 public typealias StorageBuffer<T> = Ptr<T, Access.ReadWrite, AddressSpace.Device>;
 public typealias ReadOnlyBuffer<T> = Ptr<T, Access.Read, AddressSpace.Device>;
-// ByteAddressView is defined as a struct later in the Metal section.
+// ByteAddressView is defined as a struct below (shared with CUDA).
+#elif defined(__CUDA__)
+public typealias StorageBuffer<T> = RWStructuredBuffer<T>;
+public typealias ReadOnlyBuffer<T> = StructuredBuffer<T>;
+// ByteAddressView is defined as a struct below: CUDA/NVRTC lowers
+// RWByteAddressBuffer to RWStructuredBuffer<uint> without Load/Store.
 #else
 public typealias StorageBuffer<T> = RWStructuredBuffer<T>;
 public typealias ReadOnlyBuffer<T> = StructuredBuffer<T>;
 public typealias ByteAddressView = RWByteAddressBuffer;
+#endif
+
+#if defined(__METAL__) || defined(__CUDA__)
+// Free-function wrappers for atomic intrinsics (avoids name shadowing inside
+// ByteAddressView methods where InterlockedMin would resolve to `this.InterlockedMin`).
+void __goldy_atomic_min(StorageBuffer<uint> buf, uint word_idx, uint value, out uint original) {
+    InterlockedMin(buf[word_idx], value, original);
+}
+void __goldy_atomic_max(StorageBuffer<uint> buf, uint word_idx, uint value, out uint original) {
+    InterlockedMax(buf[word_idx], value, original);
+}
+void __goldy_atomic_cmpxchg(StorageBuffer<uint> buf, uint word_idx, uint compare, uint value, out uint original) {
+    InterlockedCompareExchange(buf[word_idx], compare, value, original);
+}
+
+/// Wrapper providing RWByteAddressBuffer-compatible methods over a uint storage buffer.
+///
+/// Metal: Slang's `reinterpret<RWByteAddressBuffer>(ptr)` fails with interface
+/// constraints in the same compilation unit.
+/// CUDA: NVRTC's RWStructuredBuffer<uint> has no byte-address Load/Store API.
+public struct ByteAddressView {
+    StorageBuffer<uint> _ptr;
+
+    [ForceInline]
+    public __init(StorageBuffer<uint> ptr) { _ptr = ptr; }
+
+    [ForceInline]
+    public uint Load(uint addr) { return _ptr[addr >> 2u]; }
+
+    [ForceInline]
+    public void Store(uint addr, uint value) { _ptr[addr >> 2u] = value; }
+
+    [ForceInline]
+    public void InterlockedMin(uint addr, uint value, out uint original_value) {
+        __goldy_atomic_min(_ptr, addr >> 2u, value, original_value);
+    }
+
+    [ForceInline]
+    public void InterlockedMax(uint addr, uint value, out uint original_value) {
+        __goldy_atomic_max(_ptr, addr >> 2u, value, original_value);
+    }
+
+    [ForceInline]
+    public void InterlockedCompareExchange(uint addr, uint compare, uint value, out uint original_value) {
+        __goldy_atomic_cmpxchg(_ptr, addr >> 2u, compare, value, original_value);
+    }
+};
 #endif
 
 // =============================================================================
@@ -246,53 +298,9 @@ public ReadOnlyBuffer<T> goldy_buf_ro<T>(uint slot)
     return (Ptr<T, Access.Read, AddressSpace.Device>)basePtr;
 }
 
-// Free-function wrappers for atomic intrinsics (avoids name shadowing inside
-// ByteAddressView methods where InterlockedMin would resolve to `this.InterlockedMin`).
-void __goldy_atomic_min(StorageBuffer<uint> buf, uint word_idx, uint value, out uint original) {
-    InterlockedMin(buf[word_idx], value, original);
-}
-void __goldy_atomic_max(StorageBuffer<uint> buf, uint word_idx, uint value, out uint original) {
-    InterlockedMax(buf[word_idx], value, original);
-}
-void __goldy_atomic_cmpxchg(StorageBuffer<uint> buf, uint word_idx, uint compare, uint value, out uint original) {
-    InterlockedCompareExchange(buf[word_idx], compare, value, original);
-}
-
-/// Wrapper providing RWByteAddressBuffer-compatible methods over a device uint pointer.
-/// On Metal, Slang's `reinterpret<RWByteAddressBuffer>(ptr)` triggers a
-/// "type cannot be packed for dynamic dispatch" error when any shader in the
-/// same compilation unit uses interface constraints. This struct avoids that by
-/// implementing the byte-address API on top of a typed device pointer.
-public struct ByteAddressView {
-    StorageBuffer<uint> _ptr;
-
-    [ForceInline]
-    public uint Load(uint addr) { return _ptr[addr >> 2u]; }
-
-    [ForceInline]
-    public void Store(uint addr, uint value) { _ptr[addr >> 2u] = value; }
-
-    [ForceInline]
-    public void InterlockedMin(uint addr, uint value, out uint original_value) {
-        __goldy_atomic_min(_ptr, addr >> 2u, value, original_value);
-    }
-
-    [ForceInline]
-    public void InterlockedMax(uint addr, uint value, out uint original_value) {
-        __goldy_atomic_max(_ptr, addr >> 2u, value, original_value);
-    }
-
-    [ForceInline]
-    public void InterlockedCompareExchange(uint addr, uint compare, uint value, out uint original_value) {
-        __goldy_atomic_cmpxchg(_ptr, addr >> 2u, compare, value, original_value);
-    }
-};
-
 public ByteAddressView goldy_byte_address(uint slot)
 {
-    ByteAddressView v;
-    v._ptr = goldy_scattered<uint>(slot);
-    return v;
+    return ByteAddressView(goldy_scattered<uint>(slot));
 }
 
 public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
@@ -354,8 +362,9 @@ public typealias Interpolated<T : ITexelElement> = Texture2D<T>;
 /// Use all native methods: `img[int2(x,y)]`, `img.GetDimensions(w,h)`, etc.
 public typealias DirectSpatial<T : ITexelElement> = RWTexture2D<T>;
 
-/// Byte-address buffer (= ByteAddressView = RWByteAddressBuffer on SPIRV/DX12).
-/// Use native methods: `.Load(addr)`, `.Store(addr, v)`, `.InterlockedMin(...)`, etc.
+/// Byte-address buffer (= ByteAddressView).
+/// SPIRV/DX12: native `RWByteAddressBuffer`. Metal/CUDA: uint-storage wrapper.
+/// Use: `.Load(addr)`, `.Store(addr, v)`, `.InterlockedMin(...)`, etc.
 public typealias ByteAddress = ByteAddressView;
 
 /// Sampler state (= SamplerState).

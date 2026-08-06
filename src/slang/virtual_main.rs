@@ -707,11 +707,41 @@ fn cuda_texture_element(ty: &str, prefix: &str) -> Result<String, String> {
     }
 }
 
+/// Resolve `#ifdef` parameter blocks using the same preprocessor defines Slang
+/// will see for this compilation (e.g. `msaa` for fine MSAA variants).
+fn resolve_cuda_params(params: &[ParamItem], defines: &[(&str, &str)]) -> Vec<Param> {
+    let defined: std::collections::HashSet<&str> = defines.iter().map(|(k, _)| *k).collect();
+    let mut out = Vec::new();
+    for item in params {
+        match item {
+            ParamItem::Single(param) => out.push(param.clone()),
+            ParamItem::Conditional {
+                condition,
+                then_params,
+                else_params,
+            } => {
+                if defined.contains(condition.as_str()) {
+                    out.extend(then_params.iter().cloned());
+                } else {
+                    out.extend(else_params.iter().cloned());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Extract the CUDA launch-arg layout for the primary `[goldy_compute]` entry.
 ///
 /// Order matches author parameter order with system values skipped. Empty when
 /// the source has no `[goldy_compute]` entries (plain Slang compute passthrough).
-pub fn extract_cuda_compute_launch_layout(source: &str) -> Result<Vec<CudaLaunchArgKind>, String> {
+///
+/// `#ifdef` parameter blocks are resolved against `defines` (must match the
+/// defines passed to Slang for this shader variant).
+pub fn extract_cuda_compute_launch_layout(
+    source: &str,
+    defines: &[(&str, &str)],
+) -> Result<Vec<CudaLaunchArgKind>, String> {
     let entries = find_all_entries(source);
     let Some(entry) = entries.iter().find(|e| e.stage == Stage::Compute) else {
         return Ok(Vec::new());
@@ -721,10 +751,7 @@ pub fn extract_cuda_compute_launch_layout(source: &str) -> Result<Vec<CudaLaunch
     }
 
     let mut layout = Vec::new();
-    for item in &entry.params {
-        let ParamItem::Single(param) = item else {
-            return Err("conditional parameters are not supported by the CUDA prototype".to_string());
-        };
+    for param in resolve_cuda_params(&entry.params, defines) {
         match &param.kind {
             ParamKind::Broadcast => layout.push(CudaLaunchArgKind::Buffer),
             ParamKind::Resource => {
@@ -790,7 +817,13 @@ fn cuda_scalar_init_expr(ty: &str, word: &str) -> Result<String, String> {
 /// loaded at index 0. Single-word scalars (`uint`/`float`/`int`/`bool`) become
 /// `uniform uint` kernel args (Goldy `with_param` words). Multi-word scalars and
 /// graphics stages are rejected.
-pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, String> {
+///
+/// `#ifdef` parameter blocks are resolved against `defines` so MSAA fine variants
+/// get a concrete CUDA launch signature matching the Slang preprocessor view.
+pub fn transform_virtual_main_cuda_compute(
+    source: &str,
+    defines: &[(&str, &str)],
+) -> Result<String, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
         return Ok(source.to_string());
@@ -827,20 +860,28 @@ pub fn transform_virtual_main_cuda_compute(source: &str) -> Result<String, Strin
         let mut binding = 0u32;
         let mut user = 0u32;
 
-        for item in &entry.params {
-            let ParamItem::Single(param) = item else {
-                return Err("conditional parameters are not supported by the CUDA prototype".to_string());
-            };
+        for param in resolve_cuda_params(&entry.params, defines) {
             match &param.kind {
                 ParamKind::Resource | ParamKind::Broadcast => {
-                    let param_ty = resource_param_ty(param)?;
                     let global = format!("_goldy_cuda_binding_{binding}");
-                    signature.push(format!("uniform {param_ty} {global}"));
-                    if matches!(param.kind, ParamKind::Broadcast) {
-                        body.push_str(&format!("    {} {} = {}[0];\n", param.ty, param.name, global));
+                    if param.ty.trim() == "ByteAddress" {
+                        // CUDA/NVRTC has no RWByteAddressBuffer.Store; bind as
+                        // Scattered<uint> and wrap into ByteAddressView.
+                        signature.push(format!("uniform Scattered<uint> {global}"));
+                        body.push_str(&format!(
+                            "    ByteAddress {} = ByteAddress({});\n",
+                            param.name, global
+                        ));
                         call_args.push(param.name.clone());
                     } else {
-                        call_args.push(global);
+                        let param_ty = resource_param_ty(&param)?;
+                        signature.push(format!("uniform {param_ty} {global}"));
+                        if matches!(param.kind, ParamKind::Broadcast) {
+                            body.push_str(&format!("    {} {} = {}[0];\n", param.ty, param.name, global));
+                            call_args.push(param.name.clone());
+                        } else {
+                            call_args.push(global);
+                        }
                     }
                     binding += 1;
                 }
@@ -2823,7 +2864,7 @@ void cs_main(uniform RWStructuredBuffer<uint> values, uint3 id : SV_DispatchThre
     values[id.x] = values[id.x] * 2;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert_eq!(result, src);
     }
 
@@ -2837,7 +2878,7 @@ void cs_main(Scattered<uint> values, ThreadId id) {
     values[id.x] = values[id.x] * 2;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(result.contains("[shader(\"compute\")]"), "{result}");
         assert!(result.contains("[numthreads(64, 1, 1)]"), "{result}");
         assert!(
@@ -2863,7 +2904,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     output[id.x] = input[id.x] * 2;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(result.contains("uniform BufRO<uint> _goldy_cuda_binding_0"), "{result}");
         assert!(
             result.contains("uniform Scattered<uint> _goldy_cuda_binding_1"),
@@ -2872,6 +2913,93 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         assert!(
             result.contains("_goldy_user_cs_main(_goldy_cuda_binding_0, _goldy_cuda_binding_1, id)"),
             "{result}"
+        );
+    }
+
+    #[test]
+    fn cuda_compute_byte_address_wraps_scattered_uint() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(ByteAddress path_bboxes, ThreadId id) {
+    path_bboxes.Store(id.x * 4, 1u);
+}
+"#;
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
+        assert!(
+            result.contains("uniform Scattered<uint> _goldy_cuda_binding_0"),
+            "ByteAddress must bind as Scattered<uint> for CUDA/NVRTC: {result}"
+        );
+        assert!(
+            result.contains("ByteAddress path_bboxes = ByteAddress(_goldy_cuda_binding_0);"),
+            "wrapper must construct ByteAddressView: {result}"
+        );
+        assert!(
+            result.contains("_goldy_user_cs_main(path_bboxes, id)"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src, &[]).unwrap(),
+            vec![CudaLaunchArgKind::Buffer]
+        );
+    }
+
+    #[test]
+    fn cuda_compute_resolves_ifdef_params_from_defines() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> base,
+#ifdef msaa
+             BufRO<uint> mask_lut, DirectSpatial<float4> filter_tex0,
+#else
+             DirectSpatial<float4> filter_tex0,
+#endif
+             ThreadId id) {
+    base[id.x] = 1;
+}
+"#;
+        let area = transform_virtual_main_cuda_compute(src, &[]).unwrap();
+        let area_wrapper = area.split("#line 1").next().unwrap();
+        assert!(
+            area_wrapper.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_1"),
+            "area path should take else branch: {area_wrapper}"
+        );
+        assert!(
+            !area_wrapper.contains("mask_lut"),
+            "area wrapper must not include mask_lut: {area_wrapper}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src, &[]).unwrap(),
+            vec![
+                CudaLaunchArgKind::Buffer,
+                CudaLaunchArgKind::StorageTexture {
+                    element: "float4".into()
+                },
+            ]
+        );
+
+        let msaa = transform_virtual_main_cuda_compute(src, &[("msaa", "1")]).unwrap();
+        let msaa_wrapper = msaa.split("#line 1").next().unwrap();
+        assert!(
+            msaa_wrapper.contains("uniform BufRO<uint> _goldy_cuda_binding_1"),
+            "msaa path should take then branch: {msaa_wrapper}"
+        );
+        assert!(
+            msaa_wrapper.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_2"),
+            "msaa path keeps filter_tex0 after mask_lut: {msaa_wrapper}"
+        );
+        assert_eq!(
+            extract_cuda_compute_launch_layout(src, &[("msaa", "1")]).unwrap(),
+            vec![
+                CudaLaunchArgKind::Buffer,
+                CudaLaunchArgKind::Buffer,
+                CudaLaunchArgKind::StorageTexture {
+                    element: "float4".into()
+                },
+            ]
         );
     }
 
@@ -2887,7 +3015,7 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
     values[id.x] = values[id.x] * cfg.mul;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(
             result.contains("uniform StructuredBuffer<Params> _goldy_cuda_binding_0"),
             "{result}"
@@ -2909,7 +3037,7 @@ void cs_main(Scattered<uint> values, uint base, ThreadId id) {
     values[id.x] = base;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(
             result.contains("uniform Scattered<uint> _goldy_cuda_binding_0"),
             "{result}"
@@ -2921,7 +3049,7 @@ void cs_main(Scattered<uint> values, uint base, ThreadId id) {
             "{result}"
         );
         assert_eq!(
-            extract_cuda_compute_launch_layout(src).unwrap(),
+            extract_cuda_compute_launch_layout(src, &[]).unwrap(),
             vec![CudaLaunchArgKind::Buffer, CudaLaunchArgKind::Scalar]
         );
     }
@@ -2936,7 +3064,7 @@ void cs_main(Scattered<uint> inp, uint offset, Scattered<uint> out, ThreadId id)
     out[id.x] = inp[id.x] + offset;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(
             result.contains("uniform Scattered<uint> _goldy_cuda_binding_0"),
             "{result}"
@@ -2951,7 +3079,7 @@ void cs_main(Scattered<uint> inp, uint offset, Scattered<uint> out, ThreadId id)
             "{result}"
         );
         assert_eq!(
-            extract_cuda_compute_launch_layout(src).unwrap(),
+            extract_cuda_compute_launch_layout(src, &[]).unwrap(),
             vec![
                 CudaLaunchArgKind::Buffer,
                 CudaLaunchArgKind::Scalar,
@@ -2970,7 +3098,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     out[0] = value;
 }
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(
             result.contains("float value = asfloat(_goldy_cuda_user_0);"),
             "{result}"
@@ -2984,7 +3112,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
 [numthreads(1, 1, 1)]
 void cs_main(Scattered<uint> values, uint3 base, ThreadId id) {}
 "#;
-        let err = transform_virtual_main_cuda_compute(vector).unwrap_err();
+        let err = transform_virtual_main_cuda_compute(vector, &[]).unwrap_err();
         assert!(err.contains("single-word"), "{err}");
     }
 
@@ -2996,7 +3124,7 @@ void cs_main(Scattered<uint> values, uint3 base, ThreadId id) {}
 [numthreads(1, 1, 1)]
 void cs_main(Interpolated<float4> tex, Filter samp, DirectSpatial<float4> img, ThreadId id) {}
 "#;
-        let result = transform_virtual_main_cuda_compute(src).unwrap();
+        let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(
             result.contains("uniform Interpolated<float4> _goldy_cuda_binding_0"),
             "{result}"
@@ -3007,7 +3135,7 @@ void cs_main(Interpolated<float4> tex, Filter samp, DirectSpatial<float4> img, T
             "{result}"
         );
         assert_eq!(
-            extract_cuda_compute_launch_layout(src).unwrap(),
+            extract_cuda_compute_launch_layout(src, &[]).unwrap(),
             vec![
                 CudaLaunchArgKind::SampledTexture {
                     element: "float4".into()
@@ -3033,7 +3161,7 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
 }
 "#;
         assert_eq!(
-            extract_cuda_compute_launch_layout(src).unwrap(),
+            extract_cuda_compute_launch_layout(src, &[]).unwrap(),
             vec![CudaLaunchArgKind::Buffer, CudaLaunchArgKind::Buffer]
         );
     }

@@ -708,9 +708,9 @@ impl CudaBackend {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source)
+        let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source, &defines)
             .map_err(|error| anyhow::anyhow!("CUDA launch layout failed: {error}"))?;
-        let cuda_source = crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source)
+        let cuda_source = crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source, &defines)
             .map_err(|error| anyhow::anyhow!("CUDA shader lowering failed: {error}"))?;
         let workgroup_size = crate::slang::parse_numthreads(&shader.source).unwrap_or([1, 1, 1]);
         let compiled = compiler.compile_bindless_with_reflection_and_defines(
