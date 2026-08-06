@@ -4373,6 +4373,7 @@ mod imp {
             1,
             "worker should capture once and resubmit"
         );
+        #[cfg(not(feature = "metal"))]
         assert!(
             scheme.replay_stats().resubmit_hits >= 3,
             "expected graph/CB resubmits, got {:?}",

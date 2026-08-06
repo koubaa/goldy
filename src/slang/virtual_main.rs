@@ -698,7 +698,7 @@ impl CudaLaunchArgKind {
 ///
 /// Indexed in author order among `DirectSpatial<*>` parameters only (not all
 /// launch-layout slots). Identity keeps size-matched raw surfaces; `Float4Rgba8Unorm`
-/// rewrites `DirectSpatial<float4>` through [`DirectSpatialFloat4Rgba8View`].
+/// rewrites `DirectSpatial<float4>` through `DirectSpatialFloat4Rgba8View`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CudaStorageTextureSpec {
     /// Raw `DirectSpatial<T>` ↔ size-matched texture format.
