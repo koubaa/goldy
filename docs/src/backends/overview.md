@@ -227,9 +227,11 @@ Texture notes for CUDA:
 
 - Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`,
   `Rgba16Float`, `Rgba32Float`. **BGRA is rejected** (no matching CUDA array swizzle).
-- Writable shader access (`DirectSpatial<T>`) requires a **size-matched** element↔format
-  pair (CUDA surfaces have no typed-UAV conversion):
-  - `DirectSpatial<float4>` ↔ `Rgba32Float`
+- Writable shader access (`DirectSpatial<T>`) supports size-matched pairs and Goldy’s
+  typed-UAV emulation for convertible pairs:
+  - `DirectSpatial<float4>` ↔ `Rgba32Float` (identity surface store)
+  - `DirectSpatial<float4>` ↔ `Rgba8Unorm` (lazy PTX specialization: pack/unpack view over
+    `uint8_t4`, DX12-style `round(saturate(x)*255)` on store)
   - `DirectSpatial<half4>` ↔ `Rgba16Float`
   - `DirectSpatial<uint8_t4>` ↔ `Rgba8Unorm` (Slang has no `uchar4` alias)
   - Upload/copy/readback of other supported sampled formats still works.

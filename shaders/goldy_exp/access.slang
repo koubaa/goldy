@@ -130,6 +130,54 @@ public struct ByteAddressView {
 };
 #endif
 
+#if defined(__CUDA__)
+/// CUDA typed-UAV emulation: logical `float4` load/store over an `Rgba8Unorm` surface.
+///
+/// CUDA `CUsurfObject` writes are raw typed stores (no DX12-style UNORM conversion).
+/// Goldy specialization rewrites `DirectSpatial<float4>` bindings to this view when the
+/// bound texture is `Rgba8Unorm`, packing/unpacking through `RWTexture2D<uint8_t4>`.
+public struct DirectSpatialFloat4Rgba8View {
+    RWTexture2D<uint8_t4> _raw;
+
+    [ForceInline]
+    public __init(RWTexture2D<uint8_t4> raw) { _raw = raw; }
+
+    [ForceInline]
+    public void GetDimensions(out uint width, out uint height) {
+        _raw.GetDimensions(width, height);
+    }
+
+    public __subscript(int2 p) -> float4
+    {
+        [ForceInline]
+        get
+        {
+            uint8_t4 u = _raw[p];
+            return float4(float(u.x), float(u.y), float(u.z), float(u.w)) * (1.0 / 255.0);
+        }
+        [ForceInline]
+        set(float4 v)
+        {
+            float4 s = saturate(v);
+            uint8_t4 u;
+            u.x = uint8_t(round(s.x * 255.0));
+            u.y = uint8_t(round(s.y * 255.0));
+            u.z = uint8_t(round(s.z * 255.0));
+            u.w = uint8_t(round(s.w * 255.0));
+            _raw[p] = u;
+        }
+    }
+
+    public __subscript(uint2 p) -> float4
+    {
+        [ForceInline]
+        get { return this[int2(int(p.x), int(p.y))]; }
+        [ForceInline]
+        set(float4 v) { this[int2(int(p.x), int(p.y))] = v; }
+    }
+};
+#endif
+
 // =============================================================================
 // Frame-table protocol (record/execute index routing)
 //

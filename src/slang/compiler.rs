@@ -2021,3 +2021,53 @@ mod uniform_entry_point_param_binding_tests {
         );
     }
 }
+
+/// Spike: CUDA `DirectSpatialFloat4Rgba8View` `__subscript` must compile through NVRTC.
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_direct_spatial_rgba8_view_tests {
+    use super::*;
+
+    fn shader_path() -> String {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("shaders").to_string_lossy().into_owned()
+    }
+
+    const RGBA8_VIEW_SHADER: &str = r#"
+        import goldy_exp;
+
+        [shader("compute")]
+        [numthreads(8, 8, 1)]
+        void cs_main(uniform RWTexture2D<uint8_t4> raw, uint3 id : SV_DispatchThreadID) {
+            DirectSpatialFloat4Rgba8View view = DirectSpatialFloat4Rgba8View(raw);
+            uint2 dims;
+            view.GetDimensions(dims.x, dims.y);
+            if (id.x < dims.x && id.y < dims.y) {
+                float4 v = view[int2(id.xy)];
+                view[uint2(id.xy)] = v + float4(0.1, 0.0, 0.0, 0.0);
+                view[int2(id.xy)] = float4(1.0, 0.0, 0.0, 1.0);
+            }
+        }
+    "#;
+
+    #[test]
+    fn rgba8_view_subscript_compiles_ptx() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let transformed = crate::slang::virtual_main::transform_virtual_main_cuda_compute(RGBA8_VIEW_SHADER, &[])
+            .unwrap_or_else(|_| RGBA8_VIEW_SHADER.to_string());
+        // Plain shader (no [goldy_compute]) passes through unchanged.
+        let output = compiler
+            .compile_bindless_with_reflection_and_defines(
+                &transformed,
+                ShaderTarget::Ptx,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("CUDA PTX compilation failed for DirectSpatialFloat4Rgba8View subscript");
+        let ptx = output.shader.as_str().expect("PTX text");
+        assert!(!ptx.is_empty(), "PTX output is empty");
+    }
+}

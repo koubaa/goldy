@@ -72,15 +72,17 @@ pub(super) fn format_info(format: TextureFormat) -> Result<CudaFormatInfo> {
     Ok(info)
 }
 
-/// True when a `DirectSpatial<{element}>` shader parameter can write `format`.
+/// True when a `DirectSpatial<{element}>` shader parameter can write `format`
+/// with a **size-matched** raw CUDA surface store (no format conversion).
 ///
-/// CUDA surface stores are raw typed writes (no DX12-style typed UAV conversion),
-/// so the element type byte size must match the texture format:
 /// - `float4` ↔ [`TextureFormat::Rgba32Float`] (16 bytes)
 /// - `half4` ↔ [`TextureFormat::Rgba16Float`] (8 bytes)
 /// - `uint8_t4` / `vector<uint8_t, 4>` ↔ [`TextureFormat::Rgba8Unorm`] (4 bytes)
 ///
 /// Slang does not define CUDA's `uchar4` alias; use `uint8_t4`.
+///
+/// For `float4` + `Rgba8Unorm`, use [`storage_shader_convertible`] — Goldy emits a
+/// specialized pack/unpack surface view rather than a raw size-matched store.
 pub(super) fn storage_shader_compatible(element: &str, format: TextureFormat) -> bool {
     let element = element.trim();
     matches!(
@@ -91,6 +93,15 @@ pub(super) fn storage_shader_compatible(element: &str, format: TextureFormat) ->
             | ("vector<uint8_t, 4>", TextureFormat::Rgba8Unorm)
             | ("vector<uint8_t,4>", TextureFormat::Rgba8Unorm)
     )
+}
+
+/// True when Goldy can launch a CUDA kernel that accesses `format` as `DirectSpatial<{element}>`.
+///
+/// Includes size-matched pairs and convertible pairs that use a specialized PTX view
+/// (`float4` ↔ `Rgba8Unorm` via pack/unpack).
+pub(super) fn storage_shader_convertible(element: &str, format: TextureFormat) -> bool {
+    storage_shader_compatible(element, format)
+        || matches!((element.trim(), format), ("float4", TextureFormat::Rgba8Unorm))
 }
 
 /// Sampler configuration CUDA can represent in a single texture object.
@@ -743,13 +754,22 @@ mod tests {
             "vector<uint8_t, 4>",
             TextureFormat::Rgba8Unorm
         ));
-        // Mismatched sizes / types must stay rejected (no typed UAV conversion).
+        // Mismatched sizes stay rejected for raw stores (conversion uses specialized PTX).
         assert!(!storage_shader_compatible("float4", TextureFormat::Rgba8Unorm));
         assert!(!storage_shader_compatible("float4", TextureFormat::Rgba16Float));
         assert!(!storage_shader_compatible("half4", TextureFormat::Rgba32Float));
         assert!(!storage_shader_compatible("uint8_t4", TextureFormat::Rgba32Float));
         assert!(!storage_shader_compatible("uchar4", TextureFormat::Rgba8Unorm));
         assert!(!storage_shader_compatible("float", TextureFormat::Rgba32Float));
+    }
+
+    #[test]
+    fn storage_convertible_allows_float4_rgba8() {
+        assert!(storage_shader_convertible("float4", TextureFormat::Rgba32Float));
+        assert!(storage_shader_convertible("float4", TextureFormat::Rgba8Unorm));
+        assert!(!storage_shader_convertible("float4", TextureFormat::Rgba16Float));
+        assert!(!storage_shader_convertible("uint8_t4", TextureFormat::Rgba32Float));
+        assert!(!storage_shader_convertible("half4", TextureFormat::Rgba8Unorm));
     }
 
     #[test]
