@@ -2326,10 +2326,10 @@ impl CudaBackend {
         } else {
             scratch_images.to_vec()
         };
-        // Signal the companion fence when:
-        // - CUDA wrote surface scratch (present), or
-        // - CUDA wrote a Shared-primary buffer (imported D3D12 memory; IA reads it).
-        // Native+twin writes do NOT signal here — twin DtoD in raster owns that fence.
+        // Signal the companion fence when CUDA wrote surface scratch (present).
+        // Deposit-only Shared-primary writes (e.g. solid_cube upload scheme) do not
+        // publish a CUDA→DX12 fence — raster syncs alloc_stream before IA instead
+        // (see SharedBufferBacking::pending_host_sync in dx12_interop.rs).
         self.bump_content_epochs_for_native_twin_writes(ops);
         let shared_primaries = self.shared_primary_memories_written_by_ops(ops);
 
@@ -2344,6 +2344,7 @@ impl CudaBackend {
                 .as_ref()
                 .context("CUDA/DX12: interop submit missing companion")?,
         );
+        let worker = Arc::clone(&self.device(device_handle)?.submission_worker);
         let mut waits = Vec::new();
         for (surface_handle, image_index) in &touched {
             let slot = self
@@ -2369,6 +2370,9 @@ impl CudaBackend {
             ia_wait = ia_wait.max(shared.last_dx12_ia_fence.load(Ordering::Acquire));
         }
         if ia_wait > 0 {
+            worker
+                .flush()
+                .context("CUDA/DX12: flush worker before IA cpu_wait")?;
             companion
                 .cpu_wait(ia_wait)
                 .context("CUDA/DX12: wait IA fence before Shared buffer rewrite")?;
@@ -2378,10 +2382,15 @@ impl CudaBackend {
             *ops = waits;
         }
 
-        // Scratch present and Shared-primary buffer writes both need a CUDA→DX12 fence
-        // Signal so the DIRECT queue can Wait before reading imported memory. Publishing
-        // `last_cuda_fence` before the worker runs is safe as long as DX12 always
-        // `wait_queue`s that value before Signal'ing past it (see refresh_shared_vertex_backing).
+        if touched.is_empty() {
+            // Deposit-only: copy ops stay in `ops`; raster prologue syncs alloc_stream.
+            return Ok(());
+        }
+
+        // Scratch present needs a CUDA→DX12 fence Signal so the DIRECT queue can Wait
+        // before reading imported scratch. Publishing `last_cuda_fence` before the
+        // worker runs is safe as long as DX12 always `wait_queue`s that value before
+        // Signal'ing past it (see refresh_shared_vertex_backing).
         let cuda_complete = companion.next_fence_value();
         ops.push(CudaOp::SignalExternalFence {
             cuda_ctx: Arc::clone(&companion.cuda_ctx),
