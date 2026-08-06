@@ -823,9 +823,7 @@ impl CudaBackend {
                     formats.push(tex.format);
                     index_i += 1;
                 }
-                CudaLaunchArgKind::Buffer
-                | CudaLaunchArgKind::SampledTexture { .. }
-                | CudaLaunchArgKind::Sampler => {
+                CudaLaunchArgKind::Buffer | CudaLaunchArgKind::SampledTexture { .. } | CudaLaunchArgKind::Sampler => {
                     index_i += 1;
                 }
                 CudaLaunchArgKind::Scalar => {}
@@ -2517,9 +2515,7 @@ impl CudaBackend {
             ia_wait = ia_wait.max(shared.last_dx12_ia_fence.load(Ordering::Acquire));
         }
         if ia_wait > 0 {
-            worker
-                .flush()
-                .context("CUDA/DX12: flush worker before IA cpu_wait")?;
+            worker.flush().context("CUDA/DX12: flush worker before IA cpu_wait")?;
             companion
                 .cpu_wait(ia_wait)
                 .context("CUDA/DX12: wait IA fence before Shared buffer rewrite")?;
@@ -4486,18 +4482,14 @@ impl GpuBackend for CudaBackend {
                         }
                     }
                     let retire_at = submission_worker::submission_horizon(&device.next_timeline);
-                    device
-                        .deletion_queue
-                        .lock()
-                        .unwrap()
-                        .push(CudaDeferredDrop::Texture {
-                            retire_at,
-                            resource,
-                            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                            import,
-                            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                            d3d12_resource,
-                        });
+                    device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Texture {
+                        retire_at,
+                        resource,
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        import,
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        d3d12_resource,
+                    });
                     return;
                 }
             }

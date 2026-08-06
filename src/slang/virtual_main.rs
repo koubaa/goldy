@@ -891,10 +891,7 @@ fn cuda_scalar_init_expr(ty: &str, word: &str) -> Result<String, String> {
 ///
 /// `#ifdef` parameter blocks are resolved against `defines` so MSAA fine variants
 /// get a concrete CUDA launch signature matching the Slang preprocessor view.
-pub fn transform_virtual_main_cuda_compute(
-    source: &str,
-    defines: &[(&str, &str)],
-) -> Result<String, String> {
+pub fn transform_virtual_main_cuda_compute(source: &str, defines: &[(&str, &str)]) -> Result<String, String> {
     transform_virtual_main_cuda_compute_specialized(source, defines, &[])
 }
 
@@ -959,10 +956,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
                         // CUDA/NVRTC has no RWByteAddressBuffer.Store; bind as
                         // Scattered<uint> and wrap into ByteAddressView.
                         signature.push(format!("uniform Scattered<uint> {global}"));
-                        body.push_str(&format!(
-                            "    ByteAddress {} = ByteAddress({});\n",
-                            param.name, global
-                        ));
+                        body.push_str(&format!("    ByteAddress {} = ByteAddress({});\n", param.name, global));
                         call_args.push(param.name.clone());
                     } else if ty.starts_with("DirectSpatial<") {
                         let spec = if storage_specs.is_empty() {
@@ -1116,9 +1110,7 @@ fn rewrite_cuda_user_direct_spatial_param(
         i += 1;
     }
     if depth != 0 {
-        return Err(format!(
-            "CUDA specialization: could not parse signature of `{user_fn}`"
-        ));
+        return Err(format!("CUDA specialization: could not parse signature of `{user_fn}`"));
     }
     let sig_end = i - 1;
     let old_pat = format!("DirectSpatial<float4> {param_name}");
@@ -3132,10 +3124,7 @@ void cs_main(ByteAddress path_bboxes, ThreadId id) {
             result.contains("ByteAddress path_bboxes = ByteAddress(_goldy_cuda_binding_0);"),
             "wrapper must construct ByteAddressView: {result}"
         );
-        assert!(
-            result.contains("_goldy_user_cs_main(path_bboxes, id)"),
-            "{result}"
-        );
+        assert!(result.contains("_goldy_user_cs_main(path_bboxes, id)"), "{result}");
         assert_eq!(
             extract_cuda_compute_launch_layout(src, &[]).unwrap(),
             vec![CudaLaunchArgKind::Buffer]
@@ -3355,26 +3344,19 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
 }
 "#;
-        let result = transform_virtual_main_cuda_compute_specialized(
-            src,
-            &[],
-            &[CudaStorageTextureSpec::Float4Rgba8Unorm],
-        )
-        .unwrap();
+        let result =
+            transform_virtual_main_cuda_compute_specialized(src, &[], &[CudaStorageTextureSpec::Float4Rgba8Unorm])
+                .unwrap();
         assert!(
             result.contains("uniform RWTexture2D<uint8_t4> _goldy_cuda_binding_0"),
             "{result}"
         );
         assert!(
-            result.contains(
-                "DirectSpatialFloat4Rgba8View output = DirectSpatialFloat4Rgba8View(_goldy_cuda_binding_0);"
-            ),
+            result
+                .contains("DirectSpatialFloat4Rgba8View output = DirectSpatialFloat4Rgba8View(_goldy_cuda_binding_0);"),
             "{result}"
         );
-        assert!(
-            result.contains("_goldy_user_cs_main(output, id)"),
-            "{result}"
-        );
+        assert!(result.contains("_goldy_user_cs_main(output, id)"), "{result}");
         assert!(
             result.contains("void _goldy_user_cs_main(DirectSpatialFloat4Rgba8View output, ThreadId id)"),
             "user fn must index the view type: {result}"
@@ -3410,39 +3392,28 @@ void cs_main(DirectSpatial<float4> output,
             ],
         )
         .unwrap();
-        let user_sig_start = result
-            .find("void _goldy_user_cs_main(")
-            .expect("renamed user fn");
+        let user_sig_start = result.find("void _goldy_user_cs_main(").expect("renamed user fn");
         let user_sig = &result[user_sig_start..];
         assert_eq!(
             user_sig.matches("DirectSpatialFloat4Rgba8View filter_tex0").count(),
             2,
             "both #ifdef branches must be rewritten: {user_sig}"
         );
-        assert!(
-            !user_sig.contains("DirectSpatial<float4> filter_tex0"),
-            "{user_sig}"
-        );
+        assert!(!user_sig.contains("DirectSpatial<float4> filter_tex0"), "{user_sig}");
     }
 
     #[test]
     fn cuda_storage_spec_from_element_and_format() {
         use crate::types::TextureFormat;
         assert_eq!(
-            CudaStorageTextureSpec::from_element_and_format("float4", TextureFormat::Rgba32Float)
-                .unwrap(),
+            CudaStorageTextureSpec::from_element_and_format("float4", TextureFormat::Rgba32Float).unwrap(),
             CudaStorageTextureSpec::Identity
         );
         assert_eq!(
-            CudaStorageTextureSpec::from_element_and_format("float4", TextureFormat::Rgba8Unorm)
-                .unwrap(),
+            CudaStorageTextureSpec::from_element_and_format("float4", TextureFormat::Rgba8Unorm).unwrap(),
             CudaStorageTextureSpec::Float4Rgba8Unorm
         );
-        assert!(CudaStorageTextureSpec::from_element_and_format(
-            "uint8_t4",
-            TextureFormat::Rgba32Float
-        )
-        .is_err());
+        assert!(CudaStorageTextureSpec::from_element_and_format("uint8_t4", TextureFormat::Rgba32Float).is_err());
     }
 
     #[test]
