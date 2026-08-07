@@ -572,7 +572,9 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
         } else if ty.starts_with("BufRO<") || ty.starts_with("Interpolated<") {
             (ty.to_string(), 't')
         } else if ty.starts_with("DirectSpatial<") {
-            (ty.to_string(), 'u')
+            let logical = cuda_texture_element(ty, "DirectSpatial<")?;
+            let logical_elem = logical.split(',').next().unwrap_or(&logical).trim();
+            (format!("RWTexture2D<{logical_elem}>"), 'u')
         } else if ty == "Filter" {
             (ty.to_string(), 's')
         } else if matches!(param.kind, ParamKind::Broadcast) {
@@ -606,6 +608,10 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
                     generated.push('\n');
                     if matches!(param.kind, ParamKind::Broadcast) {
                         call_args.push(format!("*{global}"));
+                    } else if param.ty.trim().starts_with("DirectSpatial<") {
+                        let ty = param.ty.trim();
+                        body.push_str(&format!("    {ty} {} = {ty}({});\n", param.name, global));
+                        call_args.push(param.name.clone());
                     } else {
                         call_args.push(global);
                     }
@@ -698,19 +704,18 @@ impl CudaLaunchArgKind {
 ///
 /// Indexed in author order among `DirectSpatial<*>` parameters only (not all
 /// launch-layout slots). Identity keeps size-matched raw surfaces; `Float4Rgba8Unorm`
-/// rewrites that entry parameter through [`DirectSpatialFloat4Rgba8View`].
+/// rewrites that entry parameter to `DirectSpatial<float4, uint8_t4>`.
 ///
 /// Specs are applied **per binding**: a single dispatch may mix `Rgba32Float`
-/// (identity) and `Rgba8Unorm` (packed view) `DirectSpatial<float4>` slots.
-/// Helper functions that take `DirectSpatial<float4>` and may receive a packed
-/// view need a matching `DirectSpatialFloat4Rgba8View` overload (see ekrano
-/// `filter_pass.slang`).
+/// (identity `DirectSpatial<float4>`) and `Rgba8Unorm` (`DirectSpatial<float4, uint8_t4>`)
+/// slots. Helpers that take `DirectSpatial<float4>` get a matching
+/// `DirectSpatial<float4, uint8_t4>` overload injected by specialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CudaStorageTextureSpec {
-    /// Raw `DirectSpatial<T>` ↔ size-matched texture format.
+    /// Raw `DirectSpatial<T>` ↔ size-matched texture format (`S = T`).
     #[default]
     Identity,
-    /// `DirectSpatial<float4>` bound to `Rgba8Unorm` → pack/unpack view over `uint8_t4`.
+    /// `DirectSpatial<float4>` bound to `Rgba8Unorm` → `DirectSpatial<float4, uint8_t4>`.
     Float4Rgba8Unorm,
 }
 
@@ -973,28 +978,37 @@ pub fn transform_virtual_main_cuda_compute_specialized(
                             })?
                         };
                         storage_spec_i += 1;
+                        let logical = cuda_texture_element(ty, "DirectSpatial<")?;
+                        // Author `DirectSpatial<T>` may include commas only in nested
+                        // forms; identity uses the first type argument as storage.
+                        let logical_elem = logical.split(',').next().unwrap_or(&logical).trim();
                         match spec {
                             CudaStorageTextureSpec::Identity => {
-                                let param_ty = resource_param_ty(&param)?;
-                                signature.push(format!("uniform {param_ty} {global}"));
-                                call_args.push(global);
+                                // Bind the raw UAV and wrap into DirectSpatial<T>.
+                                signature.push(format!("uniform RWTexture2D<{logical_elem}> {global}"));
+                                body.push_str(&format!(
+                                    "    DirectSpatial<{logical_elem}> {} = DirectSpatial<{logical_elem}>({});\n",
+                                    param.name, global
+                                ));
+                                call_args.push(param.name.clone());
                             }
                             CudaStorageTextureSpec::Float4Rgba8Unorm => {
-                                if ty != "DirectSpatial<float4>" {
+                                if logical_elem != "float4" {
                                     return Err(format!(
                                         "CUDA specialization Float4Rgba8Unorm requires DirectSpatial<float4>, got `{ty}`"
                                     ));
                                 }
+                                let wrapped_ty = "DirectSpatial<float4, uint8_t4>";
                                 signature.push(format!("uniform RWTexture2D<uint8_t4> {global}"));
                                 body.push_str(&format!(
-                                    "    DirectSpatialFloat4Rgba8View {} = DirectSpatialFloat4Rgba8View({});\n",
+                                    "    {wrapped_ty} {} = {wrapped_ty}({});\n",
                                     param.name, global
                                 ));
                                 call_args.push(param.name.clone());
                                 user_param_rewrites.push((
                                     user_fn.clone(),
                                     param.name.clone(),
-                                    "DirectSpatialFloat4Rgba8View".to_string(),
+                                    wrapped_ty.to_string(),
                                 ));
                             }
                         }
@@ -1065,11 +1079,14 @@ pub fn transform_virtual_main_cuda_compute_specialized(
     for entry in entries.iter().rev() {
         apply_entry_transforms(&mut modified, entry);
     }
-    // Per-binding: only rewrite packed rgba8 entry params to the view type.
-    // Identity `DirectSpatial<float4>` slots stay as-is so mixed float+unorm
-    // dispatches are valid. Helpers that accept either type need overloads.
+    // Per-binding: only rewrite packed rgba8 entry params to DirectSpatial<float4, uint8_t4>.
+    // Identity DirectSpatial<float4> slots stay as-is so mixed float+unorm dispatches work.
+    let needs_packed_helper_overloads = !user_param_rewrites.is_empty();
     for (user_fn, param_name, new_ty) in &user_param_rewrites {
         rewrite_cuda_user_direct_spatial_param(&mut modified, user_fn, param_name, new_ty)?;
+    }
+    if needs_packed_helper_overloads {
+        inject_direct_spatial_float4_packed_overloads(&mut modified)?;
     }
     Ok(generated + "#line 1\n" + &modified)
 }
@@ -1115,6 +1132,164 @@ fn rewrite_cuda_user_direct_spatial_param(
     let rewritten = sig.replace(&old_pat, &new_pat);
     source.replace_range(sig_start..sig_end, &rewritten);
     Ok(())
+}
+
+/// Clone free helpers that take `DirectSpatial<float4>` so packed
+/// `DirectSpatial<float4, uint8_t4>` call sites type-check without author changes.
+///
+/// Skips Goldy-generated `_goldy_*` symbols. Each matching function body is duplicated
+/// with `DirectSpatial<float4>` → `DirectSpatial<float4, uint8_t4>` in the signature and body
+/// parameter types (body uses the same identifiers; only the signature types change).
+fn inject_direct_spatial_float4_packed_overloads(source: &mut String) -> Result<(), String> {
+    const IDENTITY: &str = "DirectSpatial<float4>";
+    const PACKED: &str = "DirectSpatial<float4, uint8_t4>";
+
+    // Collect unique function spans that need an overload.
+    let mut fn_spans: Vec<(usize, usize)> = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = source[search_from..].find(IDENTITY) {
+        let at = search_from + rel;
+        // Skip already-packed forms (`DirectSpatial<float4, …>`).
+        let after = at + IDENTITY.len();
+        if source.as_bytes().get(after) == Some(&b',') {
+            search_from = after;
+            continue;
+        }
+        let Some((fn_start, fn_end)) = find_enclosing_function_span(source, at) else {
+            search_from = after;
+            continue;
+        };
+        let header = &source[fn_start..at];
+        // Skip Goldy-generated entry wrappers / renamed user mains.
+        if header.contains("_goldy_") {
+            search_from = after;
+            continue;
+        }
+        // Only parameter-list occurrences (roughly: still inside `(`…`)` before `{`).
+        if !fn_param_list_contains_offset(source, fn_start, at) {
+            search_from = after;
+            continue;
+        }
+        if !fn_spans.iter().any(|&(s, e)| s == fn_start && e == fn_end) {
+            fn_spans.push((fn_start, fn_end));
+        }
+        search_from = after;
+    }
+
+    if fn_spans.is_empty() {
+        return Ok(());
+    }
+
+    // Insert overloads after each original, back-to-front so earlier offsets stay valid.
+    fn_spans.sort_by_key(|(s, _)| *s);
+    for &(fn_start, fn_end) in fn_spans.iter().rev() {
+        let original = source[fn_start..fn_end].to_string();
+        if original.contains(PACKED) {
+            continue;
+        }
+        let overload = original.replace(IDENTITY, PACKED);
+        if overload == original {
+            continue;
+        }
+        let insertion = format!("\n\n// [goldy] DirectSpatial<float4, uint8_t4> overload\n{overload}");
+        source.insert_str(fn_end, &insertion);
+    }
+    Ok(())
+}
+
+/// Best-effort: walk left from `pos` to a line that looks like a function declarator,
+/// then scan braces to the matching close.
+fn find_enclosing_function_span(source: &str, pos: usize) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    // Walk left to the start of the statement / previous closing brace.
+    let mut i = pos;
+    while i > 0 {
+        // Prefer starting at a newline followed by a type-ish token (not indented comment only).
+        if bytes[i - 1] == b'\n' {
+            let line_start = i;
+            let line_end = source[line_start..]
+                .find('\n')
+                .map(|n| line_start + n)
+                .unwrap_or(source.len());
+            let line = source[line_start..line_end].trim_start();
+            if line.starts_with("//") || line.starts_with('#') || line.is_empty() {
+                i -= 1;
+                continue;
+            }
+            // Function defs typically contain `(` before `{` on this or following lines.
+            if let Some(brace_rel) = source[line_start..].find('{') {
+                let brace = line_start + brace_rel;
+                if brace > pos {
+                    // `{` is after our DirectSpatial — good candidate if `(` is between line_start and brace
+                    // and DirectSpatial is between `(` and `)`.
+                    if let Some(paren_rel) = source[line_start..brace].find('(') {
+                        let paren = line_start + paren_rel;
+                        if paren < pos && pos < brace {
+                            let end = match_brace(source, brace)?;
+                            return Some((line_start, end));
+                        }
+                    }
+                }
+            }
+        }
+        i -= 1;
+        // Bound search: don't walk endlessly through a huge file for one hit.
+        if pos - i > 4000 {
+            break;
+        }
+    }
+    None
+}
+
+fn match_brace(source: &str, open_brace: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(open_brace) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut i = open_brace;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn fn_param_list_contains_offset(source: &str, fn_start: usize, offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    let Some(paren_rel) = source[fn_start..].find('(') else {
+        return false;
+    };
+    let paren = fn_start + paren_rel;
+    if offset < paren {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut i = paren;
+    while i < bytes.len() && i <= offset {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i >= offset;
+                }
+            }
+            b'{' if depth == 1 => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+    depth > 0
 }
 
 /// Slang translation-unit source after the optional virtual-main rewrite.
@@ -3141,7 +3316,7 @@ void cs_main(Scattered<uint> base,
         let area = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         let area_wrapper = area.split("#line 1").next().unwrap();
         assert!(
-            area_wrapper.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_1"),
+            area_wrapper.contains("uniform RWTexture2D<float4> _goldy_cuda_binding_1"),
             "area path should take else branch: {area_wrapper}"
         );
         assert!(
@@ -3165,7 +3340,7 @@ void cs_main(Scattered<uint> base,
             "msaa path should take then branch: {msaa_wrapper}"
         );
         assert!(
-            msaa_wrapper.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_2"),
+            msaa_wrapper.contains("uniform RWTexture2D<float4> _goldy_cuda_binding_2"),
             "msaa path keeps filter_tex0 after mask_lut: {msaa_wrapper}"
         );
         assert_eq!(
@@ -3308,7 +3483,7 @@ void cs_main(Interpolated<float4> tex, Filter samp, DirectSpatial<float4> img, T
         );
         assert!(result.contains("uniform Filter _goldy_cuda_binding_1"), "{result}");
         assert!(
-            result.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_2"),
+            result.contains("uniform RWTexture2D<float4> _goldy_cuda_binding_2"),
             "{result}"
         );
         assert_eq!(
@@ -3343,14 +3518,15 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
             "{result}"
         );
         assert!(
-            result
-                .contains("DirectSpatialFloat4Rgba8View output = DirectSpatialFloat4Rgba8View(_goldy_cuda_binding_0);"),
+            result.contains(
+                "DirectSpatial<float4, uint8_t4> output = DirectSpatial<float4, uint8_t4>(_goldy_cuda_binding_0);"
+            ),
             "{result}"
         );
         assert!(result.contains("_goldy_user_cs_main(output, id)"), "{result}");
         assert!(
-            result.contains("void _goldy_user_cs_main(DirectSpatialFloat4Rgba8View output, ThreadId id)"),
-            "user fn must index the view type: {result}"
+            result.contains("void _goldy_user_cs_main(DirectSpatial<float4, uint8_t4> output, ThreadId id)"),
+            "user fn must index the packed DirectSpatial: {result}"
         );
         assert!(
             !result.contains("void _goldy_user_cs_main(DirectSpatial<float4> output"),
@@ -3386,13 +3562,13 @@ void cs_main(DirectSpatial<float4> output,
         let user_sig_start = result.find("void _goldy_user_cs_main(").expect("renamed user fn");
         let user_sig = &result[user_sig_start..];
         assert_eq!(
-            user_sig.matches("DirectSpatialFloat4Rgba8View filter_tex0").count(),
+            user_sig.matches("DirectSpatial<float4, uint8_t4> filter_tex0").count(),
             2,
             "both #ifdef branches must be rewritten: {user_sig}"
         );
         assert!(!user_sig.contains("DirectSpatial<float4> filter_tex0"), "{user_sig}");
         assert!(
-            user_sig.contains("DirectSpatialFloat4Rgba8View output"),
+            user_sig.contains("DirectSpatial<float4, uint8_t4> output"),
             "output entry param must be rewritten per-binding: {user_sig}"
         );
     }
@@ -3401,12 +3577,16 @@ void cs_main(DirectSpatial<float4> output,
     fn cuda_compute_mixed_float4_identity_and_rgba8_per_binding() {
         let src = r#"import goldy_exp;
 
+float4 sample_tex(DirectSpatial<float4> tex, int2 p) {
+    return tex[p];
+}
+
 [goldy_compute]
 [numthreads(1, 1, 1)]
 void cs_main(DirectSpatial<float4> output,
              DirectSpatial<float4> filter_tex0,
              ThreadId id) {
-    output[int2(0, 0)] = filter_tex0[int2(0, 0)];
+    output[int2(0, 0)] = sample_tex(filter_tex0, int2(0, 0));
 }
 "#;
         let result = transform_virtual_main_cuda_compute_specialized(
@@ -3420,8 +3600,14 @@ void cs_main(DirectSpatial<float4> output,
         .expect("mixed float + rgba8 DirectSpatial specs must specialize per binding");
 
         assert!(
-            result.contains("uniform DirectSpatial<float4> _goldy_cuda_binding_0"),
-            "identity (float) slot stays DirectSpatial: {result}"
+            result.contains("uniform RWTexture2D<float4> _goldy_cuda_binding_0"),
+            "identity (float) slot binds raw float4 UAV: {result}"
+        );
+        assert!(
+            result.contains(
+                "DirectSpatial<float4> output = DirectSpatial<float4>(_goldy_cuda_binding_0);"
+            ),
+            "identity wraps DirectSpatial<float4>: {result}"
         );
         assert!(
             result.contains("uniform RWTexture2D<uint8_t4> _goldy_cuda_binding_1"),
@@ -3429,9 +3615,9 @@ void cs_main(DirectSpatial<float4> output,
         );
         assert!(
             result.contains(
-                "DirectSpatialFloat4Rgba8View filter_tex0 = DirectSpatialFloat4Rgba8View(_goldy_cuda_binding_1);"
+                "DirectSpatial<float4, uint8_t4> filter_tex0 = DirectSpatial<float4, uint8_t4>(_goldy_cuda_binding_1);"
             ),
-            "rgba8 slot wraps view: {result}"
+            "rgba8 slot wraps packed DirectSpatial: {result}"
         );
 
         let user_sig_start = result.find("void _goldy_user_cs_main(").expect("renamed user fn");
@@ -3445,12 +3631,20 @@ void cs_main(DirectSpatial<float4> output,
             "identity entry param unchanged: {user_sig}"
         );
         assert!(
-            user_sig.contains("DirectSpatialFloat4Rgba8View filter_tex0"),
+            user_sig.contains("DirectSpatial<float4, uint8_t4> filter_tex0"),
             "packed entry param rewritten: {user_sig}"
         );
         assert!(
-            !user_sig.contains("DirectSpatialFloat4Rgba8View output"),
+            !user_sig.contains("DirectSpatial<float4, uint8_t4> output"),
             "must not globally rewrite identity slots: {user_sig}"
+        );
+        assert!(
+            result.contains("float4 sample_tex(DirectSpatial<float4, uint8_t4> tex, int2 p)"),
+            "helper overload for packed DirectSpatial must be injected: {result}"
+        );
+        assert!(
+            result.contains("float4 sample_tex(DirectSpatial<float4> tex, int2 p)"),
+            "original helper must remain: {result}"
         );
     }
 

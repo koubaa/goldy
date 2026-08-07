@@ -20,7 +20,8 @@
 //     Scattered<T>      = StorageBuffer<T>    data[i], data[i].field = v
 //     BufRO<T>          = ReadOnlyBuffer<T>   data[i]
 //     Interpolated<T>   = Texture2D<T>        tex.Sample(samp, uv)
-//     DirectSpatial<T>  = RWTexture2D<T>      img[int2(x,y)], img.GetDimensions(w,h)
+//     DirectSpatial<T>  = DirectSpatial wrapper over RWTexture2D (defaults S=T)
+//                         img[int2(x,y)], img.GetDimensions(w,h)
 //     ByteAddress       = ByteAddressView     .Load/.Store/.Interlocked*
 //     Filter            = SamplerState        tex.Sample(samp, uv)
 //
@@ -130,26 +131,53 @@ public struct ByteAddressView {
 };
 #endif
 
-#if defined(__CUDA__)
-/// CUDA typed-UAV emulation: logical `float4` load/store over an `Rgba8Unorm` surface.
+/// Read-write 2D texture with a logical element type `T` and physical storage `S`.
 ///
-/// CUDA `CUsurfObject` writes are raw typed stores (no DX12-style UNORM conversion).
-/// Goldy specialization rewrites **per binding**: each `DirectSpatial<float4>` entry
-/// parameter bound to `Rgba8Unorm` becomes this view (packing through
-/// `RWTexture2D<uint8_t4>`), while `Rgba32Float` slots stay `DirectSpatial<float4>`.
-/// Duck-typed with `DirectSpatial<float4>` for `GetDimensions` / `__subscript`; helper
-/// functions that may receive either type need an overload of this view.
-public struct DirectSpatialFloat4Rgba8View {
-    RWTexture2D<uint8_t4> _raw;
+/// Authors write `DirectSpatial<float4>` (defaults `S = T`) for size-matched UAVs.
+/// CUDA may specialize individual bindings to `DirectSpatial<float4, uint8_t4>` when
+/// the bound texture is `Rgba8Unorm` (pack/unpack through storage). Extensions provide
+/// `__subscript` for identity (`S == T`) and the float4↔rgba8 pair.
+///
+/// Helpers that take `DirectSpatial<float4>` keep working for packed bindings because
+/// Goldy's CUDA specialization injects matching `DirectSpatial<float4, uint8_t4>` overloads.
+public struct DirectSpatial<T : ITexelElement, S : ITexelElement = T>
+{
+    RWTexture2D<S> _raw;
 
     [ForceInline]
-    public __init(RWTexture2D<uint8_t4> raw) { _raw = raw; }
+    public __init(RWTexture2D<S> raw) { _raw = raw; }
 
     [ForceInline]
     public void GetDimensions(out uint width, out uint height) {
         _raw.GetDimensions(width, height);
     }
+}
 
+/// Identity storage: logical type matches the UAV element type.
+__generic<T : ITexelElement>
+public extension DirectSpatial<T, T>
+{
+    public __subscript(int2 p) -> T
+    {
+        [ForceInline]
+        get { return _raw[p]; }
+        [ForceInline]
+        set { _raw[p] = newValue; }
+    }
+
+    public __subscript(uint2 p) -> T
+    {
+        [ForceInline]
+        get { return this[int2(int(p.x), int(p.y))]; }
+        [ForceInline]
+        set { this[int2(int(p.x), int(p.y))] = newValue; }
+    }
+}
+
+#if defined(__CUDA__)
+/// CUDA typed-UAV emulation: logical `float4` over an `Rgba8Unorm` `uint8_t4` surface.
+public extension DirectSpatial<float4, uint8_t4>
+{
     public __subscript(int2 p) -> float4
     {
         [ForceInline]
@@ -159,9 +187,9 @@ public struct DirectSpatialFloat4Rgba8View {
             return float4(float(u.x), float(u.y), float(u.z), float(u.w)) * (1.0 / 255.0);
         }
         [ForceInline]
-        set(float4 v)
+        set
         {
-            float4 s = saturate(v);
+            float4 s = saturate(newValue);
             uint8_t4 u;
             u.x = uint8_t(round(s.x * 255.0));
             u.y = uint8_t(round(s.y * 255.0));
@@ -176,9 +204,12 @@ public struct DirectSpatialFloat4Rgba8View {
         [ForceInline]
         get { return this[int2(int(p.x), int(p.y))]; }
         [ForceInline]
-        set(float4 v) { this[int2(int(p.x), int(p.y))] = v; }
+        set { this[int2(int(p.x), int(p.y))] = newValue; }
     }
-};
+}
+
+/// Back-compat name used by older CUDA specialization tests / comments.
+public typealias DirectSpatialFloat4Rgba8View = DirectSpatial<float4, uint8_t4>;
 #endif
 
 // =============================================================================
@@ -253,9 +284,9 @@ public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
     return g_GoldyTextureHeap[slot].asOpaqueDescriptor<Texture2D<T>>();
 }
 
-public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
+public DirectSpatial<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
-    return g_GoldyStorageImageHeap[slot].asOpaqueDescriptor<RWTexture2D<T>>();
+    return DirectSpatial<T>(g_GoldyStorageImageHeap[slot].asOpaqueDescriptor<RWTexture2D<T>>());
 }
 
 public SamplerState goldy_filter(uint slot)
@@ -304,11 +335,11 @@ public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
     return *handle;
 }
 
-public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
+public DirectSpatial<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
     DescriptorHandle<RWTexture2D<T>> handle;
     handle = DescriptorHandle<RWTexture2D<T>>(uint2(slot, 0));
-    return *handle;
+    return DirectSpatial<T>(*handle);
 }
 
 public SamplerState goldy_filter(uint slot)
@@ -359,9 +390,9 @@ public Texture2D<T> goldy_interpolated<T : ITexelElement>(uint slot)
     return reinterpret<Texture2D<T>>(gGoldy.textures[slot]);
 }
 
-public RWTexture2D<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
+public DirectSpatial<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 {
-    return reinterpret<RWTexture2D<T>>(gGoldy.storageImages[slot]);
+    return DirectSpatial<T>(reinterpret<RWTexture2D<T>>(gGoldy.storageImages[slot]));
 }
 
 public SamplerState goldy_filter(uint slot)
@@ -409,9 +440,7 @@ public typealias BufRO<T> = ReadOnlyBuffer<T>;
 /// Use all native Texture2D methods: `.Sample(samp, uv)`, `.Load(loc)`, etc.
 public typealias Interpolated<T : ITexelElement> = Texture2D<T>;
 
-/// Read-write 2D texture (= RWTexture2D<T>).
-/// Use all native methods: `img[int2(x,y)]`, `img.GetDimensions(w,h)`, etc.
-public typealias DirectSpatial<T : ITexelElement> = RWTexture2D<T>;
+// DirectSpatial<T[, S]> is defined above (before bindless helpers).
 
 /// Byte-address buffer (= ByteAddressView).
 /// SPIRV/DX12: native `RWByteAddressBuffer`. Metal/CUDA: uint-storage wrapper.

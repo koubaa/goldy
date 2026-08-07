@@ -2022,7 +2022,7 @@ mod uniform_entry_point_param_binding_tests {
     }
 }
 
-/// Spike: CUDA `DirectSpatialFloat4Rgba8View` `__subscript` must compile through NVRTC.
+/// Spike: CUDA `DirectSpatial<float4, uint8_t4>` `__subscript` must compile through NVRTC.
 #[cfg(all(test, feature = "cuda"))]
 mod cuda_direct_spatial_rgba8_view_tests {
     use super::*;
@@ -2038,7 +2038,7 @@ mod cuda_direct_spatial_rgba8_view_tests {
         [shader("compute")]
         [numthreads(8, 8, 1)]
         void cs_main(uniform RWTexture2D<uint8_t4> raw, uint3 id : SV_DispatchThreadID) {
-            DirectSpatialFloat4Rgba8View view = DirectSpatialFloat4Rgba8View(raw);
+            DirectSpatial<float4, uint8_t4> view = DirectSpatial<float4, uint8_t4>(raw);
             uint2 dims;
             view.GetDimensions(dims.x, dims.y);
             if (id.x < dims.x && id.y < dims.y) {
@@ -2066,7 +2066,7 @@ mod cuda_direct_spatial_rgba8_view_tests {
                 &[],
                 OptimizationLevel::None,
             )
-            .expect("CUDA PTX compilation failed for DirectSpatialFloat4Rgba8View subscript");
+            .expect("CUDA PTX compilation failed for DirectSpatial<float4, uint8_t4> subscript");
         let ptx = output.shader.as_str().expect("PTX text");
         assert!(!ptx.is_empty(), "PTX output is empty");
     }
