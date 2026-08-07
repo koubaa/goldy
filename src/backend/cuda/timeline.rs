@@ -114,9 +114,11 @@ pub(super) fn poll_retire_events(
         }
     }
 
-    let prev = context_completed.load(Ordering::Acquire);
-    if ctx_max > prev {
-        context_completed.store(ctx_max, Ordering::Release);
+    // Monotonic: concurrent pollers (worker + fence thread) must not clobber a
+    // higher completed watermark with a stale snapshot. After prune, the ledger
+    // no longer retains older complete entries to rediscover.
+    if ctx_max > 0 {
+        context_completed.fetch_max(ctx_max, Ordering::AcqRel);
     }
 
     let mut last = last_emitted.load(Ordering::Acquire);
@@ -128,6 +130,8 @@ pub(super) fn poll_retire_events(
     }
 
     advance_device_retired(ledger, device_retired);
+    // Drop completed prefix so `poll_retire_events` stays O(in-flight), not O(session).
+    prune_retired_entries(ledger, device_retired);
 }
 
 /// Device retired value is the longest contiguous prefix of recorded+complete events.
@@ -149,6 +153,50 @@ pub(super) fn advance_device_retired(ledger: &EventLedger, device_retired: &Atom
         }
         let _ = device_retired.compare_exchange(next - 1, next, Ordering::AcqRel, Ordering::Acquire);
     }
+}
+
+/// Remove ledger entries at or below the device retirement floor.
+///
+/// Callers that resolve waits must treat a missing entry with
+/// `value <= device_retired` as already complete (see [`completion_for_wait`]).
+pub(super) fn prune_retired_entries(ledger: &EventLedger, device_retired: &AtomicU64) {
+    let retired = device_retired.load(Ordering::Acquire);
+    if retired == 0 {
+        return;
+    }
+    let mut guard = ledger.lock().unwrap();
+    if guard.is_empty() {
+        return;
+    }
+    // `split_off(retired + 1)` keeps keys >= retired+1; assign back and drop the prefix.
+    let keep = guard.split_off(&(retired + 1));
+    *guard = keep;
+}
+
+/// Result of resolving a timeline wait against the event ledger.
+pub(super) enum WaitCompletion {
+    /// Live completion marker; caller must wait.
+    Pending(LedgerCompletion),
+    /// Value is already at or below `device_retired` (entry may have been pruned).
+    AlreadyComplete,
+    /// Not submitted / unknown — caller decides (bail vs absent wait).
+    Missing,
+}
+
+/// Look up a wait target, accounting for pruned retired ledger entries.
+pub(super) fn completion_for_wait(
+    ledger: &EventLedger,
+    device_retired: &AtomicU64,
+    context: ContextHandle,
+    value: u64,
+) -> WaitCompletion {
+    if let Some(completion) = lookup_completion(ledger, context, value) {
+        return WaitCompletion::Pending(completion);
+    }
+    if value > 0 && value <= device_retired.load(Ordering::Acquire) {
+        return WaitCompletion::AlreadyComplete;
+    }
+    WaitCompletion::Missing
 }
 
 #[allow(dead_code)]

@@ -283,7 +283,11 @@ impl ContextGpuProgress for CudaProgress {
             &self.context.signal_queue,
             &self.context.last_emitted,
         );
-        self.context.completed.load(Ordering::Acquire)
+        let completed = self.context.completed.load(Ordering::Acquire);
+        let retired = self.context.device_retired.load(Ordering::Acquire);
+        // Device-contiguous retirement covers pruned entries this context may have
+        // already lost from `completed` due to a racing poller snapshot.
+        completed.max(retired)
     }
 }
 
@@ -2752,11 +2756,15 @@ impl CudaBackend {
             return Ok(true);
         }
         let device_handle = self.context(ctx)?.device;
-        let ledger = &self.device(device_handle)?.event_ledger;
+        let device = self.device(device_handle)?;
+        let ledger = &device.event_ledger;
+        let retired = &device.retired;
         for epoch in &sync.waits {
-            match timeline::lookup_completion(ledger, epoch.context, epoch.value) {
-                Some(LedgerCompletion::Dx12Fence { .. }) => {}
-                Some(LedgerCompletion::CudaEvent(_)) | None => return Ok(false),
+            match timeline::completion_for_wait(ledger, retired, epoch.context, epoch.value) {
+                timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { .. }) => {}
+                timeline::WaitCompletion::AlreadyComplete => {}
+                timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(_))
+                | timeline::WaitCompletion::Missing => return Ok(false),
             }
         }
         Ok(true)
@@ -2838,6 +2846,7 @@ impl CudaBackend {
             },
         );
 
+        let device_retired = Arc::clone(&device.retired);
         let mut stream_waits = Vec::new();
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         let mut dx12_stream_fence_waits = Vec::new();
@@ -2845,10 +2854,17 @@ impl CudaBackend {
         let mut deferred_writes = Vec::new();
         if let Some(sync) = sync {
             for epoch in &sync.waits {
-                match timeline::lookup_completion(&event_ledger, epoch.context, epoch.value) {
-                    Some(LedgerCompletion::CudaEvent(event)) => stream_waits.push(event),
+                match timeline::completion_for_wait(
+                    &event_ledger,
+                    &device_retired,
+                    epoch.context,
+                    epoch.value,
+                ) {
+                    timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(event)) => {
+                        stream_waits.push(event)
+                    }
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    Some(LedgerCompletion::Dx12Fence { companion, value }) => {
+                    timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { companion, value }) => {
                         // Device-side DX12→CUDA: cuWaitExternalSemaphoresAsync on the
                         // submission stream. Only after Signal is published (value > 0).
                         // Prefer skipping when the fence already completed (no interop node).
@@ -2858,20 +2874,30 @@ impl CudaBackend {
                             dx12_stream_fence_waits.push((companion, value));
                         }
                     }
-                    None => {
+                    timeline::WaitCompletion::AlreadyComplete => {}
+                    timeline::WaitCompletion::Missing => {
                         anyhow::bail!(
                             "CUDA: cross-context wait missing event for context {:?} value {}",
                             epoch.context,
                             epoch.value
                         );
                     }
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    timeline::WaitCompletion::Pending(_) => unreachable!("only CudaEvent on non-dx12"),
                 }
             }
             for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
-                match timeline::lookup_completion(&event_ledger, epoch.context, epoch.value) {
-                    Some(LedgerCompletion::CudaEvent(event)) => host_waits.push(event),
+                match timeline::completion_for_wait(
+                    &event_ledger,
+                    &device_retired,
+                    epoch.context,
+                    epoch.value,
+                ) {
+                    timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(event)) => {
+                        host_waits.push(event)
+                    }
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    Some(LedgerCompletion::Dx12Fence { companion, value }) => {
+                    timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { companion, value }) => {
                         // Match DX12 FPS policy: demote WAR/host_observed Dx12Fence epochs
                         // to async stream waits rather than HOL cpu_wait on the worker.
                         // Same Signal-before-wait / already-complete skip as sync.waits.
@@ -2879,13 +2905,16 @@ impl CudaBackend {
                             dx12_stream_fence_waits.push((companion, value));
                         }
                     }
-                    None => {
+                    timeline::WaitCompletion::AlreadyComplete => {}
+                    timeline::WaitCompletion::Missing => {
                         anyhow::bail!(
                             "CUDA: host wait missing event for context {:?} value {}",
                             epoch.context,
                             epoch.value
                         );
                     }
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    timeline::WaitCompletion::Pending(_) => unreachable!("only CudaEvent on non-dx12"),
                 }
             }
             deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |handle| {
@@ -3280,12 +3309,13 @@ impl GpuBackendTimelineWait for CudaBackend {
         }
         let device_handle = self.context_device(ctx);
         let device = self.device(device_handle)?;
-        match timeline::lookup_completion(&device.event_ledger, ctx, value) {
-            Some(LedgerCompletion::CudaEvent(event)) => {
+        match timeline::completion_for_wait(&device.event_ledger, &device.retired, ctx, value) {
+            timeline::WaitCompletion::AlreadyComplete => Ok(None),
+            timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(event)) => {
                 Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            Some(LedgerCompletion::Dx12Fence {
+            timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence {
                 companion,
                 value: fence_value,
             }) => {
@@ -3301,13 +3331,25 @@ impl GpuBackendTimelineWait for CudaBackend {
             }
             // Match DX12: waiting on a never-submitted value still yields a timeout-capable
             // wait object (not an immediate Err that used to deadlock under classify+lock).
-            None => Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value }))),
+            timeline::WaitCompletion::Missing => {
+                Ok(Some(Box::new(timeline::CudaAbsentTimelineWait { context: ctx, value })))
+            }
+            #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+            timeline::WaitCompletion::Pending(_) => unreachable!("only CudaEvent on non-dx12"),
         }
     }
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let context = Arc::clone(self.context(ctx)?);
         let device_handle = context.device;
+        // Device-contiguous retirement is authoritative once prune has dropped ledger
+        // entries: a wait target at or below `device_retired` is already complete even
+        // if a racing poller briefly lagged `context.completed`.
+        if value > 0 && value <= context.device_retired.load(Ordering::Acquire) {
+            let retired = context.device_retired.load(Ordering::Acquire);
+            drain_deletion_queue_up_to(&context.deletion_queue, retired);
+            return Ok(());
+        }
         // When the timeline has already retired, skip worker flush. Flush joins the
         // submission thread; if it is blocked in cuWaitExternalSemaphoresAsync (common
         // at multi-window teardown), Scheme::drop would hang forever even though
@@ -3325,6 +3367,11 @@ impl GpuBackendTimelineWait for CudaBackend {
             &context.signal_queue,
             &context.last_emitted,
         );
+        if value > 0 && value <= context.device_retired.load(Ordering::Acquire) {
+            let retired = context.device_retired.load(Ordering::Acquire);
+            drain_deletion_queue_up_to(&context.deletion_queue, retired);
+            return Ok(());
+        }
         if self.gpu_progress(ctx) < value {
             anyhow::bail!("CUDA: timeline value {value} was not submitted on context {ctx}");
         }
@@ -4631,7 +4678,9 @@ impl GpuBackend for CudaBackend {
             &context.signal_queue,
             &context.last_emitted,
         );
-        context.completed.load(Ordering::Acquire)
+        let completed = context.completed.load(Ordering::Acquire);
+        let retired = context.device_retired.load(Ordering::Acquire);
+        completed.max(retired)
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
