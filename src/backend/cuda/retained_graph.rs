@@ -318,8 +318,11 @@ fn memory_slice_covers_ptr(candidate: &Arc<Mutex<CudaSlice<u8>>>, stream: &CudaS
     ptr >= base_ptr && ptr < base_ptr + len as u64
 }
 
-/// True when the driver is in launch-blocking mode (incompatible with stream capture).
+/// True when stream capture must not run (launch-blocking or explicit opt-out).
 pub(super) fn cuda_launch_blocking_active() -> bool {
+    if std::env::var_os("GOLDY_CUDA_DISABLE_GRAPH").is_some_and(|v| v != "0") {
+        return true;
+    }
     match std::env::var_os("CUDA_LAUNCH_BLOCKING") {
         Some(v) => v != "0",
         None => false,

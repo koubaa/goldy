@@ -57,7 +57,7 @@ use super::*;
 use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
 use crate::backend::submission_worker::{self, SubmissionWorker};
 use crate::frame_table::dispatch_table_base_word_index;
-use crate::slang::virtual_main::CudaLaunchArgKind;
+use crate::slang::virtual_main::{CudaLaunchArgKind, CudaStorageTextureSpec};
 use crate::types::{BufferResizeCost, DeviceType};
 use anyhow::{Context as _, Result};
 use cudarc::driver::{
@@ -74,7 +74,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
-use texture::{memcpy_htod_array, storage_shader_compatible, CudaSamplerKey, CudaTextureResource};
+use texture::{memcpy_htod_array, storage_shader_convertible, CudaSamplerKey, CudaTextureResource};
 use timeline::{EventLedger, LedgerCompletion, LedgerEntry};
 
 /// Logical retained entry under the backend lock (graphs themselves live on the worker).
@@ -232,10 +232,18 @@ pub(super) enum CudaDeferredDrop {
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         memory_is_external: bool,
     },
+    /// Imported shared textures: field order is load-bearing (CUDA views → import → D3D12).
     Texture {
         retire_at: u64,
         #[allow(dead_code)]
         resource: Arc<CudaTextureResource>,
+        /// External memory + mipmapped array; must outlive [`Self::Texture::resource`].
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        #[allow(dead_code)]
+        import: Option<dx12_interop::CudaImportedTexture>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        #[allow(dead_code)]
+        d3d12_resource: Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource>,
     },
     Pipeline {
         retire_at: u64,
@@ -454,6 +462,7 @@ impl CudaBuffer {
     }
 }
 
+#[derive(Clone)]
 struct CudaShader {
     device: DeviceHandle,
     source: String,
@@ -470,17 +479,26 @@ struct CudaSampler {
     key: CudaSamplerKey,
 }
 
+struct CudaComputeKernel {
+    module: Arc<CudaModule>,
+    #[allow(dead_code)]
+    function: CudaFunction,
+    /// From `CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK` at module load.
+    max_threads_per_block: u32,
+}
+
 struct CudaComputePipeline {
     device: DeviceHandle,
-    #[allow(dead_code)]
-    module: Arc<CudaModule>,
-    function: CudaFunction,
+    /// Shader snapshot for lazy format specialization (`ShaderModule` may already be destroyed).
+    shader: CudaShader,
     workgroup_size: [u32; 3],
-    /// From `CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK` at pipeline create.
-    max_threads_per_block: u32,
     slot_access: Vec<Option<ResourceAccess>>,
     /// Author param order for `[goldy_compute]`; empty for plain Slang compute (all-buffer fallback).
     launch_layout: Vec<CudaLaunchArgKind>,
+    /// Default size-matched (`Identity`) specialization.
+    identity: CudaComputeKernel,
+    /// Non-identity DirectSpatial format specializations (e.g. float4↔Rgba8Unorm pack view).
+    variants: Mutex<HashMap<Vec<CudaStorageTextureSpec>, CudaComputeKernel>>,
 }
 
 /// Host-side values pushed to `cuLaunchKernel` in shader parameter order.
@@ -700,6 +718,14 @@ impl CudaBackend {
         &self,
         shader: &CudaShader,
     ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
+        self.compile_compute_ptx_with_specs(shader, &[])
+    }
+
+    fn compile_compute_ptx_with_specs(
+        &self,
+        shader: &CudaShader,
+        storage_specs: &[CudaStorageTextureSpec],
+    ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
         ensure_cuda_toolkit_on_path();
         let compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
         let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
@@ -708,10 +734,23 @@ impl CudaBackend {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source)
+        let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source, &defines)
             .map_err(|error| anyhow::anyhow!("CUDA launch layout failed: {error}"))?;
-        let cuda_source = crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source)
-            .map_err(|error| anyhow::anyhow!("CUDA shader lowering failed: {error}"))?;
+        let cuda_source = if storage_specs.is_empty()
+            || storage_specs
+                .iter()
+                .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity))
+        {
+            crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source, &defines)
+                .map_err(|error| anyhow::anyhow!("CUDA shader lowering failed: {error}"))?
+        } else {
+            crate::slang::virtual_main::transform_virtual_main_cuda_compute_specialized(
+                &shader.source,
+                &defines,
+                storage_specs,
+            )
+            .map_err(|error| anyhow::anyhow!("CUDA shader specialization failed: {error}"))?
+        };
         let workgroup_size = crate::slang::parse_numthreads(&shader.source).unwrap_or([1, 1, 1]);
         let compiled = compiler.compile_bindless_with_reflection_and_defines(
             &cuda_source,
@@ -744,6 +783,89 @@ impl CudaBackend {
             })
             .collect();
         Ok((ptx, access, workgroup_size, launch_layout))
+    }
+
+    fn load_compute_kernel(&self, device: DeviceHandle, ptx: &str) -> Result<CudaComputeKernel> {
+        let gpu = self.device(device)?;
+        let module = load_ptx_module(&gpu.ctx, ptx)?;
+        let function = module
+            .load_function("cs_main")
+            .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
+        let max_threads_per_block = function
+            .max_threads_per_block()
+            .context("CUDA: query CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK failed")?
+            .max(0) as u32;
+        Ok(CudaComputeKernel {
+            module,
+            function,
+            max_threads_per_block,
+        })
+    }
+
+    /// Resolve per-`DirectSpatial` format specs from bound textures for this launch.
+    fn resolve_storage_texture_specs(
+        &self,
+        launch_layout: &[CudaLaunchArgKind],
+        indices: &[u32],
+    ) -> Result<Vec<CudaStorageTextureSpec>> {
+        if launch_layout.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut formats = Vec::new();
+        let mut index_i = 0usize;
+        for kind in launch_layout {
+            match kind {
+                CudaLaunchArgKind::StorageTexture { .. } => {
+                    let index = *indices.get(index_i).with_context(|| {
+                        format!("CUDA: missing registry index for storage texture at binding {index_i}")
+                    })?;
+                    let tex = self.resolve_texture(index_i, index)?;
+                    formats.push(tex.format);
+                    index_i += 1;
+                }
+                CudaLaunchArgKind::Buffer | CudaLaunchArgKind::SampledTexture { .. } | CudaLaunchArgKind::Sampler => {
+                    index_i += 1;
+                }
+                CudaLaunchArgKind::Scalar => {}
+            }
+        }
+        crate::slang::virtual_main::derive_cuda_storage_texture_specs(launch_layout, &formats)
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    /// Identity kernel, or a lazily compiled format-specialized PTX variant.
+    fn ensure_compute_kernel(
+        &self,
+        pipeline_handle: ComputePipelineHandle,
+        specs: &[CudaStorageTextureSpec],
+    ) -> Result<(Arc<CudaModule>, u32)> {
+        let pipeline = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .context("CUDA: invalid compute pipeline")?;
+        let identity_specs = specs
+            .iter()
+            .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
+        if specs.is_empty() || identity_specs {
+            return Ok((
+                Arc::clone(&pipeline.identity.module),
+                pipeline.identity.max_threads_per_block,
+            ));
+        }
+
+        {
+            let variants = pipeline.variants.lock().unwrap();
+            if let Some(kernel) = variants.get(specs) {
+                return Ok((Arc::clone(&kernel.module), kernel.max_threads_per_block));
+            }
+        }
+
+        let (ptx, _, _, _) = self.compile_compute_ptx_with_specs(&pipeline.shader, specs)?;
+        let kernel = self.load_compute_kernel(pipeline.device, &ptx)?;
+
+        let mut variants = pipeline.variants.lock().unwrap();
+        let entry = variants.entry(specs.to_vec()).or_insert(kernel);
+        Ok((Arc::clone(&entry.module), entry.max_threads_per_block))
     }
 
     fn buffer_arg(&self, stream: &Arc<CudaStream>, buffer: &CudaBuffer) -> Result<CudaBufferArg> {
@@ -897,11 +1019,11 @@ impl CudaBackend {
                 CudaLaunchArgKind::StorageTexture { element } => {
                     let index = indices[index_i];
                     let tex = self.resolve_texture(index_i, index)?;
-                    if !storage_shader_compatible(element, tex.format) {
+                    if !storage_shader_convertible(element, tex.format) {
                         anyhow::bail!(
-                            "CUDA: DirectSpatial<{element}> writable access requires a \
-                             size-matched format (float4↔Rgba32Float, half4↔Rgba16Float, \
-                             uint8_t4↔Rgba8Unorm); got {:?}",
+                            "CUDA: DirectSpatial<{element}> cannot access {:?}; \
+                             supported: float4↔Rgba32Float|Rgba8Unorm (packed), \
+                             half4↔Rgba16Float, uint8_t4↔Rgba8Unorm",
                             tex.format
                         );
                     }
@@ -1159,21 +1281,30 @@ impl CudaBackend {
     fn launch_compute(
         &self,
         stream: &Arc<CudaStream>,
-        pipeline: &CudaComputePipeline,
+        pipeline_handle: ComputePipelineHandle,
         indices: &[u32],
         user: &[u32],
         workgroups: (u32, u32, u32),
     ) -> Result<()> {
+        let pipeline = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .context("CUDA: invalid compute pipeline")?;
+        let specs = self.resolve_storage_texture_specs(&pipeline.launch_layout, indices)?;
+        let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
         let limits = self.device(pipeline.device)?.limits;
         validate_launch_config(
             &limits,
-            pipeline.max_threads_per_block,
+            max_threads_per_block,
             workgroups,
             pipeline.workgroup_size,
             0,
             None,
         )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
+        let function = module
+            .load_function("cs_main")
+            .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
         let cfg = LaunchConfig {
             grid_dim: workgroups,
             block_dim: (
@@ -1185,7 +1316,7 @@ impl CudaBackend {
         };
         // SAFETY: argument order/types match the Slang CUDA entry signature.
         unsafe {
-            let mut builder = stream.launch_builder(&pipeline.function);
+            let mut builder = stream.launch_builder(&function);
             for arg in &launch_args {
                 match arg {
                     CudaLaunchArg::Buffer(buffer) => {
@@ -1343,10 +1474,17 @@ impl CudaBackend {
             .compute_pipelines
             .get(&pipeline_handle)
             .context("CUDA: invalid compute pipeline")?;
+        let specs = self.resolve_storage_texture_specs(&pipeline.launch_layout, indices)?;
+        let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
+        // Format-specialized PTX variants are not CUDA-graph-safe in multi-dispatch
+        // partitions (GraphWithTail relaunch faults). Identity DirectSpatial stays capturable.
+        let graph_capture_ok = specs
+            .iter()
+            .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
         let limits = self.device(pipeline.device)?.limits;
         validate_launch_config(
             &limits,
-            pipeline.max_threads_per_block,
+            max_threads_per_block,
             workgroups,
             pipeline.workgroup_size,
             0,
@@ -1354,19 +1492,19 @@ impl CudaBackend {
         )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let (keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
-        let function = pipeline
-            .module
+        let function = module
             .load_function("cs_main")
             .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
         Ok(CudaOp::Launch {
             label,
             function,
-            module: Arc::clone(&pipeline.module),
+            module,
             workgroup_size: pipeline.workgroup_size,
             grid: workgroups,
             args: launch_args,
             keep_alive_buffers,
             keep_alive_textures,
+            graph_capture_ok,
         })
     }
 
@@ -1399,6 +1537,11 @@ impl CudaBackend {
                 shape_buf.size
             );
         }
+        let specs = self.resolve_storage_texture_specs(&pipeline.launch_layout, indices)?;
+        let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
+        let graph_capture_ok = specs
+            .iter()
+            .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let (mut keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
         keep_alive_buffers.push(Arc::clone(shape_buf.memory_arc()?));
@@ -1434,8 +1577,7 @@ impl CudaBackend {
             ptr
         };
 
-        let function = pipeline
-            .module
+        let function = module
             .load_function("cs_main")
             .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
         let updater = device.indirect_updater.function.clone();
@@ -1446,9 +1588,7 @@ impl CudaBackend {
             device.limits.max_grid_dim_z,
         );
         let limits = device.limits;
-        let max_threads_per_block = pipeline.max_threads_per_block;
         let workgroup_size = pipeline.workgroup_size;
-        let module = Arc::clone(&pipeline.module);
 
         Ok(CudaOp::LaunchIndirect {
             label,
@@ -1458,6 +1598,7 @@ impl CudaBackend {
             args: launch_args,
             keep_alive_buffers,
             keep_alive_textures,
+            graph_capture_ok,
             shape_ptr,
             shape_memory: Arc::clone(shape_buf.memory_arc()?),
             shape_abs_offset,
@@ -2169,6 +2310,7 @@ impl CudaBackend {
                     mut args,
                     keep_alive_buffers,
                     mut keep_alive_textures,
+                    graph_capture_ok,
                 } => {
                     let exports = self.retarget_launch_off_imported_scratch(&mut args, &mut keep_alive_textures)?;
                     out.push(CudaOp::Launch {
@@ -2180,6 +2322,7 @@ impl CudaBackend {
                         args,
                         keep_alive_buffers,
                         keep_alive_textures,
+                        graph_capture_ok,
                     });
                     for (src, dst) in exports {
                         out.push(CudaOp::CopyTexture { src, dst });
@@ -2193,6 +2336,7 @@ impl CudaBackend {
                     mut args,
                     keep_alive_buffers,
                     mut keep_alive_textures,
+                    graph_capture_ok,
                     shape_ptr,
                     shape_memory,
                     shape_abs_offset,
@@ -2215,6 +2359,7 @@ impl CudaBackend {
                         args,
                         keep_alive_buffers,
                         keep_alive_textures,
+                        graph_capture_ok,
                         shape_ptr,
                         shape_memory,
                         shape_abs_offset,
@@ -2326,10 +2471,10 @@ impl CudaBackend {
         } else {
             scratch_images.to_vec()
         };
-        // Signal the companion fence when:
-        // - CUDA wrote surface scratch (present), or
-        // - CUDA wrote a Shared-primary buffer (imported D3D12 memory; IA reads it).
-        // Native+twin writes do NOT signal here — twin DtoD in raster owns that fence.
+        // Signal the companion fence when CUDA wrote surface scratch (present).
+        // Deposit-only Shared-primary writes (e.g. solid_cube upload scheme) do not
+        // publish a CUDA→DX12 fence — raster syncs alloc_stream before IA instead
+        // (see SharedBufferBacking::pending_host_sync in dx12_interop.rs).
         self.bump_content_epochs_for_native_twin_writes(ops);
         let shared_primaries = self.shared_primary_memories_written_by_ops(ops);
 
@@ -2344,6 +2489,7 @@ impl CudaBackend {
                 .as_ref()
                 .context("CUDA/DX12: interop submit missing companion")?,
         );
+        let worker = Arc::clone(&self.device(device_handle)?.submission_worker);
         let mut waits = Vec::new();
         for (surface_handle, image_index) in &touched {
             let slot = self
@@ -2369,6 +2515,7 @@ impl CudaBackend {
             ia_wait = ia_wait.max(shared.last_dx12_ia_fence.load(Ordering::Acquire));
         }
         if ia_wait > 0 {
+            worker.flush().context("CUDA/DX12: flush worker before IA cpu_wait")?;
             companion
                 .cpu_wait(ia_wait)
                 .context("CUDA/DX12: wait IA fence before Shared buffer rewrite")?;
@@ -2378,10 +2525,15 @@ impl CudaBackend {
             *ops = waits;
         }
 
-        // Scratch present and Shared-primary buffer writes both need a CUDA→DX12 fence
-        // Signal so the DIRECT queue can Wait before reading imported memory. Publishing
-        // `last_cuda_fence` before the worker runs is safe as long as DX12 always
-        // `wait_queue`s that value before Signal'ing past it (see refresh_shared_vertex_backing).
+        if touched.is_empty() {
+            // Deposit-only: copy ops stay in `ops`; raster prologue syncs alloc_stream.
+            return Ok(());
+        }
+
+        // Scratch present needs a CUDA→DX12 fence Signal so the DIRECT queue can Wait
+        // before reading imported scratch. Publishing `last_cuda_fence` before the
+        // worker runs is safe as long as DX12 always `wait_queue`s that value before
+        // Signal'ing past it (see refresh_shared_vertex_backing).
         let cuda_complete = companion.next_fence_value();
         ops.push(CudaOp::SignalExternalFence {
             cuda_ctx: Arc::clone(&companion.cuda_ctx),
@@ -4306,6 +4458,12 @@ impl GpuBackend for CudaBackend {
             if let Some(slot) = resource.sampled_slot {
                 self.texture_slots.remove(&slot);
             }
+            // Pull import/D3D12 out of the live maps now, but keep them alive until after
+            // `resource` drops — the CUarray is borrowed from the mapped mipmapped array.
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            let import = self.texture_imports.remove(&texture);
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            let d3d12_resource = self.texture_dx12.remove(&texture);
             let device_handle = self
                 .devices
                 .iter()
@@ -4324,18 +4482,23 @@ impl GpuBackend for CudaBackend {
                         }
                     }
                     let retire_at = submission_worker::submission_horizon(&device.next_timeline);
-                    device
-                        .deletion_queue
-                        .lock()
-                        .unwrap()
-                        .push(CudaDeferredDrop::Texture { retire_at, resource });
+                    device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Texture {
+                        retire_at,
+                        resource,
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        import,
+                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        d3d12_resource,
+                    });
+                    return;
                 }
             }
+            // No device / deletion queue: drop CUDA views before import before D3D12.
+            drop(resource);
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             {
-                // Drop CUDA views (resource above) before import before D3D12 resource.
-                let _ = self.texture_imports.remove(&texture);
-                let _ = self.texture_dx12.remove(&texture);
+                drop(import);
+                drop(d3d12_resource);
             }
         }
     }
@@ -4631,6 +4794,7 @@ impl GpuBackend for CudaBackend {
         }
 
         if !core.is_empty()
+            && tail.is_empty()
             && pending_submit::ops_are_graph_safe(&core)
             && !retained_graph::cuda_launch_blocking_active()
             && !self.ops_touch_external_buffers(&core)
@@ -4822,28 +4986,40 @@ impl GpuBackend for CudaBackend {
         if shader.device != device {
             anyhow::bail!("CUDA: shader belongs to another device");
         }
+        let shader_snapshot = shader.clone();
         let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader)?;
-        let gpu = self.device(device)?;
-        let module = load_ptx_module(&gpu.ctx, &ptx)?;
-        let function = module
-            .load_function("cs_main")
-            .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
-        let max_threads_per_block = function
-            .max_threads_per_block()
-            .context("CUDA: query CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK failed")?
-            .max(0) as u32;
+        let identity = self.load_compute_kernel(device, &ptx)?;
+
+        // Preload float4↔Rgba8Unorm specialization when every DirectSpatial slot is float4.
+        // Lazy cuModuleLoad on first specialized launch can deadlock / fault under CUDA's
+        // default lazy module loading while other kernels are in flight on the stream.
+        let mut variants = HashMap::new();
+        let storage_elements: Vec<&str> = launch_layout
+            .iter()
+            .filter_map(|kind| match kind {
+                CudaLaunchArgKind::StorageTexture { element } => Some(element.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !storage_elements.is_empty() && storage_elements.iter().all(|element| *element == "float4") {
+            let specs = vec![CudaStorageTextureSpec::Float4Rgba8Unorm; storage_elements.len()];
+            let (spec_ptx, _, _, _) = self.compile_compute_ptx_with_specs(&shader_snapshot, &specs)?;
+            let kernel = self.load_compute_kernel(device, &spec_ptx)?;
+            variants.insert(specs, kernel);
+        }
+
         let handle = self.next_compute_pipeline;
         self.next_compute_pipeline += 1;
         self.compute_pipelines.insert(
             handle,
             CudaComputePipeline {
                 device,
-                module,
-                function,
+                shader: shader_snapshot,
                 workgroup_size,
-                max_threads_per_block,
                 slot_access,
                 launch_layout,
+                identity,
+                variants: Mutex::new(variants),
             },
         );
         Ok(handle)
@@ -4853,11 +5029,19 @@ impl GpuBackend for CudaBackend {
         if let Some(pipeline) = self.compute_pipelines.remove(&pipeline) {
             if let Some(device) = self.devices.get(&pipeline.device) {
                 let retire_at = submission_worker::submission_horizon(&device.next_timeline);
-                device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Pipeline {
+                let mut queue = device.deletion_queue.lock().unwrap();
+                queue.push(CudaDeferredDrop::Pipeline {
                     retire_at,
-                    module: pipeline.module,
-                    function: pipeline.function,
+                    module: pipeline.identity.module,
+                    function: pipeline.identity.function,
                 });
+                for (_specs, kernel) in pipeline.variants.into_inner().unwrap() {
+                    queue.push(CudaDeferredDrop::Pipeline {
+                        retire_at,
+                        module: kernel.module,
+                        function: kernel.function,
+                    });
+                }
             }
         }
     }
@@ -6462,6 +6646,85 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let snap = stats.snapshot();
         assert_eq!(snap.captures, 0, "clear+indirect must not capture: {snap:?}");
         assert!(snap.fallbacks >= 1, "clear+indirect should fallback: {snap:?}");
+        Ok(())
+    }
+
+    /// Regression for premature DX12↔CUDA import teardown on texture replace.
+    ///
+    /// `destroy_texture` must keep the external-memory import alive with the deferred
+    /// CUDA views. Dropping the import first left a borrowed `CUarray` dangling; the
+    /// next shared-texture create then failed with
+    /// `cuMipmappedArrayGetLevel` / `CUDA_ERROR_ILLEGAL_ADDRESS` (ekrano mask-atlas
+    /// 1×1 → 64×64 resize).
+    #[test]
+    fn shared_texture_replace_keeps_import_alive_until_views_drop() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA shared texture replace test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+
+        let small = backend.create_texture(
+            device,
+            1,
+            1,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_DST,
+        )?;
+        backend.write_texture(small, &[255, 255, 255, 255], 1, 1)?;
+        backend.destroy_texture(small);
+
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if backend.device(device)?.dx12.is_some() {
+            let queue = backend.device(device)?.deletion_queue.lock().unwrap();
+            let deferred_with_import = queue.iter().any(|entry| {
+                matches!(
+                    entry,
+                    CudaDeferredDrop::Texture {
+                        import: Some(_),
+                        d3d12_resource: Some(_),
+                        ..
+                    }
+                )
+            });
+            assert!(
+                deferred_with_import,
+                "destroy_texture must defer DX12 import+resource with the CUDA views"
+            );
+        }
+
+        // Immediate recreate+upload is the failure mode for an early import drop.
+        let large = backend.create_texture(
+            device,
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_DST,
+        )?;
+        let pixels = vec![128u8; 64 * 64 * 4];
+        backend
+            .write_texture(large, &pixels, 64, 64)
+            .context("write after replace (import must still be valid)")?;
+        backend.destroy_texture(large);
+
+        let again = backend.create_texture(
+            device,
+            32,
+            32,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::DirectInterpolated,
+            TextureFlags::COPY_DST,
+        )?;
+        let pixels = vec![64u8; 32 * 32 * 4];
+        backend.write_texture(again, &pixels, 32, 32)?;
+        backend.destroy_texture(again);
+        backend.device_wait_idle(device)?;
         Ok(())
     }
 }
