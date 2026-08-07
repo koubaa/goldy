@@ -134,8 +134,11 @@ public struct ByteAddressView {
 /// CUDA typed-UAV emulation: logical `float4` load/store over an `Rgba8Unorm` surface.
 ///
 /// CUDA `CUsurfObject` writes are raw typed stores (no DX12-style UNORM conversion).
-/// Goldy specialization rewrites `DirectSpatial<float4>` bindings to this view when the
-/// bound texture is `Rgba8Unorm`, packing/unpacking through `RWTexture2D<uint8_t4>`.
+/// Goldy specialization rewrites **per binding**: each `DirectSpatial<float4>` entry
+/// parameter bound to `Rgba8Unorm` becomes this view (packing through
+/// `RWTexture2D<uint8_t4>`), while `Rgba32Float` slots stay `DirectSpatial<float4>`.
+/// Duck-typed with `DirectSpatial<float4>` for `GetDimensions` / `__subscript`; helper
+/// functions that may receive either type need an overload of this view.
 public struct DirectSpatialFloat4Rgba8View {
     RWTexture2D<uint8_t4> _raw;
 
