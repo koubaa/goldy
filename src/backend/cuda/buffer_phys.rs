@@ -690,7 +690,7 @@ fn ops_touch_memory(
 ) -> bool {
     use super::pending_submit::CudaOp;
     ops.iter().any(|op| match op {
-        CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } => {
+        CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } | CudaOp::WriteFromHost { memory: m, .. } => {
             memory_slices_same(m, memory, stream, target_device_ptr)
         }
         CudaOp::Copy { src, dst, .. } => {

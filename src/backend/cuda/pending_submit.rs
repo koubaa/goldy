@@ -132,6 +132,14 @@ pub(super) enum CudaOp {
         abs_offset: u64,
         data: Vec<u8>,
     },
+    /// HtoD from CPU_WRITABLE host staging, read at execute time (retained-safe).
+    WriteFromHost {
+        memory: Arc<Mutex<CudaSlice<u8>>>,
+        abs_offset: u64,
+        host: Arc<Mutex<Vec<u8>>>,
+        host_offset: usize,
+        len: usize,
+    },
     Copy {
         src: Arc<Mutex<CudaSlice<u8>>>,
         src_abs: u64,
@@ -146,6 +154,18 @@ pub(super) enum CudaOp {
         width: u32,
         height: u32,
         data: Vec<u8>,
+        src_row_pitch: u32,
+    },
+    /// Texture upload from CPU_WRITABLE host staging, read at execute time (retained-safe).
+    WriteTextureFromHost {
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        host: Arc<Mutex<Vec<u8>>>,
+        host_offset: usize,
+        len: usize,
         src_row_pitch: u32,
     },
     CopyBufferToTexture {
@@ -321,14 +341,14 @@ pub(super) fn collect_pins(
                 buffers.push(Arc::clone(shape_memory));
                 textures.extend(keep_alive_textures.iter().cloned());
             }
-            CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+            CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
                 buffers.push(Arc::clone(memory));
             }
             CudaOp::Copy { src, dst, .. } => {
                 buffers.push(Arc::clone(src));
                 buffers.push(Arc::clone(dst));
             }
-            CudaOp::WriteTexture { texture, .. } => {
+            CudaOp::WriteTexture { texture, .. } | CudaOp::WriteTextureFromHost { texture, .. } => {
                 textures.push(Arc::clone(texture));
             }
             CudaOp::CopyBufferToTexture { src, texture, .. } => {
@@ -455,6 +475,34 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "WriteBuffer")?;
                 }
             }
+            CudaOp::WriteFromHost {
+                memory,
+                abs_offset,
+                host,
+                host_offset,
+                len,
+            } => {
+                let data = {
+                    let host = host.lock().unwrap();
+                    let end = *host_offset + *len;
+                    if end > host.len() {
+                        anyhow::bail!("CUDA: WriteFromHost exceeds host staging");
+                    }
+                    host[*host_offset..end].to_vec()
+                };
+                let mut guard = memory.lock().unwrap();
+                let start = *abs_offset as usize;
+                let end = start + data.len();
+                let mut view = guard
+                    .try_slice_mut(start..end)
+                    .context("CUDA: WriteFromHost range out of bounds")?;
+                stream
+                    .memcpy_htod(&data, &mut view)
+                    .context("CUDA: WriteFromHost HtoD failed")?;
+                if validate {
+                    maybe_validate_sync(stream, "WriteFromHost")?;
+                }
+            }
             CudaOp::Copy {
                 src,
                 src_abs,
@@ -479,6 +527,39 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 super::texture::memcpy_htod_array(stream, texture, *x, *y, *width, *height, data, *src_row_pitch)?;
                 if validate {
                     maybe_validate_sync(stream, "WriteTexture")?;
+                }
+            }
+            CudaOp::WriteTextureFromHost {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                host,
+                host_offset,
+                len,
+                src_row_pitch,
+            } => {
+                let data = {
+                    let host = host.lock().unwrap();
+                    let end = *host_offset + *len;
+                    if end > host.len() {
+                        anyhow::bail!("CUDA: WriteTextureFromHost exceeds host staging");
+                    }
+                    host[*host_offset..end].to_vec()
+                };
+                super::texture::memcpy_htod_array(
+                    stream,
+                    texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                    &data,
+                    *src_row_pitch,
+                )?;
+                if validate {
+                    maybe_validate_sync(stream, "WriteTextureFromHost")?;
                 }
             }
             CudaOp::CopyBufferToTexture {
@@ -737,8 +818,10 @@ pub(super) fn finalize_indirect_capture(
             }
             CudaOp::Clear { .. }
             | CudaOp::Write { .. }
+            | CudaOp::WriteFromHost { .. }
             | CudaOp::Copy { .. }
             | CudaOp::WriteTexture { .. }
+            | CudaOp::WriteTextureFromHost { .. }
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
             | CudaOp::CopyTextureToBuffer { .. } => {

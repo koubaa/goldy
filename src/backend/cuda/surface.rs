@@ -17,8 +17,9 @@
 //! *submitted to CUDA* before D3D12 `Queue.Signal(W)` for any `W > V` on the same
 //! fence — a GPU `Wait(V)` between them is not enough and yields
 //! `CUDA_ERROR_INVALID_VALUE`. Scratch presents therefore join the submission worker
-//! for `submit_tv` (so the tail `SignalExternalFence` has been issued) before the
-//! present copy's return fence is signaled.
+//! for `submit_tv` inside [`PresentGpuWork::run`] (so the tail `SignalExternalFence`
+//! has been issued) before the present copy's return fence is signaled — not under
+//! the backend lock in `take_present_gpu_work`.
 
 use super::dx12_companion::PresentCommandSlot;
 use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
@@ -888,14 +889,16 @@ pub(super) fn take_present_gpu_work(
 
     // New CUDA scratch submits signal in their own tail. Keep a temporary handoff
     // only for callers that supplied a submit timeline without a scratch-tail signal.
+    //
+    // Steady-state scratch: do **not** CPU-join the worker here (under the backend
+    // lock). `PresentGpuWork::run` waits for `submit_tv` before Queue.Signal of a
+    // higher companion fence — see module docs on SignalExternalFence ordering.
+    let join_submit_tv = if direct_cuda_complete > 0 && submit_tv > 0 {
+        Some(submit_tv)
+    } else {
+        None
+    };
     let cuda_complete = if direct_cuda_complete > 0 {
-        // Join the worker so `SignalExternalFence(cuda_complete)` has been issued to
-        // CUDA before we Queue.Signal a higher present return fence (see module docs).
-        if submit_tv > 0 {
-            worker
-                .wait_submitted_if_scheduled(submit_tv, submission_worker::submission_horizon(&next_timeline))
-                .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
-        }
         direct_cuda_complete
     } else if let Some(submit_event) = submit_event {
         let signal_value = companion.next_fence_value();
@@ -1011,6 +1014,9 @@ pub(super) fn take_present_gpu_work(
         present_slot,
         scratch_handle,
         cuda_complete,
+        join_submit_tv,
+        worker: Arc::clone(&worker),
+        next_timeline: Arc::clone(&next_timeline),
         present_tv,
         present_completion,
         event_ledger,
@@ -1112,6 +1118,10 @@ struct CudaDx12PresentGpuWork {
     present_slot: usize,
     scratch_handle: TextureHandle,
     cuda_complete: u64,
+    /// When set, join the submission worker for this timeline before companion `Signal(W)`.
+    join_submit_tv: Option<crate::timeline::TimelineValue>,
+    worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
+    next_timeline: Arc<std::sync::atomic::AtomicU64>,
     present_tv: crate::timeline::TimelineValue,
     present_completion: PresentCompletion,
     event_ledger: EventLedger,
@@ -1149,8 +1159,18 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
     fn run(mut self: Box<Self>) -> Result<PresentFinishState> {
         // Cross-domain only: CUDA→DX12 external fence. Raster→present on the same
         // DIRECT queue is already ordered by submission; do not wait_queue(dx12_src_fence).
-        // `take_present_gpu_work` already joined the submission worker so CUDA's
-        // Signal(cuda_complete) was issued before we Signal a higher return fence.
+        //
+        // Join the submission worker so `SignalExternalFence(cuda_complete)` has been
+        // issued to CUDA before we Queue.Signal a higher present return fence (module
+        // docs). Done here — off the backend lock — not in `take_present_gpu_work`.
+        if let Some(submit_tv) = self.join_submit_tv {
+            self.worker
+                .wait_submitted_if_scheduled(
+                    submit_tv,
+                    submission_worker::submission_horizon(&self.next_timeline),
+                )
+                .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
+        }
         if self.cuda_complete > 0 {
             self.companion.wait_queue(self.cuda_complete)?;
         }

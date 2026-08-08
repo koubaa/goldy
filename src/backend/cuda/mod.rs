@@ -433,10 +433,16 @@ struct CudaBuffer {
     element_stride: Option<u32>,
     /// Access kind from create — Broadcast needs a CBV on the DX12 companion heap.
     kind: BufferKind,
+    flags: BufferFlags,
     slot: Option<u32>,
     readback: bool,
     /// Bumped on every host/GPU write that changes contents (retained raster fingerprint).
     content_epoch: u64,
+    /// Host-side staging for [`BufferFlags::CPU_WRITABLE`] (DX12 UPLOAD analogue).
+    /// `write_buffer` memcpys here without GPU sync; Copy materialization records a
+    /// [`CudaOp`] that HtoDs from this Arc at execute time (so retained resubmits see
+    /// fresh bytes).
+    host_staging: Option<Arc<Mutex<Vec<u8>>>>,
     /// Parent allocation for [`GpuBackend::create_buffer_view`] slices (shares memory).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     parent: Option<BufferHandle>,
@@ -463,6 +469,10 @@ impl CudaBuffer {
         self.memory
             .as_ref()
             .context("CUDA: buffer has no physical memory yet (deferred)")
+    }
+
+    fn has_host_staging(&self) -> bool {
+        self.host_staging.is_some()
     }
 }
 
@@ -660,6 +670,7 @@ impl CudaBackend {
         capacity: u64,
         element_stride: Option<u32>,
         kind: BufferKind,
+        flags: BufferFlags,
     ) -> Result<BufferHandle> {
         let mut capacity = capacity.max(logical_size).max(4);
         // D3D12 CBVs require a 256-byte aligned range that fits in the resource.
@@ -677,6 +688,11 @@ impl CudaBackend {
                 .alloc_zeros::<u8>(capacity as usize)
                 .context("CUDA: alloc buffer")?,
         )));
+        let host_staging = if flags.contains(BufferFlags::CPU_WRITABLE) {
+            Some(Arc::new(Mutex::new(vec![0u8; capacity as usize])))
+        } else {
+            None
+        };
         let _ = gpu; // used in non-graphics branch
         let handle = self.next_buffer;
         self.next_buffer += 1;
@@ -696,6 +712,8 @@ impl CudaBackend {
                 capacity,
                 element_stride,
                 kind,
+                flags,
+                host_staging,
                 slot: Some(slot),
                 readback: false,
                 content_epoch: 0,
@@ -1742,11 +1760,19 @@ impl CudaBackend {
                     updates.push((*buffer, CudaBufferReq::HOST_WRITE));
                 }
                 GpuCommand::CopyBuffer { src, dst, .. } => {
-                    updates.push((*src, CudaBufferReq::TRANSFER));
+                    // CPU_WRITABLE deposit staging stays host-only; Copy materializes as HtoD
+                    // into dst — do not force TRANSFER materialization of the staging parcel.
+                    let src_host = self.buffers.get(src).is_some_and(|b| b.has_host_staging());
+                    if !src_host {
+                        updates.push((*src, CudaBufferReq::TRANSFER));
+                    }
                     updates.push((*dst, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
                 }
                 GpuCommand::CopyBufferToTexture { src, .. } => {
-                    updates.push((*src, CudaBufferReq::TRANSFER));
+                    let src_host = self.buffers.get(src).is_some_and(|b| b.has_host_staging());
+                    if !src_host {
+                        updates.push((*src, CudaBufferReq::TRANSFER));
+                    }
                 }
                 _ => {}
             }
@@ -1763,7 +1789,9 @@ impl CudaBackend {
         let mut out = Vec::new();
         for op in ops {
             let written = match op {
-                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => Some(memory),
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
+                    Some(memory)
+                }
                 CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => Some(dst),
                 _ => None,
             };
@@ -1792,7 +1820,7 @@ impl CudaBackend {
         let mut written: Vec<Arc<Mutex<CudaSlice<u8>>>> = Vec::new();
         for op in ops {
             match op {
-                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
                     written.push(Arc::clone(memory));
                 }
                 CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => {
@@ -1831,7 +1859,7 @@ impl CudaBackend {
         let mut memories = Vec::new();
         for op in ops {
             match op {
-                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
                     memories.push(Arc::clone(memory));
                 }
                 CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => {
@@ -1954,20 +1982,37 @@ impl CudaBackend {
                     if *src_offset + *size > src_buf.size {
                         anyhow::bail!("CUDA: copy source range exceeds logical buffer size");
                     }
-                    let src_memory = Arc::clone(src_buf.memory_arc()?);
-                    let src_abs = src_buf.offset + *src_offset;
-                    let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid copy destination")?;
-                    if *dst_offset + *size > dst_buf.size {
-                        anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
+                    if let Some(staging) = src_buf.host_staging.as_ref() {
+                        let start = (src_buf.offset + *src_offset) as usize;
+                        let host = Arc::clone(staging);
+                        let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid copy destination")?;
+                        if *dst_offset + *size > dst_buf.size {
+                            anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
+                        }
+                        dst_buf.bump_content_epoch();
+                        ops.push(CudaOp::WriteFromHost {
+                            memory: Arc::clone(dst_buf.memory_arc()?),
+                            abs_offset: dst_buf.offset + *dst_offset,
+                            host,
+                            host_offset: start,
+                            len: *size as usize,
+                        });
+                    } else {
+                        let src_memory = Arc::clone(src_buf.memory_arc()?);
+                        let src_abs = src_buf.offset + *src_offset;
+                        let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid copy destination")?;
+                        if *dst_offset + *size > dst_buf.size {
+                            anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
+                        }
+                        dst_buf.bump_content_epoch();
+                        ops.push(CudaOp::Copy {
+                            src: src_memory,
+                            src_abs,
+                            dst: Arc::clone(dst_buf.memory_arc()?),
+                            dst_abs: dst_buf.offset + *dst_offset,
+                            size: *size,
+                        });
                     }
-                    dst_buf.bump_content_epoch();
-                    ops.push(CudaOp::Copy {
-                        src: src_memory,
-                        src_abs,
-                        dst: Arc::clone(dst_buf.memory_arc()?),
-                        dst_abs: dst_buf.offset + *dst_offset,
-                        size: *size,
-                    });
                 }
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table = Some(Arc::clone(data));
@@ -2065,16 +2110,38 @@ impl CudaBackend {
                         .textures
                         .get(dst)
                         .context("CUDA: invalid CopyBufferToTexture destination")?;
-                    ops.push(CudaOp::CopyBufferToTexture {
-                        src: Arc::clone(src_buf.memory_arc()?),
-                        src_abs: src_buf.offset + *src_offset,
-                        src_row_pitch: *src_row_pitch,
-                        texture: Arc::clone(dst_tex),
-                        x: *x,
-                        y: *y,
-                        width: *width,
-                        height: *height,
-                    });
+                    if let Some(staging) = src_buf.host_staging.as_ref() {
+                        let bpp = dst_tex.format.bytes_per_pixel() as u32;
+                        let row_pitch = if *src_row_pitch == 0 {
+                            width.saturating_mul(bpp)
+                        } else {
+                            *src_row_pitch
+                        };
+                        let nbytes = (row_pitch as usize).saturating_mul(*height as usize);
+                        let start = (src_buf.offset + *src_offset) as usize;
+                        ops.push(CudaOp::WriteTextureFromHost {
+                            texture: Arc::clone(dst_tex),
+                            x: *x,
+                            y: *y,
+                            width: *width,
+                            height: *height,
+                            host: Arc::clone(staging),
+                            host_offset: start,
+                            len: nbytes,
+                            src_row_pitch: *src_row_pitch,
+                        });
+                    } else {
+                        ops.push(CudaOp::CopyBufferToTexture {
+                            src: Arc::clone(src_buf.memory_arc()?),
+                            src_abs: src_buf.offset + *src_offset,
+                            src_row_pitch: *src_row_pitch,
+                            texture: Arc::clone(dst_tex),
+                            x: *x,
+                            y: *y,
+                            width: *width,
+                            height: *height,
+                        });
+                    }
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let src_tex = self
@@ -2403,7 +2470,9 @@ impl CudaBackend {
                     | CudaOp::LaunchIndirect {
                         keep_alive_textures, ..
                     } => keep_alive_textures.iter().any(|texture| Arc::ptr_eq(texture, scratch)),
-                    CudaOp::WriteTexture { texture, .. } | CudaOp::CopyBufferToTexture { texture, .. } => {
+                    CudaOp::WriteTexture { texture, .. }
+                    | CudaOp::WriteTextureFromHost { texture, .. }
+                    | CudaOp::CopyBufferToTexture { texture, .. } => {
                         Arc::ptr_eq(texture, scratch)
                     }
                     CudaOp::CopyTexture { dst, .. } => Arc::ptr_eq(dst, scratch),
@@ -2435,7 +2504,7 @@ impl CudaBackend {
         let mut memories = Vec::new();
         for op in ops {
             match op {
-                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
                     memories.push(Arc::clone(memory));
                 }
                 CudaOp::Copy { dst, .. } => memories.push(Arc::clone(dst)),
@@ -3038,6 +3107,8 @@ impl CudaBuffer {
             capacity: self.capacity,
             element_stride: self.element_stride,
             kind: self.kind,
+            flags: self.flags,
+            host_staging: self.host_staging.as_ref().map(Arc::clone),
             slot: self.slot,
             readback: self.readback,
             content_epoch: self.content_epoch,
@@ -3719,9 +3790,9 @@ impl GpuBackend for CudaBackend {
         size: u64,
         access: BufferKind,
         element_stride: Option<u32>,
-        _flags: BufferFlags,
+        flags: BufferFlags,
     ) -> Result<BufferHandle> {
-        self.create_storage_buffer(device, size, size, element_stride, access)
+        self.create_storage_buffer(device, size, size, element_stride, access, flags)
     }
 
     fn create_buffer_with_capacity(
@@ -3731,10 +3802,10 @@ impl GpuBackend for CudaBackend {
         capacity: u64,
         access: BufferKind,
         element_stride: Option<u32>,
-        _flags: BufferFlags,
+        flags: BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
         let capacity = capacity.max(initial_size);
-        let handle = self.create_storage_buffer(device, initial_size, capacity, element_stride, access)?;
+        let handle = self.create_storage_buffer(device, initial_size, capacity, element_stride, access, flags)?;
         let stored = self.buffers.get(&handle).map(|b| b.capacity).unwrap_or(capacity);
         Ok((handle, stored))
     }
@@ -3759,6 +3830,81 @@ impl GpuBackend for CudaBackend {
     }
 
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        // CPU_WRITABLE / deposit staging: host memcpy only (DX12 UPLOAD model). HtoD is
+        // performed at Copy/CopyBufferToTexture materialization on the context stream —
+        // never flush the submission worker or sync alloc_stream here.
+        {
+            let (target, stage_offset, logical_size, has_staging) = {
+                let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+                let self_has = buf.has_host_staging();
+                let logical_size = buf.size;
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                let parent = buf.parent;
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                let view_abs = buf.offset + offset;
+                let _ = buf;
+
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                {
+                    if let Some(parent) = parent {
+                        let parent_has = self
+                            .buffers
+                            .get(&parent)
+                            .is_some_and(|p| p.has_host_staging());
+                        if parent_has {
+                            (parent, view_abs, logical_size, true)
+                        } else if self_has {
+                            (buffer, offset, logical_size, true)
+                        } else {
+                            (buffer, offset, logical_size, false)
+                        }
+                    } else if self_has {
+                        (buffer, offset, logical_size, true)
+                    } else {
+                        (buffer, offset, logical_size, false)
+                    }
+                }
+                #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                {
+                    if self_has {
+                        (buffer, offset, logical_size, true)
+                    } else {
+                        (buffer, offset, logical_size, false)
+                    }
+                }
+            };
+            if has_staging {
+                if offset + data.len() as u64 > logical_size {
+                    anyhow::bail!("CUDA: write exceeds logical buffer size");
+                }
+                let buf = self.buffers.get_mut(&target).context("CUDA: invalid buffer handle")?;
+                let staging = buf
+                    .host_staging
+                    .as_ref()
+                    .context("CUDA: missing host staging")?;
+                {
+                    let mut staging = staging.lock().unwrap();
+                    let end = stage_offset as usize + data.len();
+                    if end > staging.len() {
+                        anyhow::bail!("CUDA: write exceeds host staging capacity");
+                    }
+                    staging[stage_offset as usize..end].copy_from_slice(data);
+                }
+                buf.bump_content_epoch();
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                if target != buffer {
+                    if let Some(v) = self.buffers.get_mut(&buffer) {
+                        v.bump_content_epoch();
+                    }
+                }
+                return Ok(());
+            }
+        }
+
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
             // Stage host bytes on deferred buffers — do not force Native materialization
@@ -3838,6 +3984,8 @@ impl GpuBackend for CudaBackend {
                 capacity,
                 element_stride: None,
                 kind: BufferKind::Scattered,
+                flags: BufferFlags::empty(),
+                host_staging: None,
                 slot: None,
                 readback: true,
                 content_epoch: 0,
@@ -4080,6 +4228,9 @@ impl GpuBackend for CudaBackend {
                 capacity: size,
                 element_stride: element_stride.or(parent.element_stride),
                 kind: parent.kind,
+                flags: parent.flags,
+                // Views write through the parent; no separate host staging.
+                host_staging: None,
                 slot: Some(slot),
                 readback: false,
                 content_epoch: parent.content_epoch,
@@ -4137,6 +4288,14 @@ impl GpuBackend for CudaBackend {
                         buf.pending_init = Some(vec![0u8; new_size as usize]);
                     }
                     None => {}
+                }
+                if let Some(staging) = buf.host_staging.as_ref() {
+                    let mut staging = staging.lock().unwrap();
+                    if preserve_contents {
+                        staging.resize(new_cap as usize, 0);
+                    } else {
+                        *staging = vec![0u8; new_cap as usize];
+                    }
                 }
                 buf.size = new_size;
                 buf.capacity = new_cap;
@@ -4842,8 +5001,9 @@ impl GpuBackend for CudaBackend {
             return Ok(self.gpu_progress(ctx));
         }
 
+        // Capture when the prefix is graph-safe. A non-empty tail (e.g. present
+        // Scratch `CopyTexture` export + fence) stays as GraphWithTail replay.
         if !core.is_empty()
-            && tail.is_empty()
             && pending_submit::ops_are_graph_safe(&core)
             && !retained_graph::cuda_launch_blocking_active()
             && !self.ops_touch_external_buffers(&core)
