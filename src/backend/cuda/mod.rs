@@ -193,6 +193,8 @@ struct CudaDevice {
     next_timeline: Arc<AtomicU64>,
     retired: Arc<AtomicU64>,
     event_ledger: EventLedger,
+    /// Recycled CUDA completion events (shared with contexts / present).
+    event_pool: Arc<timeline::EventPool>,
     deletion_queue: Arc<Mutex<Vec<CudaDeferredDrop>>>,
     /// Worker-owned CUDA GraphExec registry (serialized via the submission worker).
     graph_registry: Arc<Mutex<GraphRegistry>>,
@@ -214,9 +216,25 @@ pub(super) struct CudaSubmitContext {
     signal_queue: crate::signal::SignalQueue,
     device_retired: Arc<AtomicU64>,
     event_ledger: EventLedger,
+    event_pool: Arc<timeline::EventPool>,
     deletion_queue: Arc<Mutex<Vec<CudaDeferredDrop>>>,
     fence_shutdown: Arc<AtomicBool>,
     fence_thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl CudaSubmitContext {
+    /// Poll completion markers and recycle retired CUDA events into the device pool.
+    pub(super) fn poll_retire_events(&self) {
+        timeline::poll_retire_events(
+            &self.event_ledger,
+            &self.completed,
+            self.handle,
+            &self.device_retired,
+            &self.signal_queue,
+            &self.last_emitted,
+            &self.event_pool,
+        );
+    }
 }
 
 pub(super) enum CudaDeferredDrop {
@@ -270,19 +288,11 @@ pub(super) enum CudaDeferredDrop {
 
 struct CudaProgress {
     context: Arc<CudaSubmitContext>,
-    event_ledger: EventLedger,
 }
 
 impl ContextGpuProgress for CudaProgress {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        timeline::poll_retire_events(
-            &self.event_ledger,
-            &self.context.completed,
-            self.context.handle,
-            &self.context.device_retired,
-            &self.context.signal_queue,
-            &self.context.last_emitted,
-        );
+        self.context.poll_retire_events();
         let completed = self.context.completed.load(Ordering::Acquire);
         let retired = self.context.device_retired.load(Ordering::Acquire);
         // Device-contiguous retirement covers pruned entries this context may have
@@ -364,14 +374,7 @@ struct CudaDeferredDeletionFlush {
 
 impl ContextDeferredDeletionFlush for CudaDeferredDeletionFlush {
     fn flush(&self) {
-        timeline::poll_retire_events(
-            &self.context.event_ledger,
-            &self.context.completed,
-            self.context.handle,
-            &self.context.device_retired,
-            &self.context.signal_queue,
-            &self.context.last_emitted,
-        );
+        self.context.poll_retire_events();
         drain_deletion_queue_up_to(
             &self.context.deletion_queue,
             self.context.device_retired.load(Ordering::Acquire),
@@ -646,14 +649,7 @@ impl CudaBackend {
         worker.flush()?;
         cuda_context_stream_sync_after_interop(&cuda_ctx, &alloc_stream, "sync alloc stream for immediate API")?;
         for context in self.contexts.values().filter(|context| context.device == device) {
-            timeline::poll_retire_events(
-                &context.event_ledger,
-                &context.completed,
-                context.handle,
-                &context.device_retired,
-                &context.signal_queue,
-                &context.last_emitted,
-            );
+            context.poll_retire_events();
         }
         Ok(())
     }
@@ -2908,27 +2904,34 @@ impl CudaBackend {
         let worker = Arc::clone(&device.submission_worker);
         let next_timeline = Arc::clone(&device.next_timeline);
         let event_ledger = Arc::clone(&device.event_ledger);
-        let cuda_ctx = Arc::clone(&device.ctx);
+        let event_pool = Arc::clone(&device.event_pool);
 
         worker.check_error()?;
 
         let (fence_value, completion_event) = {
             let _tz = crate::tracy_zone!("cuda.enqueue_submit.alloc_timeline");
-            let fence_value = submission_worker::allocate_timeline_value(&next_timeline);
-            let completion_event = Arc::new(
-                cuda_ctx
-                    .new_event(None)
-                    .context("CUDA: create completion event failed")?,
-            );
+            let fence_value = {
+                let _tz = crate::tracy_zone!("cuda.enqueue_submit.alloc_timeline.counter");
+                submission_worker::allocate_timeline_value(&next_timeline)
+            };
+            let completion_event = {
+                let _tz = crate::tracy_zone!("cuda.enqueue_submit.alloc_timeline.create_event");
+                event_pool.acquire()?
+            };
             self.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
-            event_ledger.lock().unwrap().insert(
-                fence_value,
-                LedgerEntry {
-                    context: ctx,
-                    completion: LedgerCompletion::CudaEvent(Arc::clone(&completion_event)),
-                    recorded: false,
-                },
-            );
+            {
+                let _tz = crate::tracy_zone!("cuda.enqueue_submit.alloc_timeline.ledger_lock");
+                let mut guard = event_ledger.lock().unwrap();
+                let _tz = crate::tracy_zone!("cuda.enqueue_submit.alloc_timeline.ledger_insert");
+                guard.insert(
+                    fence_value,
+                    LedgerEntry {
+                        context: ctx,
+                        completion: LedgerCompletion::CudaEvent(Arc::clone(&completion_event)),
+                        recorded: false,
+                    },
+                );
+            }
             (fence_value, completion_event)
         };
 
@@ -3451,14 +3454,7 @@ impl GpuBackendTimelineWait for CudaBackend {
                 device.submission_worker.flush()?;
             }
         }
-        timeline::poll_retire_events(
-            &context.event_ledger,
-            &context.completed,
-            context.handle,
-            &context.device_retired,
-            &context.signal_queue,
-            &context.last_emitted,
-        );
+        context.poll_retire_events();
         if value > 0 && value <= context.device_retired.load(Ordering::Acquire) {
             let retired = context.device_retired.load(Ordering::Acquire);
             drain_deletion_queue_up_to(&context.deletion_queue, retired);
@@ -3559,6 +3555,10 @@ impl GpuBackend for CudaBackend {
                 .with_context(|| format!("CUDA: load indirect updater for adapter {adapter_id}"))?,
         );
         let alloc_stream = ctx.default_stream();
+        let event_pool = Arc::new(timeline::EventPool::new(Arc::clone(&ctx)));
+        event_pool
+            .prewarm()
+            .with_context(|| format!("CUDA: prewarm event pool for adapter {adapter_id}"))?;
         let handle = self.next_device;
         self.next_device += 1;
         let mut gpu = CudaDevice {
@@ -3568,6 +3568,7 @@ impl GpuBackend for CudaBackend {
             next_timeline: Arc::new(AtomicU64::new(1)),
             retired: Arc::new(AtomicU64::new(0)),
             event_ledger: Arc::new(Mutex::new(BTreeMap::new())),
+            event_pool,
             deletion_queue: Arc::new(Mutex::new(Vec::new())),
             graph_registry: Arc::new(Mutex::new(GraphRegistry::default())),
             graph_stats: Arc::clone(&self.graph_stats),
@@ -3660,14 +3661,7 @@ impl GpuBackend for CudaBackend {
                 .stream
                 .synchronize()
                 .context("CUDA: context stream synchronize failed")?;
-            timeline::poll_retire_events(
-                &context.event_ledger,
-                &context.completed,
-                context.handle,
-                &context.device_retired,
-                &context.signal_queue,
-                &context.last_emitted,
-            );
+            context.poll_retire_events();
         }
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         if let Some(stream) = present_stream {
@@ -3692,11 +3686,12 @@ impl GpuBackend for CudaBackend {
         if existing >= MAX_CUDA_SUBMISSION_CONTEXTS {
             anyhow::bail!("CUDA: submission context limit reached ({MAX_CUDA_SUBMISSION_CONTEXTS} per device)");
         }
-        let (stream, event_ledger, device_retired, deletion_queue) = {
+        let (stream, event_ledger, event_pool, device_retired, deletion_queue) = {
             let gpu = self.device(device)?;
             (
                 gpu.ctx.new_stream().context("CUDA: create context stream failed")?,
                 Arc::clone(&gpu.event_ledger),
+                Arc::clone(&gpu.event_pool),
                 Arc::clone(&gpu.retired),
                 Arc::clone(&gpu.deletion_queue),
             )
@@ -3712,25 +3707,18 @@ impl GpuBackend for CudaBackend {
             last_emitted: AtomicU64::new(0),
             signal_queue: crate::signal::SignalQueue::new(),
             device_retired,
-            event_ledger: Arc::clone(&event_ledger),
+            event_ledger,
+            event_pool,
             deletion_queue,
             fence_shutdown: Arc::clone(&fence_shutdown),
             fence_thread: Mutex::new(None),
         });
 
         let poller_context = Arc::clone(&context);
-        let poller_ledger = Arc::clone(&event_ledger);
         let shutdown = Arc::clone(&fence_shutdown);
         let handle_thread = std::thread::spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
-                timeline::poll_retire_events(
-                    &poller_ledger,
-                    &poller_context.completed,
-                    poller_context.handle,
-                    &poller_context.device_retired,
-                    &poller_context.signal_queue,
-                    &poller_context.last_emitted,
-                );
+                poller_context.poll_retire_events();
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         });
@@ -3795,10 +3783,7 @@ impl GpuBackend for CudaBackend {
 
     fn clone_context_gpu_progress(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextGpuProgress>> {
         let context = Arc::clone(self.contexts.get(&ctx)?);
-        Some(Arc::new(CudaProgress {
-            event_ledger: Arc::clone(&context.event_ledger),
-            context,
-        }))
+        Some(Arc::new(CudaProgress { context }))
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
@@ -4850,14 +4835,7 @@ impl GpuBackend for CudaBackend {
         let Some(context) = self.contexts.get(&ctx) else {
             return 0;
         };
-        timeline::poll_retire_events(
-            &context.event_ledger,
-            &context.completed,
-            context.handle,
-            &context.device_retired,
-            &context.signal_queue,
-            &context.last_emitted,
-        );
+        context.poll_retire_events();
         let completed = context.completed.load(Ordering::Acquire);
         let retired = context.device_retired.load(Ordering::Acquire);
         completed.max(retired)
@@ -4903,14 +4881,7 @@ impl GpuBackend for CudaBackend {
         }
         timeline::advance_device_retired(&gpu.event_ledger, &gpu.retired);
         for context in self.contexts.values().filter(|context| context.device == device) {
-            timeline::poll_retire_events(
-                &context.event_ledger,
-                &context.completed,
-                context.handle,
-                &context.device_retired,
-                &context.signal_queue,
-                &context.last_emitted,
-            );
+            context.poll_retire_events();
         }
         Ok(())
     }
@@ -4921,14 +4892,7 @@ impl GpuBackend for CudaBackend {
         _progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::QueuedSignal> {
         if let Some(context) = self.contexts.get(&ctx) {
-            timeline::poll_retire_events(
-                &context.event_ledger,
-                &context.completed,
-                context.handle,
-                &context.device_retired,
-                &context.signal_queue,
-                &context.last_emitted,
-            );
+            context.poll_retire_events();
             crate::signal::drain_all_queued_signals(&context.signal_queue)
         } else {
             Vec::new()

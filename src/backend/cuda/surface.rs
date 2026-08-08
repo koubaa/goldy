@@ -781,13 +781,13 @@ pub(super) fn take_present_gpu_work(
     );
 
     let context = Arc::clone(backend.context(frame.context)?);
-    let (worker, next_timeline, event_ledger, cuda_ctx) = {
+    let (worker, next_timeline, event_ledger, event_pool) = {
         let gpu = backend.device(device)?;
         (
             Arc::clone(&gpu.submission_worker),
             Arc::clone(&gpu.next_timeline),
             Arc::clone(&gpu.event_ledger),
-            Arc::clone(&gpu.ctx),
+            Arc::clone(&gpu.event_pool),
         )
     };
 
@@ -866,11 +866,9 @@ pub(super) fn take_present_gpu_work(
         );
         PresentCompletion::Dx12Fence
     } else {
-        let present_event = Arc::new(
-            cuda_ctx
-                .new_event(None)
-                .context("CUDA/DX12: create present completion event failed")?,
-        );
+        let present_event = event_pool
+            .acquire()
+            .context("CUDA/DX12: create present completion event failed")?;
         event_ledger.lock().unwrap().insert(
             present_tv,
             LedgerEntry {
@@ -1252,14 +1250,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             }
         }
         timeline::mark_recorded(&self.event_ledger, self.present_tv);
-        timeline::poll_retire_events(
-            &self.event_ledger,
-            &self.context.completed,
-            self.context.handle,
-            &self.context.device_retired,
-            &self.context.signal_queue,
-            &self.context.last_emitted,
-        );
+        self.context.poll_retire_events();
 
         Ok(PresentFinishState {
             frame: self.frame,

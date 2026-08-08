@@ -7,7 +7,9 @@ use crate::backend::ContextHandle;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::parcel::BytesByKind;
-use crate::timeline::{is_ready, ReferenceTable, TimelineValue};
+use crate::timeline::{ReferenceTable, TimelineValue};
+#[cfg(test)]
+use crate::timeline::is_ready;
 use crate::transient_pool::TransientPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -517,6 +519,7 @@ impl Context {
     /// True when every context in `refs` has retired the stamped timeline values.
     ///
     /// Prefer [`crate::Parcel::is_settled`] when checking a single parcel the caller holds.
+    #[cfg(test)]
     pub(crate) fn parcel_ready(&self, refs: &ReferenceTable) -> bool {
         if refs.is_empty() {
             return true;

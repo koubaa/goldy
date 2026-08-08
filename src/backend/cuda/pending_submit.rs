@@ -919,14 +919,7 @@ fn finish_submit(
         .record(stream)
         .context("CUDA: record completion event failed")?;
     timeline::mark_recorded(event_ledger, fence_value);
-    timeline::poll_retire_events(
-        event_ledger,
-        &context.completed,
-        context.handle,
-        &context.device_retired,
-        &context.signal_queue,
-        &context.last_emitted,
-    );
+    context.poll_retire_events();
     Ok(())
 }
 

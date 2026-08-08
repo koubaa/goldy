@@ -3,7 +3,7 @@
 use super::ContextHandle;
 use crate::backend::TimelineBlockingWait;
 use anyhow::{bail, Context as _, Result};
-use cudarc::driver::CudaEvent;
+use cudarc::driver::{CudaContext, CudaEvent};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,81 @@ use std::time::{Duration, Instant};
 
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 use super::dx12_companion::Dx12Companion;
+
+/// Soft cap on recycled completion events per device (steady-state depth + headroom).
+const EVENT_POOL_CAP: usize = 32;
+/// Events allocated at device create so the first submits avoid `cuEventCreate`.
+const EVENT_POOL_PREWARM: usize = 16;
+
+/// Per-device recycle pool for CUDA completion events (DX12 fence analogue).
+///
+/// Steady-state submits should hit the free list; `cuEventCreate` / `cuEventDestroy`
+/// only run on cold start, miss, or overflow beyond [`EVENT_POOL_CAP`].
+pub(super) struct EventPool {
+    ctx: Arc<CudaContext>,
+    free: Mutex<Vec<CudaEvent>>,
+}
+
+impl EventPool {
+    pub fn new(ctx: Arc<CudaContext>) -> Self {
+        Self {
+            ctx,
+            free: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn prewarm(&self) -> Result<()> {
+        let mut free = self.free.lock().unwrap();
+        while free.len() < EVENT_POOL_PREWARM {
+            free.push(
+                self.ctx
+                    .new_event(None)
+                    .context("CUDA: event pool prewarm failed")?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Take a recycled event or create one. Returned as [`Arc`] for ledger / wait cloning.
+    pub fn acquire(&self) -> Result<Arc<CudaEvent>> {
+        if let Some(event) = self.free.lock().unwrap().pop() {
+            let _tz = crate::tracy_zone!("cuda.event_pool.acquire.hit");
+            return Ok(Arc::new(event));
+        }
+        let _tz = crate::tracy_zone!("cuda.event_pool.acquire.miss");
+        Ok(Arc::new(
+            self.ctx
+                .new_event(None)
+                .context("CUDA: create completion event failed")?,
+        ))
+    }
+
+    /// Return events whose ledger entries have retired. Drops that still have live
+    /// wait clones are skipped (`Arc::try_unwrap` fails); overflow beyond the cap is
+    /// destroyed **outside** the free-list lock.
+    pub fn recycle_many(&self, events: Vec<Arc<CudaEvent>>) {
+        if events.is_empty() {
+            return;
+        }
+        let _tz = crate::tracy_zone!("cuda.event_pool.recycle");
+        let mut overflow = Vec::new();
+        {
+            let mut free = self.free.lock().unwrap();
+            for event in events {
+                let Ok(event) = Arc::try_unwrap(event) else {
+                    continue;
+                };
+                if free.len() < EVENT_POOL_CAP {
+                    free.push(event);
+                } else {
+                    overflow.push(event);
+                }
+            }
+        }
+        // `cuEventDestroy` (and bind_to_thread) must not run under `free` or the ledger lock.
+        drop(overflow);
+    }
+}
 
 /// How a ledger timeline value becomes observable as complete.
 pub(super) enum LedgerCompletion {
@@ -90,6 +165,7 @@ pub(super) fn poll_retire_events(
     device_retired: &AtomicU64,
     signal_queue: &crate::signal::SignalQueue,
     last_emitted: &AtomicU64,
+    event_pool: &EventPool,
 ) {
     // Snapshot under the lock; query completion outside so GetCompletedValue /
     // cudaEventQuery cannot stall insert/lookup on the present/submit hot path.
@@ -130,8 +206,9 @@ pub(super) fn poll_retire_events(
     }
 
     advance_device_retired(ledger, device_retired);
-    // Drop completed prefix so `poll_retire_events` stays O(in-flight), not O(session).
-    prune_retired_entries(ledger, device_retired);
+    // Recycle (or destroy) retired events outside the ledger lock.
+    let retired_events = prune_retired_entries(ledger, device_retired);
+    event_pool.recycle_many(retired_events);
 }
 
 /// Device retired value is the longest contiguous prefix of recorded+complete events.
@@ -157,20 +234,37 @@ pub(super) fn advance_device_retired(ledger: &EventLedger, device_retired: &Atom
 
 /// Remove ledger entries at or below the device retirement floor.
 ///
+/// Returns CUDA events from pruned entries so callers can recycle them **after**
+/// releasing the ledger mutex (avoids holding the lock across `cuEventDestroy`).
+///
 /// Callers that resolve waits must treat a missing entry with
 /// `value <= device_retired` as already complete (see [`completion_for_wait`]).
-pub(super) fn prune_retired_entries(ledger: &EventLedger, device_retired: &AtomicU64) {
+pub(super) fn prune_retired_entries(
+    ledger: &EventLedger,
+    device_retired: &AtomicU64,
+) -> Vec<Arc<CudaEvent>> {
     let retired = device_retired.load(Ordering::Acquire);
     if retired == 0 {
-        return;
+        return Vec::new();
     }
-    let mut guard = ledger.lock().unwrap();
-    if guard.is_empty() {
-        return;
+    let retired_map = {
+        let mut guard = ledger.lock().unwrap();
+        if guard.is_empty() {
+            return Vec::new();
+        }
+        // `split_off(retired + 1)` keeps keys >= retired+1 in the returned map;
+        // what remains in `guard` is the retired prefix — swap it out without dropping
+        // under the lock.
+        let keep = guard.split_off(&(retired + 1));
+        std::mem::replace(&mut *guard, keep)
+    };
+    let mut events = Vec::new();
+    for (_, entry) in retired_map {
+        if let LedgerCompletion::CudaEvent(event) = entry.completion {
+            events.push(event);
+        }
     }
-    // `split_off(retired + 1)` keeps keys >= retired+1; assign back and drop the prefix.
-    let keep = guard.split_off(&(retired + 1));
-    *guard = keep;
+    events
 }
 
 /// Result of resolving a timeline wait against the event ledger.

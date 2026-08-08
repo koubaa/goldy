@@ -108,6 +108,7 @@ impl<E> ResourceBin<E> {
         self.pending.is_empty() && self.ready.is_empty()
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.pending.len() + self.ready.len()
     }
