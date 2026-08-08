@@ -48,22 +48,48 @@ pub(super) struct CudaPendingSubmit {
     pub body: CudaSubmitBody,
 }
 
+/// One alternating segment of a retainable CUDA partition.
+///
+/// Graph-safe kernel runs are captured into separate `CUgraphExec` islands; clears,
+/// copies, specialized launches, and present exports stay as stream-replayed ops.
+/// Multiple islands and stream segments may interleave; FIFO stream order preserves
+/// dependencies without inter-island events.
+#[derive(Clone)]
+pub(super) enum CudaOpSegment {
+    /// Contiguous graph-safe kernel launches (captured / relaunched).
+    Graph(Vec<CudaOp>),
+    /// Graph-unsafe boundary ops executed with `execute_ops`.
+    Stream(Vec<CudaOp>),
+}
+
+impl CudaOpSegment {
+    pub fn is_graph(&self) -> bool {
+        matches!(self, Self::Graph(_))
+    }
+
+    pub fn ops(&self) -> &[CudaOp] {
+        match self {
+            Self::Graph(ops) | Self::Stream(ops) => ops,
+        }
+    }
+}
+
 /// Body executed after the dynamic sync prefix and before the completion event.
 pub(super) enum CudaSubmitBody {
     /// Immediate stream ops (standalone submits and command-replay fallback).
     Ops(Vec<CudaOp>),
-    /// Capture ops into a retained CUDA graph, then launch it once.
+    /// Capture each [`CudaOpSegment::Graph`] into a retained island, then execute the
+    /// full segment list once (graph launch + stream replay).
     CaptureAndLaunch {
         key: u64,
-        ops: Vec<CudaOp>,
-        tail: Vec<CudaOp>,
+        segments: Vec<CudaOpSegment>,
         registry: Arc<Mutex<GraphRegistry>>,
         stats: Arc<CudaGraphStats>,
     },
-    /// Launch a previously retained CUDA graph.
+    /// Relaunch retained graph islands and replay stream segments in order.
     LaunchRetained {
         key: u64,
-        tail: Vec<CudaOp>,
+        segments: Vec<CudaOpSegment>,
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         scratch_images: Vec<(crate::backend::SurfaceHandle, usize)>,
         registry: Arc<Mutex<GraphRegistry>>,
@@ -88,9 +114,8 @@ pub(super) enum CudaOp {
         args: Vec<CudaLaunchArg>,
         keep_alive_buffers: Vec<Arc<Mutex<CudaSlice<u8>>>>,
         keep_alive_textures: Vec<Arc<super::texture::CudaTextureResource>>,
-        /// False for format-specialized PTX variants. Those kernels force the
-        /// partition onto op-list retention: capturing a graph prefix and replaying
-        /// the specialized kernel in a tail (`GraphWithTail`) has faulted on relaunch.
+        /// False for format-specialized PTX variants. Those kernels stay in
+        /// [`CudaOpSegment::Stream`]; capturing them into a graph has faulted on relaunch.
         graph_capture_ok: bool,
     },
     /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
@@ -240,15 +265,96 @@ pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
     !ops.is_empty() && ops.iter().all(op_is_graph_safe)
 }
 
-pub(super) fn split_graph_core_and_tail(ops: Vec<CudaOp>) -> (Vec<CudaOp>, Vec<CudaOp>) {
-    let split = ops.iter().position(|op| !op_is_graph_safe(op)).unwrap_or(ops.len());
-    let mut core = ops;
-    let tail = core.split_off(split);
-    (core, tail)
+/// Split ops into maximal alternating graph-safe and stream-replay segments.
+///
+/// Contiguous graph-safe launches become [`CudaOpSegment::Graph`]; everything else
+/// coalesces into [`CudaOpSegment::Stream`]. Empty input yields an empty vec.
+pub(super) fn partition_ops_into_segments(ops: Vec<CudaOp>) -> Vec<CudaOpSegment> {
+    if ops.is_empty() {
+        return Vec::new();
+    }
+    let mut segments = Vec::new();
+    let mut current: Option<(bool, Vec<CudaOp>)> = None;
+    for op in ops {
+        let safe = op_is_graph_safe(&op);
+        match current.as_mut() {
+            Some((is_safe, buf)) if *is_safe == safe => buf.push(op),
+            _ => {
+                if let Some((was_safe, buf)) = current.take() {
+                    segments.push(if was_safe {
+                        CudaOpSegment::Graph(buf)
+                    } else {
+                        CudaOpSegment::Stream(buf)
+                    });
+                }
+                current = Some((safe, vec![op]));
+            }
+        }
+    }
+    if let Some((was_safe, buf)) = current {
+        segments.push(if was_safe {
+            CudaOpSegment::Graph(buf)
+        } else {
+            CudaOpSegment::Stream(buf)
+        });
+    }
+    segments
+}
+
+/// Flatten every stream segment's ops (for epoch bumps / memory touch checks).
+pub(super) fn collect_stream_ops(segments: &[CudaOpSegment]) -> Vec<CudaOp> {
+    segments
+        .iter()
+        .filter_map(|seg| match seg {
+            CudaOpSegment::Stream(ops) => Some(ops.iter().cloned()),
+            CudaOpSegment::Graph(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Flatten all ops across segments (graph + stream), preserving order.
+pub(super) fn flatten_segment_ops(segments: &[CudaOpSegment]) -> Vec<CudaOp> {
+    segments.iter().flat_map(|seg| seg.ops().iter().cloned()).collect()
+}
+
+/// Merge adjacent [`CudaOpSegment::Stream`] runs without reclassifying graph islands.
+///
+/// Used after demoting externally-touched graph islands to stream so demoted launches
+/// stay on the stream path even though `op_is_graph_safe` would still return true.
+pub(super) fn coalesce_adjacent_stream_segments(segments: Vec<CudaOpSegment>) -> Vec<CudaOpSegment> {
+    let mut out: Vec<CudaOpSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        match (out.last_mut(), segment) {
+            (Some(CudaOpSegment::Stream(prev)), CudaOpSegment::Stream(next)) => {
+                prev.extend(next);
+            }
+            (_, segment) => out.push(segment),
+        }
+    }
+    out
+}
+
+/// Number of graph islands in `segments`.
+pub(super) fn graph_island_count(segments: &[CudaOpSegment]) -> usize {
+    segments.iter().filter(|s| s.is_graph()).count()
+}
+
+/// Mutable handle to the last stream segment (for DX12 fence injection). Creates an
+/// empty trailing stream segment if the program ends on a graph island.
+pub(super) fn last_stream_segment_mut(segments: &mut Vec<CudaOpSegment>) -> &mut Vec<CudaOp> {
+    if !matches!(segments.last(), Some(CudaOpSegment::Stream(_))) {
+        segments.push(CudaOpSegment::Stream(Vec::new()));
+    }
+    match segments.last_mut() {
+        Some(CudaOpSegment::Stream(ops)) => ops,
+        _ => unreachable!("just ensured a trailing Stream segment"),
+    }
 }
 
 pub(super) fn strip_external_fence_ops(ops: Vec<CudaOp>) -> Vec<CudaOp> {
@@ -298,6 +404,78 @@ mod graph_safe_tests {
             size: 16,
         };
         assert!(!ops_are_graph_safe(&[op]));
+    }
+
+    fn make_clear() -> CudaOp {
+        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device");
+        let stream = ctx.default_stream();
+        let slice = stream.alloc_zeros::<u8>(16).expect("alloc");
+        CudaOp::Clear {
+            memory: Arc::new(Mutex::new(slice)),
+            abs_offset: 0,
+            size: 16,
+        }
+    }
+
+    /// Build a Launch marked graph-safe without needing a real module load.
+    /// Uses a clear as a stand-in "unsafe" op and synthesizes safe/unsafe via Clear only
+    /// for partitioning tests that don't need real launches.
+    #[test]
+    fn partition_empty_yields_empty() {
+        assert!(partition_ops_into_segments(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn partition_clear_then_would_be_launch_prefix_is_single_stream() {
+        let Ok(_) = cudarc::driver::CudaContext::new(0) else {
+            eprintln!("skip: no CUDA device");
+            return;
+        };
+        let segments = partition_ops_into_segments(vec![make_clear(), make_clear()]);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(&segments[0], CudaOpSegment::Stream(ops) if ops.len() == 2));
+    }
+
+    #[test]
+    fn partition_alternating_clear_and_copy_coalesce_stream() {
+        let Ok(ctx) = cudarc::driver::CudaContext::new(0) else {
+            eprintln!("skip: no CUDA device");
+            return;
+        };
+        let stream = ctx.default_stream();
+        let Ok(a) = stream.alloc_zeros::<u8>(16) else {
+            return;
+        };
+        let Ok(b) = stream.alloc_zeros::<u8>(16) else {
+            return;
+        };
+        let mem_a = Arc::new(Mutex::new(a));
+        let mem_b = Arc::new(Mutex::new(b));
+        let clear = CudaOp::Clear {
+            memory: Arc::clone(&mem_a),
+            abs_offset: 0,
+            size: 16,
+        };
+        let copy = CudaOp::Copy {
+            src: Arc::clone(&mem_a),
+            src_abs: 0,
+            dst: Arc::clone(&mem_b),
+            dst_abs: 0,
+            size: 16,
+        };
+        let segments = partition_ops_into_segments(vec![clear, copy]);
+        assert_eq!(segments.len(), 1, "adjacent unsafe ops must coalesce into one stream segment");
+        assert!(matches!(&segments[0], CudaOpSegment::Stream(ops) if ops.len() == 2));
+    }
+
+    #[test]
+    fn last_stream_segment_mut_appends_when_ending_on_graph() {
+        // Graph segment with empty ops is unusual but exercises the helper.
+        let mut segments = vec![CudaOpSegment::Graph(Vec::new())];
+        let stream = last_stream_segment_mut(&mut segments);
+        assert!(stream.is_empty());
+        assert_eq!(segments.len(), 2);
+        assert!(matches!(segments[1], CudaOpSegment::Stream(_)));
     }
 }
 
@@ -945,63 +1123,70 @@ impl PendingSubmit for CudaPendingSubmit {
             }
             CudaSubmitBody::CaptureAndLaunch {
                 key,
-                ops,
-                tail,
+                segments,
                 registry,
                 stats,
             } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture_and_launch");
                 let ctx = self.context.handle;
-                let (buffers, modules, textures) = collect_pins(&ops);
-                let needs_indirect = ops_contain_indirect(&ops);
-                let graph = {
-                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture");
-                    capture_partition_graph(&self.stream, &ops)?
-                };
-                stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut islands = Vec::new();
+                for segment in &segments {
+                    match segment {
+                        CudaOpSegment::Graph(ops) => {
+                            let (buffers, modules, textures) = collect_pins(ops);
+                            let needs_indirect = ops_contain_indirect(ops);
+                            let graph = {
+                                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture");
+                                capture_partition_graph(&self.stream, ops)?
+                            };
+                            stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if needs_indirect {
+                                graph
+                                    .upload()
+                                    .context("CUDA: cuGraphUpload failed after indirect capture")?;
+                            }
+                            graph
+                                .launch()
+                                .context("CUDA: cuGraphLaunch failed after capture")?;
+                            stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            maybe_validate_sync(&self.stream, "graph launch after capture")?;
+                            islands.push(retained_graph::CudaRetainedPartition {
+                                graph,
+                                buffers,
+                                modules,
+                                textures,
+                                last_launch_tv: self.fence_value,
+                            });
+                        }
+                        CudaOpSegment::Stream(ops) => {
+                            if !ops.is_empty() {
+                                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
+                                execute_ops(&self.stream, ops, true)?;
+                            }
+                        }
+                    }
+                }
                 {
-                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.registry_launch");
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.registry_insert");
                     let mut guard = registry.lock().unwrap();
                     guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
                     if let Some(old) = guard.remove(ctx, key) {
-                        let retire_at = old.last_launch_tv.max(self.fence_value);
+                        let retire_at = old.last_launch_tv().max(self.fence_value);
                         guard.defer_drop(retire_at, old);
                     }
                     guard.insert(
                         ctx,
                         key,
-                        retained_graph::CudaRetainedPartition {
-                            graph,
-                            buffers,
-                            modules,
-                            textures,
+                        retained_graph::CudaRetainedProgram {
+                            islands,
                             last_launch_tv: self.fence_value,
                         },
                     );
-                    let partition = guard
-                        .get_mut(ctx, key)
-                        .context("CUDA: retained graph missing after capture")?;
-                    if needs_indirect {
-                        partition
-                            .graph
-                            .upload()
-                            .context("CUDA: cuGraphUpload failed after indirect capture")?;
-                    }
-                    partition
-                        .graph
-                        .launch()
-                        .context("CUDA: cuGraphLaunch failed after capture")?;
-                }
-                stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                maybe_validate_sync(&self.stream, "graph launch after capture")?;
-                if !tail.is_empty() {
-                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.tail");
-                    execute_ops(&self.stream, &tail, true)?;
                 }
             }
             CudaSubmitBody::LaunchRetained {
                 key,
-                tail,
+                segments,
                 registry,
                 stats,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -1009,20 +1194,38 @@ impl PendingSubmit for CudaPendingSubmit {
             } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.launch_retained");
                 let ctx = self.context.handle;
-                {
-                    let mut guard = registry.lock().unwrap();
-                    guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
-                    let partition = guard
-                        .get_mut(ctx, key)
-                        .with_context(|| format!("CUDA: retained graph missing for context {ctx} key {key:#x}"))?;
-                    partition.graph.launch().context("CUDA: cuGraphLaunch failed")?;
-                    partition.last_launch_tv = self.fence_value;
-                }
-                stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                maybe_validate_sync(&self.stream, "retained graph launch")?;
-                if !tail.is_empty() {
-                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.tail");
-                    execute_ops(&self.stream, &tail, true)?;
+                let mut island_idx = 0usize;
+                for segment in &segments {
+                    match segment {
+                        CudaOpSegment::Graph(_) => {
+                            {
+                                let mut guard = registry.lock().unwrap();
+                                guard.drain_retired(
+                                    self.context.device_retired.load(std::sync::atomic::Ordering::Acquire),
+                                );
+                                let program = guard.get_mut(ctx, key).with_context(|| {
+                                    format!("CUDA: retained graph missing for context {ctx} key {key:#x}")
+                                })?;
+                                let island = program.islands.get_mut(island_idx).with_context(|| {
+                                    format!(
+                                        "CUDA: retained island {island_idx} missing for context {ctx} key {key:#x}"
+                                    )
+                                })?;
+                                island.graph.launch().context("CUDA: cuGraphLaunch failed")?;
+                                island.last_launch_tv = self.fence_value;
+                                program.last_launch_tv = self.fence_value;
+                            }
+                            stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            maybe_validate_sync(&self.stream, "retained graph launch")?;
+                            island_idx += 1;
+                        }
+                        CudaOpSegment::Stream(ops) => {
+                            if !ops.is_empty() {
+                                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
+                                execute_ops(&self.stream, ops, true)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1055,9 +1258,9 @@ impl PendingSubmit for CudaEvictRetained {
     fn execute(self: Box<Self>) -> Result<()> {
         let mut guard = self.registry.lock().unwrap();
         guard.drain_retired(self.device_retired.load(std::sync::atomic::Ordering::Acquire));
-        if let Some(partition) = guard.remove(self.ctx, self.key) {
-            let retire_at = partition.last_launch_tv.max(self.retire_fallback);
-            guard.defer_drop(retire_at, partition);
+        if let Some(program) = guard.remove(self.ctx, self.key) {
+            let retire_at = program.last_launch_tv().max(self.retire_fallback);
+            guard.defer_drop(retire_at, program);
             self.stats.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
@@ -1077,9 +1280,9 @@ impl PendingSubmit for CudaEvictContextGraphs {
     fn execute(self: Box<Self>) -> Result<()> {
         let mut guard = self.registry.lock().unwrap();
         guard.drain_retired(self.device_retired.load(std::sync::atomic::Ordering::Acquire));
-        for partition in guard.remove_context(self.ctx) {
-            let retire_at = partition.last_launch_tv.max(self.retire_fallback);
-            guard.defer_drop(retire_at, partition);
+        for program in guard.remove_context(self.ctx) {
+            let retire_at = program.last_launch_tv().max(self.retire_fallback);
+            guard.defer_drop(retire_at, program);
             self.stats.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())

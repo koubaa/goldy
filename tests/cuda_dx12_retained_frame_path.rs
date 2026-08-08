@@ -265,7 +265,7 @@ fn cuda_compute_to_present_retained_steady_state() {
 
     let stats = device.cuda_path_stats_for_test().expect("CUDA stats must be available");
     // Present-bound launches are rewritten onto CUDA-owned staging and captured; the
-    // imported scratch export stays in the fixed GraphWithTail (CopyTexture + fence).
+    // imported scratch export stays in a trailing stream segment (CopyTexture + fence).
     assert_eq!(
         stats.rematerialize_fallbacks, 0,
         "retained replay must not rematerialize"

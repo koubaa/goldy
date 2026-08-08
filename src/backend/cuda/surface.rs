@@ -562,9 +562,9 @@ pub(super) fn surface_resize(backend: &mut CudaBackend, surface: SurfaceHandle, 
 /// Evict retained partitions that still reference destroyed surface scratch.
 ///
 /// Present writes use imported D3D12 scratch and are not CUDA-graph-capturable, so
-/// `RetainedEntry::Graph` normally has no scratch pins. Command-replay entries may
-/// still embed destroyed texture handles or registry slot indices — those must go.
-/// Unrelated retained compute graphs are left intact across resize.
+/// graph islands normally have no scratch pins. Stream-replay segments and Ops
+/// entries may still embed destroyed texture handles or registry slot indices — those
+/// must go. Unrelated retained compute graphs are left intact across resize.
 fn evict_retained_touching_scratch(
     backend: &mut CudaBackend,
     destroyed_handles: &[TextureHandle],
@@ -585,16 +585,27 @@ fn evict_retained_touching_scratch(
 
     let touches = |entry: &super::RetainedEntry| -> bool {
         match entry {
-            super::RetainedEntry::Graph { scratch_images, .. }
-            | super::RetainedEntry::GraphWithTail { scratch_images, .. } => {
-                scratch_images.iter().any(|(surface, image)| {
+            super::RetainedEntry::Segmented {
+                segments,
+                scratch_images,
+                ..
+            } => {
+                let scratch_hit = scratch_images.iter().any(|(surface, image)| {
                     backend
                         .surfaces
                         .get(surface)
                         .and_then(|state| state.scratch.get(*image))
                         .and_then(|slot| slot.as_ref())
                         .is_some_and(|slot| handles.contains(&slot.texture_handle))
-                })
+                });
+                if scratch_hit {
+                    return true;
+                }
+                let stream_ops = super::pending_submit::collect_stream_ops(segments);
+                let (_buffers, _modules, textures) = super::pending_submit::collect_pins(&stream_ops);
+                textures
+                    .iter()
+                    .any(|texture| destroyed_ptrs.contains(&Arc::as_ptr(texture)))
             }
             super::RetainedEntry::Ops(ops) => {
                 let (buffers, modules, textures) = super::pending_submit::collect_pins(ops);
@@ -633,10 +644,7 @@ fn evict_retained_touching_scratch(
     // Belt-and-suspenders: if a captured graph somehow pinned imported scratch, evict it.
     if !destroyed_ptrs.is_empty() {
         for (&(ctx, key), entry) in backend.retained.iter() {
-            if !matches!(
-                entry,
-                super::RetainedEntry::Graph { .. } | super::RetainedEntry::GraphWithTail { .. }
-            ) {
+            if !matches!(entry, super::RetainedEntry::Segmented { .. }) {
                 continue;
             }
             let Some(context) = backend.contexts.get(&ctx) else {
@@ -648,10 +656,11 @@ fn evict_retained_touching_scratch(
             let Ok(registry) = device.graph_registry.lock() else {
                 continue;
             };
-            if let Some(part) = registry.get(ctx, key) {
-                if part.textures.iter().any(|t| destroyed_ptrs.contains(&Arc::as_ptr(t))) {
-                    stale.push((ctx, key));
-                }
+            if destroyed_ptrs
+                .iter()
+                .any(|ptr| registry.program_holds_texture_ptr(ctx, key, *ptr))
+            {
+                stale.push((ctx, key));
             }
         }
     }

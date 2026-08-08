@@ -530,8 +530,9 @@ impl CudaBackend {
             .filter_map(|((ctx, key), entry)| {
                 let touches = match entry {
                     super::RetainedEntry::Ops(ops) => ops_touch_memory(ops, memory, stream, target_device_ptr),
-                    super::RetainedEntry::GraphWithTail { tail, .. } => {
-                        ops_touch_memory(tail, memory, stream, target_device_ptr)
+                    super::RetainedEntry::Segmented { segments, .. } => {
+                        let stream_ops = super::pending_submit::collect_stream_ops(segments);
+                        ops_touch_memory(&stream_ops, memory, stream, target_device_ptr)
                     }
                     _ => false,
                 };
@@ -563,34 +564,21 @@ impl CudaBackend {
             .iter()
             .filter_map(|((ctx, key), entry)| {
                 let touches = match entry {
-                    super::RetainedEntry::Graph {
+                    super::RetainedEntry::Segmented {
+                        segments,
                         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                         twin_dirty,
                         ..
                     } => {
+                        let stream_ops = super::pending_submit::collect_stream_ops(segments);
+                        let stream_hit = ops_touch_memory(&stream_ops, memory, stream, target_device_ptr);
                         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                         {
-                            twin_dirty.contains(&buffer)
+                            stream_hit || twin_dirty.contains(&buffer)
                         }
                         #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
                         {
-                            false
-                        }
-                    }
-                    super::RetainedEntry::GraphWithTail {
-                        tail,
-                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                        twin_dirty,
-                        ..
-                    } => {
-                        let tail_hit = ops_touch_memory(tail, memory, stream, target_device_ptr);
-                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                        {
-                            tail_hit || twin_dirty.contains(&buffer)
-                        }
-                        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
-                        {
-                            tail_hit
+                            stream_hit
                         }
                     }
                     _ => false,

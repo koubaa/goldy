@@ -25,12 +25,14 @@
 //! Submits are host-asynchronous: each context owns a CUDA stream, each timeline
 //! value owns a completion event, and a per-device [`SubmissionWorker`] records work.
 //!
-//! Retainable compute partitions whose bodies are kernel-launch-only are captured into
-//! CUDA graphs on first submit (`submit_graph_and_retain`) and relaunched on cache hits
-//! (`try_resubmit_retained`). Present-bound launches that would write D3D12-imported
-//! scratch are rewritten onto CUDA-owned staging with a fixed `CopyTexture` export tail.
-//! Indirect dispatches use CUDA 13.1 device-updatable kernel
-//! nodes plus an in-graph updater; uploads, clears, copies, and other graph-unsafe ops fall
+//! Retainable compute partitions are split into alternating graph-safe islands and
+//! stream-replayed boundary segments (`submit_graph_and_retain`). Graph islands are
+//! captured into CUDA graphs and relaunched on cache hits (`try_resubmit_retained`);
+//! clears, copies, format-specialized launches, and present exports stay on the
+//! stream path between islands. Present-bound launches that would write D3D12-imported
+//! scratch are rewritten onto CUDA-owned staging with a fixed `CopyTexture` export
+//! stream segment. Indirect dispatches use CUDA 13.1 device-updatable kernel
+//! nodes plus an in-graph updater; uploads and other fully graph-unsafe partitions fall
 //! back to Goldy command-list replay (with a worker-side DtoH resolve for indirect grids).
 //! Dynamic waits, deferred host writes, and completion events stay outside the captured graph.
 
@@ -80,19 +82,16 @@ use timeline::{EventLedger, LedgerCompletion, LedgerEntry};
 /// Logical retained entry under the backend lock (graphs themselves live on the worker).
 #[derive(Clone)]
 enum RetainedEntry {
-    /// Pure graph-safe core captured in the worker registry.
-    Graph {
+    /// Alternating graph islands + stream-replayed boundary segments.
+    ///
+    /// Graph-safe kernel runs are captured into the worker registry (one island per
+    /// [`pending_submit::CudaOpSegment::Graph`]); stream segments are stored here and
+    /// re-executed with `execute_ops` on each resubmit.
+    Segmented {
+        segments: Vec<pending_submit::CudaOpSegment>,
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         scratch_images: Vec<(SurfaceHandle, usize)>,
-        /// NativeAndTwin buffers the graph may write; dirty on each launch.
-        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        twin_dirty: Vec<BufferHandle>,
-    },
-    /// Graph-safe core plus pre-materialized boundary operations.
-    GraphWithTail {
-        tail: Vec<CudaOp>,
-        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        scratch_images: Vec<(SurfaceHandle, usize)>,
+        /// NativeAndTwin buffers any island/stream segment may write; dirty on each launch.
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         twin_dirty: Vec<BufferHandle>,
     },
@@ -1494,8 +1493,8 @@ impl CudaBackend {
             .context("CUDA: invalid compute pipeline")?;
         let specs = self.resolve_storage_texture_specs(&pipeline.launch_layout, indices)?;
         let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
-        // Format-specialized PTX variants are not CUDA-graph-safe in multi-dispatch
-        // partitions (GraphWithTail relaunch faults). Identity DirectSpatial stays capturable.
+        // Format-specialized PTX variants stay on the stream-replay path (multi-island
+        // stream segments). Identity DirectSpatial stays capturable.
         let graph_capture_ok = specs
             .iter()
             .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
@@ -2857,23 +2856,21 @@ impl CudaBackend {
                 CudaSubmitBody::Ops(ops) => {
                     self.prepare_surface_submit_ops(ctx, ops)?;
                 }
-                CudaSubmitBody::CaptureAndLaunch { ops, tail, .. } => {
-                    if tail.is_empty() {
-                        self.prepare_surface_submit_ops(ctx, ops)?;
-                    } else {
-                        self.prepare_surface_submit_ops(ctx, tail)?;
-                    }
+                CudaSubmitBody::CaptureAndLaunch { segments, .. } => {
+                    let stream_ops = pending_submit::last_stream_segment_mut(segments);
+                    self.prepare_surface_submit_ops(ctx, stream_ops)?;
                 }
                 CudaSubmitBody::LaunchRetained {
-                    tail,
+                    segments,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     scratch_images,
                     ..
                 } => {
+                    let stream_ops = pending_submit::last_stream_segment_mut(segments);
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, tail)?;
+                    self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, stream_ops)?;
                     #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
-                    self.prepare_surface_submit_ops(ctx, tail)?;
+                    self.prepare_surface_submit_ops(ctx, stream_ops)?;
                 }
             }
         }
@@ -3070,8 +3067,8 @@ impl CudaBackend {
         };
         let mut guard = device.graph_registry.lock().unwrap();
         guard.drain_retired(device.retired.load(Ordering::Acquire));
-        if let Some(partition) = guard.remove(ctx, key) {
-            drop(partition);
+        if let Some(program) = guard.remove(ctx, key) {
+            drop(program);
             device.graph_stats.evictions.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -3096,8 +3093,8 @@ impl CudaBackend {
         let mut guard = device.graph_registry.lock().unwrap();
         guard.drain_retired(device.retired.load(Ordering::Acquire));
         for ctx in &ctxs {
-            for partition in guard.remove_context(*ctx) {
-                drop(partition);
+            for program in guard.remove_context(*ctx) {
+                drop(program);
             }
         }
         guard.clear_pending_drops();
@@ -4962,19 +4959,24 @@ impl GpuBackend for CudaBackend {
             surface::scratch_slot_for_texture(self, *dst).map(|(surf, _)| (*src, surf))
         });
         let stripped = pending_submit::strip_external_fence_ops(ops);
-        let (core, tail) = pending_submit::split_graph_core_and_tail(stripped);
+        let mut segments = pending_submit::partition_ops_into_segments(stripped);
+        // Demote graph islands that touch D3D12 shared-primary memory to stream replay.
+        for segment in &mut segments {
+            if let pending_submit::CudaOpSegment::Graph(ops) = segment {
+                if self.ops_touch_external_buffers(ops) {
+                    *segment = pending_submit::CudaOpSegment::Stream(std::mem::take(ops));
+                }
+            }
+        }
+        // Coalesce adjacent stream segments created by demotion (do not reclassify).
+        segments = pending_submit::coalesce_adjacent_stream_segments(segments);
+
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        let scratch_images = {
-            let mut all = core.clone();
-            all.extend(tail.iter().cloned());
-            self.scratch_images_touched_by_ops(&all)
-        };
+        let all_ops = pending_submit::flatten_segment_ops(&segments);
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        let twin_dirty = {
-            let mut all = core.clone();
-            all.extend(tail.iter().cloned());
-            self.native_twin_buffers_written_by_ops(&all)
-        };
+        let scratch_images = self.scratch_images_touched_by_ops(&all_ops);
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        let twin_dirty = self.native_twin_buffers_written_by_ops(&all_ops);
 
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         if let Some((target, surface)) = direct_present {
@@ -4986,45 +4988,38 @@ impl GpuBackend for CudaBackend {
             return Ok(self.gpu_progress(ctx));
         }
 
-        // Capture when the prefix is graph-safe. A non-empty tail (e.g. present
-        // Scratch `CopyTexture` export + fence) stays as GraphWithTail replay.
-        if !core.is_empty()
-            && pending_submit::ops_are_graph_safe(&core)
-            && !retained_graph::cuda_launch_blocking_active()
-            && !self.ops_touch_external_buffers(&core)
-        {
+        let graph_islands = pending_submit::graph_island_count(&segments);
+        // Capture when at least one graph-safe island remains. Stream segments (clears,
+        // specialized kernels, present CopyTexture export + fence) stay as replayed ops
+        // interleaved with island launches on the same stream.
+        if graph_islands > 0 && !retained_graph::cuda_launch_blocking_active() {
             let device_handle = self.context(ctx)?.device;
             let device = self.device(device_handle)?;
             let body = CudaSubmitBody::CaptureAndLaunch {
                 key,
-                ops: core,
-                tail: tail.clone(),
+                segments: segments.clone(),
                 registry: Arc::clone(&device.graph_registry),
                 stats: Arc::clone(&device.graph_stats),
             };
-            let retained = if tail.is_empty() {
-                RetainedEntry::Graph {
+            self.retained.insert(
+                (ctx, key),
+                RetainedEntry::Segmented {
+                    segments,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     scratch_images,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     twin_dirty,
-                }
-            } else {
-                RetainedEntry::GraphWithTail {
-                    tail,
-                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    scratch_images,
-                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    twin_dirty,
-                }
-            };
-            self.retained.insert((ctx, key), retained);
-            tracing::trace!(key, "CUDA: capturing retainable partition into CudaGraph");
+                },
+            );
+            tracing::trace!(
+                key,
+                graph_islands,
+                "CUDA: capturing retainable partition into multi-island CudaGraph program"
+            );
             self.enqueue_submit(ctx, sync, body)
         } else {
             self.graph_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
-            let mut ops = core;
-            ops.extend(tail);
+            let ops = pending_submit::flatten_segment_ops(&segments);
             self.retained.insert((ctx, key), RetainedEntry::Ops(ops.clone()));
             tracing::trace!(
                 key,
@@ -5047,7 +5042,8 @@ impl GpuBackend for CudaBackend {
             self.retained.get(&(ctx, key)).cloned()
         };
         match entry {
-            Some(RetainedEntry::Graph {
+            Some(RetainedEntry::Segmented {
+                segments,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 scratch_images,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -5061,44 +5057,20 @@ impl GpuBackend for CudaBackend {
                             buf.bump_content_epoch();
                         }
                     }
+                    let stream_ops = pending_submit::collect_stream_ops(&segments);
+                    self.bump_content_epochs_for_retained_writes(&stream_ops);
                 }
                 let device_handle = self.context(ctx)?.device;
                 let device = self.device(device_handle)?;
                 let body = CudaSubmitBody::LaunchRetained {
                     key,
-                    tail: Vec::new(),
+                    segments,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     scratch_images,
                     registry: Arc::clone(&device.graph_registry),
                     stats: Arc::clone(&device.graph_stats),
                 };
-                tracing::trace!(key, "CUDA: launching retained CudaGraph");
-                let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
-                self.enqueue_submit(ctx, sync, body).map(Some)
-            }
-            Some(RetainedEntry::GraphWithTail {
-                tail,
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                scratch_images,
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    twin_dirty: _,
-            }) => {
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                {
-                    let _tz = crate::tracy_zone!("cuda.resubmit_retained.bump_epochs");
-                    self.bump_content_epochs_for_retained_writes(&tail);
-                }
-                let device_handle = self.context(ctx)?.device;
-                let device = self.device(device_handle)?;
-                let body = CudaSubmitBody::LaunchRetained {
-                    key,
-                    tail,
-                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    scratch_images,
-                    registry: Arc::clone(&device.graph_registry),
-                    stats: Arc::clone(&device.graph_stats),
-                };
-                tracing::trace!(key, "CUDA: launching retained CudaGraph with tail");
+                tracing::trace!(key, "CUDA: launching retained multi-island CudaGraph program");
                 let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
                 self.enqueue_submit(ctx, sync, body).map(Some)
             }
@@ -6809,7 +6781,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
     }
 
     #[test]
-    fn indirect_with_clear_uses_command_fallback() -> Result<()> {
+    fn indirect_with_clear_captures_graph_islands() -> Result<()> {
         let Some((device, stats)) = try_cuda_device_with_stats()? else {
             return Ok(());
         };
@@ -6853,8 +6825,95 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let bytes = withdraw.claim(&mut submission)?.consume()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0, 0, 0, 0]);
         let snap = stats.snapshot();
-        assert_eq!(snap.captures, 0, "clear+indirect must not capture: {snap:?}");
-        assert!(snap.fallbacks >= 1, "clear+indirect should fallback: {snap:?}");
+        assert!(
+            snap.captures >= 1,
+            "clear is stream-replayed but subsequent launches must capture: {snap:?}"
+        );
+        assert_eq!(
+            snap.fallbacks, 0,
+            "clear+indirect should use multi-island capture, not full Ops fallback: {snap:?}"
+        );
+
+        // Stable resubmit: no recapture, graph relaunches.
+        let captures_after_first = snap.captures;
+        let launches_after_first = snap.launches;
+        let mut submission = scheme.submit()?;
+        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[0, 0, 0, 0]);
+        let after = stats.snapshot();
+        assert_eq!(
+            after.captures, captures_after_first,
+            "stable multi-island resubmit must not recapture: {after:?}"
+        );
+        assert!(
+            after.launches > launches_after_first,
+            "stable multi-island resubmit must graph-launch: {after:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn multi_island_launch_clear_launch_captures_two_islands() -> Result<()> {
+        let Some((device, stats)) = try_cuda_device_with_stats()? else {
+            return Ok(());
+        };
+        stats.reset();
+        let ctx = device.create_context()?;
+        let pipeline =
+            crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
+        let mut pool = crate::RetainedPool::new(device.arc());
+        let a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
+        let b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
+
+        // Launch(a) → Clear(b) → Launch(b): two graph islands separated by a stream clear.
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("double_a", &pipeline)
+            .with_parcel(&a, crate::NodeAccess::ReadWrite)
+            .dispatch(4, 1, 1);
+        scheme.clear_parcel(&b, 0, 0)?;
+        scheme
+            .node("double_b", &pipeline)
+            .with_parcel(&b, crate::NodeAccess::ReadWrite)
+            .dispatch(4, 1, 1);
+
+        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
+        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+        let mut submission = scheme.submit()?;
+        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
+        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[0, 0, 0, 0]);
+
+        let after_first = stats.snapshot();
+        assert!(
+            after_first.captures >= 2,
+            "launch→clear→launch must capture two graph islands: {after_first:?}"
+        );
+        assert_eq!(
+            after_first.fallbacks, 0,
+            "multi-island path must not fall back to Ops: {after_first:?}"
+        );
+        let captures_after_first = after_first.captures;
+        let launches_after_first = after_first.launches;
+
+        let mut submission = scheme.submit()?;
+        let bytes_a2 = withdraw_a.claim(&mut submission)?.consume()?;
+        let bytes_b2 = withdraw_b.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a2), &[4, 8, 12, 16]);
+        // Cleared every resubmit, then doubled from zeros → still zeros.
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b2), &[0, 0, 0, 0]);
+
+        let after_second = stats.snapshot();
+        assert_eq!(
+            after_second.captures, captures_after_first,
+            "stable multi-island resubmit must not recapture: {after_second:?}"
+        );
+        assert!(
+            after_second.launches >= launches_after_first + 2,
+            "stable multi-island resubmit must relaunch both islands: first={after_first:?} second={after_second:?}"
+        );
+        assert_eq!(scheme.replay_stats().records, 1);
         Ok(())
     }
 

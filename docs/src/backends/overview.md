@@ -232,7 +232,8 @@ Texture notes for CUDA:
   - `DirectSpatial<float4>` ↔ `Rgba32Float` (identity surface store)
   - `DirectSpatial<float4>` ↔ `Rgba8Unorm` (lazy PTX specialization: pack/unpack view over
     `uint8_t4`, DX12-style `round(saturate(x)*255)` on store). Partitions that launch this
-    specialized variant use scheme op-list retention rather than CUDA graph capture.
+    specialized variant stay on stream-replay segments between CUDA graph islands
+    (or use full op-list retention when no graph-safe island remains).
   - `DirectSpatial<half4>` ↔ `Rgba16Float`
   - `DirectSpatial<uint8_t4>` ↔ `Rgba8Unorm` (Slang has no `uchar4` alias)
   - Upload/copy/readback of other supported sampled formats still works.
@@ -243,11 +244,14 @@ Texture notes for CUDA:
   A dispatch may use at most one distinct `Filter` configuration; additional distinct
   samplers are rejected.
 
-Retainable kernel-only partitions are captured into CUDA graphs on first submit and
-relaunched on clean resubmits. Indirect dispatches in those partitions use CUDA 13.1
+Retainable partitions are split into alternating CUDA graph islands (contiguous
+graph-safe kernel launches) and stream-replayed boundary segments (clears, copies,
+format-specialized launches, present exports). Islands are captured on first submit
+and relaunched on clean resubmits; stream segments re-execute between them on the
+same CUDA stream. Indirect dispatches in graph islands use CUDA 13.1
 device-updatable kernel nodes: an in-graph updater reads the GPU-resident
 `DispatchShape` and updates the consumer node's grid (or disables it for a zero /
-oversized shape). Uploads, clears, and copies (including texture copies) stay on the
+oversized shape). Uploads and other fully graph-unsafe partitions stay on the
 stream command-replay path, where indirect grids are resolved with a worker-side DtoH
 before `cuLaunchKernel`. Dynamic waits and completion events remain outside the
 captured graph. Stream capture is skipped when `CUDA_LAUNCH_BLOCKING` is set
