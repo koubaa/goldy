@@ -77,22 +77,27 @@ fn backend_submit_standalone(
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let _tz = crate::tracy_zone!("goldy.backend_submit_standalone");
-    let cmds = if let Some(s) = sync {
-        if s.prologue.is_empty() {
-            commands.to_vec()
+    let (cmds, waits_only) = {
+        let _tz = crate::tracy_zone!("goldy.backend_submit_standalone.prepare");
+        let cmds = if let Some(s) = sync {
+            if s.prologue.is_empty() {
+                commands.to_vec()
+            } else {
+                prepend_prologue(commands, &s.prologue)
+            }
         } else {
-            prepend_prologue(commands, &s.prologue)
-        }
-    } else {
-        commands.to_vec()
+            commands.to_vec()
+        };
+        let waits_only = sync.map(|s| SubmitSync {
+            prologue: Default::default(),
+            waits: s.waits.clone(),
+            cpu_waits: s.cpu_waits.clone(),
+            host_observed_waits: s.host_observed_waits.clone(),
+            deferred_host_writes: s.deferred_host_writes.clone(),
+        });
+        (cmds, waits_only)
     };
-    let waits_only = sync.map(|s| SubmitSync {
-        prologue: Default::default(),
-        waits: s.waits.clone(),
-        cpu_waits: s.cpu_waits.clone(),
-        host_observed_waits: s.host_observed_waits.clone(),
-        deferred_host_writes: s.deferred_host_writes.clone(),
-    });
+    let _tz = crate::tracy_zone!("goldy.backend_submit_standalone.session");
     session.submit_standalone(ctx, &cmds, waits_only.as_ref())
 }
 
@@ -292,7 +297,12 @@ fn backend_try_resubmit_retained(
     let _tz = crate::tracy_zone!("goldy.backend_try_resubmit_retained");
     // Prologue is baked into the retained body; only cross-context waits are live.
     // Callers must only invoke this when `CbReplayState` is present (replay enabled).
-    session.try_resubmit_retained(ctx, key, submit_sync_waits_only(sync).as_ref())
+    let waits_only = {
+        let _tz = crate::tracy_zone!("goldy.backend_try_resubmit_retained.prepare");
+        submit_sync_waits_only(sync)
+    };
+    let _tz = crate::tracy_zone!("goldy.backend_try_resubmit_retained.session");
+    session.try_resubmit_retained(ctx, key, waits_only.as_ref())
 }
 
 /// Re-record allocates a fresh CB/allocator; backends must not reuse in-flight retained storage.

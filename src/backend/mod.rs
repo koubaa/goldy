@@ -896,7 +896,11 @@ impl ContextSubmitSession for LockedSubmitSession {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let mut guard = self.backend.lock().unwrap();
+        let mut guard = {
+            let _tz = crate::tracy_zone!("goldy.submit_session.lock");
+            self.backend.lock().unwrap()
+        };
+        let _tz = crate::tracy_zone!("goldy.submit_session.submit_standalone");
         let tv = guard.submit_standalone(ctx, commands, sync)?;
         drop(guard);
         Ok(tv)
@@ -908,7 +912,12 @@ impl ContextSubmitSession for LockedSubmitSession {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.backend.lock().unwrap().submit_graph(ctx, commands, sync)
+        let mut guard = {
+            let _tz = crate::tracy_zone!("goldy.submit_session.lock");
+            self.backend.lock().unwrap()
+        };
+        let _tz = crate::tracy_zone!("goldy.submit_session.submit_graph");
+        guard.submit_graph(ctx, commands, sync)
     }
 
     fn submit_graph_and_retain(
@@ -918,10 +927,12 @@ impl ContextSubmitSession for LockedSubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.backend
-            .lock()
-            .unwrap()
-            .submit_graph_and_retain(ctx, commands, key, sync)
+        let mut guard = {
+            let _tz = crate::tracy_zone!("goldy.submit_session.lock");
+            self.backend.lock().unwrap()
+        };
+        let _tz = crate::tracy_zone!("goldy.submit_session.submit_graph_and_retain");
+        guard.submit_graph_and_retain(ctx, commands, key, sync)
     }
 
     fn try_resubmit_retained(
@@ -930,7 +941,12 @@ impl ContextSubmitSession for LockedSubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
+        let mut guard = {
+            let _tz = crate::tracy_zone!("goldy.submit_session.lock");
+            self.backend.lock().unwrap()
+        };
+        let _tz = crate::tracy_zone!("goldy.submit_session.try_resubmit_retained");
+        guard.try_resubmit_retained(ctx, key, sync)
     }
 
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {

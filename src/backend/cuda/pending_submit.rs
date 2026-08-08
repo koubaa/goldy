@@ -932,17 +932,22 @@ fn finish_submit(
 
 impl PendingSubmit for CudaPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
-        run_dynamic_prefix(
-            &self.stream,
-            &self.host_waits,
-            &self.deferred_writes,
-            &self.stream_waits,
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            &self.dx12_stream_fence_waits,
-        )?;
+        let _tz = crate::tracy_zone!("goldy.submit_worker.cuda");
+        {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.prefix");
+            run_dynamic_prefix(
+                &self.stream,
+                &self.host_waits,
+                &self.deferred_writes,
+                &self.stream_waits,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                &self.dx12_stream_fence_waits,
+            )?;
+        }
 
         match self.body {
             CudaSubmitBody::Ops(ops) => {
+                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.execute_ops");
                 execute_ops(&self.stream, &ops, true)?;
             }
             CudaSubmitBody::CaptureAndLaunch {
@@ -952,12 +957,17 @@ impl PendingSubmit for CudaPendingSubmit {
                 registry,
                 stats,
             } => {
+                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture_and_launch");
                 let ctx = self.context.handle;
                 let (buffers, modules, textures) = collect_pins(&ops);
                 let needs_indirect = ops_contain_indirect(&ops);
-                let graph = capture_partition_graph(&self.stream, &ops)?;
+                let graph = {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture");
+                    capture_partition_graph(&self.stream, &ops)?
+                };
                 stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.registry_launch");
                     let mut guard = registry.lock().unwrap();
                     guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
                     if let Some(old) = guard.remove(ctx, key) {
@@ -991,7 +1001,10 @@ impl PendingSubmit for CudaPendingSubmit {
                 }
                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 maybe_validate_sync(&self.stream, "graph launch after capture")?;
-                execute_ops(&self.stream, &tail, true)?;
+                if !tail.is_empty() {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.tail");
+                    execute_ops(&self.stream, &tail, true)?;
+                }
             }
             CudaSubmitBody::LaunchRetained {
                 key,
@@ -1001,6 +1014,7 @@ impl PendingSubmit for CudaPendingSubmit {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     scratch_images: _,
             } => {
+                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.launch_retained");
                 let ctx = self.context.handle;
                 {
                     let mut guard = registry.lock().unwrap();
@@ -1013,17 +1027,23 @@ impl PendingSubmit for CudaPendingSubmit {
                 }
                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 maybe_validate_sync(&self.stream, "retained graph launch")?;
-                execute_ops(&self.stream, &tail, true)?;
+                if !tail.is_empty() {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.tail");
+                    execute_ops(&self.stream, &tail, true)?;
+                }
             }
         }
 
-        finish_submit(
-            &self.stream,
-            &self.context,
-            self.fence_value,
-            &self.completion_event,
-            &self.event_ledger,
-        )
+        {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.finish");
+            finish_submit(
+                &self.stream,
+                &self.context,
+                self.fence_value,
+                &self.completion_event,
+                &self.event_ledger,
+            )
+        }
     }
 }
 

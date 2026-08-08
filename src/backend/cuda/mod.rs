@@ -2283,13 +2283,22 @@ impl CudaBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let effective = commands_with_sync_prologue(commands, sync);
+        let _tz = crate::tracy_zone!("cuda.submit");
+        let effective = {
+            let _tz = crate::tracy_zone!("cuda.submit.prologue");
+            commands_with_sync_prologue(commands, sync)
+        };
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let mut ops = self.materialize_ops(&stream, &effective)?;
+        let mut ops = {
+            let _tz = crate::tracy_zone!("cuda.submit.materialize");
+            self.materialize_ops(&stream, &effective)?
+        };
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
+            let _tz = crate::tracy_zone!("cuda.submit.rewrite_present");
             ops = self.rewrite_imported_present_launches(ops)?;
         }
+        let _tz = crate::tracy_zone!("cuda.submit.enqueue");
         self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
     }
 
@@ -2845,27 +2854,31 @@ impl CudaBackend {
         sync: Option<&SubmitSync>,
         mut body: CudaSubmitBody,
     ) -> Result<crate::timeline::TimelineValue> {
-        match &mut body {
-            CudaSubmitBody::Ops(ops) => {
-                self.prepare_surface_submit_ops(ctx, ops)?;
-            }
-            CudaSubmitBody::CaptureAndLaunch { ops, tail, .. } => {
-                if tail.is_empty() {
+        let _tz = crate::tracy_zone!("cuda.enqueue_submit");
+        {
+            let _tz = crate::tracy_zone!("cuda.enqueue_submit.prepare_surface");
+            match &mut body {
+                CudaSubmitBody::Ops(ops) => {
                     self.prepare_surface_submit_ops(ctx, ops)?;
-                } else {
+                }
+                CudaSubmitBody::CaptureAndLaunch { ops, tail, .. } => {
+                    if tail.is_empty() {
+                        self.prepare_surface_submit_ops(ctx, ops)?;
+                    } else {
+                        self.prepare_surface_submit_ops(ctx, tail)?;
+                    }
+                }
+                CudaSubmitBody::LaunchRetained {
+                    tail,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    scratch_images,
+                    ..
+                } => {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, tail)?;
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
                     self.prepare_surface_submit_ops(ctx, tail)?;
                 }
-            }
-            CudaSubmitBody::LaunchRetained {
-                tail,
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                scratch_images,
-                ..
-            } => {
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, tail)?;
-                #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
-                self.prepare_surface_submit_ops(ctx, tail)?;
             }
         }
         let sync_needs_work = sync.is_some_and(|sync| {
@@ -2899,21 +2912,25 @@ impl CudaBackend {
 
         worker.check_error()?;
 
-        let fence_value = submission_worker::allocate_timeline_value(&next_timeline);
-        let completion_event = Arc::new(
-            cuda_ctx
-                .new_event(None)
-                .context("CUDA: create completion event failed")?,
-        );
-        self.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
-        event_ledger.lock().unwrap().insert(
-            fence_value,
-            LedgerEntry {
-                context: ctx,
-                completion: LedgerCompletion::CudaEvent(Arc::clone(&completion_event)),
-                recorded: false,
-            },
-        );
+        let (fence_value, completion_event) = {
+            let _tz = crate::tracy_zone!("cuda.enqueue_submit.alloc_timeline");
+            let fence_value = submission_worker::allocate_timeline_value(&next_timeline);
+            let completion_event = Arc::new(
+                cuda_ctx
+                    .new_event(None)
+                    .context("CUDA: create completion event failed")?,
+            );
+            self.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
+            event_ledger.lock().unwrap().insert(
+                fence_value,
+                LedgerEntry {
+                    context: ctx,
+                    completion: LedgerCompletion::CudaEvent(Arc::clone(&completion_event)),
+                    recorded: false,
+                },
+            );
+            (fence_value, completion_event)
+        };
 
         let device_retired = Arc::clone(&device.retired);
         let mut stream_waits = Vec::new();
@@ -2922,6 +2939,7 @@ impl CudaBackend {
         let mut host_waits = Vec::new();
         let mut deferred_writes = Vec::new();
         if let Some(sync) = sync {
+            let _tz = crate::tracy_zone!("cuda.enqueue_submit.resolve_sync");
             for epoch in &sync.waits {
                 match timeline::completion_for_wait(
                     &event_ledger,
@@ -3008,7 +3026,10 @@ impl CudaBackend {
             deferred_writes,
             body,
         };
-        worker.enqueue(fence_value, Box::new(pending))?;
+        {
+            let _tz = crate::tracy_zone!("cuda.enqueue_submit.worker_enqueue");
+            worker.enqueue(fence_value, Box::new(pending))?;
+        }
         Ok(fence_value)
     }
 
@@ -5056,7 +5077,12 @@ impl GpuBackend for CudaBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        match self.retained.get(&(ctx, key)).cloned() {
+        let _tz = crate::tracy_zone!("cuda.resubmit_retained");
+        let entry = {
+            let _tz = crate::tracy_zone!("cuda.resubmit_retained.lookup");
+            self.retained.get(&(ctx, key)).cloned()
+        };
+        match entry {
             Some(RetainedEntry::Graph {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 scratch_images,
@@ -5065,6 +5091,7 @@ impl GpuBackend for CudaBackend {
             }) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 {
+                    let _tz = crate::tracy_zone!("cuda.resubmit_retained.bump_epochs");
                     for handle in twin_dirty {
                         if let Some(buf) = self.buffers.get_mut(&handle) {
                             buf.bump_content_epoch();
@@ -5082,6 +5109,7 @@ impl GpuBackend for CudaBackend {
                     stats: Arc::clone(&device.graph_stats),
                 };
                 tracing::trace!(key, "CUDA: launching retained CudaGraph");
+                let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
                 self.enqueue_submit(ctx, sync, body).map(Some)
             }
             Some(RetainedEntry::GraphWithTail {
@@ -5093,6 +5121,7 @@ impl GpuBackend for CudaBackend {
             }) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 {
+                    let _tz = crate::tracy_zone!("cuda.resubmit_retained.bump_epochs");
                     self.bump_content_epochs_for_retained_writes(&tail);
                 }
                 let device_handle = self.context(ctx)?.device;
@@ -5106,22 +5135,29 @@ impl GpuBackend for CudaBackend {
                     stats: Arc::clone(&device.graph_stats),
                 };
                 tracing::trace!(key, "CUDA: launching retained CudaGraph with tail");
+                let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
                 self.enqueue_submit(ctx, sync, body).map(Some)
             }
             Some(RetainedEntry::Ops(ops)) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                self.bump_content_epochs_for_retained_writes(&ops);
+                {
+                    let _tz = crate::tracy_zone!("cuda.resubmit_retained.bump_epochs");
+                    self.bump_content_epochs_for_retained_writes(&ops);
+                }
                 tracing::trace!(key, "CUDA: replaying retained pre-materialized ops");
+                let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
                 self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops)).map(Some)
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             Some(RetainedEntry::Render(mut commands)) => {
+                let _tz = crate::tracy_zone!("cuda.resubmit_retained.render");
                 self.retarget_surface_scratch_commands(&mut commands);
                 tracing::trace!(key, "CUDA: replaying retained render partition");
                 self.submit_graph_with_renders(ctx, &commands, sync).map(Some)
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             Some(RetainedEntry::PresentRenderTarget { target, surface }) => {
+                let _tz = crate::tracy_zone!("cuda.resubmit_retained.present_rt");
                 let (resource, fence, format) = {
                     let target = self
                         .render_targets
