@@ -230,11 +230,12 @@ impl Frame {
         let backend_mutex = &self.backend;
         let present_tv = {
             let work = {
+                let _tz = tracy_zone!("frame.take_present_gpu_work");
                 let mut backend = backend_mutex.lock().unwrap();
                 backend.take_present_gpu_work(self.token, submit_tv)?
             };
             let finish = {
-                let _gpu = tracy_zone!("frame.present.gpu");
+                let _gpu = tracy_zone!("frame.present_gpu");
                 work.run()?
             };
             let mut backend = backend_mutex.lock().unwrap();
