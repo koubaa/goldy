@@ -4,13 +4,13 @@
 //!
 //! Relinquished resources enter as stamped parcels and are handed out again by lease
 //! realization **only once every stamped epoch has retired**. Clients never compare
-//! timeline values; the pool consumes `ready_after` internally through
-//! `Context::parcel_ready`.
+//! timeline values; the pool consumes `ready_after` internally through a progress
+//! snapshot ([`Context::snapshot_gpu_progress`] / [`Context::parcel_ready`]).
 
 use crate::context::Context;
 use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping, Texture};
 use crate::retained_pool::{RetainedHold, StampedParcel};
-use crate::timeline::ReferenceTable;
+use crate::timeline::{is_ready, ReferenceTable, TimelineValue};
 use crate::types::{BufferFlags, BufferKind, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::ParcelType;
 use anyhow::Result;
@@ -87,16 +87,48 @@ struct BufferBinEntry {
     ready_after: ReferenceTable,
 }
 
+/// Pending (not yet retired) + ready (warm spare) lists for one recycle-bin key.
+///
+/// Already-ready entries never re-query GPU progress; pending entries are promoted
+/// with a caller-supplied progress snapshot (once per acquire/drain, not per parcel).
+struct ResourceBin<E> {
+    pending: Vec<E>,
+    ready: Vec<E>,
+}
+
+impl<E> ResourceBin<E> {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.ready.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len() + self.ready.len()
+    }
+}
+
+impl<E> Default for ResourceBin<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Epoch-gated recycling pool for transient parcels.
 pub(crate) struct TransientPool {
     /// Bytes parked in recycle bins.
     pending: Arc<PoolBookkeeping>,
     /// Bytes held by clients through this pool (guard-decremented on drop).
     outstanding: Arc<PoolBookkeeping>,
-    texture_bins: HashMap<TextureKey, Vec<TexturePendingEntry>>,
+    texture_bins: HashMap<TextureKey, ResourceBin<TexturePendingEntry>>,
     /// Buffer parcels keyed by `(size, kind, flags, stride)`; excess ready entries are trimmed by
     /// [`Self::drain_ready`] (see [`MAX_BUFFER_BIN_READY_SPARES`]).
-    buffer_bins: HashMap<BufferKey, Vec<BufferBinEntry>>,
+    buffer_bins: HashMap<BufferKey, ResourceBin<BufferBinEntry>>,
     /// Monotonic count of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`].
     ///
     /// Does **not** increment when a retired bin entry is reused. Exposed via
@@ -137,8 +169,11 @@ impl TransientPool {
             flags,
         };
         if let Some(bin) = self.texture_bins.get_mut(&key) {
-            if let Some(pos) = bin.iter().position(|e| ctx.parcel_ready(&e.ready_after)) {
-                let entry = bin.swap_remove(pos);
+            if let Some(entry) = take_ready_or_promote(
+                bin,
+                |e| &e.ready_after,
+                |tables| ctx.snapshot_gpu_progress_for_tables(tables),
+            ) {
                 let bytes = entry.parcel.byte_size();
                 self.pending.subtract(ParcelType::Texture, bytes);
                 let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Texture, bytes);
@@ -177,8 +212,11 @@ impl TransientPool {
             element_stride,
         };
         if let Some(bin) = self.buffer_bins.get_mut(&key) {
-            if let Some(pos) = bin.iter().position(|e| ctx.parcel_ready(&e.ready_after)) {
-                let entry = bin.swap_remove(pos);
+            if let Some(entry) = take_ready_or_promote(
+                bin,
+                |e| &e.ready_after,
+                |tables| ctx.snapshot_gpu_progress_for_tables(tables),
+            ) {
                 let bytes = entry.parcel.byte_size();
                 self.pending.subtract(ParcelType::Buffer, bytes);
                 let mut parcel = entry.parcel;
@@ -232,10 +270,9 @@ impl TransientPool {
         let bytes = parcel.byte_size();
         let key = BufferKey::from_parcel(&parcel);
         self.pending.add(ParcelType::Buffer, bytes);
-        self.buffer_bins
-            .entry(key)
-            .or_default()
-            .push(BufferBinEntry { parcel, ready_after });
+        let entry = BufferBinEntry { parcel, ready_after };
+        let bin = self.buffer_bins.entry(key).or_default();
+        park_entry(bin, entry, |e| &e.ready_after);
     }
 
     /// Return a scheme-held texture to the pool after its epoch retires.
@@ -260,10 +297,9 @@ impl TransientPool {
             flags,
         };
         self.pending.add(ParcelType::Texture, bytes);
-        self.texture_bins
-            .entry(key)
-            .or_default()
-            .push(TexturePendingEntry { parcel, ready_after });
+        let entry = TexturePendingEntry { parcel, ready_after };
+        let bin = self.texture_bins.entry(key).or_default();
+        park_entry(bin, entry, |e| &e.ready_after);
     }
 
     pub(crate) fn adopt(&mut self, stamped: StampedParcel) {
@@ -311,40 +347,45 @@ impl TransientPool {
     /// must free overflow-heap-backed textures immediately after waiting for GPU work.
     pub(crate) fn clear_textures(&mut self) {
         for bin in self.texture_bins.values() {
-            for entry in bin {
+            for entry in bin.pending.iter().chain(bin.ready.iter()) {
                 self.pending.subtract(ParcelType::Texture, entry.parcel.byte_size());
             }
         }
         self.texture_bins.clear();
     }
 
+    /// Promote retired pending entries and drop excess ready spares.
+    ///
+    /// Snapshots GPU progress **once** for every context referenced by pending entries,
+    /// then promotes/trims without further progress queries. Already-ready warm spares
+    /// are never re-checked.
     pub fn drain_ready(&mut self, ctx: &Context) -> usize {
-        let mut released = self.trim_texture_bins(ctx);
-        released += self.trim_buffer_bins(ctx);
+        let progress = ctx.snapshot_gpu_progress_for_tables(
+            self.texture_bins
+                .values()
+                .flat_map(|bin| bin.pending.iter().map(|e| &e.ready_after))
+                .chain(
+                    self.buffer_bins
+                        .values()
+                        .flat_map(|bin| bin.pending.iter().map(|e| &e.ready_after)),
+                ),
+        );
+        let mut released = self.trim_texture_bins(&progress);
+        released += self.trim_buffer_bins(&progress);
         released
     }
 
     /// Drop excess epoch-retired texture bin entries beyond [`MAX_TEXTURE_BIN_READY_SPARES`].
     ///
     /// In-flight (not-ready) entries are never dropped — only ready spares above the cap.
-    fn trim_texture_bins(&mut self, ctx: &Context) -> usize {
+    fn trim_texture_bins(&mut self, progress: &HashMap<crate::backend::ContextHandle, TimelineValue>) -> usize {
+        let bookkeeping = Arc::clone(&self.pending);
         let mut trimmed = 0;
         for bin in self.texture_bins.values_mut() {
-            let mut ready_indices: Vec<usize> = bin
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| ctx.parcel_ready(&e.ready_after))
-                .map(|(i, _)| i)
-                .collect();
-            ready_indices.sort_unstable();
-
-            let excess = ready_indices.len().saturating_sub(MAX_TEXTURE_BIN_READY_SPARES);
-            let to_drop = ready_indices.split_off(ready_indices.len().saturating_sub(excess));
-            for idx in to_drop.into_iter().rev() {
-                let entry = bin.swap_remove(idx);
-                self.pending.subtract(ParcelType::Texture, entry.parcel.byte_size());
-                trimmed += 1;
-            }
+            promote_pending(bin, progress, |e| &e.ready_after);
+            trimmed += trim_ready_spares(&mut bin.ready, MAX_TEXTURE_BIN_READY_SPARES, |entry| {
+                bookkeeping.subtract(ParcelType::Texture, entry.parcel.byte_size());
+            });
         }
         self.texture_bins.retain(|_, bin| !bin.is_empty());
         trimmed
@@ -354,27 +395,14 @@ impl TransientPool {
     ///
     /// In-flight (not-ready) entries are never dropped — only ready spares above the cap.
     /// Returns the number of entries dropped.
-    fn trim_buffer_bins(&mut self, ctx: &Context) -> usize {
+    fn trim_buffer_bins(&mut self, progress: &HashMap<crate::backend::ContextHandle, TimelineValue>) -> usize {
+        let bookkeeping = Arc::clone(&self.pending);
         let mut trimmed = 0;
         for bin in self.buffer_bins.values_mut() {
-            let mut ready_indices: Vec<usize> = bin
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| ctx.parcel_ready(&e.ready_after))
-                .map(|(i, _)| i)
-                .collect();
-            ready_indices.sort_unstable();
-
-            let excess = ready_indices.len().saturating_sub(MAX_BUFFER_BIN_READY_SPARES);
-            // Consume the highest-indexed ready entries first (descending). Removing by
-            // descending index means each swap_remove only disturbs elements at higher
-            // positions, so lower indices remain stable for subsequent iterations.
-            let to_drop = ready_indices.split_off(ready_indices.len().saturating_sub(excess));
-            for idx in to_drop.into_iter().rev() {
-                let entry = bin.swap_remove(idx);
-                self.pending.subtract(ParcelType::Buffer, entry.parcel.byte_size());
-                trimmed += 1;
-            }
+            promote_pending(bin, progress, |e| &e.ready_after);
+            trimmed += trim_ready_spares(&mut bin.ready, MAX_BUFFER_BIN_READY_SPARES, |entry| {
+                bookkeeping.subtract(ParcelType::Buffer, entry.parcel.byte_size());
+            });
         }
         self.buffer_bins.retain(|_, bin| !bin.is_empty());
         trimmed
@@ -391,7 +419,8 @@ impl TransientPool {
 
     #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
-        self.texture_bins.values().map(Vec::len).sum::<usize>() + self.buffer_bins.values().map(Vec::len).sum::<usize>()
+        self.texture_bins.values().map(ResourceBin::len).sum::<usize>()
+            + self.buffer_bins.values().map(ResourceBin::len).sum::<usize>()
     }
 
     /// Total number of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`] since
@@ -405,6 +434,66 @@ impl TransientPool {
     pub fn texture_alloc_count(&self) -> usize {
         self.texture_alloc_count
     }
+}
+
+/// Park into `ready` when the epoch table is empty (immediately reusable); otherwise `pending`.
+fn park_entry<E>(bin: &mut ResourceBin<E>, entry: E, ready_after: impl FnOnce(&E) -> &ReferenceTable) {
+    if ready_after(&entry).is_empty() {
+        bin.ready.push(entry);
+    } else {
+        bin.pending.push(entry);
+    }
+}
+
+/// Take a warm spare, or promote at most one pending entry using a single progress snapshot.
+fn take_ready_or_promote<E>(
+    bin: &mut ResourceBin<E>,
+    ready_after: impl Fn(&E) -> &ReferenceTable,
+    snapshot: impl FnOnce(Vec<&ReferenceTable>) -> HashMap<crate::backend::ContextHandle, TimelineValue>,
+) -> Option<E> {
+    if !bin.ready.is_empty() {
+        return Some(bin.ready.swap_remove(0));
+    }
+    if bin.pending.is_empty() {
+        return None;
+    }
+    let progress = snapshot(bin.pending.iter().map(&ready_after).collect());
+    if let Some(pos) = bin
+        .pending
+        .iter()
+        .position(|e| is_ready(ready_after(e), &progress))
+    {
+        return Some(bin.pending.swap_remove(pos));
+    }
+    None
+}
+
+fn promote_pending<E>(
+    bin: &mut ResourceBin<E>,
+    progress: &HashMap<crate::backend::ContextHandle, TimelineValue>,
+    ready_after: impl Fn(&E) -> &ReferenceTable,
+) {
+    let mut i = 0;
+    while i < bin.pending.len() {
+        if is_ready(ready_after(&bin.pending[i]), progress) {
+            let entry = bin.pending.swap_remove(i);
+            bin.ready.push(entry);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Keep the oldest `max_spares` ready entries; drop newest excess. Returns drop count.
+fn trim_ready_spares<E>(ready: &mut Vec<E>, max_spares: usize, mut on_drop: impl FnMut(&E)) -> usize {
+    let excess = ready.len().saturating_sub(max_spares);
+    for _ in 0..excess {
+        // Newest ready entries were pushed last; pop preserves the oldest warm spare(s).
+        if let Some(entry) = ready.pop() {
+            on_drop(&entry);
+        }
+    }
+    excess
 }
 
 impl Default for TransientPool {
@@ -471,7 +560,7 @@ mod tests {
                 access: acc,
                 flags,
             };
-            pool.texture_bins.entry(key).or_default().push(TexturePendingEntry {
+            pool.texture_bins.entry(key).or_default().ready.push(TexturePendingEntry {
                 parcel,
                 ready_after: ReferenceTable::new(),
             });
@@ -499,6 +588,7 @@ mod tests {
             pool.texture_bins
                 .entry(key)
                 .or_default()
+                .pending
                 .push(TexturePendingEntry { parcel, ready_after });
         });
     }

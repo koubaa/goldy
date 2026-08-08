@@ -421,6 +421,9 @@ impl Context {
             // acquire through the transient pool, those parked buffers are not re-issued
             // — only dropped once `ready_after` retires. Without this drain at every frame
             // boundary, `release` leaks GPU heap (e.g. Metal buffer heaps exhausted).
+            //
+            // `drain_ready` snapshots GPU progress once (after `flush_pre` already polled
+            // the ledger) rather than querying per parked parcel.
             self.with_transient_pool(|pool| pool.drain_ready(self));
         }
         {
@@ -473,6 +476,44 @@ impl Context {
         backend.in_flight_command_buffer_count(self.inner.handle)
     }
 
+    /// Snapshot GPU progress for each distinct context handle, querying each at most once.
+    ///
+    /// The home context uses [`Self::gpu_progress`] (lock-free poller path on CUDA/DX12).
+    /// Foreign contexts go through [`Device::context_gpu_progress`].
+    pub(crate) fn snapshot_gpu_progress(
+        &self,
+        contexts: impl IntoIterator<Item = ContextHandle>,
+    ) -> HashMap<ContextHandle, TimelineValue> {
+        let mut progress = HashMap::new();
+        for ctx in contexts {
+            if progress.contains_key(&ctx) {
+                continue;
+            }
+            let p = if ctx == self.inner.handle {
+                self.gpu_progress()
+            } else {
+                self.inner
+                    .device
+                    .context_gpu_progress(ctx)
+                    .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS)
+            };
+            progress.insert(ctx, p);
+        }
+        progress
+    }
+
+    /// Snapshot progress for every context referenced by the given epoch tables.
+    pub(crate) fn snapshot_gpu_progress_for_tables<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a ReferenceTable>,
+    ) -> HashMap<ContextHandle, TimelineValue> {
+        let mut keys = Vec::new();
+        for table in tables {
+            keys.extend(table.keys());
+        }
+        self.snapshot_gpu_progress(keys)
+    }
+
     /// True when every context in `refs` has retired the stamped timeline values.
     ///
     /// Prefer [`crate::Parcel::is_settled`] when checking a single parcel the caller holds.
@@ -480,14 +521,7 @@ impl Context {
         if refs.is_empty() {
             return true;
         }
-        let device = &self.inner.device;
-        let mut progress = HashMap::with_capacity(refs.len());
-        for ctx in refs.keys() {
-            let p = device
-                .context_gpu_progress(ctx)
-                .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
-            progress.insert(ctx, p);
-        }
+        let progress = self.snapshot_gpu_progress(refs.keys());
         is_ready(refs, &progress)
     }
 
@@ -515,6 +549,25 @@ mod tests {
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    #[test]
+    fn parcel_ready_empty_and_snapshot_dedupe() {
+        use crate::timeline::{mark_reference, ReferenceTable};
+
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        assert!(ctx.parcel_ready(&ReferenceTable::new()));
+
+        let mut refs = ReferenceTable::new();
+        mark_reference(&mut refs, ctx.test_backend_handle(), 0);
+        assert!(ctx.parcel_ready(&refs), "tv 0 is always retired");
+
+        let snap = ctx.snapshot_gpu_progress([
+            ctx.test_backend_handle(),
+            ctx.test_backend_handle(),
+        ]);
+        assert_eq!(snap.len(), 1, "duplicate context handles queried once");
     }
 
     #[test]
