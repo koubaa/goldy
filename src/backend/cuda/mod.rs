@@ -88,15 +88,22 @@ enum RetainedEntry {
     /// [`pending_submit::CudaOpSegment::Graph`]); stream segments are stored here and
     /// re-executed with `execute_ops` on each resubmit.
     Segmented {
-        segments: Vec<pending_submit::CudaOpSegment>,
+        segments: Arc<Vec<pending_submit::CudaOpSegment>>,
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         scratch_images: Vec<(SurfaceHandle, usize)>,
         /// NativeAndTwin buffers any island/stream segment may write; dirty on each launch.
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         twin_dirty: Vec<BufferHandle>,
+        /// Buffer handles written by stream segments; bumped on each relaunch without scanning.
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        written_buffers: Vec<BufferHandle>,
     },
     /// Fully pre-materialized operations. Replay never rematerializes commands.
-    Ops(Vec<CudaOp>),
+    Ops {
+        ops: Arc<Vec<CudaOp>>,
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        written_buffers: Vec<BufferHandle>,
+    },
     /// Render partitions retain their high-level commands; DX12 list reuse happens in raster.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     Render(Vec<GraphCommand>),
@@ -1811,41 +1818,57 @@ impl CudaBackend {
     /// Retained Ops/Graph replays mutate buffer bytes without rematerializing; bump epochs
     /// so raster fingerprints and NativeAndTwin DtoD refresh see dirty content.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn bump_content_epochs_for_handles(&mut self, handles: &[BufferHandle]) {
+        for &handle in handles {
+            if let Some(buf) = self.buffers.get_mut(&handle) {
+                buf.bump_content_epoch();
+            }
+        }
+    }
+
+    /// Retained Ops/Graph replays mutate buffer bytes without rematerializing; bump epochs
+    /// so raster fingerprints and NativeAndTwin DtoD refresh see dirty content.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     fn bump_content_epochs_for_retained_writes(&mut self, ops: &[CudaOp]) {
-        let mut written: Vec<Arc<Mutex<CudaSlice<u8>>>> = Vec::new();
-        for op in ops {
-            match op {
-                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
-                    written.push(Arc::clone(memory));
-                }
-                CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => {
-                    written.push(Arc::clone(dst));
-                }
-                CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
-                    written.extend(keep_alive_buffers.iter().cloned());
-                }
-                _ => {}
-            }
-        }
-        if written.is_empty() {
-            return;
-        }
-        for buf in self.buffers.values_mut() {
-            let Some(mem) = buf.memory.as_ref() else {
-                continue;
-            };
-            if !written.iter().any(|m| Arc::ptr_eq(m, mem)) {
-                continue;
-            }
-            buf.bump_content_epoch();
-            // Shared-primary coherence is published by SignalExternalFence in
-            // prepare_surface_submit_ops_for_retained — do not mark pending_host_sync.
-        }
+        let handles = self.buffer_handles_written_by_ops(ops);
+        self.bump_content_epochs_for_handles(&handles);
     }
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     fn bump_content_epochs_for_native_twin_writes(&mut self, ops: &[CudaOp]) {
         self.bump_content_epochs_for_retained_writes(ops);
+    }
+
+    /// All buffers whose device memory is written by `ops` (for retained relaunch dirty lists).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn buffer_handles_written_by_ops(&self, ops: &[CudaOp]) -> Vec<BufferHandle> {
+        let mut memories = Vec::new();
+        for op in ops {
+            match op {
+                CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } | CudaOp::WriteFromHost { memory, .. } => {
+                    memories.push(Arc::clone(memory));
+                }
+                CudaOp::Copy { dst, .. } | CudaOp::CopyTextureToBuffer { dst, .. } => {
+                    memories.push(Arc::clone(dst));
+                }
+                CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
+                    memories.extend(keep_alive_buffers.iter().cloned());
+                }
+                _ => {}
+            }
+        }
+        if memories.is_empty() {
+            return Vec::new();
+        }
+        let written: std::collections::HashSet<*const Mutex<CudaSlice<u8>>> =
+            memories.iter().map(Arc::as_ptr).collect();
+        self.buffers
+            .iter()
+            .filter_map(|(handle, buf)| {
+                let mem = buf.memory.as_ref()?;
+                written.contains(&Arc::as_ptr(mem)).then_some(*handle)
+            })
+            .collect()
     }
 
     /// NativeAndTwin buffers whose memory is written by `ops` (for retained graph dirty lists).
@@ -1869,6 +1892,8 @@ impl CudaBackend {
         if memories.is_empty() {
             return Vec::new();
         }
+        let written: std::collections::HashSet<*const Mutex<CudaSlice<u8>>> =
+            memories.iter().map(Arc::as_ptr).collect();
         self.buffers
             .iter()
             .filter_map(|(handle, buf)| {
@@ -1876,7 +1901,7 @@ impl CudaBackend {
                     return None;
                 }
                 let mem = buf.memory.as_ref()?;
-                memories.iter().any(|m| Arc::ptr_eq(m, mem)).then_some(*handle)
+                written.contains(&Arc::as_ptr(mem)).then_some(*handle)
             })
             .collect()
     }
@@ -2294,7 +2319,14 @@ impl CudaBackend {
             ops = self.rewrite_imported_present_launches(ops)?;
         }
         let _tz = crate::tracy_zone!("cuda.submit.enqueue");
-        self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
+        self.enqueue_submit(
+            ctx,
+            sync,
+            CudaSubmitBody::Ops {
+                ops,
+                bump_content_epochs: true,
+            },
+        )
     }
 
     /// True when `texture` is a D3D12-imported surface scratch image.
@@ -2542,6 +2574,7 @@ impl CudaBackend {
         ctx: ContextHandle,
         scratch_images: &[(SurfaceHandle, usize)],
         ops: &mut Vec<CudaOp>,
+        bump_content_epochs: bool,
     ) -> Result<()> {
         let touched = if scratch_images.is_empty() {
             self.scratch_images_touched_by_ops(ops)
@@ -2552,7 +2585,9 @@ impl CudaBackend {
         // Deposit-only Shared-primary writes (e.g. solid_cube upload scheme) do not
         // publish a CUDA→DX12 fence — raster syncs alloc_stream before IA instead
         // (see SharedBufferBacking::pending_host_sync in dx12_interop.rs).
-        self.bump_content_epochs_for_native_twin_writes(ops);
+        if bump_content_epochs {
+            self.bump_content_epochs_for_native_twin_writes(ops);
+        }
         let shared_primaries = self.shared_primary_memories_written_by_ops(ops);
 
         let device_handle = self.context(ctx)?.device;
@@ -2636,7 +2671,7 @@ impl CudaBackend {
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     fn prepare_surface_submit_ops(&mut self, ctx: ContextHandle, ops: &mut Vec<CudaOp>) -> Result<()> {
-        self.prepare_surface_submit_ops_for_retained(ctx, &[], ops)
+        self.prepare_surface_submit_ops_for_retained(ctx, &[], ops, true)
     }
 
     #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
@@ -2853,8 +2888,17 @@ impl CudaBackend {
         {
             let _tz = crate::tracy_zone!("cuda.enqueue_submit.prepare_surface");
             match &mut body {
-                CudaSubmitBody::Ops(ops) => {
-                    self.prepare_surface_submit_ops(ctx, ops)?;
+                CudaSubmitBody::Ops {
+                    ops,
+                    bump_content_epochs,
+                } => {
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    self.prepare_surface_submit_ops_for_retained(ctx, &[], ops, *bump_content_epochs)?;
+                    #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+                    {
+                        let _ = bump_content_epochs;
+                        self.prepare_surface_submit_ops(ctx, ops)?;
+                    }
                 }
                 CudaSubmitBody::CaptureAndLaunch { segments, .. } => {
                     let stream_ops = pending_submit::last_stream_segment_mut(segments);
@@ -2866,9 +2910,9 @@ impl CudaBackend {
                     scratch_images,
                     ..
                 } => {
-                    let stream_ops = pending_submit::last_stream_segment_mut(segments);
+                    let stream_ops = pending_submit::last_launch_stream_segment_mut(segments);
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, stream_ops)?;
+                    self.prepare_surface_submit_ops_for_retained(ctx, scratch_images, stream_ops, false)?;
                     #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
                     self.prepare_surface_submit_ops(ctx, stream_ops)?;
                 }
@@ -2880,14 +2924,14 @@ impl CudaBackend {
                 || !sync.host_observed_waits.is_empty()
                 || !sync.deferred_host_writes.is_empty()
         });
-        if matches!(&body, CudaSubmitBody::Ops(ops) if ops.is_empty()) && !sync_needs_work {
+        if matches!(&body, CudaSubmitBody::Ops { ops, .. } if ops.is_empty()) && !sync_needs_work {
             self.graph_stats.empty_submits_elided.fetch_add(1, Ordering::Relaxed);
             return Ok(self.gpu_progress(ctx));
         }
         // Empty body + DX12-fence-only waits: nothing runs on the CUDA stream, so a
         // completion event / stream join is pure overhead (raster-direct present path).
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        if matches!(&body, CudaSubmitBody::Ops(ops) if ops.is_empty())
+        if matches!(&body, CudaSubmitBody::Ops { ops, .. } if ops.is_empty())
             && self.empty_ops_sync_is_dx12_fence_only(ctx, sync)?
         {
             self.graph_stats.empty_submits_elided.fetch_add(1, Ordering::Relaxed);
@@ -4995,9 +5039,13 @@ impl GpuBackend for CudaBackend {
         if graph_islands > 0 && !retained_graph::cuda_launch_blocking_active() {
             let device_handle = self.context(ctx)?.device;
             let device = self.device(device_handle)?;
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            let written_buffers =
+                self.buffer_handles_written_by_ops(&pending_submit::collect_stream_ops(&segments));
+            let segments = Arc::new(segments);
             let body = CudaSubmitBody::CaptureAndLaunch {
                 key,
-                segments: segments.clone(),
+                segments: (*segments).clone(),
                 registry: Arc::clone(&device.graph_registry),
                 stats: Arc::clone(&device.graph_stats),
             };
@@ -5009,6 +5057,8 @@ impl GpuBackend for CudaBackend {
                     scratch_images,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     twin_dirty,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    written_buffers,
                 },
             );
             tracing::trace!(
@@ -5020,13 +5070,29 @@ impl GpuBackend for CudaBackend {
         } else {
             self.graph_stats.fallbacks.fetch_add(1, Ordering::Relaxed);
             let ops = pending_submit::flatten_segment_ops(&segments);
-            self.retained.insert((ctx, key), RetainedEntry::Ops(ops.clone()));
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            let written_buffers = self.buffer_handles_written_by_ops(&ops);
+            self.retained.insert(
+                (ctx, key),
+                RetainedEntry::Ops {
+                    ops: Arc::new(ops.clone()),
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    written_buffers,
+                },
+            );
             tracing::trace!(
                 key,
                 blocking = retained_graph::cuda_launch_blocking_active(),
                 "CUDA: retainable partition uses pre-materialized op fallback"
             );
-            self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops))
+            self.enqueue_submit(
+            ctx,
+            sync,
+            CudaSubmitBody::Ops {
+                ops,
+                bump_content_epochs: true,
+            },
+        )
         }
     }
 
@@ -5048,23 +5114,20 @@ impl GpuBackend for CudaBackend {
                 scratch_images,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 twin_dirty,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                written_buffers,
             }) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 {
                     let _tz = crate::tracy_zone!("cuda.resubmit_retained.bump_epochs");
-                    for handle in twin_dirty {
-                        if let Some(buf) = self.buffers.get_mut(&handle) {
-                            buf.bump_content_epoch();
-                        }
-                    }
-                    let stream_ops = pending_submit::collect_stream_ops(&segments);
-                    self.bump_content_epochs_for_retained_writes(&stream_ops);
+                    self.bump_content_epochs_for_handles(&twin_dirty);
+                    self.bump_content_epochs_for_handles(&written_buffers);
                 }
                 let device_handle = self.context(ctx)?.device;
                 let device = self.device(device_handle)?;
                 let body = CudaSubmitBody::LaunchRetained {
                     key,
-                    segments,
+                    segments: pending_submit::to_launch_segments(segments.as_ref()),
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     scratch_images,
                     registry: Arc::clone(&device.graph_registry),
@@ -5074,15 +5137,27 @@ impl GpuBackend for CudaBackend {
                 let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
                 self.enqueue_submit(ctx, sync, body).map(Some)
             }
-            Some(RetainedEntry::Ops(ops)) => {
+            Some(RetainedEntry::Ops {
+                ops,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                written_buffers,
+            }) => {
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 {
                     let _tz = crate::tracy_zone!("cuda.resubmit_retained.bump_epochs");
-                    self.bump_content_epochs_for_retained_writes(&ops);
+                    self.bump_content_epochs_for_handles(&written_buffers);
                 }
                 tracing::trace!(key, "CUDA: replaying retained pre-materialized ops");
                 let _tz = crate::tracy_zone!("cuda.resubmit_retained.enqueue");
-                self.enqueue_submit(ctx, sync, CudaSubmitBody::Ops(ops)).map(Some)
+                self.enqueue_submit(
+                    ctx,
+                    sync,
+                    CudaSubmitBody::Ops {
+                        ops: (*ops).clone(),
+                        bump_content_epochs: false,
+                    },
+                )
+                .map(Some)
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             Some(RetainedEntry::Render(mut commands)) => {

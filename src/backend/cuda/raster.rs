@@ -672,7 +672,7 @@ pub(super) fn destroy_render_target(backend: &mut CudaBackend, target: RenderTar
                     GraphCommand::Compute(GpuCommand::CopyRenderTarget { src, .. }) => *src == target,
                     _ => false,
                 }),
-                RetainedEntry::Ops(_) | RetainedEntry::Segmented { .. } => false,
+                RetainedEntry::Ops { .. } | RetainedEntry::Segmented { .. } => false,
             };
             touches.then_some((ctx, key))
         })

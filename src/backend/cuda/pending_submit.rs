@@ -74,10 +74,21 @@ impl CudaOpSegment {
     }
 }
 
+/// Retained relaunch plan: graph islands are markers only (payload lives in the registry).
+#[derive(Clone)]
+pub(super) enum CudaLaunchSegment {
+    Graph,
+    Stream(Vec<CudaOp>),
+}
+
 /// Body executed after the dynamic sync prefix and before the completion event.
 pub(super) enum CudaSubmitBody {
     /// Immediate stream ops (standalone submits and command-replay fallback).
-    Ops(Vec<CudaOp>),
+    Ops {
+        ops: Vec<CudaOp>,
+        /// When false, surface prepare skips content-epoch bumps (already done by retained replay).
+        bump_content_epochs: bool,
+    },
     /// Capture each [`CudaOpSegment::Graph`] into a retained island, then execute the
     /// full segment list once (graph launch + stream replay).
     CaptureAndLaunch {
@@ -89,7 +100,7 @@ pub(super) enum CudaSubmitBody {
     /// Relaunch retained graph islands and replay stream segments in order.
     LaunchRetained {
         key: u64,
-        segments: Vec<CudaOpSegment>,
+        segments: Vec<CudaLaunchSegment>,
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         scratch_images: Vec<(crate::backend::SurfaceHandle, usize)>,
         registry: Arc<Mutex<GraphRegistry>>,
@@ -318,6 +329,17 @@ pub(super) fn collect_stream_ops(segments: &[CudaOpSegment]) -> Vec<CudaOp> {
         .collect()
 }
 
+/// Build a retained relaunch plan without cloning graph-island op payloads.
+pub(super) fn to_launch_segments(segments: &[CudaOpSegment]) -> Vec<CudaLaunchSegment> {
+    segments
+        .iter()
+        .map(|segment| match segment {
+            CudaOpSegment::Graph(_) => CudaLaunchSegment::Graph,
+            CudaOpSegment::Stream(ops) => CudaLaunchSegment::Stream(ops.clone()),
+        })
+        .collect()
+}
+
 /// Flatten all ops across segments (graph + stream), preserving order.
 pub(super) fn flatten_segment_ops(segments: &[CudaOpSegment]) -> Vec<CudaOp> {
     segments.iter().flat_map(|seg| seg.ops().iter().cloned()).collect()
@@ -345,6 +367,18 @@ pub(super) fn graph_island_count(segments: &[CudaOpSegment]) -> usize {
     segments.iter().filter(|s| s.is_graph()).count()
 }
 
+pub(super) fn segment_op_counts(segments: &[CudaOpSegment]) -> (usize, usize) {
+    let mut graph_ops = 0usize;
+    let mut stream_ops = 0usize;
+    for segment in segments {
+        match segment {
+            CudaOpSegment::Graph(ops) => graph_ops += ops.len(),
+            CudaOpSegment::Stream(ops) => stream_ops += ops.len(),
+        }
+    }
+    (graph_ops, stream_ops)
+}
+
 /// Mutable handle to the last stream segment (for DX12 fence injection). Creates an
 /// empty trailing stream segment if the program ends on a graph island.
 pub(super) fn last_stream_segment_mut(segments: &mut Vec<CudaOpSegment>) -> &mut Vec<CudaOp> {
@@ -353,6 +387,17 @@ pub(super) fn last_stream_segment_mut(segments: &mut Vec<CudaOpSegment>) -> &mut
     }
     match segments.last_mut() {
         Some(CudaOpSegment::Stream(ops)) => ops,
+        _ => unreachable!("just ensured a trailing Stream segment"),
+    }
+}
+
+/// Same as [`last_stream_segment_mut`] for retained relaunch plans.
+pub(super) fn last_launch_stream_segment_mut(segments: &mut Vec<CudaLaunchSegment>) -> &mut Vec<CudaOp> {
+    if !matches!(segments.last(), Some(CudaLaunchSegment::Stream(_))) {
+        segments.push(CudaLaunchSegment::Stream(Vec::new()));
+    }
+    match segments.last_mut() {
+        Some(CudaLaunchSegment::Stream(ops)) => ops,
         _ => unreachable!("just ensured a trailing Stream segment"),
     }
 }
@@ -660,14 +705,12 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 host_offset,
                 len,
             } => {
-                let data = {
-                    let host = host.lock().unwrap();
-                    let end = *host_offset + *len;
-                    if end > host.len() {
-                        anyhow::bail!("CUDA: WriteFromHost exceeds host staging");
-                    }
-                    host[*host_offset..end].to_vec()
-                };
+                let host = host.lock().unwrap();
+                let end = *host_offset + *len;
+                if end > host.len() {
+                    anyhow::bail!("CUDA: WriteFromHost exceeds host staging");
+                }
+                let data = &host[*host_offset..end];
                 let mut guard = memory.lock().unwrap();
                 let start = *abs_offset as usize;
                 let end = start + data.len();
@@ -675,7 +718,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     .try_slice_mut(start..end)
                     .context("CUDA: WriteFromHost range out of bounds")?;
                 stream
-                    .memcpy_htod(&data, &mut view)
+                    .memcpy_htod(data, &mut view)
                     .context("CUDA: WriteFromHost HtoD failed")?;
                 if validate {
                     maybe_validate_sync(stream, "WriteFromHost")?;
@@ -718,14 +761,12 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 len,
                 src_row_pitch,
             } => {
-                let data = {
-                    let host = host.lock().unwrap();
-                    let end = *host_offset + *len;
-                    if end > host.len() {
-                        anyhow::bail!("CUDA: WriteTextureFromHost exceeds host staging");
-                    }
-                    host[*host_offset..end].to_vec()
-                };
+                let host = host.lock().unwrap();
+                let end = *host_offset + *len;
+                if end > host.len() {
+                    anyhow::bail!("CUDA: WriteTextureFromHost exceeds host staging");
+                }
+                let data = &host[*host_offset..end];
                 super::texture::memcpy_htod_array(
                     stream,
                     texture,
@@ -733,7 +774,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     *y,
                     *width,
                     *height,
-                    &data,
+                    data,
                     *src_row_pitch,
                 )?;
                 if validate {
@@ -1117,7 +1158,7 @@ impl PendingSubmit for CudaPendingSubmit {
         }
 
         match self.body {
-            CudaSubmitBody::Ops(ops) => {
+            CudaSubmitBody::Ops { ops, .. } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.execute_ops");
                 execute_ops(&self.stream, &ops, true)?;
             }
@@ -1197,29 +1238,28 @@ impl PendingSubmit for CudaPendingSubmit {
                 let mut island_idx = 0usize;
                 for segment in &segments {
                     match segment {
-                        CudaOpSegment::Graph(_) => {
-                            {
-                                let mut guard = registry.lock().unwrap();
-                                guard.drain_retired(
-                                    self.context.device_retired.load(std::sync::atomic::Ordering::Acquire),
-                                );
-                                let program = guard.get_mut(ctx, key).with_context(|| {
-                                    format!("CUDA: retained graph missing for context {ctx} key {key:#x}")
-                                })?;
-                                let island = program.islands.get_mut(island_idx).with_context(|| {
-                                    format!(
-                                        "CUDA: retained island {island_idx} missing for context {ctx} key {key:#x}"
-                                    )
-                                })?;
-                                island.graph.launch().context("CUDA: cuGraphLaunch failed")?;
-                                island.last_launch_tv = self.fence_value;
-                                program.last_launch_tv = self.fence_value;
-                            }
+                        CudaLaunchSegment::Graph => {
+                            let mut guard = registry.lock().unwrap();
+                            guard.drain_retired(
+                                self.context.device_retired.load(std::sync::atomic::Ordering::Acquire),
+                            );
+                            let program = guard.get_mut(ctx, key).with_context(|| {
+                                format!("CUDA: retained graph missing for context {ctx} key {key:#x}")
+                            })?;
+                            let island = program.islands.get_mut(island_idx).with_context(|| {
+                                format!(
+                                    "CUDA: retained island {island_idx} missing for context {ctx} key {key:#x}"
+                                )
+                            })?;
+                            island.graph.launch().context("CUDA: cuGraphLaunch failed")?;
+                            island.last_launch_tv = self.fence_value;
+                            program.last_launch_tv = self.fence_value;
+                            drop(guard);
                             stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             maybe_validate_sync(&self.stream, "retained graph launch")?;
                             island_idx += 1;
                         }
-                        CudaOpSegment::Stream(ops) => {
+                        CudaLaunchSegment::Stream(ops) => {
                             if !ops.is_empty() {
                                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
                                 execute_ops(&self.stream, ops, true)?;
