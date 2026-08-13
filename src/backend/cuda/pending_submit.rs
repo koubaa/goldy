@@ -705,21 +705,24 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 host_offset,
                 len,
             } => {
+                let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.lock");
                 let host = host.lock().unwrap();
-                let end = *host_offset + *len;
-                if end > host.len() {
+                let host_end = *host_offset + *len;
+                if host_end > host.len() {
                     anyhow::bail!("CUDA: WriteFromHost exceeds host staging");
                 }
-                let data = &host[*host_offset..end];
                 let mut guard = memory.lock().unwrap();
                 let start = *abs_offset as usize;
-                let end = start + data.len();
+                let end = start + *len;
                 let mut view = guard
                     .try_slice_mut(start..end)
                     .context("CUDA: WriteFromHost range out of bounds")?;
-                stream
-                    .memcpy_htod(data, &mut view)
-                    .context("CUDA: WriteFromHost HtoD failed")?;
+                {
+                    let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.htod");
+                    stream
+                        .memcpy_htod(&host[*host_offset..host_end], &mut view)
+                        .context("CUDA: WriteFromHost HtoD failed")?;
+                }
                 if validate {
                     maybe_validate_sync(stream, "WriteFromHost")?;
                 }
@@ -761,22 +764,26 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 len,
                 src_row_pitch,
             } => {
+                let _tz = crate::tracy_zone!("cuda.execute_op.write_texture_from_host.lock");
                 let host = host.lock().unwrap();
                 let end = *host_offset + *len;
                 if end > host.len() {
                     anyhow::bail!("CUDA: WriteTextureFromHost exceeds host staging");
                 }
                 let data = &host[*host_offset..end];
-                super::texture::memcpy_htod_array(
-                    stream,
-                    texture,
-                    *x,
-                    *y,
-                    *width,
-                    *height,
-                    data,
-                    *src_row_pitch,
-                )?;
+                {
+                    let _tz = crate::tracy_zone!("cuda.execute_op.write_texture_from_host.htod");
+                    super::texture::memcpy_htod_array(
+                        stream,
+                        texture,
+                        *x,
+                        *y,
+                        *width,
+                        *height,
+                        data,
+                        *src_row_pitch,
+                    )?;
+                }
                 if validate {
                     maybe_validate_sync(stream, "WriteTextureFromHost")?;
                 }
