@@ -699,6 +699,7 @@ pub(super) fn begin_frame(
     };
 
     if let Some(SendSyncHandle(waitable)) = waitable {
+        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
         unsafe { WaitForSingleObject(waitable, INFINITE) };
     }
     // Per-surface present_cmd_slots: wait only this surface's slot fence (plus DXGI
@@ -710,6 +711,7 @@ pub(super) fn begin_frame(
         .load(Ordering::Acquire);
     let wait_fence = prev_fence.max(slot_prev);
     if wait_fence > 0 {
+        let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
         companion.cpu_wait(wait_fence)?;
         backend.surfaces.get_mut(&surface).unwrap().slot_fence[present_slot] = 0;
     }
@@ -721,7 +723,10 @@ pub(super) fn begin_frame(
         idx as usize
     };
 
-    let tex_handle = ensure_scratch(backend, surface, image_index)?;
+    let tex_handle = {
+        let _tz = crate::tracy_zone!("surface.acquire.ensure_scratch");
+        ensure_scratch(backend, surface, image_index)?
+    };
 
     {
         let state = backend.surfaces.get_mut(&surface).unwrap();

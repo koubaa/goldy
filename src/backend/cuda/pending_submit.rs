@@ -1221,22 +1221,36 @@ fn finish_submit(
 impl PendingSubmit for CudaPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.cuda");
+        let CudaPendingSubmit {
+            stream,
+            context,
+            fence_value,
+            completion_event,
+            event_ledger,
+            stream_waits,
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            dx12_stream_fence_waits,
+            host_waits,
+            deferred_writes,
+            body,
+        } = *self;
+        let body_result: Result<(), anyhow::Error> = (|| {
         {
             let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.prefix");
             run_dynamic_prefix(
-                &self.stream,
-                &self.host_waits,
-                &self.deferred_writes,
-                &self.stream_waits,
+                &stream,
+                &host_waits,
+                &deferred_writes,
+                &stream_waits,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                &self.dx12_stream_fence_waits,
+                &dx12_stream_fence_waits,
             )?;
         }
 
-        match self.body {
+        match body {
             CudaSubmitBody::Ops { ops, .. } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.execute_ops");
-                execute_ops(&self.stream, &ops, true)?;
+                execute_ops(&stream, &ops, true)?;
             }
             CudaSubmitBody::CaptureAndLaunch {
                 key,
@@ -1246,7 +1260,7 @@ impl PendingSubmit for CudaPendingSubmit {
             } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture_and_launch");
                 let _gate = lock_capture_alloc_gate();
-                let ctx = self.context.handle;
+                let ctx = context.handle;
                 let mut islands = Vec::new();
                 for segment in &segments {
                     match segment {
@@ -1255,7 +1269,7 @@ impl PendingSubmit for CudaPendingSubmit {
                             let needs_indirect = ops_contain_indirect(ops);
                             let graph = {
                                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture");
-                                capture_partition_graph(&self.stream, ops)?
+                                capture_partition_graph(&stream, ops)?
                             };
                             stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if needs_indirect {
@@ -1267,20 +1281,20 @@ impl PendingSubmit for CudaPendingSubmit {
                                 .launch()
                                 .context("CUDA: cuGraphLaunch failed after capture")?;
                             stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            maybe_validate_sync(&self.stream, "graph launch after capture")?;
+                            maybe_validate_sync(&stream, "graph launch after capture")?;
                             islands.push(retained_graph::CudaRetainedPartition {
                                 graph,
                                 buffers,
                                 modules,
                                 textures,
                                 hosts,
-                                last_launch_tv: self.fence_value,
+                                last_launch_tv: fence_value,
                             });
                         }
                         CudaOpSegment::Stream(ops) => {
                             if !ops.is_empty() {
                                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
-                                execute_ops(&self.stream, ops, true)?;
+                                execute_ops(&stream, ops, true)?;
                             }
                         }
                     }
@@ -1288,9 +1302,9 @@ impl PendingSubmit for CudaPendingSubmit {
                 {
                     let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.registry_insert");
                     let mut guard = registry.lock().unwrap();
-                    guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
+                    guard.drain_retired(context.device_retired.load(std::sync::atomic::Ordering::Acquire));
                     if let Some(old) = guard.remove(ctx, key) {
-                        let retire_at = old.last_launch_tv().max(self.fence_value);
+                        let retire_at = old.last_launch_tv().max(fence_value);
                         guard.defer_drop(retire_at, old);
                     }
                     guard.insert(
@@ -1298,7 +1312,7 @@ impl PendingSubmit for CudaPendingSubmit {
                         key,
                         retained_graph::CudaRetainedProgram {
                             islands,
-                            last_launch_tv: self.fence_value,
+                            last_launch_tv: fence_value,
                         },
                     );
                 }
@@ -1312,14 +1326,14 @@ impl PendingSubmit for CudaPendingSubmit {
                     scratch_images: _,
             } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.launch_retained");
-                let ctx = self.context.handle;
+                let ctx = context.handle;
                 let mut island_idx = 0usize;
                 for segment in &segments {
                     match segment {
                         CudaLaunchSegment::Graph => {
                             let mut guard = registry.lock().unwrap();
                             guard.drain_retired(
-                                self.context.device_retired.load(std::sync::atomic::Ordering::Acquire),
+                                context.device_retired.load(std::sync::atomic::Ordering::Acquire),
                             );
                             let program = guard.get_mut(ctx, key).with_context(|| {
                                 format!("CUDA: retained graph missing for context {ctx} key {key:#x}")
@@ -1330,33 +1344,40 @@ impl PendingSubmit for CudaPendingSubmit {
                                 )
                             })?;
                             island.graph.launch().context("CUDA: cuGraphLaunch failed")?;
-                            island.last_launch_tv = self.fence_value;
-                            program.last_launch_tv = self.fence_value;
+                            island.last_launch_tv = fence_value;
+                            program.last_launch_tv = fence_value;
                             drop(guard);
                             stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            maybe_validate_sync(&self.stream, "retained graph launch")?;
+                            maybe_validate_sync(&stream, "retained graph launch")?;
                             island_idx += 1;
                         }
                         CudaLaunchSegment::Stream(ops) => {
                             if !ops.is_empty() {
                                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
-                                execute_ops(&self.stream, ops, true)?;
+                                execute_ops(&stream, ops, true)?;
                             }
                         }
                     }
                 }
             }
         }
-
-        {
+            Ok(())
+        })();
+        // Always publish the completion event so wait_until cannot observe
+        // submitted_epoch >= tv with recorded=false (skipped/`?` before record).
+        let finish_result = {
             let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.finish");
             finish_submit(
-                &self.stream,
-                &self.context,
-                self.fence_value,
-                &self.completion_event,
-                &self.event_ledger,
+                &stream,
+                &context,
+                fence_value,
+                &completion_event,
+                &event_ledger,
             )
+        };
+        match (body_result, finish_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), _) | (_, Err(e)) => Err(e),
         }
     }
 }
