@@ -89,11 +89,18 @@ impl EventPool {
 
 /// How a ledger timeline value becomes observable as complete.
 pub(super) enum LedgerCompletion {
+    /// Completion recorded on the context submission stream (compute / export).
     CudaEvent(Arc<CudaEvent>),
+    /// Present copy completion recorded on `present_stream` after a DX12 fence wait.
+    ///
+    /// `wait_until` observes this event. Compute submits must **not** `stream.wait` it:
+    /// that joins the worker stream onto the CUDA↔DX12 present tail and stalls `cs_main`.
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    PresentCudaEvent(Arc<CudaEvent>),
     /// DX12 companion fence signaled on the presentation DIRECT queue.
     ///
-    /// Present publishes [`LedgerCompletion::CudaEvent`] (bridged on `present_stream`).
-    /// This variant remains for residual fence-ledger producers; `value` may be 0 until
+    /// Scratch present publishes [`LedgerCompletion::PresentCudaEvent`]. This variant
+    /// remains for residual fence-ledger producers; `value` may be 0 until
     /// [`bind_dx12_fence_value`] runs at Signal time.
     #[allow(dead_code)]
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -117,6 +124,8 @@ impl CompletionSnap {
     fn from_completion(completion: &LedgerCompletion) -> Option<Self> {
         match completion {
             LedgerCompletion::CudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            LedgerCompletion::PresentCudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             LedgerCompletion::Dx12Fence { companion, value } => (*value > 0).then(|| Self::Dx12Fence {
                 companion: Arc::clone(companion),
@@ -260,8 +269,12 @@ pub(super) fn prune_retired_entries(
     };
     let mut events = Vec::new();
     for (_, entry) in retired_map {
-        if let LedgerCompletion::CudaEvent(event) = entry.completion {
-            events.push(event);
+        match entry.completion {
+            LedgerCompletion::CudaEvent(event) => events.push(event),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            LedgerCompletion::PresentCudaEvent(event) => events.push(event),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            LedgerCompletion::Dx12Fence { .. } => {}
         }
     }
     events
@@ -301,6 +314,8 @@ pub(super) fn lookup_event(ledger: &EventLedger, context: ContextHandle, value: 
             match &entry.completion {
                 LedgerCompletion::CudaEvent(event) => Some(Arc::clone(event)),
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::PresentCudaEvent(event) => Some(Arc::clone(event)),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 LedgerCompletion::Dx12Fence { .. } => None,
             }
         } else {
@@ -315,6 +330,10 @@ pub(super) fn lookup_completion(ledger: &EventLedger, context: ContextHandle, va
         if entry.context == context {
             Some(match &entry.completion {
                 LedgerCompletion::CudaEvent(event) => LedgerCompletion::CudaEvent(Arc::clone(event)),
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::PresentCudaEvent(event) => {
+                    LedgerCompletion::PresentCudaEvent(Arc::clone(event))
+                }
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 LedgerCompletion::Dx12Fence { companion, value } => LedgerCompletion::Dx12Fence {
                     companion: Arc::clone(companion),

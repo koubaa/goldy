@@ -11,9 +11,11 @@
 //! Present completion is published on the **Goldy/CUDA timeline** (event ledger).
 //! After DX12 Execute/Signal, present waits that fence on the dedicated
 //! `present_stream` and records a CUDA event there; `Frame::present` returns that
-//! Goldy value so `Context::wait_until` / submit sync observe the same namespace as
-//! compute. Downstream CUDA work uses stream waits on that event (not submission-
-//! stream `cuWaitExternalSemaphoresAsync` on the companion fence).
+//! Goldy value so `Context::wait_until` observes the same namespace as compute.
+//! Compute submits do **not** `stream.wait` that event: joining the worker stream
+//! onto the CUDA↔DX12 present tail stalls `cs_main`. Scheme easement uses the
+//! present-partition submit timeline (`copy_timeline` / `note_submit_timeline`),
+//! not `Frame::present`'s return value.
 //!
 //! Shared-fence signal ordering: `cuSignalExternalSemaphoresAsync(V)` must be
 //! *submitted to CUDA* before D3D12 `Queue.Signal(W)` for any `W > V` on the same
@@ -704,16 +706,16 @@ pub(super) fn begin_frame(
         .fence_value
         .load(Ordering::Acquire);
     let wait_fence = prev_fence.max(slot_prev);
-    // Fence first so Tracy attributes CUDA→DX12 present-tail stall to `fence_wait`.
-    // Remaining `dxgi_wait` is then the waitable itself (DWM/capacity).
+    // Match native DX12: DXGI waitable first (frame-latency cap), then this slot's
+    // present fence (allocator / scratch reuse).
+    if let Some(SendSyncHandle(waitable)) = waitable {
+        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
+        unsafe { WaitForSingleObject(waitable, INFINITE) };
+    }
     if wait_fence > 0 {
         let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
         companion.cpu_wait(wait_fence)?;
         backend.surfaces.get_mut(&surface).unwrap().slot_fence[present_slot] = 0;
-    }
-    if let Some(SendSyncHandle(waitable)) = waitable {
-        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
-        unsafe { WaitForSingleObject(waitable, INFINITE) };
     }
 
     let image_index = {
@@ -842,6 +844,10 @@ pub(super) fn take_present_gpu_work(
         match &entry.completion {
             LedgerCompletion::CudaEvent(event) => Some(Arc::clone(event)),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            LedgerCompletion::PresentCudaEvent(_) => {
+                bail!("CUDA/DX12: present submit_tv {submit_tv} is a present-completion event, not a compute submit")
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             LedgerCompletion::Dx12Fence { .. } => {
                 bail!("CUDA/DX12: present submit_tv {submit_tv} is a DX12 fence entry, not a CUDA event")
             }
@@ -852,12 +858,11 @@ pub(super) fn take_present_gpu_work(
 
     // Goldy timeline value for present/copy completion (same namespace as compute).
     //
-    // CUDA scratch present publishes a CUDA event: after DX12 Execute/Signal,
+    // CUDA scratch present publishes a PresentCudaEvent: after DX12 Execute/Signal,
     // PresentGpuWork waits the companion fence on `present_stream`
     // (`cuWaitExternalSemaphoresAsync`, Signal already issued) and records the
-    // event there. Downstream CUDA submits then `stream.wait(event)` — device-side
-    // CUDA→CUDA ordering — instead of demoting a Dx12Fence ledger entry onto the
-    // submission stream (which deposits sticky NOT_SUPPORTED on this WDDM stack).
+    // event there. `wait_until` observes it. Compute submits must not
+    // `stream.wait` it — that joins worker kernels onto the present tail.
     //
     // Dx12Raster (direct raster) stays on the companion fence ledger: no CUDA body
     // to bridge and no per-frame present-completion event allocation in steady state.
@@ -887,7 +892,7 @@ pub(super) fn take_present_gpu_work(
             present_tv,
             LedgerEntry {
                 context: frame.context,
-                completion: LedgerCompletion::CudaEvent(Arc::clone(&present_event)),
+                completion: LedgerCompletion::PresentCudaEvent(Arc::clone(&present_event)),
                 recorded: false,
             },
         );
@@ -1012,6 +1017,7 @@ pub(super) fn take_present_gpu_work(
         scratch_handle,
         cuda_complete,
         join_submit_tv,
+        copy_timeline: (submit_tv > 0).then_some(submit_tv),
         worker: Arc::clone(&worker),
         next_timeline: Arc::clone(&next_timeline),
         present_tv,
@@ -1114,6 +1120,8 @@ struct CudaDx12PresentGpuWork {
     cuda_complete: u64,
     /// When set, join the submission worker for this timeline before companion `Signal(W)`.
     join_submit_tv: Option<crate::timeline::TimelineValue>,
+    /// Present-partition submit TV (compute export), not display present.
+    copy_timeline: Option<crate::timeline::TimelineValue>,
     worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
     next_timeline: Arc<std::sync::atomic::AtomicU64>,
     present_tv: crate::timeline::TimelineValue,
@@ -1258,7 +1266,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             scratch_texture: Some(self.scratch_handle),
             scratch_layout_updated: true,
             present_timeline: self.present_tv,
-            copy_timeline: Some(self.present_tv),
+            copy_timeline: self.copy_timeline,
             frame_compute_timeline: None,
             signal_timeline: None,
             render_pass_submitted: false,
@@ -1710,6 +1718,11 @@ mod present_tests {
             .expect("wait_until present_tv on Goldy timeline");
         match completion.unwrap() {
             LedgerCompletion::CudaEvent(event) => assert!(
+                event.is_complete(),
+                "present_tv {present_tv} event should complete after wait_until"
+            ),
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            LedgerCompletion::PresentCudaEvent(event) => assert!(
                 event.is_complete(),
                 "present_tv {present_tv} event should complete after wait_until"
             ),

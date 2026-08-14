@@ -533,6 +533,23 @@ pub(super) enum CudaLaunchArg {
     Scalar(u32),
 }
 
+#[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+fn op_writes_imported_scratch(op: &CudaOp, scratch: &Arc<CudaTextureResource>) -> bool {
+    match op {
+        CudaOp::Launch {
+            keep_alive_textures, ..
+        }
+        | CudaOp::LaunchIndirect {
+            keep_alive_textures, ..
+        } => keep_alive_textures.iter().any(|texture| Arc::ptr_eq(texture, scratch)),
+        CudaOp::WriteTexture { texture, .. }
+        | CudaOp::WriteTextureFromHost { texture, .. }
+        | CudaOp::CopyBufferToTexture { texture, .. } => Arc::ptr_eq(texture, scratch),
+        CudaOp::CopyTexture { dst, .. } => Arc::ptr_eq(dst, scratch),
+        _ => false,
+    }
+}
+
 impl CudaBackend {
     pub(crate) fn graph_stats_snapshot(&self) -> CudaGraphStatsSnapshot {
         self.graph_stats.snapshot()
@@ -2354,6 +2371,26 @@ impl CudaBackend {
     }
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    fn first_imported_scratch_write_index(
+        &self,
+        ops: &[CudaOp],
+        touched: &[(SurfaceHandle, usize)],
+    ) -> Option<usize> {
+        let scratches: Vec<_> = touched
+            .iter()
+            .filter_map(|(surface, image)| {
+                self.surfaces
+                    .get(surface)
+                    .and_then(|state| state.scratch.get(*image))
+                    .and_then(|slot| slot.as_ref())
+                    .map(|slot| Arc::clone(&slot.shared.cuda_texture))
+            })
+            .collect();
+        ops.iter()
+            .position(|op| scratches.iter().any(|scratch| op_writes_imported_scratch(op, scratch)))
+    }
+
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     fn scratch_images_touched_by_ops(&self, ops: &[CudaOp]) -> Vec<(SurfaceHandle, usize)> {
         let mut touched = Vec::new();
         for (surface_handle, state) in &self.surfaces {
@@ -2362,21 +2399,7 @@ impl CudaBackend {
                     continue;
                 };
                 let scratch = &slot.shared.cuda_texture;
-                let writes_scratch = ops.iter().any(|op| match op {
-                    CudaOp::Launch {
-                        keep_alive_textures, ..
-                    }
-                    | CudaOp::LaunchIndirect {
-                        keep_alive_textures, ..
-                    } => keep_alive_textures.iter().any(|texture| Arc::ptr_eq(texture, scratch)),
-                    CudaOp::WriteTexture { texture, .. }
-                    | CudaOp::WriteTextureFromHost { texture, .. }
-                    | CudaOp::CopyBufferToTexture { texture, .. } => {
-                        Arc::ptr_eq(texture, scratch)
-                    }
-                    CudaOp::CopyTexture { dst, .. } => Arc::ptr_eq(dst, scratch),
-                    _ => false,
-                });
+                let writes_scratch = ops.iter().any(|op| op_writes_imported_scratch(op, scratch));
                 if writes_scratch {
                     touched.push((*surface_handle, image_index));
                 }
@@ -2496,8 +2519,15 @@ impl CudaBackend {
                 .context("CUDA/DX12: wait IA fence before Shared buffer rewrite")?;
         }
         if !waits.is_empty() {
-            waits.append(ops);
-            *ops = waits;
+            // Wait immediately before the first imported-scratch write (typically
+            // CopyTexture export). Prepending to the whole last stream segment would
+            // stall `cs_main` on the previous present's DX12 fence.
+            let insert_at = self.first_imported_scratch_write_index(ops, &touched).unwrap_or(0);
+            let mut suffix = ops.split_off(insert_at);
+            let mut prefix = std::mem::take(ops);
+            prefix.append(&mut waits);
+            prefix.append(&mut suffix);
+            *ops = prefix;
         }
 
         if touched.is_empty() {
@@ -2735,6 +2765,7 @@ impl CudaBackend {
                 timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { .. }) => {}
                 timeline::WaitCompletion::AlreadyComplete => {}
                 timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(_))
+                | timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(_))
                 | timeline::WaitCompletion::Missing => return Ok(false),
             }
         }
@@ -2858,11 +2889,16 @@ impl CudaBackend {
                         stream_waits.push(event)
                     }
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(_)) => {
+                        // Present completion lives on `present_stream`. Joining it here
+                        // serializes worker kernels behind the CUDA↔DX12 present tail.
+                    }
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { companion, value }) => {
                         // Device-side DX12→CUDA: cuWaitExternalSemaphoresAsync on the
                         // submission stream. Only after Signal is published (value > 0).
                         // Prefer skipping when the fence already completed (no interop node).
-                        // Present epochs should be CudaEvent (bridged on present_stream);
+                        // Present epochs should be PresentCudaEvent (bridged on present_stream);
                         // this path is for residual Dx12Fence producers.
                         if value > 0 && unsafe { companion.fence.GetCompletedValue() } < value {
                             dx12_stream_fence_waits.push((companion, value));
@@ -2890,6 +2926,8 @@ impl CudaBackend {
                     timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(event)) => {
                         host_waits.push(event)
                     }
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(_)) => {}
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { companion, value }) => {
                         // Match DX12 FPS policy: demote WAR/host_observed Dx12Fence epochs
@@ -3311,6 +3349,10 @@ impl GpuBackendTimelineWait for CudaBackend {
         match timeline::completion_for_wait(&device.event_ledger, &device.retired, ctx, value) {
             timeline::WaitCompletion::AlreadyComplete => Ok(None),
             timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(event)) => {
+                Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
+            }
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(event)) => {
                 Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -4775,6 +4817,10 @@ impl GpuBackend for CudaBackend {
                 LedgerCompletion::CudaEvent(event) => event
                     .synchronize()
                     .context("CUDA: device_wait_until event sync failed")?,
+                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                LedgerCompletion::PresentCudaEvent(event) => event
+                    .synchronize()
+                    .context("CUDA: device_wait_until present event sync failed")?,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 LedgerCompletion::Dx12Fence {
                     companion,
