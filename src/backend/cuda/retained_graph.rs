@@ -201,6 +201,9 @@ pub(super) struct CudaRetainedPartition {
     /// Keep CUDA texture arrays / tex/surf objects alive for baked handles.
     #[allow(dead_code)]
     pub textures: Vec<Arc<super::texture::CudaTextureResource>>,
+    /// Keep pinned host staging alive for captured HtoD memcpy nodes.
+    #[allow(dead_code)]
+    pub hosts: Vec<Arc<Mutex<super::pinned_host::CudaPinnedHost>>>,
     pub last_launch_tv: u64,
 }
 

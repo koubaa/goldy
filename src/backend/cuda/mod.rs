@@ -28,15 +28,17 @@
 //! Retainable compute partitions are split into alternating graph-safe islands and
 //! stream-replayed boundary segments (`submit_graph_and_retain`). Graph islands are
 //! captured into CUDA graphs and relaunched on cache hits (`try_resubmit_retained`);
-//! clears, copies, format-specialized launches, and present exports stay on the
-//! stream path between islands. Present-bound launches that would write D3D12-imported
-//! scratch are rewritten onto CUDA-owned staging with a fixed `CopyTexture` export
-//! stream segment. Indirect dispatches use CUDA 13.1 device-updatable kernel
-//! nodes plus an in-graph updater; uploads and other fully graph-unsafe partitions fall
-//! back to Goldy command-list replay (with a worker-side DtoH resolve for indirect grids).
-//! Dynamic waits, deferred host writes, and completion events stay outside the captured graph.
+//! pinned host→device copies, CUDA-owned memsets/DtoD copies, and kernel launches
+//! share graph islands. Format-specialized launches, imported-surface copies, and
+//! external fences stay on the stream path. Present-bound launches that would write
+//! D3D12-imported scratch are rewritten onto CUDA-owned staging with a fixed
+//! `CopyTexture` export stream segment. Indirect dispatches use CUDA 13.1
+//! device-updatable kernel nodes plus an in-graph updater. Inline `WriteBuffer`
+//! payloads (pageable `Vec`) still fall back to command replay. Dynamic waits,
+//! deferred host writes, and completion events stay outside the captured graph.
 
 mod pending_submit;
+mod pinned_host;
 mod retained_graph;
 mod runtime_module;
 mod texture;
@@ -68,6 +70,7 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::Ptx;
 use pending_submit::{CudaOp, CudaPendingSubmit, CudaSubmitBody};
+use pinned_host::CudaPinnedHost;
 use retained_graph::GraphRegistry;
 pub use retained_graph::{CudaGraphStats, CudaGraphStatsSnapshot};
 use std::collections::{BTreeMap, HashMap};
@@ -450,8 +453,8 @@ struct CudaBuffer {
     /// Host-side staging for [`BufferFlags::CPU_WRITABLE`] (DX12 UPLOAD analogue).
     /// `write_buffer` memcpys here without GPU sync; Copy materialization records a
     /// [`CudaOp`] that HtoDs from this Arc at execute time (so retained resubmits see
-    /// fresh bytes).
-    host_staging: Option<Arc<Mutex<Vec<u8>>>>,
+    /// fresh bytes). Page-locked so memcpy nodes can be CUDA-graph-captured.
+    host_staging: Option<Arc<Mutex<CudaPinnedHost>>>,
     /// Parent allocation for [`GpuBackend::create_buffer_view`] slices (shares memory).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     parent: Option<BufferHandle>,
@@ -691,11 +694,14 @@ impl CudaBackend {
                 .context("CUDA: alloc buffer")?,
         )));
         let host_staging = if flags.contains(BufferFlags::CPU_WRITABLE) {
-            Some(Arc::new(Mutex::new(vec![0u8; capacity as usize])))
+            Some(Arc::new(Mutex::new(CudaPinnedHost::alloc(
+                &gpu.ctx,
+                capacity as usize,
+            )?)))
         } else {
             None
         };
-        let _ = gpu; // used in non-graphics branch
+        let _ = &gpu; // used in non-graphics branch for `alloc_stream`
         let handle = self.next_buffer;
         self.next_buffer += 1;
         let slot = self.next_slot;
@@ -1570,6 +1576,7 @@ impl CudaBackend {
         let (mut keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
         keep_alive_buffers.push(Arc::clone(shape_buf.memory_arc()?));
 
+        let _gate = pending_submit::lock_capture_alloc_gate();
         let shape_abs_offset = shape_buf.offset + shape_offset;
         let shape_ptr = {
             let memory = shape_buf.memory_arc()?.lock().unwrap();
@@ -1600,6 +1607,7 @@ impl CudaBackend {
             let (ptr, _sync) = status.device_ptr(stream);
             ptr
         };
+        drop(_gate);
 
         let function = module
             .load_function("cs_main")
@@ -1969,10 +1977,14 @@ impl CudaBackend {
                     };
                     // Invalidate shared DX12 VB twins used by raster.
                     buffer.bump_content_epoch();
+                    let memory = Arc::clone(buffer.memory_arc()?);
+                    let abs_offset = buffer.offset + *offset;
+                    let device_ptr = pending_submit::bake_device_ptr(stream, &memory, abs_offset);
                     ops.push(CudaOp::Clear {
-                        memory: Arc::clone(buffer.memory_arc()?),
-                        abs_offset: buffer.offset + *offset,
+                        memory,
+                        abs_offset,
                         size: clear_size,
+                        device_ptr,
                     });
                 }
                 GpuCommand::WriteBuffer { buffer, offset, data } => {
@@ -2010,9 +2022,13 @@ impl CudaBackend {
                             anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
                         }
                         dst_buf.bump_content_epoch();
+                        let memory = Arc::clone(dst_buf.memory_arc()?);
+                        let abs_offset = dst_buf.offset + *dst_offset;
+                        let device_ptr = pending_submit::bake_device_ptr(stream, &memory, abs_offset);
                         ops.push(CudaOp::WriteFromHost {
-                            memory: Arc::clone(dst_buf.memory_arc()?),
-                            abs_offset: dst_buf.offset + *dst_offset,
+                            memory,
+                            abs_offset,
+                            device_ptr,
                             host,
                             host_offset: start,
                             len: *size as usize,
@@ -2025,11 +2041,17 @@ impl CudaBackend {
                             anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
                         }
                         dst_buf.bump_content_epoch();
+                        let dst_memory = Arc::clone(dst_buf.memory_arc()?);
+                        let dst_abs = dst_buf.offset + *dst_offset;
+                        let src_ptr = pending_submit::bake_device_ptr(stream, &src_memory, src_abs);
+                        let dst_ptr = pending_submit::bake_device_ptr(stream, &dst_memory, dst_abs);
                         ops.push(CudaOp::Copy {
                             src: src_memory,
                             src_abs,
-                            dst: Arc::clone(dst_buf.memory_arc()?),
-                            dst_abs: dst_buf.offset + *dst_offset,
+                            src_ptr,
+                            dst: dst_memory,
+                            dst_abs,
+                            dst_ptr,
                             size: *size,
                         });
                     }
@@ -2151,9 +2173,13 @@ impl CudaBackend {
                             src_row_pitch: *src_row_pitch,
                         });
                     } else {
+                        let src_memory = Arc::clone(src_buf.memory_arc()?);
+                        let src_abs = src_buf.offset + *src_offset;
+                        let src_ptr = pending_submit::bake_device_ptr(stream, &src_memory, src_abs);
                         ops.push(CudaOp::CopyBufferToTexture {
-                            src: Arc::clone(src_buf.memory_arc()?),
-                            src_abs: src_buf.offset + *src_offset,
+                            src: src_memory,
+                            src_abs,
+                            src_ptr,
                             src_row_pitch: *src_row_pitch,
                             texture: Arc::clone(dst_tex),
                             x: *x,
@@ -2181,14 +2207,18 @@ impl CudaBackend {
                             src_tex.height
                         );
                     }
+                    let dst_memory = Arc::clone(dst_buf.memory_arc()?);
+                    let dst_abs = dst_buf.offset + layout.footprint_offset;
+                    let dst_ptr = pending_submit::bake_device_ptr(stream, &dst_memory, dst_abs);
                     ops.push(CudaOp::CopyTextureToBuffer {
                         texture: Arc::clone(src_tex),
                         x: 0,
                         y: 0,
                         width: layout.width,
                         height: layout.height,
-                        dst: Arc::clone(dst_buf.memory_arc()?),
-                        dst_abs: dst_buf.offset + layout.footprint_offset,
+                        dst: dst_memory,
+                        dst_abs,
+                        dst_ptr,
                         dst_row_pitch: layout.row_pitch,
                     });
                 }
@@ -3595,7 +3625,13 @@ impl GpuBackend for CudaBackend {
             runtime_module::load_indirect_updater(&ctx, (major, minor))
                 .with_context(|| format!("CUDA: load indirect updater for adapter {adapter_id}"))?,
         );
-        let alloc_stream = ctx.default_stream();
+        // Dedicated non-blocking stream — never the legacy default stream. Default-stream
+        // allocs implicitly wait on every other stream, including a THREAD_LOCAL graph
+        // capture on the submit worker, which yields CUDA_ERROR_STREAM_CAPTURE_ISOLATION
+        // and invalidates in-flight upload graphs.
+        let alloc_stream = ctx
+            .new_stream()
+            .with_context(|| format!("CUDA: create alloc stream for adapter {adapter_id}"))?;
         let event_pool = Arc::new(timeline::EventPool::new(Arc::clone(&ctx)));
         event_pool
             .prewarm()
@@ -3939,7 +3975,7 @@ impl GpuBackend for CudaBackend {
                     if end > staging.len() {
                         anyhow::bail!("CUDA: write exceeds host staging capacity");
                     }
-                    staging[stage_offset as usize..end].copy_from_slice(data);
+                    staging.as_mut_slice()[stage_offset as usize..end].copy_from_slice(data);
                 }
                 buf.bump_content_epoch();
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -4338,11 +4374,7 @@ impl GpuBackend for CudaBackend {
                 }
                 if let Some(staging) = buf.host_staging.as_ref() {
                     let mut staging = staging.lock().unwrap();
-                    if preserve_contents {
-                        staging.resize(new_cap as usize, 0);
-                    } else {
-                        *staging = vec![0u8; new_cap as usize];
-                    }
+                    staging.resize(new_cap as usize, preserve_contents)?;
                 }
                 buf.size = new_size;
                 buf.capacity = new_cap;
@@ -4397,6 +4429,9 @@ impl GpuBackend for CudaBackend {
         target.offset = 0;
         target.size = new_size;
         target.capacity = capacity;
+        if let Some(staging) = target.host_staging.as_ref() {
+            staging.lock().unwrap().resize(capacity as usize, preserve_contents)?;
+        }
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
             // Shared twin is size-specific; drop and recreate on next VB bind.
@@ -6666,6 +6701,290 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     }
 
     #[test]
+    fn cpu_writable_pinned_staging_copy_roundtrip() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA pinned staging test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let staging = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::CPU_WRITABLE | BufferFlags::COPY_SRC,
+        )?;
+        let dst = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(staging, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let tv = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: staging,
+                src_offset: 0,
+                dst,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, tv)?;
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        let tv = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: dst,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, tv)?;
+        let mut bytes = vec![0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[1, 2, 3, 4]);
+
+        backend.write_buffer(staging, 0, bytemuck::cast_slice(&[5u32, 6, 7, 8]))?;
+        let tv = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: staging,
+                src_offset: 0,
+                dst,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, tv)?;
+        let tv = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: dst,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, tv)?;
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[5, 6, 7, 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_writable_copy_captures_once_then_graph_launches() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA pinned capture test: {error:#}");
+                return Ok(());
+            }
+        };
+        let stats = backend.graph_stats();
+        stats.reset();
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let staging = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::CPU_WRITABLE | BufferFlags::COPY_SRC,
+        )?;
+        let dst = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(staging, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        const KEY: u64 = 0xC0_91_ED;
+        let commands = [GraphCommand::Compute(GpuCommand::CopyBuffer {
+            src: staging,
+            src_offset: 0,
+            dst,
+            dst_offset: 0,
+            size: 16,
+        })];
+        let tv = backend.submit_graph_and_retain(ctx, &commands, KEY, None)?;
+        wait_for(&mut backend, ctx, tv)?;
+        let after_first = stats.snapshot();
+        assert!(
+            after_first.captures >= 1,
+            "pinned WriteFromHost copy must capture: {after_first:?}"
+        );
+        assert_eq!(
+            after_first.fallbacks, 0,
+            "pinned host copy must not use Ops fallback: {after_first:?}"
+        );
+
+        backend.write_buffer(staging, 0, bytemuck::cast_slice(&[9u32, 8, 7, 6]))?;
+        let tv = backend
+            .try_resubmit_retained(ctx, KEY, None)?
+            .context("expected retained upload graph")?;
+        wait_for(&mut backend, ctx, tv)?;
+        let after_second = stats.snapshot();
+        assert_eq!(
+            after_second.captures, after_first.captures,
+            "resubmit must not recapture: first={after_first:?} second={after_second:?}"
+        );
+        assert!(
+            after_second.launches > after_first.launches,
+            "resubmit must graph-launch: first={after_first:?} second={after_second:?}"
+        );
+
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        let tv = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: dst,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, tv)?;
+        let mut bytes = vec![0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(
+            bytemuck::cast_slice::<u8, u32>(&bytes),
+            &[9, 8, 7, 6],
+            "graph relaunch must observe CPU writes into pinned staging"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_writable_texture_copy_captures_once_then_graph_launches() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA pinned texture capture test: {error:#}");
+                return Ok(());
+            }
+        };
+        let stats = backend.graph_stats();
+        stats.reset();
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let staging = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::CPU_WRITABLE | BufferFlags::COPY_SRC,
+        )?;
+        let tex = backend.create_texture(
+            device,
+            2,
+            2,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+        )?;
+        let imported = backend
+            .textures
+            .get(&tex)
+            .is_some_and(|t| t.is_imported());
+        backend.write_buffer(staging, 0, &[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])?;
+        const KEY: u64 = 0xC0_91_7E;
+        let commands = [GraphCommand::Compute(GpuCommand::CopyBufferToTexture {
+            src: staging,
+            src_offset: 0,
+            src_row_pitch: 0,
+            dst: tex,
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        })];
+        let tv = backend.submit_graph_and_retain(ctx, &commands, KEY, None)?;
+        wait_for(&mut backend, ctx, tv)?;
+        let after_first = stats.snapshot();
+        if imported {
+            assert_eq!(
+                after_first.captures, 0,
+                "imported-surface texture upload must not capture: {after_first:?}"
+            );
+        } else {
+            assert!(
+                after_first.captures >= 1,
+                "pinned WriteTextureFromHost must capture: {after_first:?}"
+            );
+            assert_eq!(
+                after_first.fallbacks, 0,
+                "pinned texture upload must not use Ops fallback: {after_first:?}"
+            );
+        }
+
+        backend.write_buffer(staging, 0, &[16u8, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1])?;
+        let tv = backend
+            .try_resubmit_retained(ctx, KEY, None)?
+            .context("expected retained texture upload")?;
+        wait_for(&mut backend, ctx, tv)?;
+        let after_second = stats.snapshot();
+        assert_eq!(
+            after_second.captures, after_first.captures,
+            "resubmit must not recapture: first={after_first:?} second={after_second:?}"
+        );
+        if !imported {
+            assert!(
+                after_second.launches > after_first.launches,
+                "resubmit must graph-launch: first={after_first:?} second={after_second:?}"
+            );
+        }
+
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        let layout = crate::TextureCopyFootprint {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8Unorm,
+            logical_bytes: 16,
+            staging_bytes: 16,
+            row_pitch: 8,
+            footprint_offset: 0,
+        };
+        let tv = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyTextureToReadback {
+                src: tex,
+                dst: readback,
+                layout,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, tv)?;
+        let mut bytes = vec![0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(
+            bytes.as_slice(),
+            &[16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+            "relaunch must observe CPU writes into pinned staging"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn upload_write_commands_use_command_fallback_not_graph_capture() -> Result<()> {
         let _exclusive = cuda_exclusive_guard();
         let mut backend = match CudaBackend::new() {
@@ -6902,7 +7221,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let snap = stats.snapshot();
         assert!(
             snap.captures >= 1,
-            "clear is stream-replayed but subsequent launches must capture: {snap:?}"
+            "clear+indirect launches must capture: {snap:?}"
         );
         assert_eq!(
             snap.fallbacks, 0,
@@ -6940,7 +7259,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
 
-        // Launch(a) → Clear(b) → Launch(b): two graph islands separated by a stream clear.
+        // Launch(a) → Clear(b) → Launch(b): all graph-safe, one captured island.
         let mut scheme = crate::Scheme::new(&ctx);
         scheme
             .node("double_a", &pipeline)
@@ -6962,8 +7281,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
 
         let after_first = stats.snapshot();
         assert!(
-            after_first.captures >= 2,
-            "launch→clear→launch must capture two graph islands: {after_first:?}"
+            after_first.captures >= 1,
+            "launch→clear→launch must capture a graph island: {after_first:?}"
         );
         assert_eq!(
             after_first.fallbacks, 0,
@@ -6985,8 +7304,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             "stable multi-island resubmit must not recapture: {after_second:?}"
         );
         assert!(
-            after_second.launches >= launches_after_first + 2,
-            "stable multi-island resubmit must relaunch both islands: first={after_first:?} second={after_second:?}"
+            after_second.launches >= launches_after_first + 1,
+            "stable resubmit must relaunch the captured island: first={after_first:?} second={after_second:?}"
         );
         assert_eq!(scheme.replay_stats().records, 1);
         Ok(())

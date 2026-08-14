@@ -602,13 +602,13 @@ fn evict_retained_touching_scratch(
                     return true;
                 }
                 let stream_ops = super::pending_submit::collect_stream_ops(segments.as_ref());
-                let (_buffers, _modules, textures) = super::pending_submit::collect_pins(&stream_ops);
+                let (_buffers, _modules, textures, _hosts) = super::pending_submit::collect_pins(&stream_ops);
                 textures
                     .iter()
                     .any(|texture| destroyed_ptrs.contains(&Arc::as_ptr(texture)))
             }
             super::RetainedEntry::Ops { ops, .. } => {
-                let (buffers, modules, textures) = super::pending_submit::collect_pins(ops.as_ref());
+                let (buffers, modules, textures, _hosts) = super::pending_submit::collect_pins(ops.as_ref());
                 let _ = (buffers, modules, &slots);
                 textures
                     .iter()
