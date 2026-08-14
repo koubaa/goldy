@@ -292,6 +292,14 @@ fn worker_loop(
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                         let mut slot = latched_error.lock().unwrap();
                         if slot.is_none() {
+                            if tracing::enabled!(target: "goldy::submit", tracing::Level::WARN) {
+                                tracing::warn!(
+                                    target: "goldy::submit",
+                                    timeline = tv,
+                                    error = %format_args!("{:#}", e),
+                                    "submit worker job failed"
+                                );
+                            }
                             *slot = Some(e);
                         }
                         notify_waiters(&wait_notify);

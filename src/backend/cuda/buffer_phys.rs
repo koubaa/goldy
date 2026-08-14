@@ -251,6 +251,7 @@ impl CudaBackend {
         match target {
             CudaPhysKind::Native | CudaPhysKind::NativeAndTwin => {
                 let gpu = self.device(device)?;
+                let _gate = super::capture_gate::lock_capture_alloc_gate();
                 let memory = Arc::new(Mutex::new(
                     gpu.alloc_stream
                         .alloc_zeros::<u8>(capacity as usize)
@@ -465,6 +466,7 @@ impl CudaBackend {
             .context("CUDA: promote Shared without memory")?;
 
         let gpu = self.device(device)?;
+        let _gate = super::capture_gate::lock_capture_alloc_gate();
         gpu.ctx
             .bind_to_thread()
             .context("CUDA: bind context for Shared promote")?;

@@ -13,16 +13,9 @@ use anyhow::{Context as _, Result};
 use cudarc::driver::{
     CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg,
 };
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
-/// Serializes graph capture vs host-thread `alloc_zeros` on `alloc_stream`.
-/// Concurrent malloc on another stream during THREAD_LOCAL capture yields
-/// `CUDA_ERROR_STREAM_CAPTURE_ISOLATION` (and invalidates the capture).
-static CAPTURE_ALLOC_GATE: Mutex<()> = Mutex::new(());
-
-pub(super) fn lock_capture_alloc_gate() -> MutexGuard<'static, ()> {
-    CAPTURE_ALLOC_GATE.lock().unwrap()
-}
+pub(super) use super::capture_gate::lock_capture_alloc_gate;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -1235,6 +1228,10 @@ impl PendingSubmit for CudaPendingSubmit {
             body,
         } = *self;
         let body_result: Result<(), anyhow::Error> = (|| {
+        // Hold across prefix + capture: API-thread `device_ptr` / alloc on another
+        // stream during THREAD_LOCAL capture is CUDA_ERROR_STREAM_CAPTURE_ISOLATION.
+        let _capture_gate = matches!(&body, CudaSubmitBody::CaptureAndLaunch { .. })
+            .then(lock_capture_alloc_gate);
         {
             let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.prefix");
             run_dynamic_prefix(
@@ -1259,7 +1256,6 @@ impl PendingSubmit for CudaPendingSubmit {
                 stats,
             } => {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture_and_launch");
-                let _gate = lock_capture_alloc_gate();
                 let ctx = context.handle;
                 let mut islands = Vec::new();
                 for segment in &segments {
@@ -1445,6 +1441,7 @@ pub(super) fn bake_device_ptr(
     memory: &Arc<Mutex<CudaSlice<u8>>>,
     abs_offset: u64,
 ) -> u64 {
+    let _gate = lock_capture_alloc_gate();
     let guard = memory.lock().unwrap();
     let (base, _sync) = guard.device_ptr(stream);
     base + abs_offset

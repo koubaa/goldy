@@ -23,6 +23,7 @@ unsafe impl Sync for CudaPinnedHost {}
 impl CudaPinnedHost {
     pub(super) fn alloc(ctx: &Arc<CudaContext>, len: usize) -> Result<Self> {
         let len = len.max(1);
+        let _gate = super::capture_gate::lock_capture_alloc_gate();
         ctx.bind_to_thread()
             .context("CUDA: bind context for pinned host alloc")?;
         // SAFETY: `cuMemHostAlloc` returns unset host memory of `len` bytes.
@@ -71,6 +72,7 @@ impl Drop for CudaPinnedHost {
         if self.ptr.is_null() {
             return;
         }
+        let _gate = super::capture_gate::lock_capture_alloc_gate();
         let _ = self.ctx.bind_to_thread();
         // SAFETY: `ptr` came from `malloc_host` and is not used after this.
         let _ = unsafe { cudarc::driver::result::free_host(self.ptr as *mut std::ffi::c_void) };

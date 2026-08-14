@@ -37,6 +37,7 @@
 //! payloads (pageable `Vec`) still fall back to command replay. Dynamic waits,
 //! deferred host writes, and completion events stay outside the captured graph.
 
+mod capture_gate;
 mod pending_submit;
 mod pinned_host;
 mod retained_graph;
@@ -683,6 +684,7 @@ impl CudaBackend {
             capacity = capacity.max((logical_size + 255) & !255);
         }
         let gpu = self.device(device)?;
+        let _gate = capture_gate::lock_capture_alloc_gate();
         // Graphics+DX12: defer physical backing until scheme usage is known (Shared vs
         // Native vs NativeAndTwin). Compute-only builds still allocate eagerly.
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -817,6 +819,7 @@ impl CudaBackend {
 
     fn load_compute_kernel(&self, device: DeviceHandle, ptx: &str) -> Result<CudaComputeKernel> {
         let gpu = self.device(device)?;
+        let _gate = capture_gate::lock_capture_alloc_gate();
         let module = load_ptx_module(&gpu.ctx, ptx)?;
         let function = module
             .load_function("cs_main")
@@ -899,6 +902,7 @@ impl CudaBackend {
     }
 
     fn buffer_arg(&self, stream: &Arc<CudaStream>, buffer: &CudaBuffer) -> Result<CudaBufferArg> {
+        let _gate = capture_gate::lock_capture_alloc_gate();
         let memory = buffer.memory_arc()?.lock().unwrap();
         let start = buffer.offset as usize;
         let end = (buffer.offset + buffer.size) as usize;
@@ -1915,6 +1919,7 @@ impl CudaBackend {
     }
 
     fn materialize_ops(&mut self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+        let _gate = capture_gate::lock_capture_alloc_gate();
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
             // Late-physicalize from this submit's usage before building CudaOps.
@@ -4049,6 +4054,7 @@ impl GpuBackend for CudaBackend {
 
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         let gpu = self.device(device)?;
+        let _gate = capture_gate::lock_capture_alloc_gate();
         let capacity = size.max(4);
         let memory = Arc::new(Mutex::new(
             gpu.alloc_stream
