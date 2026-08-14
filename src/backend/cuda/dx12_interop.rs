@@ -1,29 +1,29 @@
-//! Shared D3D12↔CUDA textures and present blit helpers.
+//! Shared D3D12↔CUDA textures and present copy helpers.
 //!
 //! Graphics companion allocates exportable UAV textures; CUDA imports them once via
-//! `cuImportExternalMemory` + mapped mipmapped arrays. Present converts
-//! [`TextureFormat::Rgba32Float`] scratch into the BGRA8 swapchain backbuffer with a
-//! tiny embedded compute blit (CopyResource cannot convert formats).
+//! `cuImportExternalMemory` + mapped mipmapped arrays. Surface scratch and the
+//! swapchain are both RGBA8 so present is a single `CopyResource` (no conversion
+//! dispatch). Flip-model backbuffers still cannot be CUDA-imported, so the shared
+//! scratch remains the write target.
 
-use super::dx12_companion::{Dx12Companion, MAX_FRAMES};
+use super::dx12_companion::Dx12Companion;
 use super::texture::{format_info, CudaTextureResource};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{bail, Context as _, Result};
 use cudarc::driver::{sys, CudaContext};
 use std::sync::Arc;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
-use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
-use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-/// Goldy surface format exposed to schemes writing `DirectSpatial<float4>`.
-pub(super) const SURFACE_COMPUTE_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
+/// Goldy surface format exposed to schemes (`DirectSpatial<float4>` packs via
+/// `Float4Rgba8Unorm` specialization).
+pub(super) const SURFACE_COMPUTE_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
-/// DXGI swapchain / blit destination format.
-pub(super) const SWAPCHAIN_DXGI_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
+/// DXGI swapchain format — matches [`SURFACE_COMPUTE_FORMAT`] for direct copy.
+pub(super) const SWAPCHAIN_DXGI_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-/// One shareable float4 UAV texture with a CUDA surface view.
+/// One shareable RGBA8 UAV texture with a CUDA surface view.
 ///
 /// Field order is load-bearing: Rust drops fields in declaration order, so
 /// [`cuda_texture`] (tex/surf objects) must precede [`import`] (mapped mipmapped
@@ -38,8 +38,6 @@ pub(super) struct SharedScratchTexture {
     pub d3d12_resource: ID3D12Resource,
     #[allow(dead_code)]
     pub allocation_size: u64,
-    /// BGRA8 UAV used as compute-blit destination before CopyResource → backbuffer.
-    pub blit_target: ID3D12Resource,
 }
 
 pub(in crate::backend) struct CudaImportedTexture {
@@ -94,7 +92,7 @@ impl SharedScratchTexture {
             &companion.device,
             width,
             height,
-            DXGI_FORMAT_R32G32B32A32_FLOAT,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         )?;
 
@@ -122,19 +120,7 @@ impl SharedScratchTexture {
             None,
         )?;
 
-        let (blit_target, _) = create_shared_texture(
-            &companion.device,
-            width,
-            height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        )?;
-        // blit_target is DX12-only (not imported); SHARED flag is harmless.
-
-        // Transition both to UAV for first use (separate submits keep the init-list
-        // state machine simple; still cheaper than streaming upload paths).
         init_resource_state(companion, &d3d12_resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)?;
-        init_resource_state(companion, &blit_target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)?;
 
         Ok(Self {
             width,
@@ -143,7 +129,6 @@ impl SharedScratchTexture {
             import,
             d3d12_resource,
             allocation_size,
-            blit_target,
         })
     }
 
@@ -542,276 +527,7 @@ mod tests {
     }
 }
 
-/// Cached compute PSOs that convert float4 or R8G8B8A8 UAV → BGRA8 UAV.
-pub(super) struct PresentBlitPipeline {
-    pub root_signature: ID3D12RootSignature,
-    /// `Texture2D<float4>` source (shared float4 scratch / Rgba32Float RT).
-    pub pso_float: ID3D12PipelineState,
-    /// `Texture2D<unorm float4>` source (`Rgba8Unorm` RT).
-    pub pso_unorm8: ID3D12PipelineState,
-    pub srv_uav_heap: ID3D12DescriptorHeap,
-    pub descriptor_size: u32,
-}
-
-impl PresentBlitPipeline {
-    pub fn create(device: &ID3D12Device) -> Result<Self> {
-        let hlsl_float = r#"
-Texture2D<float4> SrcTex : register(t0);
-RWTexture2D<unorm float4> DstTex : register(u0);
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    uint w, h;
-    DstTex.GetDimensions(w, h);
-    if (id.x >= w || id.y >= h) return;
-    DstTex[id.xy] = SrcTex.Load(int3(id.xy, 0));
-}
-"#;
-        let hlsl_unorm8 = r#"
-Texture2D<unorm float4> SrcTex : register(t0);
-RWTexture2D<unorm float4> DstTex : register(u0);
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    uint w, h;
-    DstTex.GetDimensions(w, h);
-    if (id.x >= w || id.y >= h) return;
-    DstTex[id.xy] = SrcTex.Load(int3(id.xy, 0));
-}
-"#;
-
-        // Shared root signature from the float path; unorm PSO reuses it.
-        let mut shader: Option<ID3DBlob> = None;
-        let mut errors: Option<ID3DBlob> = None;
-        let hr = unsafe {
-            D3DCompile(
-                hlsl_float.as_ptr() as *const _,
-                hlsl_float.len(),
-                windows::core::PCSTR::null(),
-                None,
-                None,
-                windows::core::s!("main"),
-                windows::core::s!("cs_5_1"),
-                0,
-                0,
-                &mut shader,
-                Some(&mut errors),
-            )
-        };
-        if hr.is_err() {
-            let msg = errors
-                .as_ref()
-                .map(|e| {
-                    let ptr = unsafe { e.GetBufferPointer() } as *const u8;
-                    let len = unsafe { e.GetBufferSize() };
-                    unsafe { std::slice::from_raw_parts(ptr, len) }
-                })
-                .map(|b| String::from_utf8_lossy(b).into_owned())
-                .unwrap_or_default();
-            bail!("CUDA/DX12: D3DCompile present blit (float) failed: {msg}");
-        }
-        let shader = shader.context("CUDA/DX12: null blit shader blob")?;
-
-        let ranges = [
-            D3D12_DESCRIPTOR_RANGE1 {
-                RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-                NumDescriptors: 1,
-                BaseShaderRegister: 0,
-                RegisterSpace: 0,
-                Flags: D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-                OffsetInDescriptorsFromTableStart: 0,
-            },
-            D3D12_DESCRIPTOR_RANGE1 {
-                RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
-                NumDescriptors: 1,
-                BaseShaderRegister: 0,
-                RegisterSpace: 0,
-                Flags: D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-                OffsetInDescriptorsFromTableStart: 1,
-            },
-        ];
-        let param = D3D12_ROOT_PARAMETER1 {
-            ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
-            Anonymous: D3D12_ROOT_PARAMETER1_0 {
-                DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE1 {
-                    NumDescriptorRanges: ranges.len() as u32,
-                    pDescriptorRanges: ranges.as_ptr(),
-                },
-            },
-            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-        };
-        let desc1 = D3D12_ROOT_SIGNATURE_DESC1 {
-            NumParameters: 1,
-            pParameters: &param,
-            NumStaticSamplers: 0,
-            pStaticSamplers: std::ptr::null(),
-            Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
-        };
-        let versioned = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
-            Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
-            Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 { Desc_1_1: desc1 },
-        };
-        let mut sig_blob: Option<ID3DBlob> = None;
-        let mut sig_err: Option<ID3DBlob> = None;
-        unsafe { D3D12SerializeVersionedRootSignature(&versioned, &mut sig_blob, Some(&mut sig_err)) }
-            .context("CUDA/DX12: serialize blit root signature")?;
-        let sig_blob = sig_blob.context("null root signature blob")?;
-        let root_signature: ID3D12RootSignature = unsafe {
-            device.CreateRootSignature(
-                0,
-                std::slice::from_raw_parts(sig_blob.GetBufferPointer() as *const u8, sig_blob.GetBufferSize()),
-            )
-        }
-        .context("CUDA/DX12: CreateRootSignature(blit)")?;
-
-        let pso_float: ID3D12PipelineState = {
-            let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
-                CS: D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: unsafe { shader.GetBufferPointer() },
-                    BytecodeLength: unsafe { shader.GetBufferSize() },
-                },
-                NodeMask: 0,
-                CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
-                Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
-            };
-            unsafe { device.CreateComputePipelineState(&pso_desc) }
-                .context("CUDA/DX12: CreateComputePipelineState(blit float)")?
-        };
-
-        let pso_unorm8 = {
-            let mut u8_shader: Option<ID3DBlob> = None;
-            let mut u8_errors: Option<ID3DBlob> = None;
-            let hr = unsafe {
-                D3DCompile(
-                    hlsl_unorm8.as_ptr() as *const _,
-                    hlsl_unorm8.len(),
-                    windows::core::PCSTR::null(),
-                    None,
-                    None,
-                    windows::core::s!("main"),
-                    windows::core::s!("cs_5_1"),
-                    0,
-                    0,
-                    &mut u8_shader,
-                    Some(&mut u8_errors),
-                )
-            };
-            if hr.is_err() {
-                let msg = u8_errors
-                    .as_ref()
-                    .map(|e| {
-                        let ptr = unsafe { e.GetBufferPointer() } as *const u8;
-                        let len = unsafe { e.GetBufferSize() };
-                        unsafe { std::slice::from_raw_parts(ptr, len) }
-                    })
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .unwrap_or_default();
-                bail!("CUDA/DX12: D3DCompile present blit (unorm8) failed: {msg}");
-            }
-            let u8_shader = u8_shader.context("CUDA/DX12: null unorm8 blit shader blob")?;
-            let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                pRootSignature: unsafe { std::mem::transmute_copy(&root_signature) },
-                CS: D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: unsafe { u8_shader.GetBufferPointer() },
-                    BytecodeLength: unsafe { u8_shader.GetBufferSize() },
-                },
-                NodeMask: 0,
-                CachedPSO: D3D12_CACHED_PIPELINE_STATE::default(),
-                Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
-            };
-            unsafe { device.CreateComputePipelineState(&pso_desc) }
-                .context("CUDA/DX12: CreateComputePipelineState(blit unorm8)")?
-        };
-
-        let heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
-            Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            NumDescriptors: (MAX_FRAMES * 2) as u32,
-            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-            NodeMask: 0,
-        };
-        let srv_uav_heap: ID3D12DescriptorHeap =
-            unsafe { device.CreateDescriptorHeap(&heap_desc) }.context("CUDA/DX12: CreateDescriptorHeap(blit)")?;
-        let descriptor_size =
-            unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
-
-        Ok(Self {
-            root_signature,
-            pso_float,
-            pso_unorm8,
-            srv_uav_heap,
-            descriptor_size,
-        })
-    }
-
-    fn srv_dxgi(src_format: TextureFormat) -> Result<DXGI_FORMAT> {
-        Ok(match src_format {
-            TextureFormat::Rgba32Float => DXGI_FORMAT_R32G32B32A32_FLOAT,
-            TextureFormat::Rgba8Unorm => DXGI_FORMAT_R8G8B8A8_UNORM,
-            other => bail!("CUDA/DX12: present blit unsupported source format {other:?}"),
-        })
-    }
-
-    pub fn pso_for(&self, src_format: TextureFormat) -> Result<&ID3D12PipelineState> {
-        Ok(match src_format {
-            TextureFormat::Rgba32Float => &self.pso_float,
-            TextureFormat::Rgba8Unorm => &self.pso_unorm8,
-            other => bail!("CUDA/DX12: present blit unsupported source format {other:?}"),
-        })
-    }
-
-    /// Write SRV(src) + UAV(dst) descriptors for slot `idx`.
-    pub fn write_descriptors(
-        &self,
-        device: &ID3D12Device,
-        idx: usize,
-        src: &ID3D12Resource,
-        dst: &ID3D12Resource,
-        src_format: TextureFormat,
-    ) -> Result<()> {
-        let srv_format = Self::srv_dxgi(src_format)?;
-        let base = unsafe { self.srv_uav_heap.GetCPUDescriptorHandleForHeapStart() };
-        let srv = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: base.ptr + (idx * 2) as usize * self.descriptor_size as usize,
-        };
-        let uav = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: base.ptr + (idx * 2 + 1) as usize * self.descriptor_size as usize,
-        };
-        let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
-            Format: srv_format,
-            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
-            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: D3D12_TEX2D_SRV {
-                    MostDetailedMip: 0,
-                    MipLevels: 1,
-                    PlaneSlice: 0,
-                    ResourceMinLODClamp: 0.0,
-                },
-            },
-        };
-        unsafe { device.CreateShaderResourceView(src, Some(&srv_desc), srv) };
-        let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                Texture2D: D3D12_TEX2D_UAV {
-                    MipSlice: 0,
-                    PlaneSlice: 0,
-                },
-            },
-        };
-        unsafe { device.CreateUnorderedAccessView(dst, None, Some(&uav_desc), uav) };
-        Ok(())
-    }
-
-    pub fn gpu_table_handle(&self, idx: usize) -> D3D12_GPU_DESCRIPTOR_HANDLE {
-        let base = unsafe { self.srv_uav_heap.GetGPUDescriptorHandleForHeapStart() };
-        D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: base.ptr + (idx * 2) as u64 * self.descriptor_size as u64,
-        }
-    }
-}
-
-/// Where the present-blit color source sits before the copy.
+/// Where the present color source sits before the copy.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PresentColorSrcState {
     /// CUDA-written imported scratch (UAV).
@@ -820,75 +536,54 @@ pub(super) enum PresentColorSrcState {
     Common,
 }
 
-/// Record color→BGRA blit + CopyResource(blit→backbuffer) + present barriers.
+/// Record color → backbuffer `CopyResource` + present barriers.
+///
+/// `color_src` must be RGBA8 matching [`SWAPCHAIN_DXGI_FORMAT`].
 pub(super) fn record_present_copy(
     list: &ID3D12GraphicsCommandList,
-    blit: &PresentBlitPipeline,
-    slot_idx: usize,
     color_src: &ID3D12Resource,
     color_src_state: PresentColorSrcState,
     color_src_format: TextureFormat,
-    blit_target: &ID3D12Resource,
     backbuffer: &ID3D12Resource,
     backbuffer_from_common: bool,
-    width: u32,
-    height: u32,
 ) -> Result<()> {
+    if color_src_format != SURFACE_COMPUTE_FORMAT {
+        bail!(
+            "CUDA/DX12: present CopyResource requires {SURFACE_COMPUTE_FORMAT:?} source              (got {color_src_format:?})"
+        );
+    }
     let src_before = match color_src_state {
         PresentColorSrcState::UnorderedAccess => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         PresentColorSrcState::Common => D3D12_RESOURCE_STATE_COMMON,
     };
-    let src_after = match color_src_state {
-        PresentColorSrcState::UnorderedAccess => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        PresentColorSrcState::Common => D3D12_RESOURCE_STATE_COMMON,
-    };
-    // color → SRV for blit
-    let b0 = transition(color_src, src_before, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    unsafe { list.ResourceBarrier(&[b0]) };
-
-    let pso = blit.pso_for(color_src_format)?;
-    unsafe { list.SetPipelineState(pso) };
-    unsafe { list.SetComputeRootSignature(&blit.root_signature) };
-    unsafe {
-        list.SetDescriptorHeaps(&[Some(blit.srv_uav_heap.clone())]);
-        list.SetComputeRootDescriptorTable(0, blit.gpu_table_handle(slot_idx));
-    }
-    let gx = width.div_ceil(8);
-    let gy = height.div_ceil(8);
-    unsafe { list.Dispatch(gx, gy, 1) };
-
-    let b1 = transition(
-        blit_target,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        D3D12_RESOURCE_STATE_COPY_SOURCE,
-    );
+    let src_after = src_before;
     let backbuffer_before = if backbuffer_from_common {
         D3D12_RESOURCE_STATE_COMMON
     } else {
         D3D12_RESOURCE_STATE_PRESENT
     };
-    let b2 = transition(backbuffer, backbuffer_before, D3D12_RESOURCE_STATE_COPY_DEST);
-    // UAV barrier on blit_target before transitioning (compute wrote it).
-    let uav_barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(blit_target) },
-            }),
-        },
-    };
-    unsafe { list.ResourceBarrier(&[uav_barrier, b1, b2]) };
-    unsafe { list.CopyResource(backbuffer, blit_target) };
 
-    let b3 = transition(backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    let b4 = transition(
-        blit_target,
-        D3D12_RESOURCE_STATE_COPY_SOURCE,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-    );
-    let b5 = transition(color_src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, src_after);
-    unsafe { list.ResourceBarrier(&[b3, b4, b5]) };
+    // UAV barrier when CUDA (or a prior UAV writer) last touched color_src.
+    let mut barriers = Vec::with_capacity(3);
+    if matches!(color_src_state, PresentColorSrcState::UnorderedAccess) {
+        barriers.push(D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                    pResource: unsafe { std::mem::transmute_copy(color_src) },
+                }),
+            },
+        });
+    }
+    barriers.push(transition(color_src, src_before, D3D12_RESOURCE_STATE_COPY_SOURCE));
+    barriers.push(transition(backbuffer, backbuffer_before, D3D12_RESOURCE_STATE_COPY_DEST));
+    unsafe { list.ResourceBarrier(&barriers) };
+    unsafe { list.CopyResource(backbuffer, color_src) };
+
+    let b_back = transition(backbuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    let b_src = transition(color_src, D3D12_RESOURCE_STATE_COPY_SOURCE, src_after);
+    unsafe { list.ResourceBarrier(&[b_back, b_src]) };
     Ok(())
 }
 

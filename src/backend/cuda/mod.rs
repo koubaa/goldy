@@ -1,8 +1,8 @@
 //! Compute-focused CUDA backend (Slang → PTX → Driver API).
 //!
 //! With `cuda` + `graphics` + `dx12` on Windows, presentation and a first-slice
-//! raster path are enabled via a DX12 companion: CUDA writes shared float4 scratch
-//! textures and DX12 presents them; offscreen `Rgba32Float` / `Rgba8Unorm` render
+//! raster path are enabled via a DX12 companion: CUDA writes shared RGBA8 scratch
+//! textures and DX12 presents them with `CopyResource`; offscreen `Rgba32Float` / `Rgba8Unorm` render
 //! targets and indexed / non-indexed graphics pipelines (point/line/triangle list+strip)
 //! are also supported, including optional DX12-only depth attachments and
 //! depth-stencil PSOs (depth is not CUDA-imported). Buffer handles are late-physicalized:
@@ -30,9 +30,9 @@
 //! captured into CUDA graphs and relaunched on cache hits (`try_resubmit_retained`);
 //! pinned host→device copies, CUDA-owned memsets/DtoD copies, and kernel launches
 //! share graph islands. Format-specialized launches, imported-surface copies, and
-//! external fences stay on the stream path. Present-bound launches that would write
-//! D3D12-imported scratch are rewritten onto CUDA-owned staging with a fixed
-//! `CopyTexture` export stream segment. Indirect dispatches use CUDA 13.1
+//! external fences stay on the stream path. Schemes write a CUDA-owned staging
+//! texture (`out_image`) and export via `CopyTexture` into D3D12-imported RGBA8
+//! scratch before present's `CopyResource`. Indirect dispatches use CUDA 13.1
 //! device-updatable kernel nodes plus an in-graph updater. Inline `WriteBuffer`
 //! payloads (pageable `Vec`) still fall back to command replay. Dynamic waits,
 //! deferred host writes, and completion events stay outside the captured graph.
@@ -175,10 +175,6 @@ pub(crate) struct CudaBackend {
     /// CUDA external-memory imports that must outlive [`Self::textures`] views.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     texture_imports: HashMap<TextureHandle, dx12_interop::CudaImportedTexture>,
-    /// CUDA-owned Direct textures used to stage compute writes before export to
-    /// D3D12-imported present scratch (graph-capture safe core + CopyTexture tail).
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    present_staging: HashMap<(u32, u32, TextureFormat), Arc<CudaTextureResource>>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -608,8 +604,6 @@ impl CudaBackend {
             texture_dx12: HashMap::new(),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             texture_imports: HashMap::new(),
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            present_staging: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
@@ -2344,15 +2338,10 @@ impl CudaBackend {
             commands_with_sync_prologue(commands, sync)
         };
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let mut ops = {
+        let ops = {
             let _tz = crate::tracy_zone!("cuda.submit.materialize");
             self.materialize_ops(&stream, &effective)?
         };
-        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        {
-            let _tz = crate::tracy_zone!("cuda.submit.rewrite_present");
-            ops = self.rewrite_imported_present_launches(ops)?;
-        }
         let _tz = crate::tracy_zone!("cuda.submit.enqueue");
         self.enqueue_submit(
             ctx,
@@ -2362,167 +2351,6 @@ impl CudaBackend {
                 bump_content_epochs: true,
             },
         )
-    }
-
-    /// True when `texture` is a D3D12-imported surface scratch image.
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    fn texture_is_surface_scratch(&self, texture: &Arc<CudaTextureResource>) -> bool {
-        self.surfaces.values().any(|state| {
-            state
-                .scratch
-                .iter()
-                .flatten()
-                .any(|slot| Arc::ptr_eq(&slot.shared.cuda_texture, texture))
-        })
-    }
-
-    /// CUDA-owned Direct staging texture matching an imported scratch image.
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    fn ensure_present_staging(&mut self, imported: &CudaTextureResource) -> Result<Arc<CudaTextureResource>> {
-        let key = (imported.width, imported.height, imported.format);
-        if let Some(existing) = self.present_staging.get(&key) {
-            return Ok(Arc::clone(existing));
-        }
-        let staging = CudaTextureResource::create(
-            &imported.ctx,
-            imported.width,
-            imported.height,
-            imported.format,
-            TextureKind::Direct,
-            TextureFlags::empty(),
-            None,
-            None,
-        )?;
-        self.present_staging.insert(key, Arc::clone(&staging));
-        Ok(staging)
-    }
-
-    /// Retarget launches that write imported present scratch onto CUDA-owned staging,
-    /// then append `CopyTexture` staging→scratch exports for the non-capturable tail.
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    fn retarget_launch_off_imported_scratch(
-        &mut self,
-        args: &mut [CudaLaunchArg],
-        keep_alive_textures: &mut Vec<Arc<CudaTextureResource>>,
-    ) -> Result<Vec<(Arc<CudaTextureResource>, Arc<CudaTextureResource>)>> {
-        let mut imports = Vec::new();
-        for texture in keep_alive_textures.iter() {
-            if texture.is_imported()
-                && self.texture_is_surface_scratch(texture)
-                && !imports
-                    .iter()
-                    .any(|existing: &Arc<CudaTextureResource>| Arc::ptr_eq(existing, texture))
-            {
-                imports.push(Arc::clone(texture));
-            }
-        }
-        let mut exports = Vec::with_capacity(imports.len());
-        for imported in imports {
-            let staging = self.ensure_present_staging(&imported)?;
-            let old_surf = imported.surf_object()?;
-            let new_surf = staging.surf_object()?;
-            for arg in args.iter_mut() {
-                if let CudaLaunchArg::Handle(handle) = arg {
-                    if *handle == old_surf {
-                        *handle = new_surf;
-                    }
-                }
-            }
-            for texture in keep_alive_textures.iter_mut() {
-                if Arc::ptr_eq(texture, &imported) {
-                    *texture = Arc::clone(&staging);
-                }
-            }
-            exports.push((staging, imported));
-        }
-        Ok(exports)
-    }
-
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    fn rewrite_imported_present_launches(&mut self, ops: Vec<CudaOp>) -> Result<Vec<CudaOp>> {
-        let mut out = Vec::with_capacity(ops.len());
-        for op in ops {
-            match op {
-                CudaOp::Launch {
-                    label,
-                    function,
-                    module,
-                    workgroup_size,
-                    grid,
-                    mut args,
-                    keep_alive_buffers,
-                    mut keep_alive_textures,
-                    graph_capture_ok,
-                } => {
-                    let exports = self.retarget_launch_off_imported_scratch(&mut args, &mut keep_alive_textures)?;
-                    out.push(CudaOp::Launch {
-                        label,
-                        function,
-                        module,
-                        workgroup_size,
-                        grid,
-                        args,
-                        keep_alive_buffers,
-                        keep_alive_textures,
-                        graph_capture_ok,
-                    });
-                    for (src, dst) in exports {
-                        out.push(CudaOp::CopyTexture { src, dst });
-                    }
-                }
-                CudaOp::LaunchIndirect {
-                    label,
-                    function,
-                    module,
-                    workgroup_size,
-                    mut args,
-                    keep_alive_buffers,
-                    mut keep_alive_textures,
-                    graph_capture_ok,
-                    shape_ptr,
-                    shape_memory,
-                    shape_abs_offset,
-                    node_slot_ptr,
-                    node_slot,
-                    status_ptr,
-                    status_memory,
-                    updater,
-                    updater_module,
-                    max_grid,
-                    max_threads_per_block,
-                    limits,
-                } => {
-                    let exports = self.retarget_launch_off_imported_scratch(&mut args, &mut keep_alive_textures)?;
-                    out.push(CudaOp::LaunchIndirect {
-                        label,
-                        function,
-                        module,
-                        workgroup_size,
-                        args,
-                        keep_alive_buffers,
-                        keep_alive_textures,
-                        graph_capture_ok,
-                        shape_ptr,
-                        shape_memory,
-                        shape_abs_offset,
-                        node_slot_ptr,
-                        node_slot,
-                        status_ptr,
-                        status_memory,
-                        updater,
-                        updater_module,
-                        max_grid,
-                        max_threads_per_block,
-                        limits,
-                    });
-                    for (src, dst) in exports {
-                        out.push(CudaOp::CopyTexture { src, dst });
-                    }
-                }
-                other => out.push(other),
-            }
-        }
-        Ok(out)
     }
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -3599,10 +3427,11 @@ impl GpuBackend for CudaBackend {
 
     fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
         crate::device::DeviceCapabilities {
-            // Surfaces expose shared Rgba32Float scratch (DirectSpatial<float4>); swapchain is BGRA8.
-            preferred_surface_format: TextureFormat::Rgba32Float,
+            // Surfaces expose shared Rgba8Unorm scratch (DirectSpatial<float4> packs);
+            // swapchain is matching R8G8B8A8 for a single CopyResource present.
+            preferred_surface_format: TextureFormat::Rgba8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
-            supported_surface_formats: vec![TextureFormat::Rgba32Float],
+            supported_surface_formats: vec![TextureFormat::Rgba8Unorm],
             supported_render_target_formats: vec![TextureFormat::Rgba32Float, TextureFormat::Rgba8Unorm],
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
@@ -3712,7 +3541,6 @@ impl GpuBackend for CudaBackend {
                 .collect();
             self.render_targets.retain(|_, rt| rt.device != device);
             self.raster_list_cache.clear();
-            self.present_staging.clear();
             for slot in rt_tex.into_iter().flatten() {
                 if let Some(tex) = self.texture_slots.remove(&slot) {
                     self.textures.remove(&tex);
@@ -5031,11 +4859,7 @@ impl GpuBackend for CudaBackend {
         let gpu_commands = Self::flatten_graph_commands(commands)?;
         let effective = commands_with_sync_prologue(&gpu_commands, sync);
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let mut ops = self.materialize_ops(&stream, &effective)?;
-        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        {
-            ops = self.rewrite_imported_present_launches(ops)?;
-        }
+        let ops = self.materialize_ops(&stream, &effective)?;
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         let direct_present = effective.iter().find_map(|command| {
             let GpuCommand::CopyRenderTarget { src, dst } = command else {
@@ -6298,8 +6122,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             }
         };
         let caps = backend.adapter_capabilities(0);
-        assert_eq!(caps.preferred_surface_format, TextureFormat::Rgba32Float);
-        assert_eq!(caps.supported_surface_formats, vec![TextureFormat::Rgba32Float]);
+        assert_eq!(caps.preferred_surface_format, TextureFormat::Rgba8Unorm);
+        assert_eq!(caps.supported_surface_formats, vec![TextureFormat::Rgba8Unorm]);
         assert_eq!(caps.preferred_render_target_format, TextureFormat::Rgba8Unorm);
         assert_eq!(
             caps.supported_render_target_formats,
