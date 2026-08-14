@@ -2,7 +2,9 @@
 //!
 //! Swapchain backbuffers are RGBA8 (non-shareable). Per-image RGBA8 shared scratch
 //! textures are CUDA-writable; present `CopyResource`s scratch → backbuffer. Compute
-//! writes wait on the shared D3D12 fence CUDA signals at submit completion. When
+//! writes wait on the shared D3D12 fence CUDA signals at submit completion. CUDA
+//! present waits that value on a COPY hop queue; the DXGI DIRECT queue waits a
+//! native hop fence before `CopyResource`+`Present`. When
 //! `CopyRenderTarget` targets scratch (`bind_render_target`), present copies the DX12
 //! raster RT directly (same RGBA8 format) and skips the CUDA array round-trip.
 //!
@@ -694,22 +696,24 @@ pub(super) fn begin_frame(
         )
     };
 
-    if let Some(SendSyncHandle(waitable)) = waitable {
-        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
-        unsafe { WaitForSingleObject(waitable, INFINITE) };
-    }
     // Per-surface present_cmd_slots: wait only this surface's slot fence (plus DXGI
-    // waitable above). Do not touch companion.present_slots — those are shared and
+    // waitable below). Do not touch companion.present_slots — those are shared and
     // caused multi-window freezes/teardown hangs when one surface destroyed others' lists.
     let companion = companion_ref(backend, device)?;
     let slot_prev = backend.surfaces.get(&surface).unwrap().present_cmd_slots[present_slot]
         .fence_value
         .load(Ordering::Acquire);
     let wait_fence = prev_fence.max(slot_prev);
+    // Fence first so Tracy attributes CUDA→DX12 present-tail stall to `fence_wait`.
+    // Remaining `dxgi_wait` is then the waitable itself (DWM/capacity).
     if wait_fence > 0 {
         let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
         companion.cpu_wait(wait_fence)?;
         backend.surfaces.get_mut(&surface).unwrap().slot_fence[present_slot] = 0;
+    }
+    if let Some(SendSyncHandle(waitable)) = waitable {
+        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
+        unsafe { WaitForSingleObject(waitable, INFINITE) };
     }
 
     let image_index = {
@@ -1150,6 +1154,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         // issued to CUDA before we Queue.Signal a higher present return fence (module
         // docs). Done here — off the backend lock — not in `take_present_gpu_work`.
         if let Some(submit_tv) = self.join_submit_tv {
+            let _tz = crate::tracy_zone!("present.join_submit");
             self.worker
                 .wait_submitted_if_scheduled(
                     submit_tv,
@@ -1157,9 +1162,14 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
                 )
                 .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
         }
-        if self.cuda_complete > 0 {
-            self.companion.wait_queue(self.cuda_complete)?;
-        }
+        // CUDA shared-fence Wait stays on the COPY hop queue so the DXGI DIRECT
+        // queue is not serialized behind the next frame's external wait.
+        let hop = if self.cuda_complete > 0 {
+            let _tz = crate::tracy_zone!("present.wait_cuda");
+            Some(self.companion.hop_wait_cuda(self.cuda_complete)?)
+        } else {
+            None
+        };
 
         if !self.reuse_list {
             // begin_frame already CPU-waited the global + per-surface present-slot fences.
@@ -1189,7 +1199,11 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         if matches!(self.present_completion, PresentCompletion::Dx12Fence) {
             timeline::bind_dx12_fence_value(&self.event_ledger, self.present_tv, return_fence);
         }
-        self.companion.execute_and_signal(&[Some(cmd)], return_fence)?;
+        {
+            let _tz = crate::tracy_zone!("present.copy");
+            self.companion
+                .execute_and_signal_after_hop(&[Some(cmd)], hop, return_fence)?;
+        }
         self.present_cmd_slots[self.present_slot]
             .fence_value
             .store(return_fence, Ordering::Release);
@@ -1199,7 +1213,10 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
 
         // Flip-model Present is ordered after the copy on the DX12 queue; no CPU wait.
         let (sync_interval, flags) = present_args(self.present_mode, self.allow_tearing);
-        let hr = unsafe { self.swapchain.Present(sync_interval, flags) };
+        let hr = {
+            let _tz = crate::tracy_zone!("present.swapchain");
+            unsafe { self.swapchain.Present(sync_interval, flags) }
+        };
         // Present may fail after the copy is already submitted. Always retire
         // `return_fence` so allocator / scratch reuse stays guarded via finish_present.
         let present_ok = hr.is_ok();

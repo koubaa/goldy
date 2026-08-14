@@ -1,8 +1,14 @@
 //! D3D12 companion device for CUDA presentation (Windows only).
 //!
 //! Compiled only when `cuda`, `graphics`, and `dx12` are all enabled. Pairs a CUDA
-//! ordinal with the matching DXGI adapter by LUID, then owns a DIRECT queue plus a
-//! shareable fence imported into CUDA as an external semaphore.
+//! ordinal with the matching DXGI adapter by LUID, then owns a DIRECT present
+//! queue, a COPY hop queue, and a shareable fence imported into CUDA as an
+//! external semaphore.
+//!
+//! CUDA→DX12 present waits (`Queue.Wait` on the shared fence) run on the COPY
+//! queue and signal a native hop fence. The DIRECT/DXGI queue waits only that
+//! hop before `CopyResource`+`Present`, so the next frame's CUDA wait can overlap
+//! the previous Present instead of sitting behind it on the same engine.
 
 use anyhow::{bail, Context as _, Result};
 use cudarc::driver::{sys, CudaContext, CudaStream};
@@ -14,10 +20,12 @@ use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::{
     D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12DescriptorHeap,
     ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Resource, ID3D12RootSignature, D3D12_CLEAR_VALUE,
-    D3D12_CLEAR_VALUE_0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
-    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_DEPTH_STENCIL_VALUE,
+    D3D12_CLEAR_VALUE_0, D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC,
+    D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+    D3D12_DEPTH_STENCIL_VALUE,
     D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
-    D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_FENCE_FLAG_SHARED, D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES,
+    D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_FENCE_FLAG_NONE, D3D12_FENCE_FLAG_SHARED, D3D12_HEAP_FLAG_NONE,
+    D3D12_HEAP_PROPERTIES,
     D3D12_HEAP_TYPE_DEFAULT, D3D12_MEMORY_POOL_UNKNOWN, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_TEXTURE2D,
     D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_COMMON, D3D12_TEXTURE_LAYOUT_UNKNOWN,
 };
@@ -122,6 +130,12 @@ pub(super) struct Dx12Companion {
     pub device: ID3D12Device,
     pub queue: ID3D12CommandQueue,
     pub queue_lock: std::sync::Mutex<()>,
+    /// COPY queue used only to Wait the CUDA-shared fence and Signal [`Self::hop_fence`].
+    pub hop_queue: ID3D12CommandQueue,
+    pub hop_queue_lock: std::sync::Mutex<()>,
+    /// Native (non-shared) fence bridging COPY CUDA-wait → DIRECT present.
+    pub hop_fence: ID3D12Fence,
+    pub hop_fence_value: AtomicU64,
     /// Shareable fence; CUDA imports it as an external semaphore.
     pub fence: ID3D12Fence,
     pub fence_value: AtomicU64,
@@ -219,6 +233,17 @@ impl Dx12Companion {
         let queue: ID3D12CommandQueue =
             unsafe { device.CreateCommandQueue(&queue_desc) }.context("CUDA/DX12: CreateCommandQueue failed")?;
 
+        let hop_queue_desc = D3D12_COMMAND_QUEUE_DESC {
+            Type: D3D12_COMMAND_LIST_TYPE_COPY,
+            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+            Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+            NodeMask: 0,
+        };
+        let hop_queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&hop_queue_desc) }
+            .context("CUDA/DX12: CreateCommandQueue(COPY hop) failed")?;
+        let hop_fence: ID3D12Fence =
+            unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.context("CUDA/DX12: CreateFence(hop) failed")?;
+
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_SHARED) }
             .context("CUDA/DX12: CreateFence(SHARED) failed")?;
 
@@ -313,6 +338,10 @@ impl Dx12Companion {
             device,
             queue,
             queue_lock: std::sync::Mutex::new(()),
+            hop_queue,
+            hop_queue_lock: std::sync::Mutex::new(()),
+            hop_fence,
+            hop_fence_value: AtomicU64::new(1),
             fence,
             fence_value: AtomicU64::new(1),
             cuda_semaphore,
@@ -355,12 +384,39 @@ impl Dx12Companion {
         Ok(())
     }
 
+    /// Wait a CUDA-signaled shared-fence value on the COPY hop queue.
+    ///
+    /// Returns the hop-fence value the DIRECT present queue should `Wait` before
+    /// `CopyResource`/`Present`. Keeps the CUDA external wait off the DXGI queue.
+    pub fn hop_wait_cuda(&self, cuda_complete: u64) -> Result<u64> {
+        let hop = self.hop_fence_value.fetch_add(1, Ordering::AcqRel);
+        let _guard = self.hop_queue_lock.lock().unwrap();
+        unsafe { self.hop_queue.Wait(&self.fence, cuda_complete) }
+            .context("CUDA/DX12: hop queue Wait(shared fence) failed")?;
+        unsafe { self.hop_queue.Signal(&self.hop_fence, hop) }
+            .context("CUDA/DX12: hop queue Signal failed")?;
+        Ok(hop)
+    }
+
     pub fn execute_and_signal(
         &self,
         lists: &[Option<windows::Win32::Graphics::Direct3D12::ID3D12CommandList>],
         signal_value: u64,
     ) -> Result<()> {
+        self.execute_and_signal_after_hop(lists, None, signal_value)
+    }
+
+    pub fn execute_and_signal_after_hop(
+        &self,
+        lists: &[Option<windows::Win32::Graphics::Direct3D12::ID3D12CommandList>],
+        hop: Option<u64>,
+        signal_value: u64,
+    ) -> Result<()> {
         let _guard = self.queue_lock.lock().unwrap();
+        if let Some(hop) = hop {
+            unsafe { self.queue.Wait(&self.hop_fence, hop) }
+                .context("CUDA/DX12: present queue Wait(hop fence) failed")?;
+        }
         unsafe { self.queue.ExecuteCommandLists(lists) };
         unsafe { self.queue.Signal(&self.fence, signal_value) }
             .context("CUDA/DX12: Signal after ExecuteCommandLists failed")?;
@@ -368,11 +424,15 @@ impl Dx12Companion {
     }
 
     pub fn cpu_wait(&self, value: u64) -> Result<()> {
-        if unsafe { self.fence.GetCompletedValue() } >= value {
+        Self::cpu_wait_fence(&self.fence, value)
+    }
+
+    fn cpu_wait_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
+        if unsafe { fence.GetCompletedValue() } >= value {
             return Ok(());
         }
         let event = unsafe { CreateEventA(None, false, false, None) }.context("CUDA/DX12: CreateEventA failed")?;
-        unsafe { self.fence.SetEventOnCompletion(value, event) }.context("CUDA/DX12: SetEventOnCompletion failed")?;
+        unsafe { fence.SetEventOnCompletion(value, event) }.context("CUDA/DX12: SetEventOnCompletion failed")?;
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe {
             let _ = CloseHandle(event);
@@ -383,7 +443,12 @@ impl Dx12Companion {
     pub fn wait_idle(&self) -> Result<()> {
         let v = self.next_fence_value();
         self.signal_queue(v)?;
-        self.cpu_wait(v)
+        self.cpu_wait(v)?;
+        let hop_issued = self.hop_fence_value.load(Ordering::Acquire);
+        if hop_issued > 1 {
+            Self::cpu_wait_fence(&self.hop_fence, hop_issued - 1)?;
+        }
+        Ok(())
     }
 
     /// Record and submit a one-shot barrier list on the dedicated init allocator.
