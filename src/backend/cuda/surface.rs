@@ -4,7 +4,8 @@
 //! textures are CUDA-writable; present `CopyResource`s scratch → backbuffer. Compute
 //! writes wait on the shared D3D12 fence CUDA signals at submit completion. CUDA
 //! present waits that value on a COPY hop queue; the DXGI DIRECT queue waits a
-//! native hop fence before `CopyResource`+`Present`. When
+//! native hop fence then `CopyResource` + `Present`. Flip-model backbuffers are
+//! DWM-shared, so the copy cannot run on the COPY queue. When
 //! `CopyRenderTarget` targets scratch (`bind_render_target`), present copies the DX12
 //! raster RT directly (same RGBA8 format) and skips the CUDA array round-trip.
 //!
@@ -1112,6 +1113,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
     fn run(mut self: Box<Self>) -> Result<PresentFinishState> {
         // Cross-domain only: CUDA→DX12 external fence. Raster→present on the same
         // DIRECT queue is already ordered by submission; do not wait_queue(dx12_src_fence).
+        // Flip-model backbuffers are DWM-shared — CopyResource stays on DIRECT.
         //
         // Join the submission worker so `SignalExternalFence(cuda_complete)` has been
         // issued to CUDA before we Queue.Signal a higher present return fence (module
@@ -1125,8 +1127,6 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
                 )
                 .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
         }
-        // CUDA shared-fence Wait stays on the COPY hop queue so the DXGI DIRECT
-        // queue is not serialized behind the next frame's external wait.
         let hop = if self.cuda_complete > 0 {
             let _tz = crate::tracy_zone!("present.wait_cuda");
             Some(self.companion.hop_wait_cuda(self.cuda_complete)?)
@@ -1182,8 +1182,10 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
         // `return_fence` so allocator / scratch reuse stays guarded via finish_present.
         let present_ok = hr.is_ok();
         if !present_ok {
+            let removed = unsafe { self.companion.device.GetDeviceRemovedReason() };
             tracing::error!(
-                "CUDA/DX12: Present failed: {hr:?} sync_interval={sync_interval} flags={flags:?} \
+                "CUDA/DX12: Present failed: {hr:?} removed={removed:?} \
+                 sync_interval={sync_interval} flags={flags:?} \
                  (retiring copy fence {return_fence})"
             );
         }

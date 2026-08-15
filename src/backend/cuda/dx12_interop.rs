@@ -536,9 +536,10 @@ pub(super) enum PresentColorSrcState {
     Common,
 }
 
-/// Record color → backbuffer `CopyResource` + present barriers.
+/// Record color → backbuffer `CopyResource` + present barriers on a DIRECT list.
 ///
-/// `color_src` must be RGBA8 matching [`SWAPCHAIN_DXGI_FORMAT`].
+/// Flip-model backbuffers are DWM-shared and must be written on the swapchain's
+/// DIRECT queue. `color_src` must be RGBA8 matching [`SWAPCHAIN_DXGI_FORMAT`].
 pub(super) fn record_present_copy(
     list: &ID3D12GraphicsCommandList,
     color_src: &ID3D12Resource,
@@ -563,7 +564,6 @@ pub(super) fn record_present_copy(
         D3D12_RESOURCE_STATE_PRESENT
     };
 
-    // UAV barrier when CUDA (or a prior UAV writer) last touched color_src.
     let mut barriers = Vec::with_capacity(3);
     if matches!(color_src_state, PresentColorSrcState::UnorderedAccess) {
         barriers.push(D3D12_RESOURCE_BARRIER {

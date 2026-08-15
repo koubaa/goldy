@@ -6,9 +6,10 @@
 //! external semaphore.
 //!
 //! CUDA→DX12 present waits (`Queue.Wait` on the shared fence) run on the COPY
-//! queue and signal a native hop fence. The DIRECT/DXGI queue waits only that
-//! hop before `CopyResource`+`Present`, so the next frame's CUDA wait can overlap
-//! the previous Present instead of sitting behind it on the same engine.
+//! hop queue and signal a native hop fence. The DIRECT/DXGI queue waits that hop
+//! then `CopyResource` + `Present`. Flip-model backbuffers are DWM-shared; a COPY
+//! queue cannot write them (`DXGI_ERROR_ACCESS_DENIED` / 0x887A002B). Keeping the
+//! CUDA wait off DIRECT still lets the next frame's external wait overlap Present.
 
 use anyhow::{bail, Context as _, Result};
 use cudarc::driver::{sys, CudaContext};
@@ -379,6 +380,7 @@ impl Dx12Companion {
     ///
     /// Returns the hop-fence value the DIRECT present queue should `Wait` before
     /// `CopyResource`/`Present`. Keeps the CUDA external wait off the DXGI queue.
+    /// Flip-model backbuffers cannot be COPY-queue destinations (DWM shared).
     pub fn hop_wait_cuda(&self, cuda_complete: u64) -> Result<u64> {
         let hop = self.hop_fence_value.fetch_add(1, Ordering::AcqRel);
         let _guard = self.hop_queue_lock.lock().unwrap();
