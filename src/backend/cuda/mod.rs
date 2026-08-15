@@ -512,6 +512,7 @@ struct CudaComputeKernel {
 
 struct CudaComputePipeline {
     device: DeviceHandle,
+    shader_handle: ShaderHandle,
     /// Shader snapshot for lazy format specialization (`ShaderModule` may already be destroyed).
     shader: CudaShader,
     workgroup_size: [u32; 3],
@@ -547,6 +548,74 @@ fn op_writes_imported_scratch(op: &CudaOp, scratch: &Arc<CudaTextureResource>) -
         | CudaOp::CopyBufferToTexture { texture, .. } => Arc::ptr_eq(texture, scratch),
         CudaOp::CopyTexture { dst, .. } => Arc::ptr_eq(dst, scratch),
         _ => false,
+    }
+}
+
+fn cuda_spec_dump_tag(specs: &[CudaStorageTextureSpec]) -> String {
+    if specs.is_empty() || specs.iter().all(|spec| matches!(spec, CudaStorageTextureSpec::Identity)) {
+        "id".to_owned()
+    } else {
+        specs
+            .iter()
+            .map(|spec| match spec {
+                CudaStorageTextureSpec::Identity => "id",
+                CudaStorageTextureSpec::Float4Rgba8Unorm => "f4rgba8",
+            })
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+}
+
+fn write_dump_file(dir: &std::path::Path, name: &str, contents: &str) {
+    use std::io::Write;
+    let path = dir.join(name);
+    match std::fs::File::create(&path) {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(contents.as_bytes()) {
+                tracing::warn!("CUDA: GOLDY_DUMP_SHADERS write {} failed: {error}", path.display());
+            } else {
+                tracing::info!("Dumped CUDA shader to {}", path.display());
+            }
+        }
+        Err(error) => tracing::warn!("CUDA: GOLDY_DUMP_SHADERS create {} failed: {error}", path.display()),
+    }
+}
+
+fn maybe_dump_cuda_shaders(
+    compiler: &crate::slang::SlangCompiler,
+    shader: &CudaShader,
+    shader_handle: ShaderHandle,
+    storage_specs: &[CudaStorageTextureSpec],
+    cuda_source: &str,
+    ptx: &str,
+    paths: &[&str],
+    defines: &[(&str, &str)],
+) {
+    let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dump_dir);
+    if let Err(error) = std::fs::create_dir_all(dir) {
+        tracing::warn!("CUDA: GOLDY_DUMP_SHADERS create_dir_all {dump_dir} failed: {error}");
+        return;
+    }
+    let tag = cuda_spec_dump_tag(storage_specs);
+    let stem = format!("cs_main_h{shader_handle}_{tag}_cuda");
+    write_dump_file(dir, &format!("{stem}.ptx"), ptx);
+    match compiler.compile_bindless_with_reflection_and_defines(
+        cuda_source,
+        crate::slang::ShaderTarget::CudaSource,
+        &[("cs_main", crate::slang::SlangStage::Compute)],
+        paths,
+        defines,
+        &[],
+        shader.optimization_level,
+    ) {
+        Ok(compiled) => match compiled.shader.as_str() {
+            Some(cu) => write_dump_file(dir, &format!("{stem}.cu"), cu),
+            None => tracing::warn!("CUDA: GOLDY_DUMP_SHADERS Slang CUDA C++ was not text"),
+        },
+        Err(error) => tracing::warn!("CUDA: GOLDY_DUMP_SHADERS Slang CUDA C++ compile failed: {error:#}"),
     }
 }
 
@@ -760,13 +829,15 @@ impl CudaBackend {
     fn compile_compute_ptx(
         &self,
         shader: &CudaShader,
+        shader_handle: ShaderHandle,
     ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
-        self.compile_compute_ptx_with_specs(shader, &[])
+        self.compile_compute_ptx_with_specs(shader, shader_handle, &[])
     }
 
     fn compile_compute_ptx_with_specs(
         &self,
         shader: &CudaShader,
+        shader_handle: ShaderHandle,
         storage_specs: &[CudaStorageTextureSpec],
     ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
         ensure_cuda_toolkit_on_path();
@@ -812,6 +883,16 @@ impl CudaBackend {
         while ptx.ends_with('\0') {
             ptx.pop();
         }
+        maybe_dump_cuda_shaders(
+            &compiler,
+            shader,
+            shader_handle,
+            storage_specs,
+            &cuda_source,
+            &ptx,
+            &paths,
+            &defines,
+        );
         let access = crate::slang::virtual_main::extract_push_constant_categories(&shader.source)
             .iter()
             .map(|category| {
@@ -904,7 +985,7 @@ impl CudaBackend {
             }
         }
 
-        let (ptx, _, _, _) = self.compile_compute_ptx_with_specs(&pipeline.shader, specs)?;
+        let (ptx, _, _, _) = self.compile_compute_ptx_with_specs(&pipeline.shader, pipeline.shader_handle, specs)?;
         let kernel = self.load_compute_kernel(pipeline.device, &ptx)?;
 
         let mut variants = pipeline.variants.lock().unwrap();
@@ -5154,7 +5235,7 @@ impl GpuBackend for CudaBackend {
             anyhow::bail!("CUDA: shader belongs to another device");
         }
         let shader_snapshot = shader.clone();
-        let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader)?;
+        let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader, compute_shader)?;
         let identity = self.load_compute_kernel(device, &ptx)?;
 
         // Preload float4↔Rgba8Unorm specialization when every DirectSpatial slot is float4.
@@ -5170,7 +5251,8 @@ impl GpuBackend for CudaBackend {
             .collect();
         if !storage_elements.is_empty() && storage_elements.iter().all(|element| *element == "float4") {
             let specs = vec![CudaStorageTextureSpec::Float4Rgba8Unorm; storage_elements.len()];
-            let (spec_ptx, _, _, _) = self.compile_compute_ptx_with_specs(&shader_snapshot, &specs)?;
+            let (spec_ptx, _, _, _) =
+                self.compile_compute_ptx_with_specs(&shader_snapshot, compute_shader, &specs)?;
             let kernel = self.load_compute_kernel(device, &spec_ptx)?;
             variants.insert(specs, kernel);
         }
@@ -5181,6 +5263,7 @@ impl GpuBackend for CudaBackend {
             handle,
             CudaComputePipeline {
                 device,
+                shader_handle: compute_shader,
                 shader: shader_snapshot,
                 workgroup_size,
                 slot_access,
