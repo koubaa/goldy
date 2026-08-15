@@ -11,7 +11,7 @@
 //! the previous Present instead of sitting behind it on the same engine.
 
 use anyhow::{bail, Context as _, Result};
-use cudarc::driver::{sys, CudaContext, CudaStream};
+use cudarc::driver::{sys, CudaContext};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use windows::core::Interface;
@@ -142,10 +142,6 @@ pub(super) struct Dx12Companion {
     /// CUDA import of [`Self::fence`].
     pub cuda_semaphore: sys::CUexternalSemaphore,
     pub cuda_ctx: Arc<CudaContext>,
-    /// Dedicated stream for publishing present-completion into the Goldy timeline.
-    /// Separate from per-context submit streams so present recording cannot race the
-    /// submission worker.
-    pub present_stream: Arc<CudaStream>,
     /// Scratch allocator/list pool for present copy + blit (one per in-flight slot).
     pub present_slots: Vec<PresentCommandSlot>,
     /// Dedicated command allocator/list for one-shot resource-state init.
@@ -326,10 +322,6 @@ impl Dx12Companion {
             });
         }
 
-        let present_stream = cuda_ctx
-            .new_stream()
-            .context("CUDA/DX12: create present stream failed")?;
-
         Ok(Self {
             factory,
             allow_tearing,
@@ -346,7 +338,6 @@ impl Dx12Companion {
             fence_value: AtomicU64::new(1),
             cuda_semaphore,
             cuda_ctx: Arc::clone(cuda_ctx),
-            present_stream,
             present_slots,
             init_allocator,
             init_list,

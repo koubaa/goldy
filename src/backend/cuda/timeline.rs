@@ -91,18 +91,12 @@ impl EventPool {
 pub(super) enum LedgerCompletion {
     /// Completion recorded on the context submission stream (compute / export).
     CudaEvent(Arc<CudaEvent>),
-    /// Present copy completion recorded on `present_stream` after a DX12 fence wait.
-    ///
-    /// `wait_until` observes this event. Compute submits must **not** `stream.wait` it:
-    /// that joins the worker stream onto the CUDA↔DX12 present tail and stalls `cs_main`.
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-    PresentCudaEvent(Arc<CudaEvent>),
     /// DX12 companion fence signaled on the presentation DIRECT queue.
     ///
-    /// Scratch present publishes [`LedgerCompletion::PresentCudaEvent`]. This variant
-    /// remains for residual fence-ledger producers; `value` may be 0 until
-    /// [`bind_dx12_fence_value`] runs at Signal time.
-    #[allow(dead_code)]
+    /// Scratch and raster-direct present both publish this. `value` may be 0 until
+    /// [`bind_dx12_fence_value`] runs at Signal time. Compute submits must **not**
+    /// `cuWaitExternalSemaphoresAsync` it: that joins the worker stream onto the
+    /// present tail and wakes CUDA after DXGI Present.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     Dx12Fence {
         companion: Arc<Dx12Companion>,
@@ -124,8 +118,6 @@ impl CompletionSnap {
     fn from_completion(completion: &LedgerCompletion) -> Option<Self> {
         match completion {
             LedgerCompletion::CudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::PresentCudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             LedgerCompletion::Dx12Fence { companion, value } => (*value > 0).then(|| Self::Dx12Fence {
                 companion: Arc::clone(companion),
@@ -272,8 +264,6 @@ pub(super) fn prune_retired_entries(
         match entry.completion {
             LedgerCompletion::CudaEvent(event) => events.push(event),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::PresentCudaEvent(event) => events.push(event),
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             LedgerCompletion::Dx12Fence { .. } => {}
         }
     }
@@ -314,8 +304,6 @@ pub(super) fn lookup_event(ledger: &EventLedger, context: ContextHandle, value: 
             match &entry.completion {
                 LedgerCompletion::CudaEvent(event) => Some(Arc::clone(event)),
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                LedgerCompletion::PresentCudaEvent(event) => Some(Arc::clone(event)),
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 LedgerCompletion::Dx12Fence { .. } => None,
             }
         } else {
@@ -330,10 +318,6 @@ pub(super) fn lookup_completion(ledger: &EventLedger, context: ContextHandle, va
         if entry.context == context {
             Some(match &entry.completion {
                 LedgerCompletion::CudaEvent(event) => LedgerCompletion::CudaEvent(Arc::clone(event)),
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                LedgerCompletion::PresentCudaEvent(event) => {
-                    LedgerCompletion::PresentCudaEvent(Arc::clone(event))
-                }
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 LedgerCompletion::Dx12Fence { companion, value } => LedgerCompletion::Dx12Fence {
                     companion: Arc::clone(companion),
@@ -353,7 +337,6 @@ pub(super) fn mark_recorded(ledger: &EventLedger, value: u64) {
 }
 
 /// Fill the DX12 fence value for a fence ledger entry at Signal time (not earlier).
-#[allow(dead_code)] // paired with LedgerCompletion::Dx12Fence for residual producers
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 pub(super) fn bind_dx12_fence_value(ledger: &EventLedger, timeline: u64, fence_value: u64) {
     if let Some(entry) = ledger.lock().unwrap().get_mut(&timeline) {

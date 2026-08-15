@@ -8,14 +8,12 @@
 //! `CopyRenderTarget` targets scratch (`bind_render_target`), present copies the DX12
 //! raster RT directly (same RGBA8 format) and skips the CUDA array round-trip.
 //!
-//! Present completion is published on the **Goldy/CUDA timeline** (event ledger).
-//! After DX12 Execute/Signal, present waits that fence on the dedicated
-//! `present_stream` and records a CUDA event there; `Frame::present` returns that
-//! Goldy value so `Context::wait_until` observes the same namespace as compute.
-//! Compute submits do **not** `stream.wait` that event: joining the worker stream
-//! onto the CUDA↔DX12 present tail stalls `cs_main`. Scheme easement uses the
-//! present-partition submit timeline (`copy_timeline` / `note_submit_timeline`),
-//! not `Frame::present`'s return value.
+//! Present completion is published on the **Goldy timeline** as a companion DX12
+//! fence (`Frame::present`'s return value). Compute submits do **not** wait that
+//! fence on the CUDA stream: joining the worker stream onto the CUDA↔DX12 present
+//! tail stalls `cs_main` and wakes the CUDA context after Present. Scheme easement
+//! uses the present-partition submit timeline (`copy_timeline` / `note_submit_timeline`),
+//! not display-present completion. `wait_until(present)` CPU-waits the DX12 fence.
 //!
 //! Shared-fence signal ordering: `cuSignalExternalSemaphoresAsync(V)` must be
 //! *submitted to CUDA* before D3D12 `Queue.Signal(W)` for any `W > V` on the same
@@ -26,7 +24,7 @@
 //! the backend lock in `take_present_gpu_work`.
 
 use super::dx12_companion::PresentCommandSlot;
-use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
+use super::dx12_companion::{cuda_signal_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_interop::{
     record_present_copy, PresentColorSrcState, SharedScratchTexture, SURFACE_COMPUTE_FORMAT, SWAPCHAIN_DXGI_FORMAT,
 };
@@ -797,13 +795,12 @@ pub(super) fn take_present_gpu_work(
     );
 
     let context = Arc::clone(backend.context(frame.context)?);
-    let (worker, next_timeline, event_ledger, event_pool) = {
+    let (worker, next_timeline, event_ledger) = {
         let gpu = backend.device(device)?;
         (
             Arc::clone(&gpu.submission_worker),
             Arc::clone(&gpu.next_timeline),
             Arc::clone(&gpu.event_ledger),
-            Arc::clone(&gpu.event_pool),
         )
     };
 
@@ -844,10 +841,6 @@ pub(super) fn take_present_gpu_work(
         match &entry.completion {
             LedgerCompletion::CudaEvent(event) => Some(Arc::clone(event)),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::PresentCudaEvent(_) => {
-                bail!("CUDA/DX12: present submit_tv {submit_tv} is a present-completion event, not a compute submit")
-            }
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             LedgerCompletion::Dx12Fence { .. } => {
                 bail!("CUDA/DX12: present submit_tv {submit_tv} is a DX12 fence entry, not a CUDA event")
             }
@@ -858,51 +851,22 @@ pub(super) fn take_present_gpu_work(
 
     // Goldy timeline value for present/copy completion (same namespace as compute).
     //
-    // CUDA scratch present publishes a PresentCudaEvent: after DX12 Execute/Signal,
-    // PresentGpuWork waits the companion fence on `present_stream`
-    // (`cuWaitExternalSemaphoresAsync`, Signal already issued) and records the
-    // event there. `wait_until` observes it. Compute submits must not
-    // `stream.wait` it — that joins worker kernels onto the present tail.
-    //
-    // Dx12Raster (direct raster) stays on the companion fence ledger: no CUDA body
-    // to bridge and no per-frame present-completion event allocation in steady state.
-    // Fence values stay allocated at Signal time in `run` (not here).
+    // Scratch and raster-direct present both publish a companion-fence ledger entry.
+    // Fence values stay allocated at Signal time in `run` (not here) so allocation
+    // does not race other companion fence users or collapse present-slot wait depth.
+    // Compute submits must not `cuWaitExternalSemaphoresAsync` this value.
     let present_tv = submission_worker::allocate_timeline_value(&next_timeline);
-    let dx12_raster_direct = matches!(&present_source, Some(PresentSource::Dx12Raster { .. }));
-    let present_completion = if dx12_raster_direct {
-        // Fence value is bound at Signal time in PresentGpuWork::run — allocating here
-        // races other companion fence users and collapses present-slot wait depth.
-        event_ledger.lock().unwrap().insert(
-            present_tv,
-            LedgerEntry {
-                context: frame.context,
-                completion: LedgerCompletion::Dx12Fence {
-                    companion: Arc::clone(&companion),
-                    value: 0,
-                },
-                recorded: false,
+    event_ledger.lock().unwrap().insert(
+        present_tv,
+        LedgerEntry {
+            context: frame.context,
+            completion: LedgerCompletion::Dx12Fence {
+                companion: Arc::clone(&companion),
+                value: 0,
             },
-        );
-        PresentCompletion::Dx12Fence
-    } else {
-        let present_event = event_pool
-            .acquire()
-            .context("CUDA/DX12: create present completion event failed")?;
-        event_ledger.lock().unwrap().insert(
-            present_tv,
-            LedgerEntry {
-                context: frame.context,
-                completion: LedgerCompletion::PresentCudaEvent(Arc::clone(&present_event)),
-                recorded: false,
-            },
-        );
-        backend
-            .graph_stats
-            .present_completion_events
-            .fetch_add(1, Ordering::Relaxed);
-        backend.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
-        PresentCompletion::CudaEvent(present_event)
-    };
+            recorded: false,
+        },
+    );
 
     // New CUDA scratch submits signal in their own tail. Keep a temporary handoff
     // only for callers that supplied a submit timeline without a scratch-tail signal.
@@ -1021,7 +985,6 @@ pub(super) fn take_present_gpu_work(
         worker: Arc::clone(&worker),
         next_timeline: Arc::clone(&next_timeline),
         present_tv,
-        present_completion,
         event_ledger,
         stats: Arc::clone(&backend.graph_stats),
         context,
@@ -1125,7 +1088,6 @@ struct CudaDx12PresentGpuWork {
     worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
     next_timeline: Arc<std::sync::atomic::AtomicU64>,
     present_tv: crate::timeline::TimelineValue,
-    present_completion: PresentCompletion,
     event_ledger: EventLedger,
     stats: Arc<super::retained_graph::CudaGraphStats>,
     context: Arc<CudaSubmitContext>,
@@ -1144,13 +1106,6 @@ struct CudaDx12PresentGpuWork {
     present_cache: Arc<Mutex<[PresentListCache; MAX_FRAMES]>>,
     cache_entry: PresentListCache,
     reuse_list: bool,
-}
-
-enum PresentCompletion {
-    /// Present completion bridged to CUDA via `present_stream` after DX12 Signal.
-    CudaEvent(Arc<CudaEvent>),
-    /// Raster-direct: companion fence allocated at Execute/Signal, not in take_present.
-    Dx12Fence,
 }
 
 impl PresentGpuWork for CudaDx12PresentGpuWork {
@@ -1204,9 +1159,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
 
         let cmd: ID3D12CommandList = self.list.cast().context("cast present list")?;
         let return_fence = self.companion.next_fence_value();
-        if matches!(self.present_completion, PresentCompletion::Dx12Fence) {
-            timeline::bind_dx12_fence_value(&self.event_ledger, self.present_tv, return_fence);
-        }
+        timeline::bind_dx12_fence_value(&self.event_ledger, self.present_tv, return_fence);
         {
             let _tz = crate::tracy_zone!("present.copy");
             self.companion
@@ -1235,28 +1188,8 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             );
         }
 
-        // Publish present/copy completion on the Goldy timeline.
-        match self.present_completion {
-            PresentCompletion::CudaEvent(ref present_event) => {
-                // Bridge DX12 Signal → CUDA event on the dedicated present stream (Signal
-                // already issued — satisfies CUDA external-semaphore wait-before-signal rule).
-                // Do not wait the fence on the submission stream; that path poisons later
-                // cuStreamSynchronize on WDDM+D3D12.
-                cuda_wait_fence(
-                    &self.companion.cuda_ctx,
-                    self.companion.cuda_semaphore,
-                    self.companion.present_stream.cu_stream(),
-                    return_fence,
-                )?;
-                present_event
-                    .record(&self.companion.present_stream)
-                    .context("CUDA/DX12: record present completion event")?;
-                // Leave present_stream async — ledger polling retires the timeline later.
-            }
-            PresentCompletion::Dx12Fence => {
-                // DX12 fence ledger: copy completion is already on the companion fence.
-            }
-        }
+        // Copy/Present completion is the companion fence (`return_fence`). Do not
+        // wait it on a CUDA stream — that wakes the CUDA context after DXGI Present.
         timeline::mark_recorded(&self.event_ledger, self.present_tv);
         self.context.poll_retire_events();
 
@@ -1448,7 +1381,7 @@ fn cuda_device_has_pending_work(backend: &CudaBackend, device: DeviceHandle) -> 
 /// Skips CUDA stream synchronizes when the event ledger shows no in-flight work (common
 /// between frames). Skips the DX12 CPU wait when `fence_high` has already retired.
 fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, mut fence_high: u64) -> Result<()> {
-    let (worker, present_stream, companion, cuda_ctx) = {
+    let (worker, companion, cuda_ctx) = {
         let gpu = backend.device(device)?;
         let companion = gpu.dx12.as_ref().map(Arc::clone);
         if let Some(c) = companion.as_ref() {
@@ -1456,7 +1389,6 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
         }
         (
             Arc::clone(&gpu.submission_worker),
-            companion.as_ref().map(|c| Arc::clone(&c.present_stream)),
             companion,
             Arc::clone(&gpu.ctx),
         )
@@ -1495,13 +1427,6 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
                 "context stream synchronize before surface resource sync",
             )?;
         }
-        if let Some(stream) = present_stream {
-            super::cuda_context_stream_sync_after_interop(
-                &cuda_ctx,
-                &stream,
-                "present stream synchronize before surface resource sync",
-            )?;
-        }
     }
     Ok(())
 }
@@ -1509,17 +1434,16 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
 /// Full CUDA + DX12 drain used when destroying a surface or replacing a size-mismatched
 /// scratch outside `surface_resize` (no per-surface fence high-water available yet).
 fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle) -> Result<()> {
-    let (worker, alloc_stream, present_stream, companion, cuda_ctx) = {
+    let (worker, alloc_stream, companion, cuda_ctx) = {
         let gpu = backend.device(device)?;
         (
             Arc::clone(&gpu.submission_worker),
             Arc::clone(&gpu.alloc_stream),
-            gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
             gpu.dx12.as_ref().map(Arc::clone),
             Arc::clone(&gpu.ctx),
         )
     };
-    // Unblock CUDA WaitExternalFence on the submission/present streams before joining
+    // Unblock CUDA WaitExternalFence on submission streams before joining
     // the worker. Otherwise flush waits forever on a Wait whose Signal sits behind a
     // stalled DX12 queue or was never issued (multi-window teardown).
     if let Some(companion) = companion.as_ref() {
@@ -1557,13 +1481,6 @@ fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle)
             &cuda_ctx,
             &context.stream,
             "context stream synchronize before surface teardown",
-        )?;
-    }
-    if let Some(stream) = present_stream {
-        super::cuda_context_stream_sync_after_interop(
-            &cuda_ctx,
-            &stream,
-            "present stream synchronize before surface teardown",
         )?;
     }
     super::cuda_context_stream_sync_after_interop(
@@ -1717,15 +1634,7 @@ mod present_tests {
             .wait_until(ctx, present_tv)
             .expect("wait_until present_tv on Goldy timeline");
         match completion.unwrap() {
-            LedgerCompletion::CudaEvent(event) => assert!(
-                event.is_complete(),
-                "present_tv {present_tv} event should complete after wait_until"
-            ),
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::PresentCudaEvent(event) => assert!(
-                event.is_complete(),
-                "present_tv {present_tv} event should complete after wait_until"
-            ),
+            LedgerCompletion::CudaEvent(_) => panic!("present_tv {present_tv} should be a DX12 fence ledger entry"),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             LedgerCompletion::Dx12Fence { companion, value } => assert!(
                 unsafe { companion.fence.GetCompletedValue() } >= value,

@@ -2846,7 +2846,6 @@ impl CudaBackend {
                 timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { .. }) => {}
                 timeline::WaitCompletion::AlreadyComplete => {}
                 timeline::WaitCompletion::Pending(LedgerCompletion::CudaEvent(_))
-                | timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(_))
                 | timeline::WaitCompletion::Missing => return Ok(false),
             }
         }
@@ -2954,7 +2953,7 @@ impl CudaBackend {
         let device_retired = Arc::clone(&device.retired);
         let mut stream_waits = Vec::new();
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        let mut dx12_stream_fence_waits = Vec::new();
+        let dx12_stream_fence_waits = Vec::new();
         let mut host_waits = Vec::new();
         let mut deferred_writes = Vec::new();
         if let Some(sync) = sync {
@@ -2970,20 +2969,10 @@ impl CudaBackend {
                         stream_waits.push(event)
                     }
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(_)) => {
-                        // Present completion lives on `present_stream`. Joining it here
-                        // serializes worker kernels behind the CUDA↔DX12 present tail.
-                    }
-                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { companion, value }) => {
-                        // Device-side DX12→CUDA: cuWaitExternalSemaphoresAsync on the
-                        // submission stream. Only after Signal is published (value > 0).
-                        // Prefer skipping when the fence already completed (no interop node).
-                        // Present epochs should be PresentCudaEvent (bridged on present_stream);
-                        // this path is for residual Dx12Fence producers.
-                        if value > 0 && unsafe { companion.fence.GetCompletedValue() } < value {
-                            dx12_stream_fence_waits.push((companion, value));
-                        }
+                    timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { .. }) => {
+                        // Present completion is a companion fence. Joining it here
+                        // (`cuWaitExternalSemaphoresAsync`) serializes worker kernels
+                        // behind the CUDA↔DX12 present tail and wakes CUDA after Present.
                     }
                     timeline::WaitCompletion::AlreadyComplete => {}
                     timeline::WaitCompletion::Missing => {
@@ -3008,15 +2997,8 @@ impl CudaBackend {
                         host_waits.push(event)
                     }
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(_)) => {}
-                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { companion, value }) => {
-                        // Match DX12 FPS policy: demote WAR/host_observed Dx12Fence epochs
-                        // to async stream waits rather than HOL cpu_wait on the worker.
-                        // Same Signal-before-wait / already-complete skip as sync.waits.
-                        if value > 0 && unsafe { companion.fence.GetCompletedValue() } < value {
-                            dx12_stream_fence_waits.push((companion, value));
-                        }
+                    timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence { .. }) => {
+                        // Same skip as sync.waits: do not wake CUDA on present-fence epochs.
                     }
                     timeline::WaitCompletion::AlreadyComplete => {}
                     timeline::WaitCompletion::Missing => {
@@ -3433,10 +3415,6 @@ impl GpuBackendTimelineWait for CudaBackend {
                 Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            timeline::WaitCompletion::Pending(LedgerCompletion::PresentCudaEvent(event)) => {
-                Ok(Some(Box::new(timeline::CudaTimelineBlockingWait { event })))
-            }
-            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             timeline::WaitCompletion::Pending(LedgerCompletion::Dx12Fence {
                 companion,
                 value: fence_value,
@@ -3681,13 +3659,7 @@ impl GpuBackend for CudaBackend {
         let worker = Arc::clone(&self.device(device)?.submission_worker);
         let alloc_stream = Arc::clone(&self.device(device)?.alloc_stream);
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        let (present_stream, dx12) = {
-            let gpu = self.device(device)?;
-            (
-                gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
-                gpu.dx12.as_ref().map(Arc::clone),
-            )
-        };
+        let dx12 = self.device(device)?.dx12.as_ref().map(Arc::clone);
         worker.flush()?;
         for context in self.contexts.values().filter(|context| context.device == device) {
             context
@@ -3695,12 +3667,6 @@ impl GpuBackend for CudaBackend {
                 .synchronize()
                 .context("CUDA: context stream synchronize failed")?;
             context.poll_retire_events();
-        }
-        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        if let Some(stream) = present_stream {
-            stream
-                .synchronize()
-                .context("CUDA: present stream synchronize failed")?;
         }
         alloc_stream.synchronize().context("CUDA: device wait idle failed")?;
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -4898,10 +4864,6 @@ impl GpuBackend for CudaBackend {
                 LedgerCompletion::CudaEvent(event) => event
                     .synchronize()
                     .context("CUDA: device_wait_until event sync failed")?,
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                LedgerCompletion::PresentCudaEvent(event) => event
-                    .synchronize()
-                    .context("CUDA: device_wait_until present event sync failed")?,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 LedgerCompletion::Dx12Fence {
                     companion,
