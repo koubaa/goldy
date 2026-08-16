@@ -5,6 +5,7 @@
 //! - SPIR-V (Vulkan)
 //! - DXIL (DirectX 12)
 //! - MSL (Metal)
+//! - CUDA PTX / CUDA C++ (`GOLDY_DUMP_SHADERS`)
 //!
 //! # Example
 //!

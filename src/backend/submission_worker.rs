@@ -281,19 +281,27 @@ fn worker_loop(
         match msg {
             WorkerMessage::Submit { tv, work } => {
                 let _exec = crate::tracy_zone!("goldy.submit_worker.execute");
-                if latched_error.lock().unwrap().is_some() {
-                    // Still advance so wait_submitted(last_submitted_seq) cannot block
-                    // forever after an earlier execute failure skipped this job.
-                    advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
-                    continue;
-                }
+                // Always execute: skipping after a latched error advances submitted_epoch
+                // without recording the CUDA completion event, so wait_until observes
+                // submitted >= tv with recorded=false and reports "not submitted".
                 match work.execute() {
                     Ok(()) => {
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                     }
                     Err(e) => {
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
-                        *latched_error.lock().unwrap() = Some(e);
+                        let mut slot = latched_error.lock().unwrap();
+                        if slot.is_none() {
+                            if tracing::enabled!(target: "goldy::submit", tracing::Level::WARN) {
+                                tracing::warn!(
+                                    target: "goldy::submit",
+                                    timeline = tv,
+                                    error = %format_args!("{:#}", e),
+                                    "submit worker job failed"
+                                );
+                            }
+                            *slot = Some(e);
+                        }
                         notify_waiters(&wait_notify);
                     }
                 }

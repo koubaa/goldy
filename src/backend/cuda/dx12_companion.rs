@@ -1,11 +1,27 @@
 //! D3D12 companion device for CUDA presentation (Windows only).
 //!
 //! Compiled only when `cuda`, `graphics`, and `dx12` are all enabled. Pairs a CUDA
-//! ordinal with the matching DXGI adapter by LUID, then owns a DIRECT queue plus a
-//! shareable fence imported into CUDA as an external semaphore.
+//! ordinal with the matching DXGI adapter by LUID, then owns a DIRECT present
+//! queue, a COPY hop queue, and two shareable fences imported into CUDA as
+//! external semaphores:
+//!
+//! - **ready** (`fence`): CUDA-only producer. Compute signals when imported
+//!   scratch is ready to present; DX12 waits this before `CopyResource`.
+//! - **recycle** (`recycle_fence`): DX12-only producer. Present signals after
+//!   `CopyResource`; CUDA waits this only when wrapping the depth-3 scratch ring.
+//!
+//! Mixing producers on one D3D12 fence yields `CUDA_ERROR_INVALID_VALUE` when
+//! DX12 `Signal(W)` races a still-unsubmitted CUDA `SignalExternalFence(V)` for
+//! `W > V`.
+//!
+//! CUDA→DX12 present waits (`Queue.Wait` on the ready fence) run on the COPY
+//! hop queue and signal a native hop fence. The DIRECT/DXGI queue waits that hop
+//! then `CopyResource` + `Present`. Flip-model backbuffers are DWM-shared; a COPY
+//! queue cannot write them (`DXGI_ERROR_ACCESS_DENIED` / 0x887A002B). Keeping the
+//! CUDA wait off DIRECT still lets the next frame's external wait overlap Present.
 
 use anyhow::{bail, Context as _, Result};
-use cudarc::driver::{sys, CudaContext, CudaStream};
+use cudarc::driver::{sys, CudaContext};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use windows::core::Interface;
@@ -14,12 +30,13 @@ use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::{
     D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12DescriptorHeap,
     ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Resource, ID3D12RootSignature, D3D12_CLEAR_VALUE,
-    D3D12_CLEAR_VALUE_0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
-    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_DEPTH_STENCIL_VALUE,
-    D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
-    D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_FENCE_FLAG_SHARED, D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES,
-    D3D12_HEAP_TYPE_DEFAULT, D3D12_MEMORY_POOL_UNKNOWN, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_COMMON, D3D12_TEXTURE_LAYOUT_UNKNOWN,
+    D3D12_CLEAR_VALUE_0, D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC,
+    D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+    D3D12_DEPTH_STENCIL_VALUE, D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+    D3D12_DESCRIPTOR_HEAP_TYPE_DSV, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_FENCE_FLAG_NONE, D3D12_FENCE_FLAG_SHARED,
+    D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_MEMORY_POOL_UNKNOWN,
+    D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+    D3D12_RESOURCE_STATE_COMMON, D3D12_TEXTURE_LAYOUT_UNKNOWN,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT,
@@ -122,16 +139,23 @@ pub(super) struct Dx12Companion {
     pub device: ID3D12Device,
     pub queue: ID3D12CommandQueue,
     pub queue_lock: std::sync::Mutex<()>,
-    /// Shareable fence; CUDA imports it as an external semaphore.
+    /// COPY queue used only to Wait the CUDA-shared fence and Signal [`Self::hop_fence`].
+    pub hop_queue: ID3D12CommandQueue,
+    pub hop_queue_lock: std::sync::Mutex<()>,
+    /// Native (non-shared) fence bridging COPY CUDA-wait → DIRECT present.
+    pub hop_fence: ID3D12Fence,
+    pub hop_fence_value: AtomicU64,
+    /// Shareable ready fence; CUDA-only producer, imported as [`Self::cuda_semaphore`].
     pub fence: ID3D12Fence,
     pub fence_value: AtomicU64,
     /// CUDA import of [`Self::fence`].
     pub cuda_semaphore: sys::CUexternalSemaphore,
+    /// Shareable recycle fence; DX12-only producer, imported as [`Self::recycle_semaphore`].
+    pub recycle_fence: ID3D12Fence,
+    pub recycle_fence_value: AtomicU64,
+    /// CUDA import of [`Self::recycle_fence`] (scratch-ring wrap waits).
+    pub recycle_semaphore: sys::CUexternalSemaphore,
     pub cuda_ctx: Arc<CudaContext>,
-    /// Dedicated stream for publishing present-completion into the Goldy timeline.
-    /// Separate from per-context submit streams so present recording cannot race the
-    /// submission worker.
-    pub present_stream: Arc<CudaStream>,
     /// Scratch allocator/list pool for present copy + blit (one per in-flight slot).
     pub present_slots: Vec<PresentCommandSlot>,
     /// Dedicated command allocator/list for one-shot resource-state init.
@@ -219,18 +243,19 @@ impl Dx12Companion {
         let queue: ID3D12CommandQueue =
             unsafe { device.CreateCommandQueue(&queue_desc) }.context("CUDA/DX12: CreateCommandQueue failed")?;
 
-        let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_SHARED) }
-            .context("CUDA/DX12: CreateFence(SHARED) failed")?;
+        let hop_queue_desc = D3D12_COMMAND_QUEUE_DESC {
+            Type: D3D12_COMMAND_LIST_TYPE_COPY,
+            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+            Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+            NodeMask: 0,
+        };
+        let hop_queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&hop_queue_desc) }
+            .context("CUDA/DX12: CreateCommandQueue(COPY hop) failed")?;
+        let hop_fence: ID3D12Fence =
+            unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.context("CUDA/DX12: CreateFence(hop) failed")?;
 
-        let fence_handle: HANDLE =
-            unsafe { device.CreateSharedHandle(&fence, None, windows::Win32::Foundation::GENERIC_ALL.0, None) }
-                .context("CUDA/DX12: CreateSharedHandle(fence) failed")?;
-
-        let cuda_semaphore = import_d3d12_fence(cuda_ctx, fence_handle)?;
-        // CUDA does not take ownership of the Win32 NT handle.
-        unsafe {
-            let _ = CloseHandle(fence_handle);
-        }
+        let (fence, cuda_semaphore) = create_shared_fence(cuda_ctx, &device, "ready")?;
+        let (recycle_fence, recycle_semaphore) = create_shared_fence(cuda_ctx, &device, "recycle")?;
 
         let mut present_slots = Vec::with_capacity(MAX_FRAMES);
         for _ in 0..MAX_FRAMES {
@@ -301,10 +326,6 @@ impl Dx12Companion {
             });
         }
 
-        let present_stream = cuda_ctx
-            .new_stream()
-            .context("CUDA/DX12: create present stream failed")?;
-
         Ok(Self {
             factory,
             allow_tearing,
@@ -313,11 +334,17 @@ impl Dx12Companion {
             device,
             queue,
             queue_lock: std::sync::Mutex::new(()),
+            hop_queue,
+            hop_queue_lock: std::sync::Mutex::new(()),
+            hop_fence,
+            hop_fence_value: AtomicU64::new(1),
             fence,
             fence_value: AtomicU64::new(1),
             cuda_semaphore,
+            recycle_fence,
+            recycle_fence_value: AtomicU64::new(1),
+            recycle_semaphore,
             cuda_ctx: Arc::clone(cuda_ctx),
-            present_stream,
             present_slots,
             init_allocator,
             init_list,
@@ -338,9 +365,14 @@ impl Dx12Companion {
         })
     }
 
-    /// Allocate the next fence value (monotonic, starts at 1).
+    /// Allocate the next ready-fence value (CUDA producer; monotonic, starts at 1).
     pub fn next_fence_value(&self) -> u64 {
         self.fence_value.fetch_add(1, Ordering::AcqRel)
+    }
+
+    /// Allocate the next recycle-fence value (DX12 producer; monotonic, starts at 1).
+    pub fn next_recycle_value(&self) -> u64 {
+        self.recycle_fence_value.fetch_add(1, Ordering::AcqRel)
     }
 
     pub fn signal_queue(&self, value: u64) -> Result<()> {
@@ -355,24 +387,94 @@ impl Dx12Companion {
         Ok(())
     }
 
+    /// Wait a CUDA-signaled shared-fence value on the COPY hop queue.
+    ///
+    /// Returns the hop-fence value the DIRECT present queue should `Wait` before
+    /// `CopyResource`/`Present`. Keeps the CUDA external wait off the DXGI queue.
+    /// Flip-model backbuffers cannot be COPY-queue destinations (DWM shared).
+    pub fn hop_wait_cuda(&self, cuda_complete: u64) -> Result<u64> {
+        let hop = self.hop_fence_value.fetch_add(1, Ordering::AcqRel);
+        let _guard = self.hop_queue_lock.lock().unwrap();
+        unsafe { self.hop_queue.Wait(&self.fence, cuda_complete) }
+            .context("CUDA/DX12: hop queue Wait(shared fence) failed")?;
+        unsafe { self.hop_queue.Signal(&self.hop_fence, hop) }.context("CUDA/DX12: hop queue Signal failed")?;
+        Ok(hop)
+    }
+
     pub fn execute_and_signal(
         &self,
         lists: &[Option<windows::Win32::Graphics::Direct3D12::ID3D12CommandList>],
         signal_value: u64,
     ) -> Result<()> {
+        self.execute_and_signal_after_hop(lists, None, signal_value)
+    }
+
+    pub fn execute_and_signal_after_hop(
+        &self,
+        lists: &[Option<windows::Win32::Graphics::Direct3D12::ID3D12CommandList>],
+        hop: Option<u64>,
+        signal_value: u64,
+    ) -> Result<()> {
         let _guard = self.queue_lock.lock().unwrap();
+        if let Some(hop) = hop {
+            unsafe { self.queue.Wait(&self.hop_fence, hop) }
+                .context("CUDA/DX12: present queue Wait(hop fence) failed")?;
+        }
         unsafe { self.queue.ExecuteCommandLists(lists) };
         unsafe { self.queue.Signal(&self.fence, signal_value) }
             .context("CUDA/DX12: Signal after ExecuteCommandLists failed")?;
         Ok(())
     }
 
+    /// Execute present copy and signal the **recycle** fence (DX12-only producer).
+    pub fn execute_and_recycle_after_hop(
+        &self,
+        lists: &[Option<windows::Win32::Graphics::Direct3D12::ID3D12CommandList>],
+        hop: Option<u64>,
+        recycle_value: u64,
+    ) -> Result<()> {
+        let _guard = self.queue_lock.lock().unwrap();
+        if let Some(hop) = hop {
+            unsafe { self.queue.Wait(&self.hop_fence, hop) }
+                .context("CUDA/DX12: present queue Wait(hop fence) failed")?;
+        }
+        unsafe { self.queue.ExecuteCommandLists(lists) };
+        unsafe { self.queue.Signal(&self.recycle_fence, recycle_value) }
+            .context("CUDA/DX12: Signal recycle fence after ExecuteCommandLists failed")?;
+        Ok(())
+    }
+
     pub fn cpu_wait(&self, value: u64) -> Result<()> {
-        if unsafe { self.fence.GetCompletedValue() } >= value {
+        Self::cpu_wait_fence(&self.fence, value)
+    }
+
+    pub fn cpu_wait_recycle(&self, value: u64) -> Result<()> {
+        Self::cpu_wait_fence(&self.recycle_fence, value)
+    }
+
+    pub fn cpu_wait_timeline(&self, value: u64, recycle: bool) -> Result<()> {
+        if recycle {
+            self.cpu_wait_recycle(value)
+        } else {
+            self.cpu_wait(value)
+        }
+    }
+
+    pub fn timeline_completed(&self, value: u64, recycle: bool) -> bool {
+        let completed = if recycle {
+            unsafe { self.recycle_fence.GetCompletedValue() }
+        } else {
+            unsafe { self.fence.GetCompletedValue() }
+        };
+        completed >= value
+    }
+
+    fn cpu_wait_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
+        if unsafe { fence.GetCompletedValue() } >= value {
             return Ok(());
         }
         let event = unsafe { CreateEventA(None, false, false, None) }.context("CUDA/DX12: CreateEventA failed")?;
-        unsafe { self.fence.SetEventOnCompletion(value, event) }.context("CUDA/DX12: SetEventOnCompletion failed")?;
+        unsafe { fence.SetEventOnCompletion(value, event) }.context("CUDA/DX12: SetEventOnCompletion failed")?;
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe {
             let _ = CloseHandle(event);
@@ -383,7 +485,28 @@ impl Dx12Companion {
     pub fn wait_idle(&self) -> Result<()> {
         let v = self.next_fence_value();
         self.signal_queue(v)?;
-        self.cpu_wait(v)
+        self.cpu_wait(v)?;
+        let recycle_issued = self.recycle_fence_value.load(Ordering::Acquire);
+        if recycle_issued > 1 {
+            Self::cpu_wait_fence(&self.recycle_fence, recycle_issued - 1)?;
+        }
+        let hop_issued = self.hop_fence_value.load(Ordering::Acquire);
+        if hop_issued > 1 {
+            Self::cpu_wait_fence(&self.hop_fence, hop_issued - 1)?;
+        }
+        Ok(())
+    }
+
+    /// Unblock CUDA waits on either imported fence during teardown.
+    pub fn signal_both_fences_for_teardown(&self) -> Result<()> {
+        let ready = self.next_fence_value();
+        let recycle = self.next_recycle_value();
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.queue.Signal(&self.fence, ready) }
+            .context("CUDA/DX12: signal ready fence to unblock CUDA waits before teardown")?;
+        unsafe { self.queue.Signal(&self.recycle_fence, recycle) }
+            .context("CUDA/DX12: signal recycle fence to unblock CUDA waits before teardown")?;
+        Ok(())
     }
 
     /// Record and submit a one-shot barrier list on the dedicated init allocator.
@@ -643,13 +766,30 @@ impl Dx12Companion {
         Ok(present_slots)
     }
 
-    /// Highest fence value known for companion-owned work (init + raster/present slots).
-    pub fn companion_fence_high_water(&self) -> u64 {
+    /// Highest ready-fence value for companion-owned init/raster work.
+    pub fn companion_ready_high_water(&self) -> u64 {
         let mut high = self.init_fence.load(Ordering::Acquire);
-        for slot in self.raster_slots.iter().chain(self.present_slots.iter()) {
+        for slot in &self.raster_slots {
             high = high.max(slot.fence_value.load(Ordering::Acquire));
         }
         high
+    }
+
+    /// Highest recycle-fence value among present allocator slots.
+    pub fn companion_recycle_high_water(&self) -> u64 {
+        self.present_slots
+            .iter()
+            .map(|slot| slot.fence_value.load(Ordering::Acquire))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Highest ready-fence value known for companion-owned init/raster work.
+    ///
+    /// Present-slot `fence_value`s are recycle-fence values and must not be mixed in:
+    /// bindless reclaim compares this against [`Self::fence`].
+    pub fn companion_fence_high_water(&self) -> u64 {
+        self.companion_ready_high_water()
     }
 }
 
@@ -661,6 +801,10 @@ impl Drop for Dx12Companion {
         if !sem.is_null() {
             let _ = unsafe { sys::cuDestroyExternalSemaphore(sem) };
         }
+        let recycle = std::mem::replace(&mut self.recycle_semaphore, std::ptr::null_mut());
+        if !recycle.is_null() {
+            let _ = unsafe { sys::cuDestroyExternalSemaphore(recycle) };
+        }
     }
 }
 
@@ -669,6 +813,23 @@ unsafe impl Send for Dx12Companion {}
 unsafe impl Sync for Dx12Companion {}
 
 pub(super) const MAX_FRAMES: usize = 3;
+
+fn create_shared_fence(
+    cuda_ctx: &Arc<CudaContext>,
+    device: &ID3D12Device,
+    name: &str,
+) -> Result<(ID3D12Fence, sys::CUexternalSemaphore)> {
+    let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_SHARED) }
+        .with_context(|| format!("CUDA/DX12: CreateFence(SHARED {name}) failed"))?;
+    let fence_handle: HANDLE =
+        unsafe { device.CreateSharedHandle(&fence, None, windows::Win32::Foundation::GENERIC_ALL.0, None) }
+            .with_context(|| format!("CUDA/DX12: CreateSharedHandle({name} fence) failed"))?;
+    let sem = import_d3d12_fence(cuda_ctx, fence_handle);
+    unsafe {
+        let _ = CloseHandle(fence_handle);
+    }
+    Ok((fence, sem?))
+}
 
 fn import_d3d12_fence(cuda_ctx: &Arc<CudaContext>, handle: HANDLE) -> Result<sys::CUexternalSemaphore> {
     cuda_ctx

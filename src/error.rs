@@ -41,3 +41,13 @@ pub enum GoldyError {
     #[error(transparent)]
     Backend(#[from] anyhow::Error),
 }
+
+impl GoldyError {
+    /// Full error text for logging, including anyhow context chains on backend failures.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Backend(e) => format!("{e:#}"),
+            _ => self.to_string(),
+        }
+    }
+}

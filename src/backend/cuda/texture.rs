@@ -203,6 +203,7 @@ impl CudaArray {
         format: TextureFormat,
         need_surface: bool,
     ) -> Result<Self> {
+        let _gate = super::capture_gate::lock_capture_alloc_gate();
         ctx.bind_to_thread().context("CUDA: bind context for array create")?;
         let info = format_info(format)?;
         let array = if need_surface {
@@ -259,6 +260,7 @@ impl Drop for CudaArray {
         if !self.owns_array {
             return;
         }
+        let _gate = super::capture_gate::lock_capture_alloc_gate();
         let _ = self.ctx.bind_to_thread();
         let array = std::mem::replace(&mut self.array, std::ptr::null_mut());
         if !array.is_null() {

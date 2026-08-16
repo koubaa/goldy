@@ -251,6 +251,7 @@ impl CudaBackend {
         match target {
             CudaPhysKind::Native | CudaPhysKind::NativeAndTwin => {
                 let gpu = self.device(device)?;
+                let _gate = super::capture_gate::lock_capture_alloc_gate();
                 let memory = Arc::new(Mutex::new(
                     gpu.alloc_stream
                         .alloc_zeros::<u8>(capacity as usize)
@@ -465,6 +466,7 @@ impl CudaBackend {
             .context("CUDA: promote Shared without memory")?;
 
         let gpu = self.device(device)?;
+        let _gate = super::capture_gate::lock_capture_alloc_gate();
         gpu.ctx
             .bind_to_thread()
             .context("CUDA: bind context for Shared promote")?;
@@ -529,9 +531,12 @@ impl CudaBackend {
             .iter()
             .filter_map(|((ctx, key), entry)| {
                 let touches = match entry {
-                    super::RetainedEntry::Ops(ops) => ops_touch_memory(ops, memory, stream, target_device_ptr),
-                    super::RetainedEntry::GraphWithTail { tail, .. } => {
-                        ops_touch_memory(tail, memory, stream, target_device_ptr)
+                    super::RetainedEntry::Ops { ops, .. } => {
+                        ops_touch_memory(ops.as_ref(), memory, stream, target_device_ptr)
+                    }
+                    super::RetainedEntry::Segmented { segments, .. } => {
+                        let stream_ops = super::pending_submit::collect_stream_ops(segments.as_ref());
+                        ops_touch_memory(&stream_ops, memory, stream, target_device_ptr)
                     }
                     _ => false,
                 };
@@ -563,34 +568,21 @@ impl CudaBackend {
             .iter()
             .filter_map(|((ctx, key), entry)| {
                 let touches = match entry {
-                    super::RetainedEntry::Graph {
+                    super::RetainedEntry::Segmented {
+                        segments,
                         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                         twin_dirty,
                         ..
                     } => {
+                        let stream_ops = super::pending_submit::collect_stream_ops(segments.as_ref());
+                        let stream_hit = ops_touch_memory(&stream_ops, memory, stream, target_device_ptr);
                         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                         {
-                            twin_dirty.contains(&buffer)
+                            stream_hit || twin_dirty.contains(&buffer)
                         }
                         #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
                         {
-                            false
-                        }
-                    }
-                    super::RetainedEntry::GraphWithTail {
-                        tail,
-                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                        twin_dirty,
-                        ..
-                    } => {
-                        let tail_hit = ops_touch_memory(tail, memory, stream, target_device_ptr);
-                        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                        {
-                            tail_hit || twin_dirty.contains(&buffer)
-                        }
-                        #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
-                        {
-                            tail_hit
+                            stream_hit
                         }
                     }
                     _ => false,
@@ -690,7 +682,7 @@ fn ops_touch_memory(
 ) -> bool {
     use super::pending_submit::CudaOp;
     ops.iter().any(|op| match op {
-        CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } => {
+        CudaOp::Clear { memory: m, .. } | CudaOp::Write { memory: m, .. } | CudaOp::WriteFromHost { memory: m, .. } => {
             memory_slices_same(m, memory, stream, target_device_ptr)
         }
         CudaOp::Copy { src, dst, .. } => {

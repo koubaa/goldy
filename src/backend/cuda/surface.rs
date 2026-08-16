@@ -1,30 +1,33 @@
 //! CUDA + DX12 surface / swapchain / present.
 //!
-//! Swapchain backbuffers stay BGRA8 (non-shareable). Per-image float4 shared scratch
-//! textures are CUDA-writable; present blits color → BGRA UAV → backbuffer. Compute
-//! writes wait on the shared D3D12 fence CUDA signals at submit completion. When
-//! `CopyRenderTarget` targets scratch (`bind_render_target`), present blits the DX12
-//! raster RT directly and skips the CUDA array round-trip.
+//! Swapchain backbuffers are RGBA8 (non-shareable). A depth-3 ring of RGBA8 shared
+//! scratch textures is CUDA-writable and independent of the DXGI image index — CUDA
+//! frame N+1 writes a different slot while DX12 copies frame N. Present
+//! `CopyResource`s scratch → backbuffer. Compute writes signal a **ready** D3D12
+//! fence (CUDA-only producer); DX12 waits that value on a COPY hop queue. After
+//! `CopyResource`, DX12 signals a **recycle** fence (DX12-only producer). CUDA waits
+//! recycle only when wrapping the ring (slot N-3). DXGI `GetCurrentBackBufferIndex`
+//! still happens at acquire for swapchain pacing; scratch identity is `frame_slot`.
 //!
-//! Present completion is published on the **Goldy/CUDA timeline** (event ledger).
-//! After DX12 Execute/Signal, present waits that fence on the dedicated
-//! `present_stream` and records a CUDA event there; `Frame::present` returns that
-//! Goldy value so `Context::wait_until` / submit sync observe the same namespace as
-//! compute. Downstream CUDA work uses stream waits on that event (not submission-
-//! stream `cuWaitExternalSemaphoresAsync` on the companion fence).
+//! Flip-model backbuffers are DWM-shared, so the copy cannot run on the COPY queue.
+//! When `CopyRenderTarget` targets scratch (`bind_render_target`), present copies the
+//! DX12 raster RT directly (same RGBA8 format) and skips the CUDA array round-trip.
 //!
-//! Shared-fence signal ordering: `cuSignalExternalSemaphoresAsync(V)` must be
-//! *submitted to CUDA* before D3D12 `Queue.Signal(W)` for any `W > V` on the same
-//! fence — a GPU `Wait(V)` between them is not enough and yields
-//! `CUDA_ERROR_INVALID_VALUE`. Scratch presents therefore join the submission worker
-//! for `submit_tv` (so the tail `SignalExternalFence` has been issued) before the
-//! present copy's return fence is signaled.
+//! Present completion is published on the **Goldy timeline** as the recycle fence
+//! (`Frame::present`'s return value). Compute submits do **not** wait that fence on
+//! the CUDA stream: joining the worker stream onto the CUDA↔DX12 present tail stalls
+//! `cs_main` and wakes the CUDA context after Present. Scheme easement uses the
+//! present-partition submit timeline (`copy_timeline` / `note_submit_timeline`),
+//! not display-present completion. `wait_until(present)` CPU-waits the recycle fence.
+//!
+//! Depth 3 is a CUDA+DX12 interop tradeoff: three imported staging textures in
+//! exchange for not serializing compute N+1 behind present-copy N. Future CUDA/DX12
+//! sync improvements may shrink this.
 
 use super::dx12_companion::PresentCommandSlot;
-use super::dx12_companion::{cuda_signal_fence, cuda_wait_fence, Dx12Companion, MAX_FRAMES};
+use super::dx12_companion::{cuda_signal_fence, Dx12Companion, MAX_FRAMES};
 use super::dx12_interop::{
-    record_present_copy, PresentBlitPipeline, PresentColorSrcState, SharedScratchTexture, SURFACE_COMPUTE_FORMAT,
-    SWAPCHAIN_DXGI_FORMAT,
+    record_present_copy, PresentColorSrcState, SharedScratchTexture, SURFACE_COMPUTE_FORMAT, SWAPCHAIN_DXGI_FORMAT,
 };
 use super::timeline::{self, EventLedger, LedgerCompletion, LedgerEntry};
 use super::{CudaBackend, CudaDevice, CudaSubmitContext};
@@ -67,20 +70,19 @@ pub(super) struct CudaSurfaceState {
     pub depth_texture: Option<ID3D12Resource>,
     pub dsv_offset: Option<u32>,
     pub frame_latency_waitable: Option<SendSyncHandle>,
-    /// Rotating present-slot index (0..MAX_FRAMES).
+    /// Rotating scratch / present-allocator slot (0..MAX_FRAMES), independent of DXGI.
     pub current_frame: usize,
     pub current_image_index: Option<u32>,
     pub current_texture_handle: Option<TextureHandle>,
-    /// Per-swapchain-image shared scratch (indexed by backbuffer index).
+    /// Depth-3 imported scratch ring (indexed by `current_frame` / `frame_slot`).
     pub scratch: Vec<Option<ScratchSlot>>,
-    /// Fence value that guards each present-slot's command allocator reuse.
+    /// Recycle-fence value that guards each present-slot's command allocator reuse.
     pub slot_fence: [u64; MAX_FRAMES],
     /// Per-surface present allocator/list pool. Must not share companion.present_slots
     /// across windows — destroying one surface would Reset lists still used by others.
     pub present_cmd_slots: Arc<Vec<PresentCommandSlot>>,
     /// After create/resize, DXGI backbuffers are in COMMON until the first present copy.
     pub backbuffer_in_common: [bool; MAX_FRAMES],
-    pub blit: PresentBlitPipeline,
     present_generation: u64,
     present_cache: Arc<Mutex<[PresentListCache; MAX_FRAMES]>>,
     /// Scratch retired from the live slots; destroyed/pooled once `retire_at` completes.
@@ -98,7 +100,6 @@ struct PresentListCache {
     color_src_ptr: usize,
     color_src_state: Option<PresentColorSrcState>,
     color_src_format: Option<crate::types::TextureFormat>,
-    blit_target_ptr: usize,
     backbuffer_ptr: usize,
     image_index: usize,
     width: u32,
@@ -119,7 +120,7 @@ const SCRATCH_POOL_CAP: usize = 4;
 pub(super) struct ScratchSlot {
     pub shared: SharedScratchTexture,
     pub texture_handle: TextureHandle,
-    /// Fence value after DX12 finished present-copy (CUDA may wait before reuse).
+    /// Recycle-fence value after DX12 finished present-copy (CUDA waits on wrap).
     pub dx12_complete: u64,
     pub present_source: Option<PresentSource>,
     /// Deferred until a submission worker first writes this imported scratch.
@@ -129,8 +130,9 @@ pub(super) struct ScratchSlot {
 pub(super) enum PresentSource {
     /// CUDA wrote imported scratch; present waits on companion fence `cuda_complete`.
     CudaScratch { cuda_complete: u64 },
-    /// DX12 raster RT; present blits this resource. Same-queue submission order
+    /// DX12 raster RT; present copies this resource. Same-queue submission order
     /// after `render_to_target` is enough — no extra queue Wait on `fence`.
+    /// Format must match [`SURFACE_COMPUTE_FORMAT`] / the swapchain.
     Dx12Raster {
         resource: ID3D12Resource,
         fence: u64,
@@ -236,7 +238,6 @@ pub(super) fn create_surface(
         (None, None)
     };
 
-    let blit = PresentBlitPipeline::create(&companion.device)?;
     let present_cmd_slots = Arc::new(companion.create_present_command_slots()?);
 
     let handle = backend.next_surface;
@@ -262,7 +263,6 @@ pub(super) fn create_surface(
             slot_fence: [0; MAX_FRAMES],
             present_cmd_slots,
             backbuffer_in_common: [true; MAX_FRAMES],
-            blit,
             present_generation: 1,
             present_cache: Arc::new(Mutex::new([PresentListCache::default(); MAX_FRAMES])),
             pending_scratch: Vec::new(),
@@ -400,23 +400,22 @@ pub(super) fn surface_resize(backend: &mut CudaBackend, surface: SurfaceHandle, 
     let resize_t0 = std::time::Instant::now();
     backend.graph_stats.surface_resizes.fetch_add(1, Ordering::Relaxed);
 
-    // Snapshot surface fence high-water before taking scratch slots so the idle
-    // drain can wait on present-source / dx12_complete / slot_fence values.
-    let fence_high = {
+    // Snapshot ready + recycle high-water before taking scratch slots.
+    let (ready_high, recycle_high) = {
         let state = backend.surfaces.get(&surface).unwrap();
-        let mut high = 0u64;
+        let mut ready = 0u64;
+        let mut recycle = 0u64;
         for v in &state.slot_fence {
-            high = high.max(*v);
+            recycle = recycle.max(*v);
         }
         for slot in state.scratch.iter().flatten() {
-            high = high
-                .max(present_source_fence(&slot.present_source))
-                .max(slot.dx12_complete);
+            ready = ready.max(present_source_fence(&slot.present_source));
+            recycle = recycle.max(slot.dx12_complete);
         }
         for pending in &state.pending_scratch {
-            high = high.max(pending.retire_at);
+            recycle = recycle.max(pending.retire_at);
         }
-        high
+        (ready, recycle)
     };
 
     // Take live scratch out of the swapchain slots. Teardown is deferred until the
@@ -444,7 +443,7 @@ pub(super) fn surface_resize(backend: &mut CudaBackend, surface: SurfaceHandle, 
         .collect();
 
     let idle_t0 = std::time::Instant::now();
-    wait_surface_resources_idle(backend, device, fence_high)?;
+    wait_surface_resources_idle(backend, device, ready_high, recycle_high)?;
     let idle_ns = idle_t0.elapsed().as_nanos() as u64;
     backend
         .graph_stats
@@ -460,9 +459,7 @@ pub(super) fn surface_resize(backend: &mut CudaBackend, surface: SurfaceHandle, 
         .surface_resize_evictions
         .fetch_add(evicted, Ordering::Relaxed);
     for slot in old_slots {
-        let retire_at = fence_high
-            .max(present_source_fence(&slot.present_source))
-            .max(slot.dx12_complete);
+        let retire_at = recycle_high.max(slot.dx12_complete);
         unregister_scratch_texture(backend, slot.texture_handle);
         backend
             .surfaces
@@ -561,9 +558,9 @@ pub(super) fn surface_resize(backend: &mut CudaBackend, surface: SurfaceHandle, 
 /// Evict retained partitions that still reference destroyed surface scratch.
 ///
 /// Present writes use imported D3D12 scratch and are not CUDA-graph-capturable, so
-/// `RetainedEntry::Graph` normally has no scratch pins. Command-replay entries may
-/// still embed destroyed texture handles or registry slot indices — those must go.
-/// Unrelated retained compute graphs are left intact across resize.
+/// graph islands normally have no scratch pins. Stream-replay segments and Ops
+/// entries may still embed destroyed texture handles or registry slot indices — those
+/// must go. Unrelated retained compute graphs are left intact across resize.
 fn evict_retained_touching_scratch(
     backend: &mut CudaBackend,
     destroyed_handles: &[TextureHandle],
@@ -584,19 +581,30 @@ fn evict_retained_touching_scratch(
 
     let touches = |entry: &super::RetainedEntry| -> bool {
         match entry {
-            super::RetainedEntry::Graph { scratch_images, .. }
-            | super::RetainedEntry::GraphWithTail { scratch_images, .. } => {
-                scratch_images.iter().any(|(surface, image)| {
+            super::RetainedEntry::Segmented {
+                segments,
+                scratch_images,
+                ..
+            } => {
+                let scratch_hit = scratch_images.iter().any(|(surface, image)| {
                     backend
                         .surfaces
                         .get(surface)
                         .and_then(|state| state.scratch.get(*image))
                         .and_then(|slot| slot.as_ref())
                         .is_some_and(|slot| handles.contains(&slot.texture_handle))
-                })
+                });
+                if scratch_hit {
+                    return true;
+                }
+                let stream_ops = super::pending_submit::collect_stream_ops(segments.as_ref());
+                let (_buffers, _modules, textures, _hosts) = super::pending_submit::collect_pins(&stream_ops);
+                textures
+                    .iter()
+                    .any(|texture| destroyed_ptrs.contains(&Arc::as_ptr(texture)))
             }
-            super::RetainedEntry::Ops(ops) => {
-                let (buffers, modules, textures) = super::pending_submit::collect_pins(ops);
+            super::RetainedEntry::Ops { ops, .. } => {
+                let (buffers, modules, textures, _hosts) = super::pending_submit::collect_pins(ops.as_ref());
                 let _ = (buffers, modules, &slots);
                 textures
                     .iter()
@@ -632,10 +640,7 @@ fn evict_retained_touching_scratch(
     // Belt-and-suspenders: if a captured graph somehow pinned imported scratch, evict it.
     if !destroyed_ptrs.is_empty() {
         for (&(ctx, key), entry) in backend.retained.iter() {
-            if !matches!(
-                entry,
-                super::RetainedEntry::Graph { .. } | super::RetainedEntry::GraphWithTail { .. }
-            ) {
+            if !matches!(entry, super::RetainedEntry::Segmented { .. }) {
                 continue;
             }
             let Some(context) = backend.contexts.get(&ctx) else {
@@ -647,10 +652,11 @@ fn evict_retained_touching_scratch(
             let Ok(registry) = device.graph_registry.lock() else {
                 continue;
             };
-            if let Some(part) = registry.get(ctx, key) {
-                if part.textures.iter().any(|t| destroyed_ptrs.contains(&Arc::as_ptr(t))) {
-                    stale.push((ctx, key));
-                }
+            if destroyed_ptrs
+                .iter()
+                .any(|ptr| registry.program_holds_texture_ptr(ctx, key, *ptr))
+            {
+                stale.push((ctx, key));
             }
         }
     }
@@ -688,19 +694,23 @@ pub(super) fn begin_frame(
         )
     };
 
-    if let Some(SendSyncHandle(waitable)) = waitable {
-        unsafe { WaitForSingleObject(waitable, INFINITE) };
-    }
-    // Per-surface present_cmd_slots: wait only this surface's slot fence (plus DXGI
-    // waitable above). Do not touch companion.present_slots — those are shared and
+    // Per-surface present_cmd_slots: wait only this surface's recycle fence (plus DXGI
+    // waitable below). Do not touch companion.present_slots — those are shared and
     // caused multi-window freezes/teardown hangs when one surface destroyed others' lists.
     let companion = companion_ref(backend, device)?;
     let slot_prev = backend.surfaces.get(&surface).unwrap().present_cmd_slots[present_slot]
         .fence_value
         .load(Ordering::Acquire);
     let wait_fence = prev_fence.max(slot_prev);
+    // DXGI waitable first (frame-latency cap), then this staging slot's recycle fence
+    // (allocator / ring wrap). Scratch identity is `present_slot`, not the DXGI index.
+    if let Some(SendSyncHandle(waitable)) = waitable {
+        let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
+        unsafe { WaitForSingleObject(waitable, INFINITE) };
+    }
     if wait_fence > 0 {
-        companion.cpu_wait(wait_fence)?;
+        let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
+        companion.cpu_wait_recycle(wait_fence)?;
         backend.surfaces.get_mut(&surface).unwrap().slot_fence[present_slot] = 0;
     }
 
@@ -711,7 +721,10 @@ pub(super) fn begin_frame(
         idx as usize
     };
 
-    let tex_handle = ensure_scratch(backend, surface, image_index)?;
+    let tex_handle = {
+        let _tz = crate::tracy_zone!("surface.acquire.ensure_scratch");
+        ensure_scratch(backend, surface, present_slot)?
+    };
 
     {
         let state = backend.surfaces.get_mut(&surface).unwrap();
@@ -730,7 +743,7 @@ pub(super) fn begin_frame(
             surface,
             image: image_index as SwapchainImageHandle,
             context: ctx,
-            frame_slot: image_index as u32,
+            frame_slot: present_slot as u32,
             present_slot: present_slot as u32,
         },
         tex_handle,
@@ -762,6 +775,7 @@ pub(super) fn take_present_gpu_work(
 ) -> Result<Box<dyn PresentGpuWork>> {
     let surface_handle = frame.surface;
     let image_index = frame.image as usize;
+    let scratch_slot = frame.frame_slot as usize;
     let present_slot = frame.present_slot as usize;
 
     if let Some(s) = backend.surfaces.get_mut(&surface_handle) {
@@ -780,20 +794,19 @@ pub(super) fn take_present_gpu_work(
     );
 
     let context = Arc::clone(backend.context(frame.context)?);
-    let (worker, next_timeline, event_ledger, cuda_ctx) = {
+    let (worker, next_timeline, event_ledger) = {
         let gpu = backend.device(device)?;
         (
             Arc::clone(&gpu.submission_worker),
             Arc::clone(&gpu.next_timeline),
             Arc::clone(&gpu.event_ledger),
-            Arc::clone(&gpu.ctx),
         )
     };
 
     let present_source = backend
         .surfaces
         .get_mut(&surface_handle)
-        .and_then(|state| state.scratch.get_mut(image_index))
+        .and_then(|state| state.scratch.get_mut(scratch_slot))
         .and_then(|slot| slot.as_mut())
         .context("no scratch for present")?
         .present_source
@@ -837,65 +850,36 @@ pub(super) fn take_present_gpu_work(
 
     // Goldy timeline value for present/copy completion (same namespace as compute).
     //
-    // CUDA scratch present publishes a CUDA event: after DX12 Execute/Signal,
-    // PresentGpuWork waits the companion fence on `present_stream`
-    // (`cuWaitExternalSemaphoresAsync`, Signal already issued) and records the
-    // event there. Downstream CUDA submits then `stream.wait(event)` — device-side
-    // CUDA→CUDA ordering — instead of demoting a Dx12Fence ledger entry onto the
-    // submission stream (which deposits sticky NOT_SUPPORTED on this WDDM stack).
-    //
-    // Dx12Raster (direct raster) stays on the companion fence ledger: no CUDA body
-    // to bridge and no per-frame present-completion event allocation in steady state.
-    // Fence values stay allocated at Signal time in `run` (not here).
+    // Scratch and raster-direct present both publish a companion-fence ledger entry.
+    // Fence values stay allocated at Signal time in `run` (not here) so allocation
+    // does not race other companion fence users or collapse present-slot wait depth.
+    // Compute submits must not `cuWaitExternalSemaphoresAsync` this value.
     let present_tv = submission_worker::allocate_timeline_value(&next_timeline);
-    let dx12_raster_direct = matches!(&present_source, Some(PresentSource::Dx12Raster { .. }));
-    let present_completion = if dx12_raster_direct {
-        // Fence value is bound at Signal time in PresentGpuWork::run — allocating here
-        // races other companion fence users and collapses present-slot wait depth.
-        event_ledger.lock().unwrap().insert(
-            present_tv,
-            LedgerEntry {
-                context: frame.context,
-                completion: LedgerCompletion::Dx12Fence {
-                    companion: Arc::clone(&companion),
-                    value: 0,
-                },
-                recorded: false,
+    event_ledger.lock().unwrap().insert(
+        present_tv,
+        LedgerEntry {
+            context: frame.context,
+            completion: LedgerCompletion::Dx12Fence {
+                companion: Arc::clone(&companion),
+                value: 0,
+                recycle: true,
             },
-        );
-        PresentCompletion::Dx12Fence
-    } else {
-        let present_event = Arc::new(
-            cuda_ctx
-                .new_event(None)
-                .context("CUDA/DX12: create present completion event failed")?,
-        );
-        event_ledger.lock().unwrap().insert(
-            present_tv,
-            LedgerEntry {
-                context: frame.context,
-                completion: LedgerCompletion::CudaEvent(Arc::clone(&present_event)),
-                recorded: false,
-            },
-        );
-        backend
-            .graph_stats
-            .present_completion_events
-            .fetch_add(1, Ordering::Relaxed);
-        backend.graph_stats.completion_events.fetch_add(1, Ordering::Relaxed);
-        PresentCompletion::CudaEvent(present_event)
-    };
+            recorded: false,
+        },
+    );
 
     // New CUDA scratch submits signal in their own tail. Keep a temporary handoff
     // only for callers that supplied a submit timeline without a scratch-tail signal.
+    //
+    // Steady-state scratch: do **not** CPU-join the worker here (under the backend
+    // lock). `PresentGpuWork::run` waits for `submit_tv` so the ready-fence
+    // `SignalExternalFence` is queued before the hop `Wait`.
+    let join_submit_tv = if direct_cuda_complete > 0 && submit_tv > 0 {
+        Some(submit_tv)
+    } else {
+        None
+    };
     let cuda_complete = if direct_cuda_complete > 0 {
-        // Join the worker so `SignalExternalFence(cuda_complete)` has been issued to
-        // CUDA before we Queue.Signal a higher present return fence (see module docs).
-        if submit_tv > 0 {
-            worker
-                .wait_submitted_if_scheduled(submit_tv, submission_worker::submission_horizon(&next_timeline))
-                .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
-        }
         direct_cuda_complete
     } else if let Some(submit_event) = submit_event {
         let signal_value = companion.next_fence_value();
@@ -924,11 +908,10 @@ pub(super) fn take_present_gpu_work(
     let state = backend.surfaces.get_mut(&surface_handle).context("invalid surface")?;
     let scratch = state
         .scratch
-        .get_mut(image_index)
+        .get_mut(scratch_slot)
         .and_then(|s| s.as_mut())
         .context("no scratch for present")?;
     let scratch_handle = scratch.texture_handle;
-    let blit_target = scratch.shared.blit_target.clone();
     let width = scratch.shared.width;
     let height = scratch.shared.height;
     // Prefer a stashed DX12 raster RT over CUDA-written imported scratch.
@@ -944,6 +927,12 @@ pub(super) fn take_present_gpu_work(
             SURFACE_COMPUTE_FORMAT,
         ),
     };
+    if color_src_format != SURFACE_COMPUTE_FORMAT {
+        bail!(
+            "CUDA/DX12: present source format {color_src_format:?} must match \
+             surface {SURFACE_COMPUTE_FORMAT:?}"
+        );
+    }
     let backbuffer = state.backbuffers[image_index].clone();
     let backbuffer_from_common = state.backbuffer_in_common[image_index];
     let swapchain = state.swapchain.clone();
@@ -958,7 +947,6 @@ pub(super) fn take_present_gpu_work(
         color_src_ptr: color_src.as_raw() as usize,
         color_src_state: Some(color_src_state),
         color_src_format: Some(color_src_format),
-        blit_target_ptr: blit_target.as_raw() as usize,
         backbuffer_ptr: backbuffer.as_raw() as usize,
         image_index,
         width,
@@ -976,34 +964,15 @@ pub(super) fn take_present_gpu_work(
             && prior.color_src_ptr == cache_entry.color_src_ptr
             && prior.color_src_state == cache_entry.color_src_state
             && prior.color_src_format == cache_entry.color_src_format
-            && prior.blit_target_ptr == cache_entry.blit_target_ptr
             && prior.backbuffer_ptr == cache_entry.backbuffer_ptr
             && prior.image_index == cache_entry.image_index
             && prior.width == cache_entry.width
             && prior.height == cache_entry.height
             && prior.backbuffer_from_common == cache_entry.backbuffer_from_common
     };
-    companion.as_ref(); // keep alive
-    let blit = &state.blit;
-    if !reuse_list {
-        blit.write_descriptors(
-            &companion.device,
-            image_index,
-            &color_src,
-            &blit_target,
-            color_src_format,
-        )?;
-    }
 
     let allocator = present_cmd_slots[present_slot].allocator.clone();
     let list = present_cmd_slots[present_slot].list.clone();
-    let blit_pipe = PresentBlitPipeline {
-        root_signature: state.blit.root_signature.clone(),
-        pso_float: state.blit.pso_float.clone(),
-        pso_unorm8: state.blit.pso_unorm8.clone(),
-        srv_uav_heap: state.blit.srv_uav_heap.clone(),
-        descriptor_size: state.blit.descriptor_size,
-    };
 
     Ok(Box::new(CudaDx12PresentGpuWork {
         frame,
@@ -1011,8 +980,11 @@ pub(super) fn take_present_gpu_work(
         present_slot,
         scratch_handle,
         cuda_complete,
+        join_submit_tv,
+        copy_timeline: (submit_tv > 0).then_some(submit_tv),
+        worker: Arc::clone(&worker),
+        next_timeline: Arc::clone(&next_timeline),
         present_tv,
-        present_completion,
         event_ledger,
         stats: Arc::clone(&backend.graph_stats),
         context,
@@ -1021,17 +993,13 @@ pub(super) fn take_present_gpu_work(
         color_src,
         color_src_state,
         color_src_format,
-        blit_target,
         backbuffer,
         backbuffer_from_common,
         allocator,
         list,
-        blit: blit_pipe,
         swapchain,
         present_mode,
         allow_tearing,
-        width,
-        height,
         present_cache,
         cache_entry,
         reuse_list,
@@ -1045,13 +1013,14 @@ pub(super) fn finish_present(
 ) -> Result<crate::timeline::TimelineValue> {
     let surface = finish.frame.surface;
     let present_slot = finish.frame.present_slot as usize;
+    let scratch_slot = finish.frame.frame_slot as usize;
     let image_index = finish.frame.image as usize;
     let ctx = finish.frame.context;
 
     if let Some(state) = backend.surfaces.get_mut(&surface) {
         if finish.return_fence > 0 {
             state.slot_fence[present_slot] = finish.return_fence;
-            if let Some(slot) = state.scratch.get_mut(image_index).and_then(|s| s.as_mut()) {
+            if let Some(slot) = state.scratch.get_mut(scratch_slot).and_then(|s| s.as_mut()) {
                 slot.dx12_complete = finish.return_fence;
                 slot.pending_scratch_reuse_fence = finish.return_fence;
             }
@@ -1107,13 +1076,19 @@ impl PendingSubmit for CudaPresentHandoff {
 
 struct CudaDx12PresentGpuWork {
     frame: FrameToken,
+    #[allow(dead_code)]
     image_index: usize,
     #[allow(dead_code)]
     present_slot: usize,
     scratch_handle: TextureHandle,
     cuda_complete: u64,
+    /// When set, join the submission worker for this timeline before companion `Signal(W)`.
+    join_submit_tv: Option<crate::timeline::TimelineValue>,
+    /// Present-partition submit TV (compute export), not display present.
+    copy_timeline: Option<crate::timeline::TimelineValue>,
+    worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
+    next_timeline: Arc<std::sync::atomic::AtomicU64>,
     present_tv: crate::timeline::TimelineValue,
-    present_completion: PresentCompletion,
     event_ledger: EventLedger,
     stats: Arc<super::retained_graph::CudaGraphStats>,
     context: Arc<CudaSubmitContext>,
@@ -1122,38 +1097,39 @@ struct CudaDx12PresentGpuWork {
     color_src: ID3D12Resource,
     color_src_state: PresentColorSrcState,
     color_src_format: crate::types::TextureFormat,
-    blit_target: ID3D12Resource,
     backbuffer: ID3D12Resource,
     backbuffer_from_common: bool,
     allocator: ID3D12CommandAllocator,
     list: ID3D12GraphicsCommandList,
-    blit: PresentBlitPipeline,
     swapchain: IDXGISwapChain3,
     present_mode: crate::types::PresentMode,
     allow_tearing: bool,
-    width: u32,
-    height: u32,
     present_cache: Arc<Mutex<[PresentListCache; MAX_FRAMES]>>,
     cache_entry: PresentListCache,
     reuse_list: bool,
-}
-
-enum PresentCompletion {
-    /// Present completion bridged to CUDA via `present_stream` after DX12 Signal.
-    CudaEvent(Arc<CudaEvent>),
-    /// Raster-direct: companion fence allocated at Execute/Signal, not in take_present.
-    Dx12Fence,
 }
 
 impl PresentGpuWork for CudaDx12PresentGpuWork {
     fn run(mut self: Box<Self>) -> Result<PresentFinishState> {
         // Cross-domain only: CUDA→DX12 external fence. Raster→present on the same
         // DIRECT queue is already ordered by submission; do not wait_queue(dx12_src_fence).
-        // `take_present_gpu_work` already joined the submission worker so CUDA's
-        // Signal(cuda_complete) was issued before we Signal a higher return fence.
-        if self.cuda_complete > 0 {
-            self.companion.wait_queue(self.cuda_complete)?;
+        // Flip-model backbuffers are DWM-shared — CopyResource stays on DIRECT.
+        //
+        // Join the submission worker so `SignalExternalFence(cuda_complete)` has been
+        // issued to CUDA before we Queue.Signal a higher present return fence (module
+        // docs). Done here — off the backend lock — not in `take_present_gpu_work`.
+        if let Some(submit_tv) = self.join_submit_tv {
+            let _tz = crate::tracy_zone!("present.join_submit");
+            self.worker
+                .wait_submitted_if_scheduled(submit_tv, submission_worker::submission_horizon(&self.next_timeline))
+                .context("CUDA/DX12: wait for scratch SignalExternalFence before present")?;
         }
+        let hop = if self.cuda_complete > 0 {
+            let _tz = crate::tracy_zone!("present.wait_cuda");
+            Some(self.companion.hop_wait_cuda(self.cuda_complete)?)
+        } else {
+            None
+        };
 
         if !self.reuse_list {
             // begin_frame already CPU-waited the global + per-surface present-slot fences.
@@ -1168,27 +1144,24 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
 
             record_present_copy(
                 &self.list,
-                &self.blit,
-                self.image_index,
                 &self.color_src,
                 self.color_src_state,
                 self.color_src_format,
-                &self.blit_target,
                 &self.backbuffer,
                 self.backbuffer_from_common,
-                self.width,
-                self.height,
             )?;
             unsafe { self.list.Close() }.context("close present list")?;
             self.stats.present_list_records.fetch_add(1, Ordering::Relaxed);
         }
 
         let cmd: ID3D12CommandList = self.list.cast().context("cast present list")?;
-        let return_fence = self.companion.next_fence_value();
-        if matches!(self.present_completion, PresentCompletion::Dx12Fence) {
-            timeline::bind_dx12_fence_value(&self.event_ledger, self.present_tv, return_fence);
+        let return_fence = self.companion.next_recycle_value();
+        timeline::bind_dx12_fence_value(&self.event_ledger, self.present_tv, return_fence);
+        {
+            let _tz = crate::tracy_zone!("present.copy");
+            self.companion
+                .execute_and_recycle_after_hop(&[Some(cmd)], hop, return_fence)?;
         }
-        self.companion.execute_and_signal(&[Some(cmd)], return_fence)?;
         self.present_cmd_slots[self.present_slot]
             .fence_value
             .store(return_fence, Ordering::Release);
@@ -1198,48 +1171,26 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
 
         // Flip-model Present is ordered after the copy on the DX12 queue; no CPU wait.
         let (sync_interval, flags) = present_args(self.present_mode, self.allow_tearing);
-        let hr = unsafe { self.swapchain.Present(sync_interval, flags) };
+        let hr = {
+            let _tz = crate::tracy_zone!("present.swapchain");
+            unsafe { self.swapchain.Present(sync_interval, flags) }
+        };
         // Present may fail after the copy is already submitted. Always retire
         // `return_fence` so allocator / scratch reuse stays guarded via finish_present.
         let present_ok = hr.is_ok();
         if !present_ok {
+            let removed = unsafe { self.companion.device.GetDeviceRemovedReason() };
             tracing::error!(
-                "CUDA/DX12: Present failed: {hr:?} sync_interval={sync_interval} flags={flags:?} \
+                "CUDA/DX12: Present failed: {hr:?} removed={removed:?} \
+                 sync_interval={sync_interval} flags={flags:?} \
                  (retiring copy fence {return_fence})"
             );
         }
 
-        // Publish present/copy completion on the Goldy timeline.
-        match self.present_completion {
-            PresentCompletion::CudaEvent(ref present_event) => {
-                // Bridge DX12 Signal → CUDA event on the dedicated present stream (Signal
-                // already issued — satisfies CUDA external-semaphore wait-before-signal rule).
-                // Do not wait the fence on the submission stream; that path poisons later
-                // cuStreamSynchronize on WDDM+D3D12.
-                cuda_wait_fence(
-                    &self.companion.cuda_ctx,
-                    self.companion.cuda_semaphore,
-                    self.companion.present_stream.cu_stream(),
-                    return_fence,
-                )?;
-                present_event
-                    .record(&self.companion.present_stream)
-                    .context("CUDA/DX12: record present completion event")?;
-                // Leave present_stream async — ledger polling retires the timeline later.
-            }
-            PresentCompletion::Dx12Fence => {
-                // DX12 fence ledger: copy completion is already on the companion fence.
-            }
-        }
+        // Copy/Present completion is the companion fence (`return_fence`). Do not
+        // wait it on a CUDA stream — that wakes the CUDA context after DXGI Present.
         timeline::mark_recorded(&self.event_ledger, self.present_tv);
-        timeline::poll_retire_events(
-            &self.event_ledger,
-            &self.context.completed,
-            self.context.handle,
-            &self.context.device_retired,
-            &self.context.signal_queue,
-            &self.context.last_emitted,
-        );
+        self.context.poll_retire_events();
 
         Ok(PresentFinishState {
             frame: self.frame,
@@ -1247,7 +1198,7 @@ impl PresentGpuWork for CudaDx12PresentGpuWork {
             scratch_texture: Some(self.scratch_handle),
             scratch_layout_updated: true,
             present_timeline: self.present_tv,
-            copy_timeline: Some(self.present_tv),
+            copy_timeline: self.copy_timeline,
             frame_compute_timeline: None,
             signal_timeline: None,
             render_pass_submitted: false,
@@ -1290,16 +1241,20 @@ fn ensure_scratch(backend: &mut CudaBackend, surface: SurfaceHandle, image_index
             .get_mut(image_index)
             .and_then(|s| s.take())
         {
-            let retire_at = present_source_fence(&slot.present_source).max(slot.dx12_complete);
+            let ready_at = present_source_fence(&slot.present_source);
+            let recycle_at = slot.dx12_complete;
             unregister_scratch_texture(backend, old);
             backend
                 .surfaces
                 .get_mut(&surface)
                 .unwrap()
                 .pending_scratch
-                .push(PendingScratchDrop { retire_at, slot });
-            if retire_at > 0 {
-                wait_surface_resources_idle(backend, device, retire_at)?;
+                .push(PendingScratchDrop {
+                    retire_at: recycle_at,
+                    slot,
+                });
+            if ready_at > 0 || recycle_at > 0 {
+                wait_surface_resources_idle(backend, device, ready_at, recycle_at)?;
             }
             drain_pending_scratch(backend, surface)?;
         }
@@ -1315,19 +1270,6 @@ fn ensure_scratch(backend: &mut CudaBackend, surface: SurfaceHandle, image_index
         let companion = companion_ref(backend, device)?;
         SharedScratchTexture::create(companion, &cuda_ctx, width, height, storage_slot)?
     };
-
-    // Write blit descriptors for this image index.
-    {
-        let companion = companion_ref(backend, device)?;
-        let state = backend.surfaces.get(&surface).unwrap();
-        state.blit.write_descriptors(
-            &companion.device,
-            image_index,
-            &shared.d3d12_resource,
-            &shared.blit_target,
-            SURFACE_COMPUTE_FORMAT,
-        )?;
-    }
 
     let texture_handle = backend.next_texture;
     backend.next_texture += 1;
@@ -1374,7 +1316,7 @@ fn drain_pending_scratch(backend: &mut CudaBackend, surface: SurfaceHandle) -> R
         .device;
     let completed = {
         let companion = companion_ref(backend, device)?;
-        unsafe { companion.fence.GetCompletedValue() }
+        unsafe { companion.recycle_fence.GetCompletedValue() }
     };
     let state = backend.surfaces.get_mut(&surface).unwrap();
     let mut still_pending = Vec::new();
@@ -1440,35 +1382,43 @@ fn cuda_device_has_pending_work(backend: &CudaBackend, device: DeviceHandle) -> 
 /// Drain GPU work that may still reference this surface's imported scratch / present slots.
 ///
 /// Skips CUDA stream synchronizes when the event ledger shows no in-flight work (common
-/// between frames). Skips the DX12 CPU wait when `fence_high` has already retired.
-fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, mut fence_high: u64) -> Result<()> {
-    let (worker, present_stream, companion, cuda_ctx) = {
+/// between frames). Skips DX12 CPU waits when the corresponding fence has already retired.
+fn wait_surface_resources_idle(
+    backend: &mut CudaBackend,
+    device: DeviceHandle,
+    mut ready_high: u64,
+    mut recycle_high: u64,
+) -> Result<()> {
+    let (worker, companion, cuda_ctx) = {
         let gpu = backend.device(device)?;
         let companion = gpu.dx12.as_ref().map(Arc::clone);
         if let Some(c) = companion.as_ref() {
-            fence_high = fence_high.max(c.companion_fence_high_water());
+            ready_high = ready_high.max(c.companion_ready_high_water());
+            recycle_high = recycle_high.max(c.companion_recycle_high_water());
         }
-        (
-            Arc::clone(&gpu.submission_worker),
-            companion.as_ref().map(|c| Arc::clone(&c.present_stream)),
-            companion,
-            Arc::clone(&gpu.ctx),
-        )
+        (Arc::clone(&gpu.submission_worker), companion, Arc::clone(&gpu.ctx))
     };
     worker
         .flush()
         .context("CUDA/DX12: flush submission worker before surface teardown")?;
     backend.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
 
-    // Retire DX12 first so any CUDA WaitExternalFence (scratch reuse) can complete
-    // before cuStreamSynchronize.
+    // Recycle first so CUDA WaitExternalFence(scratch wrap) can complete, then ready.
     if let Some(companion) = companion.as_ref() {
-        if fence_high > 0 {
-            let completed = unsafe { companion.fence.GetCompletedValue() };
-            if completed < fence_high {
+        if recycle_high > 0 {
+            let completed = unsafe { companion.recycle_fence.GetCompletedValue() };
+            if completed < recycle_high {
                 companion
-                    .cpu_wait(fence_high)
-                    .context("CUDA/DX12: companion fence wait before surface teardown")?;
+                    .cpu_wait_recycle(recycle_high)
+                    .context("CUDA/DX12: recycle fence wait before surface teardown")?;
+            }
+        }
+        if ready_high > 0 {
+            let completed = unsafe { companion.fence.GetCompletedValue() };
+            if completed < ready_high {
+                companion
+                    .cpu_wait(ready_high)
+                    .context("CUDA/DX12: ready fence wait before surface teardown")?;
             }
         }
     }
@@ -1489,13 +1439,6 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
                 "context stream synchronize before surface resource sync",
             )?;
         }
-        if let Some(stream) = present_stream {
-            super::cuda_context_stream_sync_after_interop(
-                &cuda_ctx,
-                &stream,
-                "present stream synchronize before surface resource sync",
-            )?;
-        }
     }
     Ok(())
 }
@@ -1503,24 +1446,22 @@ fn wait_surface_resources_idle(backend: &mut CudaBackend, device: DeviceHandle, 
 /// Full CUDA + DX12 drain used when destroying a surface or replacing a size-mismatched
 /// scratch outside `surface_resize` (no per-surface fence high-water available yet).
 fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle) -> Result<()> {
-    let (worker, alloc_stream, present_stream, companion, cuda_ctx) = {
+    let (worker, alloc_stream, companion, cuda_ctx) = {
         let gpu = backend.device(device)?;
         (
             Arc::clone(&gpu.submission_worker),
             Arc::clone(&gpu.alloc_stream),
-            gpu.dx12.as_ref().map(|c| Arc::clone(&c.present_stream)),
             gpu.dx12.as_ref().map(Arc::clone),
             Arc::clone(&gpu.ctx),
         )
     };
-    // Unblock CUDA WaitExternalFence on the submission/present streams before joining
+    // Unblock CUDA WaitExternalFence on submission streams before joining
     // the worker. Otherwise flush waits forever on a Wait whose Signal sits behind a
     // stalled DX12 queue or was never issued (multi-window teardown).
     if let Some(companion) = companion.as_ref() {
-        let unblock = companion.next_fence_value();
         companion
-            .signal_queue(unblock)
-            .context("CUDA/DX12: signal fence to unblock CUDA waits before teardown flush")?;
+            .signal_both_fences_for_teardown()
+            .context("CUDA/DX12: signal fences to unblock CUDA waits before teardown flush")?;
     }
     worker
         .flush()
@@ -1551,13 +1492,6 @@ fn wait_device_idle_for_surface(backend: &mut CudaBackend, device: DeviceHandle)
             &cuda_ctx,
             &context.stream,
             "context stream synchronize before surface teardown",
-        )?;
-    }
-    if let Some(stream) = present_stream {
-        super::cuda_context_stream_sync_after_interop(
-            &cuda_ctx,
-            &stream,
-            "present stream synchronize before surface teardown",
         )?;
     }
     super::cuda_context_stream_sync_after_interop(
@@ -1701,23 +1635,28 @@ mod present_tests {
         let finish = work.run().expect("present run");
         let present_tv = backend.finish_present(finish, 0).expect("finish_present");
         assert!(present_tv > 0, "present must allocate a Goldy timeline value");
-        // Must be waitable on the Goldy timeline (CUDA event or DX12 fence ledger entry).
-        let completion = timeline::lookup_completion(&backend.context(ctx).unwrap().event_ledger, ctx, present_tv);
-        assert!(
-            completion.is_some(),
-            "present_tv {present_tv} missing from CUDA event ledger"
-        );
         backend
             .wait_until(ctx, present_tv)
             .expect("wait_until present_tv on Goldy timeline");
-        match completion.unwrap() {
-            LedgerCompletion::CudaEvent(event) => assert!(
-                event.is_complete(),
-                "present_tv {present_tv} event should complete after wait_until"
-            ),
+        let completion = timeline::lookup_completion(&backend.context(ctx).unwrap().event_ledger, ctx, present_tv);
+        match completion {
+            None => {
+                // Recycle-fence present can retire and prune before lookup.
+                assert!(
+                    backend.gpu_progress(ctx) >= present_tv,
+                    "present_tv {present_tv} missing from ledger and not retired"
+                );
+            }
+            Some(LedgerCompletion::CudaEvent(_)) => {
+                panic!("present_tv {present_tv} should be a DX12 fence ledger entry")
+            }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::Dx12Fence { companion, value } => assert!(
-                unsafe { companion.fence.GetCompletedValue() } >= value,
+            Some(LedgerCompletion::Dx12Fence {
+                companion,
+                value,
+                recycle,
+            }) => assert!(
+                companion.timeline_completed(value, recycle),
                 "present_tv {present_tv} DX12 fence should complete after wait_until"
             ),
         }

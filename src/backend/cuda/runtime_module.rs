@@ -119,6 +119,21 @@ pub(super) fn load_indirect_updater(ctx: &Arc<CudaContext>, compute_capability: 
             include.display()
         )
     })?;
+    if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+        use std::io::Write;
+        let dir = std::path::Path::new(&dump_dir);
+        let _ = std::fs::create_dir_all(dir);
+        let cu_path = dir.join("goldy_apply_dispatch_shape.cu");
+        let ptx_path = dir.join("goldy_apply_dispatch_shape.ptx");
+        if let Ok(mut file) = std::fs::File::create(&cu_path) {
+            let _ = file.write_all(APPLY_DISPATCH_SHAPE_SRC.as_bytes());
+            tracing::info!("Dumped CUDA shader to {}", cu_path.display());
+        }
+        if let Ok(mut file) = std::fs::File::create(&ptx_path) {
+            let _ = file.write_all(ptx.to_src().as_bytes());
+            tracing::info!("Dumped CUDA shader to {}", ptx_path.display());
+        }
+    }
     let module = ctx
         .load_module(ptx)
         .context("CUDA: load indirect updater PTX module failed")?;

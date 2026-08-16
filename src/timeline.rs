@@ -71,10 +71,6 @@ impl<T: Copy + Default> SmallContextMap<T> {
         self.inline_len == 0 && self.spill.is_empty()
     }
 
-    pub fn len(&self) -> usize {
-        self.inline_len as usize + self.spill.len()
-    }
-
     pub fn get(&self, key: ContextHandle) -> Option<T> {
         self.find(key).map(|loc| self.read(loc))
     }

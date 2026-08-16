@@ -189,7 +189,7 @@ impl Drop for OwnedCudaGraph {
 // and shut down during device/context teardown.
 unsafe impl Send for OwnedCudaGraph {}
 
-/// One captured partition graph plus pinned resources it references.
+/// One captured graph island plus pinned resources it references.
 pub(super) struct CudaRetainedPartition {
     pub graph: OwnedCudaGraph,
     /// Keep buffer allocations alive for the lifetime of the graph (baked device pointers).
@@ -201,40 +201,72 @@ pub(super) struct CudaRetainedPartition {
     /// Keep CUDA texture arrays / tex/surf objects alive for baked handles.
     #[allow(dead_code)]
     pub textures: Vec<Arc<super::texture::CudaTextureResource>>,
+    /// Keep pinned host staging alive for captured HtoD memcpy nodes.
+    #[allow(dead_code)]
+    pub hosts: Vec<Arc<Mutex<super::pinned_host::CudaPinnedHost>>>,
     pub last_launch_tv: u64,
 }
 
 // SAFETY: see [`OwnedCudaGraph`].
 unsafe impl Send for CudaRetainedPartition {}
 
-/// Worker-owned map of retained CUDA graphs keyed by `(context, partition_key)`.
+/// All captured graph islands for one retainable partition key.
+///
+/// Stream-replayed segments live in the backend's [`super::RetainedEntry`] metadata;
+/// only capturable islands are stored here.
+pub(super) struct CudaRetainedProgram {
+    pub islands: Vec<CudaRetainedPartition>,
+    pub last_launch_tv: u64,
+}
+
+impl CudaRetainedProgram {
+    pub fn last_launch_tv(&self) -> u64 {
+        self.islands
+            .iter()
+            .map(|island| island.last_launch_tv)
+            .fold(self.last_launch_tv, u64::max)
+    }
+
+    fn holds_memory(&self, memory: &Arc<Mutex<CudaSlice<u8>>>, stream: &CudaStream, target_device_ptr: u64) -> bool {
+        self.islands
+            .iter()
+            .any(|island| partition_holds_memory(island, memory, stream, target_device_ptr))
+    }
+
+    fn holds_texture_ptr(&self, ptr: *const super::texture::CudaTextureResource) -> bool {
+        self.islands
+            .iter()
+            .any(|island| island.textures.iter().any(|t| Arc::as_ptr(t) == ptr))
+    }
+}
+
+// SAFETY: see [`OwnedCudaGraph`].
+unsafe impl Send for CudaRetainedProgram {}
+
+/// Worker-owned map of retained CUDA graph programs keyed by `(context, partition_key)`.
 #[derive(Default)]
 pub(super) struct GraphRegistry {
-    graphs: HashMap<(crate::backend::ContextHandle, u64), CudaRetainedPartition>,
-    /// Graphs removed from `graphs` but still referenced by in-flight launches.
-    pending_drops: Vec<(u64, CudaRetainedPartition)>,
+    graphs: HashMap<(crate::backend::ContextHandle, u64), CudaRetainedProgram>,
+    /// Programs removed from `graphs` but still referenced by in-flight launches.
+    pending_drops: Vec<(u64, CudaRetainedProgram)>,
 }
 
 impl GraphRegistry {
-    pub fn insert(&mut self, ctx: crate::backend::ContextHandle, key: u64, partition: CudaRetainedPartition) {
-        if let Some(old) = self.graphs.insert((ctx, key), partition) {
+    pub fn insert(&mut self, ctx: crate::backend::ContextHandle, key: u64, program: CudaRetainedProgram) {
+        if let Some(old) = self.graphs.insert((ctx, key), program) {
             drop(old);
         }
     }
 
-    pub fn get_mut(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<&mut CudaRetainedPartition> {
+    pub fn get_mut(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<&mut CudaRetainedProgram> {
         self.graphs.get_mut(&(ctx, key))
     }
 
-    pub fn get(&self, ctx: crate::backend::ContextHandle, key: u64) -> Option<&CudaRetainedPartition> {
-        self.graphs.get(&(ctx, key))
-    }
-
-    pub fn remove(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<CudaRetainedPartition> {
+    pub fn remove(&mut self, ctx: crate::backend::ContextHandle, key: u64) -> Option<CudaRetainedProgram> {
         self.graphs.remove(&(ctx, key))
     }
 
-    pub fn remove_context(&mut self, ctx: crate::backend::ContextHandle) -> Vec<CudaRetainedPartition> {
+    pub fn remove_context(&mut self, ctx: crate::backend::ContextHandle) -> Vec<CudaRetainedProgram> {
         let keys: Vec<_> = self
             .graphs
             .keys()
@@ -249,8 +281,8 @@ impl GraphRegistry {
         out
     }
 
-    pub fn defer_drop(&mut self, retire_at: u64, partition: CudaRetainedPartition) {
-        self.pending_drops.push((retire_at, partition));
+    pub fn defer_drop(&mut self, retire_at: u64, program: CudaRetainedProgram) {
+        self.pending_drops.push((retire_at, program));
     }
 
     /// Drop any pending graphs whose last launch has retired.
@@ -272,16 +304,27 @@ impl GraphRegistry {
         let keys: Vec<_> = self
             .graphs
             .iter()
-            .filter(|(_, partition)| partition_holds_memory(partition, memory, stream, target_device_ptr))
+            .filter(|(_, program)| program.holds_memory(memory, stream, target_device_ptr))
             .map(|(key, _)| *key)
             .collect();
         for key in keys {
-            if let Some(partition) = self.graphs.remove(&key) {
-                drop(partition);
+            if let Some(program) = self.graphs.remove(&key) {
+                drop(program);
             }
         }
         self.pending_drops
-            .retain(|(_, partition)| !partition_holds_memory(partition, memory, stream, target_device_ptr));
+            .retain(|(_, program)| !program.holds_memory(memory, stream, target_device_ptr));
+    }
+
+    pub fn program_holds_texture_ptr(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        key: u64,
+        ptr: *const super::texture::CudaTextureResource,
+    ) -> bool {
+        self.graphs
+            .get(&(ctx, key))
+            .is_some_and(|program| program.holds_texture_ptr(ptr))
     }
 }
 

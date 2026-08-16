@@ -592,7 +592,7 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
         &shader,
         &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Rgba32Float,
+            target_format: TextureFormat::Rgba8Unorm,
             topology: PrimitiveTopology::TriangleList,
             depth_stencil: None,
         },
@@ -608,7 +608,7 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
         let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
         let (w, h) = surface.size();
         let rt = scheme
-            .lease_render_target(w, h, TextureFormat::Rgba32Float, None)
+            .lease_render_target(w, h, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         {
             let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));
@@ -678,7 +678,7 @@ fn cuda_teardown_context_before_surface_after_raster_present() {
         &shader,
         &RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
-            target_format: TextureFormat::Rgba32Float,
+            target_format: TextureFormat::Rgba8Unorm,
             topology: PrimitiveTopology::TriangleList,
             depth_stencil: None,
         },
@@ -694,7 +694,7 @@ fn cuda_teardown_context_before_surface_after_raster_present() {
         let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
         let (w, h) = surface.size();
         let rt = scheme
-            .lease_render_target(w, h, TextureFormat::Rgba32Float, None)
+            .lease_render_target(w, h, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         {
             let mut pass = scheme.render_pass("tri", &rt, TargetLoad::Clear(Color::BLACK));

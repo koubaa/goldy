@@ -15,6 +15,8 @@ use cudarc::driver::{
 };
 use std::sync::{Arc, Mutex};
 
+pub(super) use super::capture_gate::lock_capture_alloc_gate;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct U64Word(u64);
@@ -48,22 +50,60 @@ pub(super) struct CudaPendingSubmit {
     pub body: CudaSubmitBody,
 }
 
+/// One alternating segment of a retainable CUDA partition.
+///
+/// Graph-safe kernel runs and pinned host/device copies are captured into
+/// [`CudaOpSegment::Graph`] islands; remaining boundary ops (inline WriteBuffer,
+/// imported-surface copies, external fences) stay as stream-replayed ops.
+/// Multiple islands and stream segments may interleave; FIFO stream order preserves
+/// dependencies without inter-island events.
+#[derive(Clone)]
+pub(super) enum CudaOpSegment {
+    /// Contiguous graph-safe kernel launches (captured / relaunched).
+    Graph(Vec<CudaOp>),
+    /// Graph-unsafe boundary ops executed with `execute_ops`.
+    Stream(Vec<CudaOp>),
+}
+
+impl CudaOpSegment {
+    pub fn is_graph(&self) -> bool {
+        matches!(self, Self::Graph(_))
+    }
+
+    pub fn ops(&self) -> &[CudaOp] {
+        match self {
+            Self::Graph(ops) | Self::Stream(ops) => ops,
+        }
+    }
+}
+
+/// Retained relaunch plan: graph islands are markers only (payload lives in the registry).
+#[derive(Clone)]
+pub(super) enum CudaLaunchSegment {
+    Graph,
+    Stream(Vec<CudaOp>),
+}
+
 /// Body executed after the dynamic sync prefix and before the completion event.
 pub(super) enum CudaSubmitBody {
     /// Immediate stream ops (standalone submits and command-replay fallback).
-    Ops(Vec<CudaOp>),
-    /// Capture ops into a retained CUDA graph, then launch it once.
+    Ops {
+        ops: Vec<CudaOp>,
+        /// When false, surface prepare skips content-epoch bumps (already done by retained replay).
+        bump_content_epochs: bool,
+    },
+    /// Capture each [`CudaOpSegment::Graph`] into a retained island, then execute the
+    /// full segment list once (graph launch + stream replay).
     CaptureAndLaunch {
         key: u64,
-        ops: Vec<CudaOp>,
-        tail: Vec<CudaOp>,
+        segments: Vec<CudaOpSegment>,
         registry: Arc<Mutex<GraphRegistry>>,
         stats: Arc<CudaGraphStats>,
     },
-    /// Launch a previously retained CUDA graph.
+    /// Relaunch retained graph islands and replay stream segments in order.
     LaunchRetained {
         key: u64,
-        tail: Vec<CudaOp>,
+        segments: Vec<CudaLaunchSegment>,
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         scratch_images: Vec<(crate::backend::SurfaceHandle, usize)>,
         registry: Arc<Mutex<GraphRegistry>>,
@@ -88,9 +128,8 @@ pub(super) enum CudaOp {
         args: Vec<CudaLaunchArg>,
         keep_alive_buffers: Vec<Arc<Mutex<CudaSlice<u8>>>>,
         keep_alive_textures: Vec<Arc<super::texture::CudaTextureResource>>,
-        /// False for format-specialized PTX variants. Those kernels force the
-        /// partition onto op-list retention: capturing a graph prefix and replaying
-        /// the specialized kernel in a tail (`GraphWithTail`) has faulted on relaunch.
+        /// False for format-specialized PTX variants. Those kernels stay in
+        /// [`CudaOpSegment::Stream`]; capturing them into a graph has faulted on relaunch.
         graph_capture_ok: bool,
     },
     /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
@@ -126,17 +165,31 @@ pub(super) enum CudaOp {
         memory: Arc<Mutex<CudaSlice<u8>>>,
         abs_offset: u64,
         size: u64,
+        /// Device pointer of the clear range, baked at materialize (capture-safe).
+        device_ptr: u64,
     },
     Write {
         memory: Arc<Mutex<CudaSlice<u8>>>,
         abs_offset: u64,
         data: Vec<u8>,
     },
+    /// HtoD from CPU_WRITABLE pinned host staging, read at execute time (retained-safe).
+    WriteFromHost {
+        memory: Arc<Mutex<CudaSlice<u8>>>,
+        abs_offset: u64,
+        /// Device pointer of the destination range, baked at materialize (capture-safe).
+        device_ptr: u64,
+        host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
+        host_offset: usize,
+        len: usize,
+    },
     Copy {
         src: Arc<Mutex<CudaSlice<u8>>>,
         src_abs: u64,
+        src_ptr: u64,
         dst: Arc<Mutex<CudaSlice<u8>>>,
         dst_abs: u64,
+        dst_ptr: u64,
         size: u64,
     },
     WriteTexture {
@@ -148,9 +201,22 @@ pub(super) enum CudaOp {
         data: Vec<u8>,
         src_row_pitch: u32,
     },
+    /// Texture upload from CPU_WRITABLE pinned host staging, read at execute time (retained-safe).
+    WriteTextureFromHost {
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
+        host_offset: usize,
+        len: usize,
+        src_row_pitch: u32,
+    },
     CopyBufferToTexture {
         src: Arc<Mutex<CudaSlice<u8>>>,
         src_abs: u64,
+        src_ptr: u64,
         src_row_pitch: u32,
         texture: Arc<super::texture::CudaTextureResource>,
         x: u32,
@@ -184,6 +250,7 @@ pub(super) enum CudaOp {
         height: u32,
         dst: Arc<Mutex<CudaSlice<u8>>>,
         dst_abs: u64,
+        dst_ptr: u64,
         dst_row_pitch: u32,
     },
 }
@@ -198,12 +265,15 @@ unsafe impl Send for SendExternalSemaphore {}
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
 unsafe impl Sync for SendExternalSemaphore {}
 
-/// True when `ops` can be recorded into a CUDA graph without host allocation or HtoD.
+/// True when `ops` can be recorded into a CUDA graph.
 ///
 /// Kernel launches (direct and indirect) are capture-safe when they only touch
-/// driver-owned allocations. Launches that would write imported D3D12/external surface
-/// scratch are rewritten onto CUDA-owned staging before this check (with a
-/// `CopyTexture` export left in the non-capturable tail).
+/// driver-owned allocations. Pinned host→device copies, CUDA-owned memsets, and
+/// DtoD copies are also capture-safe: the captured node bakes the host/device
+/// pointer, matching D3D12's retained `CopyBufferRegion` from an UPLOAD heap.
+/// Launches that would write imported D3D12/external surface scratch are rewritten
+/// onto CUDA-owned staging before this check (with a `CopyTexture` export left in
+/// the non-capturable tail).
 pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
     match op {
         CudaOp::Launch {
@@ -216,19 +286,143 @@ pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
             graph_capture_ok,
             ..
         } => *graph_capture_ok && !keep_alive_textures.iter().any(|tex| tex.is_imported()),
+        CudaOp::Clear { .. } | CudaOp::WriteFromHost { .. } => true,
+        // Same-allocation copies allocate scratch during execute, which is not capturable.
+        CudaOp::Copy { src, dst, .. } => !Arc::ptr_eq(src, dst),
+        CudaOp::WriteTextureFromHost { texture, .. } | CudaOp::CopyBufferToTexture { texture, .. } => {
+            !texture.is_imported()
+        }
+        CudaOp::CopyTexture { src, dst } => !src.is_imported() && !dst.is_imported(),
+        // Inline `Write`/`WriteTexture` own a `Vec<u8>` whose address is not a
+        // stable pinned allocation. External fences are frame-varying.
         _ => false,
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn ops_are_graph_safe(ops: &[CudaOp]) -> bool {
     !ops.is_empty() && ops.iter().all(op_is_graph_safe)
 }
 
-pub(super) fn split_graph_core_and_tail(ops: Vec<CudaOp>) -> (Vec<CudaOp>, Vec<CudaOp>) {
-    let split = ops.iter().position(|op| !op_is_graph_safe(op)).unwrap_or(ops.len());
-    let mut core = ops;
-    let tail = core.split_off(split);
-    (core, tail)
+/// Split ops into maximal alternating graph-safe and stream-replay segments.
+///
+/// Contiguous graph-safe launches become [`CudaOpSegment::Graph`]; everything else
+/// coalesces into [`CudaOpSegment::Stream`]. Empty input yields an empty vec.
+pub(super) fn partition_ops_into_segments(ops: Vec<CudaOp>) -> Vec<CudaOpSegment> {
+    if ops.is_empty() {
+        return Vec::new();
+    }
+    let mut segments = Vec::new();
+    let mut current: Option<(bool, Vec<CudaOp>)> = None;
+    for op in ops {
+        let safe = op_is_graph_safe(&op);
+        match current.as_mut() {
+            Some((is_safe, buf)) if *is_safe == safe => buf.push(op),
+            _ => {
+                if let Some((was_safe, buf)) = current.take() {
+                    segments.push(if was_safe {
+                        CudaOpSegment::Graph(buf)
+                    } else {
+                        CudaOpSegment::Stream(buf)
+                    });
+                }
+                current = Some((safe, vec![op]));
+            }
+        }
+    }
+    if let Some((was_safe, buf)) = current {
+        segments.push(if was_safe {
+            CudaOpSegment::Graph(buf)
+        } else {
+            CudaOpSegment::Stream(buf)
+        });
+    }
+    segments
+}
+
+/// Flatten every stream segment's ops (for epoch bumps / memory touch checks).
+pub(super) fn collect_stream_ops(segments: &[CudaOpSegment]) -> Vec<CudaOp> {
+    segments
+        .iter()
+        .filter_map(|seg| match seg {
+            CudaOpSegment::Stream(ops) => Some(ops.iter().cloned()),
+            CudaOpSegment::Graph(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Build a retained relaunch plan without cloning graph-island op payloads.
+pub(super) fn to_launch_segments(segments: &[CudaOpSegment]) -> Vec<CudaLaunchSegment> {
+    segments
+        .iter()
+        .map(|segment| match segment {
+            CudaOpSegment::Graph(_) => CudaLaunchSegment::Graph,
+            CudaOpSegment::Stream(ops) => CudaLaunchSegment::Stream(ops.clone()),
+        })
+        .collect()
+}
+
+/// Flatten all ops across segments (graph + stream), preserving order.
+pub(super) fn flatten_segment_ops(segments: &[CudaOpSegment]) -> Vec<CudaOp> {
+    segments.iter().flat_map(|seg| seg.ops().iter().cloned()).collect()
+}
+
+/// Merge adjacent [`CudaOpSegment::Stream`] runs without reclassifying graph islands.
+///
+/// Used after demoting externally-touched graph islands to stream so demoted launches
+/// stay on the stream path even though `op_is_graph_safe` would still return true.
+pub(super) fn coalesce_adjacent_stream_segments(segments: Vec<CudaOpSegment>) -> Vec<CudaOpSegment> {
+    let mut out: Vec<CudaOpSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        match (out.last_mut(), segment) {
+            (Some(CudaOpSegment::Stream(prev)), CudaOpSegment::Stream(next)) => {
+                prev.extend(next);
+            }
+            (_, segment) => out.push(segment),
+        }
+    }
+    out
+}
+
+/// Number of graph islands in `segments`.
+pub(super) fn graph_island_count(segments: &[CudaOpSegment]) -> usize {
+    segments.iter().filter(|s| s.is_graph()).count()
+}
+
+pub(super) fn segment_op_counts(segments: &[CudaOpSegment]) -> (usize, usize) {
+    let mut graph_ops = 0usize;
+    let mut stream_ops = 0usize;
+    for segment in segments {
+        match segment {
+            CudaOpSegment::Graph(ops) => graph_ops += ops.len(),
+            CudaOpSegment::Stream(ops) => stream_ops += ops.len(),
+        }
+    }
+    (graph_ops, stream_ops)
+}
+
+/// Mutable handle to the last stream segment (for DX12 fence injection). Creates an
+/// empty trailing stream segment if the program ends on a graph island.
+pub(super) fn last_stream_segment_mut(segments: &mut Vec<CudaOpSegment>) -> &mut Vec<CudaOp> {
+    if !matches!(segments.last(), Some(CudaOpSegment::Stream(_))) {
+        segments.push(CudaOpSegment::Stream(Vec::new()));
+    }
+    match segments.last_mut() {
+        Some(CudaOpSegment::Stream(ops)) => ops,
+        _ => unreachable!("just ensured a trailing Stream segment"),
+    }
+}
+
+/// Same as [`last_stream_segment_mut`] for retained relaunch plans.
+pub(super) fn last_launch_stream_segment_mut(segments: &mut Vec<CudaLaunchSegment>) -> &mut Vec<CudaOp> {
+    if !matches!(segments.last(), Some(CudaLaunchSegment::Stream(_))) {
+        segments.push(CudaLaunchSegment::Stream(Vec::new()));
+    }
+    match segments.last_mut() {
+        Some(CudaLaunchSegment::Stream(ops)) => ops,
+        _ => unreachable!("just ensured a trailing Stream segment"),
+    }
 }
 
 pub(super) fn strip_external_fence_ops(ops: Vec<CudaOp>) -> Vec<CudaOp> {
@@ -260,9 +454,7 @@ mod graph_safe_tests {
     }
 
     #[test]
-    fn clear_ops_are_not_graph_safe() {
-        // Graph capture rejects clears/copies; only kernel launches without imported
-        // textures are safe. A Clear with a dummy Arc is enough to hit the `_ => false` arm.
+    fn clear_ops_are_graph_safe() {
         let Ok(ctx) = cudarc::driver::CudaContext::new(0) else {
             eprintln!("skip: no CUDA device");
             return;
@@ -276,8 +468,89 @@ mod graph_safe_tests {
             memory: Arc::new(Mutex::new(slice)),
             abs_offset: 0,
             size: 16,
+            device_ptr: 0,
         };
-        assert!(!ops_are_graph_safe(&[op]));
+        assert!(ops_are_graph_safe(&[op]));
+    }
+
+    fn make_clear() -> CudaOp {
+        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device");
+        let stream = ctx.default_stream();
+        let slice = stream.alloc_zeros::<u8>(16).expect("alloc");
+        CudaOp::Clear {
+            memory: Arc::new(Mutex::new(slice)),
+            abs_offset: 0,
+            size: 16,
+            device_ptr: 0,
+        }
+    }
+
+    /// Build a Launch marked graph-safe without needing a real module load.
+    /// Uses a clear as a stand-in "unsafe" op and synthesizes safe/unsafe via Clear only
+    /// for partitioning tests that don't need real launches.
+    #[test]
+    fn partition_empty_yields_empty() {
+        assert!(partition_ops_into_segments(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn partition_clears_form_one_graph_island() {
+        let Ok(_) = cudarc::driver::CudaContext::new(0) else {
+            eprintln!("skip: no CUDA device");
+            return;
+        };
+        let segments = partition_ops_into_segments(vec![make_clear(), make_clear()]);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(&segments[0], CudaOpSegment::Graph(ops) if ops.len() == 2));
+    }
+
+    #[test]
+    fn partition_clear_and_copy_form_one_graph_island() {
+        let Ok(ctx) = cudarc::driver::CudaContext::new(0) else {
+            eprintln!("skip: no CUDA device");
+            return;
+        };
+        let stream = ctx.default_stream();
+        let Ok(a) = stream.alloc_zeros::<u8>(16) else {
+            return;
+        };
+        let Ok(b) = stream.alloc_zeros::<u8>(16) else {
+            return;
+        };
+        let mem_a = Arc::new(Mutex::new(a));
+        let mem_b = Arc::new(Mutex::new(b));
+        let clear = CudaOp::Clear {
+            memory: Arc::clone(&mem_a),
+            abs_offset: 0,
+            size: 16,
+            device_ptr: 0,
+        };
+        let copy = CudaOp::Copy {
+            src: Arc::clone(&mem_a),
+            src_abs: 0,
+            src_ptr: 0,
+            dst: Arc::clone(&mem_b),
+            dst_abs: 0,
+            dst_ptr: 0,
+            size: 16,
+        };
+        let segments = partition_ops_into_segments(vec![clear, copy]);
+        assert_eq!(
+            segments.len(),
+            1,
+            "adjacent graph-safe ops must coalesce into one island"
+        );
+        assert!(matches!(&segments[0], CudaOpSegment::Graph(ops) if ops.len() == 2));
+    }
+
+    #[test]
+    fn last_stream_segment_mut_appends_when_ending_on_graph() {
+        // Graph segment with empty ops is unusual but exercises the helper.
+        let mut segments = vec![CudaOpSegment::Graph(Vec::new())];
+        let stream = last_stream_segment_mut(&mut segments);
+        assert!(stream.is_empty());
+        assert_eq!(segments.len(), 2);
+        assert!(matches!(segments[1], CudaOpSegment::Stream(_)));
     }
 }
 
@@ -291,10 +564,12 @@ pub(super) fn collect_pins(
     Vec<Arc<Mutex<CudaSlice<u8>>>>,
     Vec<Arc<CudaModule>>,
     Vec<Arc<super::texture::CudaTextureResource>>,
+    Vec<Arc<Mutex<super::pinned_host::CudaPinnedHost>>>,
 ) {
     let mut buffers = Vec::new();
     let mut modules = Vec::new();
     let mut textures = Vec::new();
+    let mut hosts = Vec::new();
     for op in ops {
         match op {
             CudaOp::Launch {
@@ -324,12 +599,20 @@ pub(super) fn collect_pins(
             CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
                 buffers.push(Arc::clone(memory));
             }
+            CudaOp::WriteFromHost { memory, host, .. } => {
+                buffers.push(Arc::clone(memory));
+                hosts.push(Arc::clone(host));
+            }
             CudaOp::Copy { src, dst, .. } => {
                 buffers.push(Arc::clone(src));
                 buffers.push(Arc::clone(dst));
             }
             CudaOp::WriteTexture { texture, .. } => {
                 textures.push(Arc::clone(texture));
+            }
+            CudaOp::WriteTextureFromHost { texture, host, .. } => {
+                textures.push(Arc::clone(texture));
+                hosts.push(Arc::clone(host));
             }
             CudaOp::CopyBufferToTexture { src, texture, .. } => {
                 buffers.push(Arc::clone(src));
@@ -347,7 +630,7 @@ pub(super) fn collect_pins(
             }
         }
     }
-    (buffers, modules, textures)
+    (buffers, modules, textures, hosts)
 }
 
 pub(super) fn maybe_validate_sync(stream: &Arc<CudaStream>, op: &str) -> Result<()> {
@@ -427,14 +710,19 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 memory,
                 abs_offset,
                 size,
+                device_ptr,
             } => {
-                let mut guard = memory.lock().unwrap();
-                let start = *abs_offset as usize;
-                let end = start + *size as usize;
-                let mut view = guard
-                    .try_slice_mut(start..end)
-                    .context("CUDA: clear range out of bounds")?;
-                stream.memset_zeros(&mut view).context("CUDA: memset failed")?;
+                if capturing {
+                    capture_memset_zeros(stream, *device_ptr, *size)?;
+                } else {
+                    let mut guard = memory.lock().unwrap();
+                    let start = *abs_offset as usize;
+                    let end = start + *size as usize;
+                    let mut view = guard
+                        .try_slice_mut(start..end)
+                        .context("CUDA: clear range out of bounds")?;
+                    stream.memset_zeros(&mut view).context("CUDA: memset failed")?;
+                }
                 if validate {
                     maybe_validate_sync(stream, "ClearBuffer")?;
                 }
@@ -455,14 +743,55 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "WriteBuffer")?;
                 }
             }
+            CudaOp::WriteFromHost {
+                memory,
+                abs_offset,
+                device_ptr,
+                host,
+                host_offset,
+                len,
+            } => {
+                let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.lock");
+                let host = host.lock().unwrap();
+                let host_end = *host_offset + *len;
+                if host_end > host.len() {
+                    anyhow::bail!("CUDA: WriteFromHost exceeds host staging");
+                }
+                let src = &host.as_slice()[*host_offset..host_end];
+                {
+                    let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.htod");
+                    if capturing {
+                        capture_memcpy_htod(stream, *device_ptr, src).context("CUDA: WriteFromHost HtoD failed")?;
+                    } else {
+                        let mut guard = memory.lock().unwrap();
+                        let start = *abs_offset as usize;
+                        let end = start + *len;
+                        let mut view = guard
+                            .try_slice_mut(start..end)
+                            .context("CUDA: WriteFromHost range out of bounds")?;
+                        stream
+                            .memcpy_htod(src, &mut view)
+                            .context("CUDA: WriteFromHost HtoD failed")?;
+                    }
+                }
+                if validate {
+                    maybe_validate_sync(stream, "WriteFromHost")?;
+                }
+            }
             CudaOp::Copy {
                 src,
                 src_abs,
+                src_ptr,
                 dst,
                 dst_abs,
+                dst_ptr,
                 size,
             } => {
-                execute_copy(stream, src, *src_abs, dst, *dst_abs, *size)?;
+                if capturing {
+                    capture_memcpy_dtod(stream, *src_ptr, *dst_ptr, *size)?;
+                } else {
+                    execute_copy(stream, src, *src_abs, dst, *dst_abs, *size)?;
+                }
                 if validate {
                     maybe_validate_sync(stream, "CopyBuffer")?;
                 }
@@ -481,9 +810,36 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "WriteTexture")?;
                 }
             }
+            CudaOp::WriteTextureFromHost {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                host,
+                host_offset,
+                len,
+                src_row_pitch,
+            } => {
+                let _tz = crate::tracy_zone!("cuda.execute_op.write_texture_from_host.lock");
+                let host = host.lock().unwrap();
+                let end = *host_offset + *len;
+                if end > host.len() {
+                    anyhow::bail!("CUDA: WriteTextureFromHost exceeds host staging");
+                }
+                let data = &host.as_slice()[*host_offset..end];
+                {
+                    let _tz = crate::tracy_zone!("cuda.execute_op.write_texture_from_host.htod");
+                    super::texture::memcpy_htod_array(stream, texture, *x, *y, *width, *height, data, *src_row_pitch)?;
+                }
+                if validate {
+                    maybe_validate_sync(stream, "WriteTextureFromHost")?;
+                }
+            }
             CudaOp::CopyBufferToTexture {
                 src,
                 src_abs,
+                src_ptr,
                 src_row_pitch,
                 texture,
                 x,
@@ -491,7 +847,9 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 width,
                 height,
             } => {
-                let src_ptr = {
+                let src_ptr = if capturing {
+                    *src_ptr
+                } else {
                     let memory = src.lock().unwrap();
                     let (base, _sync) = memory.device_ptr(stream);
                     base + *src_abs
@@ -537,9 +895,12 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 height,
                 dst,
                 dst_abs,
+                dst_ptr,
                 dst_row_pitch,
             } => {
-                let dst_ptr = {
+                let dst_ptr = if capturing {
+                    *dst_ptr
+                } else {
                     let memory = dst.lock().unwrap();
                     let (base, _sync) = memory.device_ptr(stream);
                     base + *dst_abs
@@ -735,19 +1096,19 @@ pub(super) fn finalize_indirect_capture(
                     .context("CUDA: write CUgraphDeviceNode into updater slot failed")?;
                 kernel_ordinal += 2;
             }
+            // Memcpy/memset nodes are not kernel nodes; skip them when counting
+            // device-updatable consumers.
             CudaOp::Clear { .. }
             | CudaOp::Write { .. }
+            | CudaOp::WriteFromHost { .. }
             | CudaOp::Copy { .. }
             | CudaOp::WriteTexture { .. }
+            | CudaOp::WriteTextureFromHost { .. }
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
-            | CudaOp::CopyTextureToBuffer { .. } => {
-                anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
-            }
+            | CudaOp::CopyTextureToBuffer { .. } => {}
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {
-                anyhow::bail!("CUDA: finalize_indirect_capture called on a graph-unsafe op set");
-            }
+            CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {}
         }
     }
     Ok(())
@@ -760,6 +1121,10 @@ pub(super) fn capture_partition_graph(
     ops: &[CudaOp],
 ) -> Result<retained_graph::OwnedCudaGraph> {
     use cudarc::driver::sys;
+    // Allocations live on the device alloc stream. `device_ptr(submit_stream)`
+    // inserts `cuStreamWaitEvent` for those alloc events. Doing that *during*
+    // THREAD_LOCAL capture invalidates the graph, so prime waits first.
+    prime_submit_waits_for_ops(stream, ops)?;
     stream
         .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
         .context("CUDA: begin_capture failed")?;
@@ -836,111 +1201,161 @@ fn finish_submit(
         .record(stream)
         .context("CUDA: record completion event failed")?;
     timeline::mark_recorded(event_ledger, fence_value);
-    timeline::poll_retire_events(
-        event_ledger,
-        &context.completed,
-        context.handle,
-        &context.device_retired,
-        &context.signal_queue,
-        &context.last_emitted,
-    );
+    context.poll_retire_events();
     Ok(())
 }
 
 impl PendingSubmit for CudaPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
-        run_dynamic_prefix(
-            &self.stream,
-            &self.host_waits,
-            &self.deferred_writes,
-            &self.stream_waits,
+        let _tz = crate::tracy_zone!("goldy.submit_worker.cuda");
+        let CudaPendingSubmit {
+            stream,
+            context,
+            fence_value,
+            completion_event,
+            event_ledger,
+            stream_waits,
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            &self.dx12_stream_fence_waits,
-        )?;
+            dx12_stream_fence_waits,
+            host_waits,
+            deferred_writes,
+            body,
+        } = *self;
+        let body_result: Result<(), anyhow::Error> = (|| {
+            // Hold across prefix + capture: API-thread `device_ptr` / alloc on another
+            // stream during THREAD_LOCAL capture is CUDA_ERROR_STREAM_CAPTURE_ISOLATION.
+            let _capture_gate = matches!(&body, CudaSubmitBody::CaptureAndLaunch { .. }).then(lock_capture_alloc_gate);
+            {
+                let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.prefix");
+                run_dynamic_prefix(
+                    &stream,
+                    &host_waits,
+                    &deferred_writes,
+                    &stream_waits,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                    &dx12_stream_fence_waits,
+                )?;
+            }
 
-        match self.body {
-            CudaSubmitBody::Ops(ops) => {
-                execute_ops(&self.stream, &ops, true)?;
-            }
-            CudaSubmitBody::CaptureAndLaunch {
-                key,
-                ops,
-                tail,
-                registry,
-                stats,
-            } => {
-                let ctx = self.context.handle;
-                let (buffers, modules, textures) = collect_pins(&ops);
-                let needs_indirect = ops_contain_indirect(&ops);
-                let graph = capture_partition_graph(&self.stream, &ops)?;
-                stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                {
-                    let mut guard = registry.lock().unwrap();
-                    guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
-                    if let Some(old) = guard.remove(ctx, key) {
-                        let retire_at = old.last_launch_tv.max(self.fence_value);
-                        guard.defer_drop(retire_at, old);
-                    }
-                    guard.insert(
-                        ctx,
-                        key,
-                        retained_graph::CudaRetainedPartition {
-                            graph,
-                            buffers,
-                            modules,
-                            textures,
-                            last_launch_tv: self.fence_value,
-                        },
-                    );
-                    let partition = guard
-                        .get_mut(ctx, key)
-                        .context("CUDA: retained graph missing after capture")?;
-                    if needs_indirect {
-                        partition
-                            .graph
-                            .upload()
-                            .context("CUDA: cuGraphUpload failed after indirect capture")?;
-                    }
-                    partition
-                        .graph
-                        .launch()
-                        .context("CUDA: cuGraphLaunch failed after capture")?;
+            match body {
+                CudaSubmitBody::Ops { ops, .. } => {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.execute_ops");
+                    execute_ops(&stream, &ops, true)?;
                 }
-                stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                maybe_validate_sync(&self.stream, "graph launch after capture")?;
-                execute_ops(&self.stream, &tail, true)?;
-            }
-            CudaSubmitBody::LaunchRetained {
-                key,
-                tail,
-                registry,
-                stats,
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                    scratch_images: _,
-            } => {
-                let ctx = self.context.handle;
-                {
-                    let mut guard = registry.lock().unwrap();
-                    guard.drain_retired(self.context.device_retired.load(std::sync::atomic::Ordering::Acquire));
-                    let partition = guard
-                        .get_mut(ctx, key)
-                        .with_context(|| format!("CUDA: retained graph missing for context {ctx} key {key:#x}"))?;
-                    partition.graph.launch().context("CUDA: cuGraphLaunch failed")?;
-                    partition.last_launch_tv = self.fence_value;
+                CudaSubmitBody::CaptureAndLaunch {
+                    key,
+                    segments,
+                    registry,
+                    stats,
+                } => {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture_and_launch");
+                    let ctx = context.handle;
+                    let mut islands = Vec::new();
+                    for segment in &segments {
+                        match segment {
+                            CudaOpSegment::Graph(ops) => {
+                                let (buffers, modules, textures, hosts) = collect_pins(ops);
+                                let needs_indirect = ops_contain_indirect(ops);
+                                let graph = {
+                                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.capture");
+                                    capture_partition_graph(&stream, ops)?
+                                };
+                                stats.captures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if needs_indirect {
+                                    graph
+                                        .upload()
+                                        .context("CUDA: cuGraphUpload failed after indirect capture")?;
+                                }
+                                graph.launch().context("CUDA: cuGraphLaunch failed after capture")?;
+                                stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                maybe_validate_sync(&stream, "graph launch after capture")?;
+                                islands.push(retained_graph::CudaRetainedPartition {
+                                    graph,
+                                    buffers,
+                                    modules,
+                                    textures,
+                                    hosts,
+                                    last_launch_tv: fence_value,
+                                });
+                            }
+                            CudaOpSegment::Stream(ops) => {
+                                if !ops.is_empty() {
+                                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
+                                    execute_ops(&stream, ops, true)?;
+                                }
+                            }
+                        }
+                    }
+                    {
+                        let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.registry_insert");
+                        let mut guard = registry.lock().unwrap();
+                        guard.drain_retired(context.device_retired.load(std::sync::atomic::Ordering::Acquire));
+                        if let Some(old) = guard.remove(ctx, key) {
+                            let retire_at = old.last_launch_tv().max(fence_value);
+                            guard.defer_drop(retire_at, old);
+                        }
+                        guard.insert(
+                            ctx,
+                            key,
+                            retained_graph::CudaRetainedProgram {
+                                islands,
+                                last_launch_tv: fence_value,
+                            },
+                        );
+                    }
                 }
-                stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                maybe_validate_sync(&self.stream, "retained graph launch")?;
-                execute_ops(&self.stream, &tail, true)?;
+                CudaSubmitBody::LaunchRetained {
+                    key,
+                    segments,
+                    registry,
+                    stats,
+                    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+                        scratch_images: _,
+                } => {
+                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.launch_retained");
+                    let ctx = context.handle;
+                    let mut island_idx = 0usize;
+                    for segment in &segments {
+                        match segment {
+                            CudaLaunchSegment::Graph => {
+                                let mut guard = registry.lock().unwrap();
+                                guard.drain_retired(context.device_retired.load(std::sync::atomic::Ordering::Acquire));
+                                let program = guard.get_mut(ctx, key).with_context(|| {
+                                    format!("CUDA: retained graph missing for context {ctx} key {key:#x}")
+                                })?;
+                                let island = program.islands.get_mut(island_idx).with_context(|| {
+                                    format!("CUDA: retained island {island_idx} missing for context {ctx} key {key:#x}")
+                                })?;
+                                island.graph.launch().context("CUDA: cuGraphLaunch failed")?;
+                                island.last_launch_tv = fence_value;
+                                program.last_launch_tv = fence_value;
+                                drop(guard);
+                                stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                maybe_validate_sync(&stream, "retained graph launch")?;
+                                island_idx += 1;
+                            }
+                            CudaLaunchSegment::Stream(ops) => {
+                                if !ops.is_empty() {
+                                    let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
+                                    execute_ops(&stream, ops, true)?;
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            Ok(())
+        })();
+        // Always publish the completion event so wait_until cannot observe
+        // submitted_epoch >= tv with recorded=false (skipped/`?` before record).
+        let finish_result = {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.finish");
+            finish_submit(&stream, &context, fence_value, &completion_event, &event_ledger)
+        };
+        match (body_result, finish_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), _) | (_, Err(e)) => Err(e),
         }
-
-        finish_submit(
-            &self.stream,
-            &self.context,
-            self.fence_value,
-            &self.completion_event,
-            &self.event_ledger,
-        )
     }
 }
 
@@ -959,9 +1374,9 @@ impl PendingSubmit for CudaEvictRetained {
     fn execute(self: Box<Self>) -> Result<()> {
         let mut guard = self.registry.lock().unwrap();
         guard.drain_retired(self.device_retired.load(std::sync::atomic::Ordering::Acquire));
-        if let Some(partition) = guard.remove(self.ctx, self.key) {
-            let retire_at = partition.last_launch_tv.max(self.retire_fallback);
-            guard.defer_drop(retire_at, partition);
+        if let Some(program) = guard.remove(self.ctx, self.key) {
+            let retire_at = program.last_launch_tv().max(self.retire_fallback);
+            guard.defer_drop(retire_at, program);
             self.stats.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
@@ -981,13 +1396,53 @@ impl PendingSubmit for CudaEvictContextGraphs {
     fn execute(self: Box<Self>) -> Result<()> {
         let mut guard = self.registry.lock().unwrap();
         guard.drain_retired(self.device_retired.load(std::sync::atomic::Ordering::Acquire));
-        for partition in guard.remove_context(self.ctx) {
-            let retire_at = partition.last_launch_tv.max(self.retire_fallback);
-            guard.defer_drop(retire_at, partition);
+        for program in guard.remove_context(self.ctx) {
+            let retire_at = program.last_launch_tv().max(self.retire_fallback);
+            guard.defer_drop(retire_at, program);
             self.stats.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
+}
+
+/// Wait on the submit stream for alloc-stream buffer events *before* graph capture.
+fn prime_submit_waits_for_ops(stream: &Arc<CudaStream>, ops: &[CudaOp]) -> Result<()> {
+    let (buffers, _, _, _) = collect_pins(ops);
+    for memory in buffers {
+        let guard = memory.lock().unwrap();
+        let (_ptr, _sync) = guard.device_ptr(stream);
+    }
+    Ok(())
+}
+
+/// Device pointer baked on the API thread before capture (no alloc-stream CUDA
+/// calls from the capturing worker).
+pub(super) fn bake_device_ptr(stream: &Arc<CudaStream>, memory: &Arc<Mutex<CudaSlice<u8>>>, abs_offset: u64) -> u64 {
+    let _gate = lock_capture_alloc_gate();
+    let guard = memory.lock().unwrap();
+    let (base, _sync) = guard.device_ptr(stream);
+    base + abs_offset
+}
+
+fn capture_memset_zeros(stream: &Arc<CudaStream>, device_ptr: u64, size: u64) -> Result<()> {
+    if size == 0 {
+        return Ok(());
+    }
+    unsafe { cudarc::driver::result::memset_d8_async(device_ptr, 0, size as usize, stream.cu_stream()) }
+        .context("CUDA: capture memset failed")
+}
+
+fn capture_memcpy_htod(stream: &Arc<CudaStream>, device_ptr: u64, src: &[u8]) -> Result<()> {
+    unsafe { cudarc::driver::result::memcpy_htod_async(device_ptr, src, stream.cu_stream()) }
+        .context("CUDA: capture HtoD failed")
+}
+
+fn capture_memcpy_dtod(stream: &Arc<CudaStream>, src_ptr: u64, dst_ptr: u64, size: u64) -> Result<()> {
+    if size == 0 {
+        return Ok(());
+    }
+    unsafe { cudarc::driver::result::memcpy_dtod_async(dst_ptr, src_ptr, size as usize, stream.cu_stream()) }
+        .context("CUDA: capture DtoD failed")
 }
 
 fn execute_copy(

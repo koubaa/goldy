@@ -4386,6 +4386,79 @@ mod imp {
         assert_eq!(output[3], 255, "A");
     }
 
+    /// One dispatch with float4 identity + float4↔rgba8 packed view bindings.
+    ///
+    /// Mirrors ekrano fine: float `out_image` / present scratch + rgba8 filter layers.
+    fn cuda_mixed_float4_identity_and_rgba8_copy(device: &Device) {
+        if device.backend_type() != BackendType::Cuda {
+            return;
+        }
+        const MIXED: &str = r#"
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(8, 8, 1)]
+        void cs_main(DirectSpatial<float4> output, DirectSpatial<float4> filter_tex0, ThreadId id) {
+            uint2 dims;
+            output.GetDimensions(dims.x, dims.y);
+            if (id.x < dims.x && id.y < dims.y) {
+                int2 p = int2(id.x, id.y);
+                float4 v = filter_tex0[p];
+                output[p] = float4(v.x, v.y * 0.5, v.z, v.w);
+            }
+        }
+        "#;
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, MIXED).expect("mixed shader");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let width = 8u32;
+        let height = 8u32;
+        let mut seed = vec![0u8; (width * height * 4) as usize];
+        for px in seed.chunks_exact_mut(4) {
+            px[0] = 255;
+            px[1] = 128;
+            px[2] = 0;
+            px[3] = 255;
+        }
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let filter_tex = pool
+            .acquire_texture(
+                width,
+                height,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+                Some(&seed),
+            )
+            .expect("rgba8 filter");
+        let output = pool
+            .acquire_texture(
+                width,
+                height,
+                TextureFormat::Rgba32Float,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("float output");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("mix", &pipeline)
+            .with_parcel(&output, NodeAccess::Write)
+            .with_parcel(&filter_tex, NodeAccess::Read)
+            .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw float");
+        let mut frame = scheme.submit().expect("submit mixed float+rgba8");
+        let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
+        let floats: &[f32] = bytemuck::cast_slice(&loan);
+        assert!((floats[0] - 1.0).abs() < 1e-3, "R={}", floats[0]);
+        // 128/255 * 0.5 ≈ 0.251
+        assert!((floats[1] - (128.0 / 255.0) * 0.5).abs() < 1e-3, "G={}", floats[1]);
+        assert!(floats[2].abs() < 1e-3, "B={}", floats[2]);
+        assert!((floats[3] - 1.0).abs() < 1e-3, "A={}", floats[3]);
+    }
+
     /// CUDA `DirectSpatial<uint8_t4>` may write `Rgba8Unorm` (size-matched surface store).
     fn cuda_uint8_t4_writes_rgba8_unorm(device: &Device) {
         if device.backend_type() != BackendType::Cuda {
@@ -4659,6 +4732,7 @@ mod imp {
         trial!(cuda_float4_rgba8_rmw);
         trial!(cuda_float4_variant_cache_float_then_unorm);
         trial!(cuda_float4_rgba8_retained_resubmit);
+        trial!(cuda_mixed_float4_identity_and_rgba8_copy);
         trial!(cuda_uint8_t4_writes_rgba8_unorm);
         trial!(cuda_half4_writes_rgba16_float);
         trial!(cuda_rejects_multiple_distinct_samplers);

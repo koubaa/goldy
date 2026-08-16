@@ -24,6 +24,10 @@ let (lease, present) = surface.bind_destination(&mut scheme)?;
 
 Bind the returned lease in a compute node with `with_present(&lease)`. Goldy handles barrier insertion between compute writes and the presentation engine.
 
+On CUDA+DX12, present scratch is a depth-3 imported staging ring (not the DXGI
+backbuffer). Compute does not reuse frame N's scratch in frame N+1; that extra
+memory is the interop tradeoff until CUDA/DX12 synchronization APIs improve.
+
 ## Building the scheme
 
 Record a retained scheme with a compute node that writes to the present lease:
