@@ -36,6 +36,9 @@
 //! device-updatable kernel nodes plus an in-graph updater. Inline `WriteBuffer`
 //! payloads (pageable `Vec`) still fall back to command replay. Dynamic waits,
 //! deferred host writes, and completion events stay outside the captured graph.
+//!
+//! Windows CUDA+DX12 presentation, WDDM context-switch costs, and API gaps:
+//! see [`WDDM_INTEROP.md`](WDDM_INTEROP.md) in this directory (internal; not user docs).
 
 mod capture_gate;
 mod pending_submit;
