@@ -5,7 +5,7 @@
 //! Relinquished resources enter as stamped parcels and are handed out again by lease
 //! realization **only once every stamped epoch has retired**. Clients never compare
 //! timeline values; the pool consumes `ready_after` internally through a progress
-//! snapshot ([`Context::snapshot_gpu_progress`] / [`Context::parcel_ready`]).
+//! snapshot (progress sampled when checking whether stamped epochs have retired).
 
 use crate::context::Context;
 use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping, Texture};
@@ -21,7 +21,7 @@ use std::sync::Arc;
 ///
 /// At N=1, depth=1 (the only proven config), one warm spare is enough to avoid
 /// re-allocating on immediate reuse. Excess ready entries are dropped on
-/// each frame-boundary [`Context::boundary_crossed`] → [`Self::drain_ready`] call.
+/// each frame-boundary [`Self::drain_ready`] call.
 const MAX_BUFFER_BIN_READY_SPARES: usize = 1;
 
 /// Maximum number of ready (epoch-retired) entries to keep per texture bin.
