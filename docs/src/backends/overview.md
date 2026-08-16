@@ -200,13 +200,15 @@ uploads/readbacks, timelines, **indirect dispatch**, and **2D textures/samplers*
 
 **Windows presentation:** when `cuda`, `graphics`, and `dx12` are all enabled, each
 CUDA device opens a LUID-matched DX12 companion. Surface frames expose an
-`Rgba8Unorm` shared scratch texture. Typical schemes (including Ekrano) write a
-CUDA-owned staging texture then `CopyTexture` into that imported scratch — the same
+`Rgba8Unorm` shared scratch texture from a **depth-3 staging ring** independent of
+the DXGI swapchain image. Typical schemes (including Ekrano) write a CUDA-owned
+staging texture then `CopyTexture` into that imported scratch — the same
 local-then-copy pattern as native DX12 — before present's same-format `CopyResource`
-onto the `R8G8B8A8_UNORM` DXGI swapchain. Sync uses a shared D3D12 fence imported as
-a CUDA external semaphore. Adapter mismatch, WARP, and linked-node adapters fail at
-device creation. A first-slice raster path is also available under the same feature
-gate: offscreen `Rgba32Float` and `Rgba8Unorm` render targets, indexed and non-indexed
+onto the `R8G8B8A8_UNORM` DXGI swapchain. CUDA signals a **ready** fence; DX12 waits
+it, copies, then signals a **recycle** fence. CUDA waits recycle only when wrapping
+the ring, so compute N+1 does not serialize behind present-copy N. Adapter mismatch,
+WARP, and linked-node adapters fail at device creation. A first-slice raster path is
+also available under the same feature gate: offscreen `Rgba32Float` and `Rgba8Unorm` render targets, indexed and non-indexed
 point/line/triangle pipelines (Slang → DXIL), bindless render bindings, optional
 DX12-only depth attachments / depth-stencil PSOs / `ClearDepth`, and
 `CopyRenderTarget` into present scratch / CUDA textures. Depth is not CUDA-imported
@@ -236,7 +238,9 @@ Texture notes for CUDA:
   - `DirectSpatial<half4>` ↔ `Rgba16Float`
   - `DirectSpatial<uint8_t4>` ↔ `Rgba8Unorm` (Slang has no `uchar4` alias)
   - Upload/copy/readback of other supported sampled formats still works.
-- Surfaces expose `Rgba8Unorm` imported scratch. Prefer writing a CUDA-owned
+- Surfaces expose `Rgba8Unorm` imported scratch from a depth-3 ring (CUDA+DX12
+  interop tradeoff: extra staging textures so compute does not reuse frame N's
+  scratch in N+1). Prefer writing a CUDA-owned
   `Rgba8Unorm` texture (or render target) and exporting with `CopyTexture`; direct
   launches onto imported scratch remain supported but are costlier under WDDM.
   The DXGI swapchain is matching `R8G8B8A8_UNORM` so present is a single

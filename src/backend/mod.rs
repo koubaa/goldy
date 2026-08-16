@@ -374,7 +374,9 @@ pub(crate) struct FrameToken {
     ///
     /// Used for present-lease retention keys: must match the physical backing that
     /// shader dispatches and copies target, not necessarily [`Self::image`].
-    /// On Vulkan this is `current_frame`; on DX12 it equals the swapchain image index.
+    /// On Vulkan this is `current_frame`; on native DX12 it equals the swapchain
+    /// image index; on CUDA+DX12 it is the depth-3 imported scratch ring slot
+    /// (independent of [`Self::image`]).
     pub frame_slot: u32,
     /// Command-allocator / frame-sync slot claimed at acquire for this frame.
     ///

@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `goldy_buf_len` helper for portable buffer `.len()` lowering on SPIR-V/DX12.
 - Docs: [Rust Compute Kernels](docs/src/programming-model/rust-kernels.md);
   `GOLDY_DUMP_RUST_KERNELS` dump env var.
+- CUDA+DX12 present scratch is a depth-3 ring independent of the DXGI image, with
+  separate ready (CUDA-produced) and recycle (DX12-produced) fences so compute N+1
+  does not wait present-copy N. Documented as an interop staging tradeoff until
+  CUDA/DX12 sync APIs improve.
 
 ## [0.2.0] - 2026-07-23
 

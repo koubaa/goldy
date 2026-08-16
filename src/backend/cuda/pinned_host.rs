@@ -27,10 +27,8 @@ impl CudaPinnedHost {
         ctx.bind_to_thread()
             .context("CUDA: bind context for pinned host alloc")?;
         // SAFETY: `cuMemHostAlloc` returns unset host memory of `len` bytes.
-        let ptr = unsafe {
-            cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_WRITECOMBINED as u32)
-        }
-        .context("CUDA: cuMemHostAlloc failed")?;
+        let ptr = unsafe { cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_WRITECOMBINED as u32) }
+            .context("CUDA: cuMemHostAlloc failed")?;
         let ptr = ptr as *mut u8;
         // SAFETY: freshly allocated `len` bytes.
         unsafe { std::ptr::write_bytes(ptr, 0, len) };

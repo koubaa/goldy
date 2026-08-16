@@ -577,7 +577,11 @@ pub(super) fn record_present_copy(
         });
     }
     barriers.push(transition(color_src, src_before, D3D12_RESOURCE_STATE_COPY_SOURCE));
-    barriers.push(transition(backbuffer, backbuffer_before, D3D12_RESOURCE_STATE_COPY_DEST));
+    barriers.push(transition(
+        backbuffer,
+        backbuffer_before,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+    ));
     unsafe { list.ResourceBarrier(&barriers) };
     unsafe { list.CopyResource(backbuffer, color_src) };
 

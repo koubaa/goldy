@@ -7,9 +7,9 @@ use crate::backend::ContextHandle;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::parcel::BytesByKind;
-use crate::timeline::{ReferenceTable, TimelineValue};
 #[cfg(test)]
 use crate::timeline::is_ready;
+use crate::timeline::{ReferenceTable, TimelineValue};
 use crate::transient_pool::TransientPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -566,10 +566,7 @@ mod tests {
         mark_reference(&mut refs, ctx.test_backend_handle(), 0);
         assert!(ctx.parcel_ready(&refs), "tv 0 is always retired");
 
-        let snap = ctx.snapshot_gpu_progress([
-            ctx.test_backend_handle(),
-            ctx.test_backend_handle(),
-        ]);
+        let snap = ctx.snapshot_gpu_progress([ctx.test_backend_handle(), ctx.test_backend_handle()]);
         assert_eq!(snap.len(), 1, "duplicate context handles queried once");
     }
 

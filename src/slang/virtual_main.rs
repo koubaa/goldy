@@ -1005,11 +1005,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
                                     param.name, global
                                 ));
                                 call_args.push(param.name.clone());
-                                user_param_rewrites.push((
-                                    user_fn.clone(),
-                                    param.name.clone(),
-                                    wrapped_ty.to_string(),
-                                ));
+                                user_param_rewrites.push((user_fn.clone(), param.name.clone(), wrapped_ty.to_string()));
                             }
                         }
                     } else {
@@ -3604,9 +3600,7 @@ void cs_main(DirectSpatial<float4> output,
             "identity (float) slot binds raw float4 UAV: {result}"
         );
         assert!(
-            result.contains(
-                "DirectSpatial<float4> output = DirectSpatial<float4>(_goldy_cuda_binding_0);"
-            ),
+            result.contains("DirectSpatial<float4> output = DirectSpatial<float4>(_goldy_cuda_binding_0);"),
             "identity wraps DirectSpatial<float4>: {result}"
         );
         assert!(

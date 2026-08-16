@@ -37,11 +37,7 @@ impl EventPool {
     pub fn prewarm(&self) -> Result<()> {
         let mut free = self.free.lock().unwrap();
         while free.len() < EVENT_POOL_PREWARM {
-            free.push(
-                self.ctx
-                    .new_event(None)
-                    .context("CUDA: event pool prewarm failed")?,
-            );
+            free.push(self.ctx.new_event(None).context("CUDA: event pool prewarm failed")?);
         }
         Ok(())
     }
@@ -101,6 +97,8 @@ pub(super) enum LedgerCompletion {
     Dx12Fence {
         companion: Arc<Dx12Companion>,
         value: u64,
+        /// `true` = present recycle fence (DX12 producer); `false` = ready fence.
+        recycle: bool,
     },
 }
 
@@ -111,6 +109,7 @@ enum CompletionSnap {
     Dx12Fence {
         companion: Arc<Dx12Companion>,
         value: u64,
+        recycle: bool,
     },
 }
 
@@ -119,9 +118,14 @@ impl CompletionSnap {
         match completion {
             LedgerCompletion::CudaEvent(event) => Some(Self::CudaEvent(Arc::clone(event))),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            LedgerCompletion::Dx12Fence { companion, value } => (*value > 0).then(|| Self::Dx12Fence {
+            LedgerCompletion::Dx12Fence {
+                companion,
+                value,
+                recycle,
+            } => (*value > 0).then(|| Self::Dx12Fence {
                 companion: Arc::clone(companion),
                 value: *value,
+                recycle: *recycle,
             }),
         }
     }
@@ -130,7 +134,11 @@ impl CompletionSnap {
         match self {
             Self::CudaEvent(event) => event.is_complete(),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-            Self::Dx12Fence { companion, value } => (unsafe { companion.fence.GetCompletedValue() }) >= *value,
+            Self::Dx12Fence {
+                companion,
+                value,
+                recycle,
+            } => companion.timeline_completed(*value, *recycle),
         }
     }
 }
@@ -240,10 +248,7 @@ pub(super) fn advance_device_retired(ledger: &EventLedger, device_retired: &Atom
 ///
 /// Callers that resolve waits must treat a missing entry with
 /// `value <= device_retired` as already complete (see [`completion_for_wait`]).
-pub(super) fn prune_retired_entries(
-    ledger: &EventLedger,
-    device_retired: &AtomicU64,
-) -> Vec<Arc<CudaEvent>> {
+pub(super) fn prune_retired_entries(ledger: &EventLedger, device_retired: &AtomicU64) -> Vec<Arc<CudaEvent>> {
     let retired = device_retired.load(Ordering::Acquire);
     if retired == 0 {
         return Vec::new();
@@ -319,9 +324,14 @@ pub(super) fn lookup_completion(ledger: &EventLedger, context: ContextHandle, va
             Some(match &entry.completion {
                 LedgerCompletion::CudaEvent(event) => LedgerCompletion::CudaEvent(Arc::clone(event)),
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                LedgerCompletion::Dx12Fence { companion, value } => LedgerCompletion::Dx12Fence {
+                LedgerCompletion::Dx12Fence {
+                    companion,
+                    value,
+                    recycle,
+                } => LedgerCompletion::Dx12Fence {
                     companion: Arc::clone(companion),
                     value: *value,
+                    recycle: *recycle,
                 },
             })
         } else {
@@ -374,6 +384,7 @@ impl TimelineBlockingWait for CudaTimelineBlockingWait {
 pub(super) struct Dx12FenceTimelineBlockingWait {
     pub companion: Arc<Dx12Companion>,
     pub value: u64,
+    pub recycle: bool,
 }
 
 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -382,7 +393,7 @@ impl TimelineBlockingWait for Dx12FenceTimelineBlockingWait {
         if self.value == 0 {
             bail!("CUDA/DX12: cannot wait on unbound present fence");
         }
-        self.companion.cpu_wait(self.value)
+        self.companion.cpu_wait_timeline(self.value, self.recycle)
     }
 
     fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
@@ -390,16 +401,16 @@ impl TimelineBlockingWait for Dx12FenceTimelineBlockingWait {
             return Ok(false);
         }
         if timeout_ms == 0 {
-            return Ok(unsafe { self.companion.fence.GetCompletedValue() } >= self.value);
+            return Ok(self.companion.timeline_completed(self.value, self.recycle));
         }
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
         while Instant::now() < deadline {
-            if unsafe { self.companion.fence.GetCompletedValue() } >= self.value {
+            if self.companion.timeline_completed(self.value, self.recycle) {
                 return Ok(true);
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        Ok(unsafe { self.companion.fence.GetCompletedValue() } >= self.value)
+        Ok(self.companion.timeline_completed(self.value, self.recycle))
     }
 }
 

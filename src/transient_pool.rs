@@ -459,11 +459,7 @@ fn take_ready_or_promote<E>(
         return None;
     }
     let progress = snapshot(bin.pending.iter().map(&ready_after).collect());
-    if let Some(pos) = bin
-        .pending
-        .iter()
-        .position(|e| is_ready(ready_after(e), &progress))
-    {
+    if let Some(pos) = bin.pending.iter().position(|e| is_ready(ready_after(e), &progress)) {
         return Some(bin.pending.swap_remove(pos));
     }
     None
@@ -561,10 +557,14 @@ mod tests {
                 access: acc,
                 flags,
             };
-            pool.texture_bins.entry(key).or_default().ready.push(TexturePendingEntry {
-                parcel,
-                ready_after: ReferenceTable::new(),
-            });
+            pool.texture_bins
+                .entry(key)
+                .or_default()
+                .ready
+                .push(TexturePendingEntry {
+                    parcel,
+                    ready_after: ReferenceTable::new(),
+                });
         });
     }
 
