@@ -605,8 +605,13 @@ fn try_merge_compute_render_range(
     let r1 = wave_ranges[part_idx + 1].clone();
     let w0 = &schedule.waves[r0.clone()];
     let w1 = &schedule.waves[r1.clone()];
+    // Present and deposit slots bake late-bound handles into the CB. Merged
+    // compute→render retains under `merged_fp` (IR fingerprint only), not
+    // `dynamic_partition_slot_key`, so either side with slots must stay split.
     if analysis::partition_waves_have_present(ir, w0)
         || analysis::partition_waves_have_present(ir, w1)
+        || analysis::partition_waves_have_upload_slots(ir, w0)
+        || analysis::partition_waves_have_upload_slots(ir, w1)
         || !partition_waves_can_retain(ir, w0)
         || !partition_waves_can_retain(ir, w1)
     {
@@ -957,7 +962,14 @@ fn try_merge_fresh_segments(plan: &[FreshSegment], idx: usize, separate_graphics
     }
     let a = &plan[idx];
     let b = &plan[idx + 1];
-    !a.has_present && !b.has_present && !a.needs_standalone && !b.needs_standalone && !a.has_render && b.has_render
+    !a.has_present
+        && !b.has_present
+        && !a.has_upload_slots
+        && !b.has_upload_slots
+        && !a.needs_standalone
+        && !b.needs_standalone
+        && !a.has_render
+        && b.has_render
 }
 
 /// True when an upload-only segment may fuse with the immediately following compute
@@ -1146,7 +1158,12 @@ fn submit_resolved_ir_partitions_fresh(
                 let graph_cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.fresh_cmds");
                     let waves = &cache.as_ref().unwrap().schedule.waves[wave_range.clone()];
-                    analysis::emit_graph_commands_for_waves(ir, waves, None)
+                    let needs_resolver = partition_needs_slot_resolver(ir, waves, false);
+                    analysis::emit_graph_commands_for_waves(
+                        ir,
+                        waves,
+                        if needs_resolver { Some(&resolver) } else { None },
+                    )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.fresh");
                 last_tv = backend_submit_graph(session, ctx, &graph_cmds, merged.as_ref())?;
@@ -1352,7 +1369,12 @@ fn submit_resolved_ir_partitions_replay(
 
                 let graph_cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.merged_emit");
-                    analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
+                    let needs_resolver = partition_needs_slot_resolver(ir, &merged_waves, false);
+                    analysis::emit_graph_commands_for_waves(
+                        ir,
+                        &merged_waves,
+                        if needs_resolver { Some(&resolver) } else { None },
+                    )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
                 ensure_partition_retired_before_rerecord(context, replay.partition_last_tv[part_idx])?;
@@ -2723,6 +2745,596 @@ mod slice_retention_tests {
             assert_eq!(
                 m.compute_dispatch_count, 1,
                 "replay path must fuse upload+compute when capability is enabled"
+            );
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Deposit CopyBuffer vs compute→render merge
+    //
+    // Scheme deposits are retainable (`waves_can_retain` stays true) but bake
+    // late-bound handles into the CB. Compute→render merge retains under an IR
+    // fingerprint only, so deposit waves must not fold into that merge.
+    // ------------------------------------------------------------------
+
+    fn deposit_copy_node(dst: ResourceId, size: u64) -> TaskNode {
+        let src = ResourceId::Deposit(0);
+        TaskNode {
+            label: "deposit_copy",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src,
+                src_offset: 0,
+                dst,
+                dst_offset: 0,
+                size,
+            },
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    fn compute_render_merge(ir: &GraphIR, separate_graphics: bool) -> Option<std::ops::Range<usize>> {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        let wave_ranges = analysis::partition_wave_ranges(ir, &schedule, true);
+        try_merge_compute_render_range(ir, &schedule, &wave_ranges, 0, separate_graphics)
+    }
+
+    #[cfg(feature = "graphics")]
+    fn deposit_map(parent: BufferHandle, len: u64) -> std::collections::HashMap<u32, ResolvedDeposit> {
+        let mut uploads = std::collections::HashMap::new();
+        uploads.insert(0, ResolvedDeposit { parent, offset: 0, len });
+        uploads
+    }
+
+    #[cfg(feature = "graphics")]
+    fn submit_with_deposits(
+        state: &mut IrSubmitState,
+        ctx: &crate::Context,
+        ir: &GraphIR,
+        deposits: &std::collections::HashMap<u32, ResolvedDeposit>,
+        ir_clean: bool,
+    ) {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let mut present_slots = Vec::new();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
+        state
+            .submit_pipelined_and_retain_with_presents(
+                ctx,
+                ir,
+                &mut present_slots,
+                None,
+                deposits,
+                ir_clean,
+                &mut partial,
+                &mut partial_tv,
+            )
+            .unwrap();
+    }
+
+    fn fresh_segment(
+        wave_range: std::ops::Range<usize>,
+        has_render: bool,
+        has_upload_slots: bool,
+        needs_standalone: bool,
+    ) -> FreshSegment {
+        FreshSegment {
+            wave_range,
+            has_render,
+            has_present: false,
+            present_bindings: Vec::new(),
+            needs_standalone,
+            has_upload_slots,
+        }
+    }
+
+    /// Deposit copies stay retainable; do not route them through `waves_can_retain`.
+    #[test]
+    fn deposit_copy_buffer_is_retainable() {
+        let ir = GraphIR {
+            nodes: vec![deposit_copy_node(ResourceId::Buffer(1), 64)],
+        };
+        let edges = analysis::build_edges(&ir);
+        let schedule = analysis::schedule_waves(&ir, &edges);
+        assert!(
+            partition_waves_can_retain(&ir, &schedule.waves),
+            "Deposit CopyBuffer must stay retainable (slot-key path), unlike WriteBuffer"
+        );
+        assert!(analysis::partition_waves_have_upload_slots(&ir, &schedule.waves));
+    }
+
+    /// Fresh compute→render merge is blocked when either segment has deposit slots.
+    #[test]
+    fn try_merge_fresh_segments_rejects_upload_slots_on_either_side() {
+        let compute_then_render = vec![
+            fresh_segment(0..1, false, false, false),
+            fresh_segment(1..2, true, false, false),
+        ];
+        assert!(
+            try_merge_fresh_segments(&compute_then_render, 0, false),
+            "retainable compute→render must still merge on a shared queue"
+        );
+        assert!(
+            !try_merge_fresh_segments(&compute_then_render, 0, true),
+            "separate graphics queue must not merge compute into render"
+        );
+
+        let upload_then_render = vec![
+            fresh_segment(0..1, false, true, false),
+            fresh_segment(1..2, true, false, false),
+        ];
+        assert!(
+            !try_merge_fresh_segments(&upload_then_render, 0, false),
+            "deposit wave must not merge into the following render segment"
+        );
+
+        let compute_then_upload_render = vec![
+            fresh_segment(0..1, false, false, false),
+            fresh_segment(1..2, true, true, false),
+        ];
+        assert!(
+            !try_merge_fresh_segments(&compute_then_upload_render, 0, false),
+            "render segment with deposit slots must not absorb the prior compute segment"
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    fn dispatch_then_render_ir(p: ComputePipelineHandle, buf: BufferHandle, rt: u64) -> GraphIR {
+        GraphIR {
+            nodes: vec![
+                TaskNode {
+                    label: "pre",
+                    bindings: vec![ResourceBinding {
+                        resource: ResourceId::Buffer(buf),
+                        access: NodeAccess::Write,
+                    }],
+                    kind: NodeKind::Dispatch {
+                        pipeline: p,
+                        resource_slots: vec![],
+                        user_slots: vec![],
+                        dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+                    },
+                },
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![ResourceBinding {
+                        resource: ResourceId::Buffer(buf),
+                        access: NodeAccess::Read,
+                    }],
+                    kind: NodeKind::RenderPass {
+                        target: rt,
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
+                        commands: Vec::new(),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    fn deposit_then_render_ir(buf: BufferHandle, rt: u64) -> GraphIR {
+        GraphIR {
+            nodes: vec![
+                deposit_copy_node(ResourceId::Buffer(buf), 64),
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![ResourceBinding {
+                        resource: ResourceId::Buffer(buf),
+                        access: NodeAccess::Read,
+                    }],
+                    kind: NodeKind::RenderPass {
+                        target: rt,
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
+                        commands: Vec::new(),
+                    },
+                },
+            ],
+        }
+    }
+
+    /// Compute in wave 0; deposit copy and render share wave 1 (slots on the render partition).
+    ///
+    /// `deposit_dst` is independent of the render pass so the copy can sit in the
+    /// same wave as the draw. Reading `compute_buf` pulls the copy to depth 1.
+    #[cfg(feature = "graphics")]
+    fn compute_then_deposit_and_render_ir(
+        p: ComputePipelineHandle,
+        compute_buf: BufferHandle,
+        deposit_dst: BufferHandle,
+        rt: u64,
+    ) -> GraphIR {
+        let compute = ResourceId::Buffer(compute_buf);
+        let mut copy = deposit_copy_node(ResourceId::Buffer(deposit_dst), 64);
+        copy.bindings.push(ResourceBinding {
+            resource: compute,
+            access: NodeAccess::Read,
+        });
+        GraphIR {
+            nodes: vec![
+                TaskNode {
+                    label: "pre",
+                    bindings: vec![ResourceBinding {
+                        resource: compute,
+                        access: NodeAccess::Write,
+                    }],
+                    kind: NodeKind::Dispatch {
+                        pipeline: p,
+                        resource_slots: vec![],
+                        user_slots: vec![],
+                        dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+                    },
+                },
+                copy,
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![ResourceBinding {
+                        resource: compute,
+                        access: NodeAccess::Read,
+                    }],
+                    kind: NodeKind::RenderPass {
+                        target: rt,
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
+                        commands: Vec::new(),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn try_merge_compute_render_rejects_deposit_slots_on_either_side() {
+        let compute_render = dispatch_then_render_ir(1, 1, 10);
+        assert!(
+            compute_render_merge(&compute_render, false).is_some(),
+            "shared-queue compute→render without deposits must still merge"
+        );
+        assert!(
+            compute_render_merge(&compute_render, true).is_none(),
+            "separate graphics queue must not merge"
+        );
+
+        let deposit_render = deposit_then_render_ir(1, 10);
+        assert!(
+            compute_render_merge(&deposit_render, false).is_none(),
+            "deposit-then-render must not merge (slots on w0)"
+        );
+
+        let compute_deposit_render = compute_then_deposit_and_render_ir(1, 1, 2, 10);
+        let edges = analysis::build_edges(&compute_deposit_render);
+        let schedule = analysis::schedule_waves(&compute_deposit_render, &edges);
+        let ranges = analysis::partition_wave_ranges(&compute_deposit_render, &schedule, true);
+        assert!(
+            ranges.len() >= 2,
+            "expected compute | deposit+render partitions, got {ranges:?}"
+        );
+        assert!(
+            !analysis::partition_waves_have_upload_slots(&compute_deposit_render, &schedule.waves[ranges[0].clone()]),
+            "first partition must be deposit-free so this case exercises slots on w1"
+        );
+        assert!(analysis::partition_waves_have_upload_slots(
+            &compute_deposit_render,
+            &schedule.waves[ranges[1].clone()]
+        ));
+        assert!(
+            compute_render_merge(&compute_deposit_render, false).is_none(),
+            "compute then deposit+render must not merge (slots on w1)"
+        );
+    }
+
+    /// Clock-style: deposit blit then render must not panic, and must not share a CB.
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn fresh_deposit_then_render_stays_split_and_resolves() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
+        let buf = mock_buf(&device);
+        let ir = deposit_then_render_ir(buf.handle, rt.backend_handle());
+        let uploads = deposit_map(buf.handle, 64);
+
+        let mut cache = None;
+        let empty_stamps = ResourceKeyMap::default();
+        let mut present_slots = Vec::new();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
+        submit_resolved_ir_partitions(
+            &mut cache,
+            None,
+            &ctx,
+            ctx.submit_session(),
+            &ir,
+            PresentSubmitOptions {
+                present_slots: &mut present_slots,
+                deferred_acquire: None,
+                deposits: &uploads,
+                resource_stamps: &empty_stamps,
+                stamp_targets: &[],
+                ir_clean: false,
+                sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
+            },
+        )
+        .expect("deposit CopyBuffer in a split render scheme must resolve");
+
+        let plan = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap();
+        assert_eq!(plan.len(), 2, "deposit and render must be distinct fresh segments");
+        assert!(plan[0].has_upload_slots);
+        assert!(!plan[0].has_render);
+        assert!(plan[1].has_render);
+        assert!(!plan[1].has_upload_slots);
+        assert!(
+            !try_merge_fresh_segments(plan, 0, false),
+            "fresh executor must not fold the deposit segment into render"
+        );
+        device.with_mock(|m| {
+            assert_eq!(
+                m.recorded_graph_syncs.len(),
+                1,
+                "render stays on submit_graph; deposit is standalone"
+            );
+        });
+    }
+
+    /// Same-wave deposit + render is one partition: emit must still pass a resolver.
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn fresh_same_wave_deposit_and_render_resolves_without_panic() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
+        let buf = mock_buf(&device);
+        // Independent nodes share depth 0 → one wave with both deposit and render.
+        let ir = GraphIR {
+            nodes: vec![
+                deposit_copy_node(ResourceId::Buffer(buf.handle), 64),
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![],
+                    kind: NodeKind::RenderPass {
+                        target: rt.backend_handle(),
+                        color_load: crate::types::TargetLoad::Clear(crate::types::Color::BLACK),
+                        commands: Vec::new(),
+                    },
+                },
+            ],
+        };
+        let uploads = deposit_map(buf.handle, 64);
+
+        let mut cache = None;
+        let empty_stamps = ResourceKeyMap::default();
+        let mut present_slots = Vec::new();
+        let mut partial = PartitionSubmitResult::default();
+        let mut partial_tv = 0u64;
+        submit_resolved_ir_partitions(
+            &mut cache,
+            None,
+            &ctx,
+            ctx.submit_session(),
+            &ir,
+            PresentSubmitOptions {
+                present_slots: &mut present_slots,
+                deferred_acquire: None,
+                deposits: &uploads,
+                resource_stamps: &empty_stamps,
+                stamp_targets: &[],
+                ir_clean: false,
+                sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
+                partial: &mut partial,
+                partial_tv: &mut partial_tv,
+            },
+        )
+        .expect("render partition with deposit slots must emit with a slot resolver");
+
+        let plan = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap();
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].has_render);
+        assert!(plan[0].has_upload_slots);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn replay_compute_then_render_still_merges_into_one_retained_cb() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
+        let ir = dispatch_then_render_ir(p.handle, buf.handle, rt.backend_handle());
+
+        let mut state = IrSubmitState::new();
+        do_submit(&mut state, &ctx, &ir, false);
+        assert_eq!(
+            retained_count(&device),
+            1,
+            "shared-queue compute→render without deposits retains as one merged CB"
+        );
+        device.with_mock(|m| {
+            let cmds = m.retained_graphs.values().next().expect("merged CB");
+            let has_dispatch = cmds.iter().any(|c| {
+                matches!(
+                    c,
+                    GraphCommand::Compute(GpuCommand::Dispatch { .. } | GpuCommand::DispatchBatch { .. })
+                )
+            });
+            let has_render = cmds.iter().any(|c| matches!(c, GraphCommand::Render { .. }));
+            assert!(has_dispatch && has_render, "merged CB must contain compute and render");
+        });
+
+        // Recompute partition fingerprints from the IR (ir_clean=false). Clean-submit
+        // sticky keys currently store merged_fp in both slots, which would re-hash
+        // the merge key; that is independent of deposit-slot gating.
+        do_submit(&mut state, &ctx, &ir, false);
+        assert_eq!(resubmit_count(&device), 1);
+        assert_eq!(retained_count(&device), 1);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn replay_deposit_then_render_retains_slot_keyed_copy_separate_from_render() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let buf = mock_buf(&device);
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
+        let ir = deposit_then_render_ir(buf.handle, rt.backend_handle());
+        let uploads = deposit_map(buf.handle, 64);
+
+        let mut state = IrSubmitState::new();
+        submit_with_deposits(&mut state, &ctx, &ir, &uploads, false);
+        assert_eq!(
+            retained_count(&device),
+            2,
+            "deposit and render must retain as two CBs, not one merged_fp graph"
+        );
+        device.with_mock(|m| {
+            let mut saw_copy = false;
+            let mut saw_render = false;
+            let mut saw_merged = false;
+            for cmds in m.retained_graphs.values() {
+                let has_copy = cmds
+                    .iter()
+                    .any(|c| matches!(c, GraphCommand::Compute(GpuCommand::CopyBuffer { .. })));
+                let has_render = cmds.iter().any(|c| matches!(c, GraphCommand::Render { .. }));
+                saw_copy |= has_copy && !has_render;
+                saw_render |= has_render && !has_copy;
+                saw_merged |= has_copy && has_render;
+            }
+            assert!(saw_copy, "deposit partition must retain a CopyBuffer-only CB");
+            assert!(saw_render, "render partition must retain a render-only CB");
+            assert!(!saw_merged, "deposit CopyBuffer must not be baked into the render CB");
+        });
+
+        submit_with_deposits(&mut state, &ctx, &ir, &uploads, true);
+        assert_eq!(
+            resubmit_count(&device),
+            2,
+            "both slot-keyed deposit and render resubmit"
+        );
+        assert_eq!(retained_count(&device), 2);
+    }
+
+    /// A different physical deposit parcel must not resubmit the previous baked CB.
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn replay_deposit_then_render_records_new_slot_variant_on_parcel_change() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let buf_a = mock_buf(&device);
+        let buf_b = mock_buf(&device);
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
+        let ir = deposit_then_render_ir(buf_a.handle, rt.backend_handle());
+
+        let mut state = IrSubmitState::new();
+        let uploads_a = deposit_map(buf_a.handle, 64);
+        submit_with_deposits(&mut state, &ctx, &ir, &uploads_a, false);
+        assert_eq!(retained_count(&device), 2);
+
+        let uploads_b = deposit_map(buf_b.handle, 64);
+        submit_with_deposits(&mut state, &ctx, &ir, &uploads_b, true);
+        assert_eq!(
+            resubmit_count(&device),
+            1,
+            "render CB resubmits; deposit must re-record for the new parcel"
+        );
+        assert_eq!(
+            retained_count(&device),
+            3,
+            "new deposit slot variant is retained alongside the previous deposit CB and render CB"
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn replay_compute_then_deposit_render_does_not_merge() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let compute_buf = mock_buf(&device);
+        let deposit_dst = mock_buf(&device);
+        let rt = crate::render_target::RenderTarget::new_with_depth(
+            &device,
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .unwrap();
+        let ir =
+            compute_then_deposit_and_render_ir(p.handle, compute_buf.handle, deposit_dst.handle, rt.backend_handle());
+        let uploads = deposit_map(deposit_dst.handle, 64);
+
+        let mut state = IrSubmitState::new();
+        submit_with_deposits(&mut state, &ctx, &ir, &uploads, false);
+        assert!(
+            retained_count(&device) >= 2,
+            "compute must not merge into a deposit-bearing render partition (got {} retained)",
+            retained_count(&device)
+        );
+        device.with_mock(|m| {
+            let merged_compute_into_slots = m.retained_graphs.values().any(|cmds| {
+                let has_dispatch = cmds.iter().any(|c| {
+                    matches!(
+                        c,
+                        GraphCommand::Compute(GpuCommand::Dispatch { .. } | GpuCommand::DispatchBatch { .. })
+                    )
+                });
+                let has_copy = cmds
+                    .iter()
+                    .any(|c| matches!(c, GraphCommand::Compute(GpuCommand::CopyBuffer { .. })));
+                let has_render = cmds.iter().any(|c| matches!(c, GraphCommand::Render { .. }));
+                has_dispatch && has_copy && has_render
+            });
+            assert!(
+                !merged_compute_into_slots,
+                "prior compute partition must not fold into a deposit-bearing render CB (merged_fp has no slot key)"
             );
         });
     }
