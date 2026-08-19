@@ -68,8 +68,8 @@ When updating Slang, only this file needs to change (plus downloading new binari
 
 The build script:
 1. Reads `slang/manifest.json`
-2. Prefers vendored binaries in `slang/bin/{platform}/` (local `./download.sh`)
-3. If missing, downloads from GitHub releases into **`OUT_DIR/slang_bin/`** (not the package source — required for `cargo publish`)
+2. Prefers vendored binaries in `slang/bin/{platform}/` (gitignored local cache)
+3. If missing, downloads from GitHub releases into `slang/bin/{platform}/`. On `cargo publish` verification (source is read-only) this falls back to **`OUT_DIR/slang_bin/`**
 4. Embeds libraries via `include_bytes!` into the crate
 5. At runtime, extracts and loads them (override with `GOLDY_SLANG_PATH`)
 

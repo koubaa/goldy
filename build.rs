@@ -141,42 +141,110 @@ fn main() {
         }
     };
 
-    // Prefer repo-vendored binaries (`slang/bin/...`, gitignored). If missing,
-    // download into OUT_DIR only — never write under CARGO_MANIFEST_DIR during
-    // `cargo publish` verification (cargo forbids modifying the package source).
-    let vendored_dir = manifest_dir.join("slang").join("bin").join(platform_dir);
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let out_bin_dir = out_dir.join("slang_bin").join(platform_dir);
-
-    for file in &platform_info.files {
-        println!("cargo:rerun-if-changed={}", vendored_dir.join(file).display());
-    }
-
-    let slang_bin_dir = if vendored_dir.join(&platform_info.primary).exists() {
-        vendored_dir
-    } else {
-        println!(
-            "cargo:warning=Vendored Slang binaries not found at {}",
-            vendored_dir.display()
-        );
-        println!(
-            "cargo:warning=Downloading Slang v{} for {} into OUT_DIR...",
-            manifest.version, platform_dir
-        );
-
-        if let Err(e) = download_slang_to_vendored(&out_bin_dir, platform_dir, &manifest.version, &platform_info.files)
-        {
-            println!("cargo:warning=Failed to download Slang: {}", e);
-            println!("cargo:warning=Run: cd slang && ./download.sh");
-            generate_empty_embedded_module();
-            emit_goldy_cache_version(Some(manifest.version.as_str()));
-            return;
-        }
-        out_bin_dir
+    // Local cache is `slang/bin/...` (gitignored). First miss downloads there so
+    // later builds hit without rerunning this script. `cargo publish` forbids
+    // writing the package source, so that path falls back to OUT_DIR.
+    let Some(slang_bin_dir) = resolve_slang_bin_dir(&manifest_dir, platform_dir, &manifest, platform_info) else {
+        generate_empty_embedded_module();
+        emit_goldy_cache_version(Some(manifest.version.as_str()));
+        return;
     };
 
     generate_embedded_module(&manifest.version, &slang_bin_dir, platform_info);
     emit_goldy_cache_version(Some(manifest.version.as_str()));
+}
+
+/// Locate Slang libraries, downloading once into the local gitignored cache when possible.
+fn resolve_slang_bin_dir(
+    manifest_dir: &Path,
+    platform_dir: &str,
+    manifest: &SlangManifest,
+    platform_info: &PlatformInfo,
+) -> Option<PathBuf> {
+    let vendored_dir = manifest_dir.join("slang").join("bin").join(platform_dir);
+    let out_bin_dir = PathBuf::from(env::var("OUT_DIR").unwrap())
+        .join("slang_bin")
+        .join(platform_dir);
+
+    if slang_binaries_present(&vendored_dir, platform_info) {
+        emit_rerun_if_changed_existing(&vendored_dir, &platform_info.files);
+        return Some(vendored_dir);
+    }
+
+    if dir_is_writable(&vendored_dir) {
+        println!(
+            "cargo:warning=Downloading Slang v{} for {} into {}",
+            manifest.version,
+            platform_dir,
+            vendored_dir.display()
+        );
+        if let Err(e) = download_slang_to_vendored(&vendored_dir, platform_dir, &manifest.version, &platform_info.files)
+        {
+            println!("cargo:warning=Failed to download Slang: {}", e);
+            println!("cargo:warning=Run: cd slang && ./download.sh");
+            // Missing path keeps the script dirty so the next `cargo build` retries.
+            println!(
+                "cargo:rerun-if-changed={}",
+                vendored_dir.join(&platform_info.primary).display()
+            );
+            return None;
+        }
+        emit_rerun_if_changed_existing(&vendored_dir, &platform_info.files);
+        return Some(vendored_dir);
+    }
+
+    if slang_binaries_present(&out_bin_dir, platform_info) {
+        emit_rerun_if_changed_existing(&out_bin_dir, &platform_info.files);
+        return Some(out_bin_dir);
+    }
+
+    println!(
+        "cargo:warning=Cannot write {} (publish verification?); downloading Slang v{} into OUT_DIR",
+        vendored_dir.display(),
+        manifest.version
+    );
+    if let Err(e) = download_slang_to_vendored(&out_bin_dir, platform_dir, &manifest.version, &platform_info.files) {
+        println!("cargo:warning=Failed to download Slang: {}", e);
+        println!("cargo:warning=Run: cd slang && ./download.sh");
+        println!(
+            "cargo:rerun-if-changed={}",
+            out_bin_dir.join(&platform_info.primary).display()
+        );
+        return None;
+    }
+    emit_rerun_if_changed_existing(&out_bin_dir, &platform_info.files);
+    Some(out_bin_dir)
+}
+
+fn slang_binaries_present(dir: &Path, platform_info: &PlatformInfo) -> bool {
+    dir.join(&platform_info.primary).exists()
+}
+
+fn emit_rerun_if_changed_existing(dir: &Path, files: &[String]) {
+    for file in files {
+        let path = dir.join(file);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
+
+/// True when we can create `dir` and write a file into it.
+///
+/// Used to distinguish a normal checkout (`slang/bin` is the lazy cache) from
+/// `cargo publish` verification, which rejects writes under `CARGO_MANIFEST_DIR`.
+fn dir_is_writable(dir: &Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".goldy_write_probe");
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Generate an empty embedded module (for unsupported platforms or missing binaries)
@@ -196,7 +264,7 @@ pub const SLANG_FILES: &[(&str, &[u8])] = &[];
 pub const SLANG_PRIMARY: &str = "";
 "#;
 
-    fs::write(&embedded_path, content).expect("Failed to write slang_embedded.rs");
+    write_if_changed(&embedded_path, content);
 }
 
 /// Generate the embedded module with include_bytes! for all Slang files
@@ -247,7 +315,15 @@ fn generate_embedded_module(version: &str, vendored_dir: &Path, platform_info: &
 
     content.push_str("];\n");
 
-    fs::write(&embedded_path, content).expect("Failed to write slang_embedded.rs");
+    write_if_changed(&embedded_path, content);
+}
+
+fn write_if_changed(path: &Path, content: impl AsRef<[u8]>) {
+    let content = content.as_ref();
+    if fs::read(path).ok().as_deref() == Some(content) {
+        return;
+    }
+    fs::write(path, content).expect("Failed to write slang_embedded.rs");
 }
 
 fn load_manifest(path: &Path) -> io::Result<SlangManifest> {
