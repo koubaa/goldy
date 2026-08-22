@@ -5,13 +5,13 @@
 #![allow(deprecated)]
 
 use super::super::SurfaceHandle;
+use super::objc_id::id;
 use super::types::{SharedLogicalDevice, SharedMetalSubmissionContext, TimelineWaiter};
 use crate::backend::submission_worker::{allocate_timeline_value, PendingSubmit};
 use crate::timeline::TimelineValue;
 use ::metal as mtl;
 use anyhow::Result;
 use block::ConcreteBlock;
-use super::objc_id::id;
 use objc::rc::autoreleasepool;
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;

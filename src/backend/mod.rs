@@ -84,7 +84,11 @@ use std::sync::Arc;
 ///
 /// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
 /// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
-#[cfg(any(feature = "vulkan", feature = "cuda", all(feature = "metal", any(target_os = "macos", target_os = "ios")),))]
+#[cfg(any(
+    feature = "vulkan",
+    feature = "cuda",
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
+))]
 #[must_use]
 pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()

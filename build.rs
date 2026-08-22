@@ -429,15 +429,11 @@ fn get_platform_dir() -> String {
 fn slang_download_url(platform_dir: &str, version: &str) -> (String, String) {
     if platform_dir == "android-aarch64" {
         let zip_name = format!("slang-android-v{version}.zip");
-        let url = format!(
-            "https://github.com/zeozeozeo/slang-android/releases/download/v{version}/{zip_name}"
-        );
+        let url = format!("https://github.com/zeozeozeo/slang-android/releases/download/v{version}/{zip_name}");
         return (zip_name, url);
     }
     let zip_name = format!("slang-{version}-{platform_dir}.zip");
-    let url = format!(
-        "https://github.com/shader-slang/slang/releases/download/v{version}/{zip_name}"
-    );
+    let url = format!("https://github.com/shader-slang/slang/releases/download/v{version}/{zip_name}");
     (zip_name, url)
 }
 

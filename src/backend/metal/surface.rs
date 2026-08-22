@@ -38,12 +38,14 @@
 
 use super::super::{DeviceHandle, FrameToken, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use super::compute;
+#[cfg(target_os = "macos")]
+use super::objc_id::YES;
+use super::objc_id::{id, nil, NO};
 use super::types::{
     MetalState, ResourceRegistry, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE, MAX_FRAMES_IN_FLIGHT,
 };
 use super::utils::depth_format_to_mtl;
 use crate::types::{DepthFormat, PresentMode, TextureFormat};
-use super::objc_id::{id, nil, NO, YES};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use core_graphics_types::geometry::CGSize;

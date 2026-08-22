@@ -10,10 +10,16 @@
 /// the device descriptor registry) and reach shaders via push constants
 /// `_rs1`/`_rs2`; these constants only describe Metal's fixed device-level
 /// argument-buffer layout.
-#[cfg_attr(not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_SELECTOR_SLOT: u32 = 0;
 /// Metal argument-buffer slot for the device-local index table (`Scattered<u32>`).
-#[cfg_attr(not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
 /// First bindless slot available to program resources (low protocol slots reserved).
 #[cfg_attr(
@@ -37,7 +43,10 @@ pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
 pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;
 
 /// Byte size of one device-local table buffer.
-#[cfg_attr(not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))),
+    allow(dead_code)
+)]
 pub const FRAME_TABLE_TABLE_BYTES: u64 = (FRAME_TABLE_TABLE_U32S * 4) as u64;
 /// Per-row selector slots at the front of CPU upload staging.
 #[cfg_attr(
