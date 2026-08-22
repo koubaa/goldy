@@ -376,7 +376,13 @@ impl SlangLibrary {
         if SLANG_VERSION.is_empty() {
             return None;
         }
-        dirs::cache_dir().map(|d| d.join("goldy").join("slang").join(SLANG_VERSION))
+        dirs::cache_dir().map(|d| {
+            let mut p = d.join("goldy").join("slang").join(SLANG_VERSION);
+            if !SLANG_EMBED_PLATFORM.is_empty() {
+                p.push(SLANG_EMBED_PLATFORM);
+            }
+            p
+        })
     }
 
     /// Ensure Slang libraries are extracted to the cache directory.
