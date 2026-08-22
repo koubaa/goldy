@@ -18,6 +18,7 @@ mod context;
 mod device;
 mod frame_table;
 pub(super) mod metal_capture;
+mod objc_id;
 mod pending_submit;
 mod pipeline;
 mod render_commands;

@@ -29,8 +29,8 @@ pub(crate) mod dx12;
 // Mock backend for testing (always available)
 pub(crate) mod mock;
 
-// Metal backend for macOS (native Metal, not MoltenVK)
-#[cfg(all(feature = "metal", target_os = "macos"))]
+// Metal backend for macOS / iOS (native Metal, not MoltenVK)
+#[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
 pub(crate) mod metal;
 
 // Portable WebGPU backend (compute-only prototype).
@@ -84,7 +84,11 @@ use std::sync::Arc;
 ///
 /// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
 /// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
-#[cfg(any(feature = "vulkan", feature = "cuda", all(feature = "metal", target_os = "macos"),))]
+#[cfg(any(
+    feature = "vulkan",
+    feature = "cuda",
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
+))]
 #[must_use]
 pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
@@ -94,7 +98,7 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 use crate::types::ResourceCategory;
 
@@ -110,7 +114,7 @@ use crate::types::BindlessSlotKind;
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 #[inline]
 pub(crate) fn with_layout_validation<F>(f: F) -> Result<()>
@@ -179,7 +183,7 @@ pub(crate) fn validate_bindless_slot_kinds(
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 pub(crate) fn validate_typed_push_constants(
     handles: &[ResourceHandle],
@@ -225,7 +229,7 @@ pub(crate) fn validate_typed_push_constants(
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 pub(crate) fn validate_binding_strides(
     buffer_strides: &[Option<u32>],
@@ -272,7 +276,7 @@ pub(crate) fn validate_binding_strides(
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 pub(crate) fn validate_raw_binding_strides(
     indices: &[u32],
@@ -329,7 +333,7 @@ pub(crate) fn validate_raw_binding_strides(
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 pub(crate) fn validate_render_pass_bind_resources<F, G>(
     commands: &[RenderCommand],
@@ -732,7 +736,7 @@ pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
     test,
     feature = "vulkan",
     all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
     feature = "cuda",
 ))]
 pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHandle) {
@@ -1704,8 +1708,8 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
         return create_backend(backend_type);
     }
 
-    // On macOS with metal feature, prefer Metal
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    // On macOS / iOS with metal feature, prefer Metal
+    #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
     {
         tracing::info!("Creating Metal backend");
         Ok(Box::new(metal::MetalBackend::new()?))
@@ -1715,7 +1719,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     #[cfg(all(
         feature = "dx12",
         target_os = "windows",
-        not(all(feature = "metal", target_os = "macos"))
+        not(all(feature = "metal", any(target_os = "macos", target_os = "ios")))
     ))]
     {
         tracing::info!("Creating DX12 backend");
@@ -1726,7 +1730,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     #[cfg(all(
         feature = "vulkan",
         not(all(feature = "dx12", target_os = "windows")),
-        not(all(feature = "metal", target_os = "macos"))
+        not(all(feature = "metal", any(target_os = "macos", target_os = "ios")))
     ))]
     {
         tracing::info!("Creating Vulkan backend");
@@ -1736,7 +1740,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     // Compute-only prototypes: only when no native graphics backend is compiled in.
     #[cfg(all(
         feature = "cuda",
-        not(all(feature = "metal", target_os = "macos")),
+        not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))),
         not(all(feature = "dx12", target_os = "windows")),
         not(feature = "vulkan")
     ))]
@@ -1748,7 +1752,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     #[cfg(all(
         feature = "webgpu",
         not(feature = "cuda"),
-        not(all(feature = "metal", target_os = "macos")),
+        not(all(feature = "metal", any(target_os = "macos", target_os = "ios"))),
         not(all(feature = "dx12", target_os = "windows")),
         not(feature = "vulkan")
     ))]
@@ -1759,7 +1763,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 
     // No backend available
     #[cfg(not(any(
-        all(feature = "metal", target_os = "macos"),
+        all(feature = "metal", any(target_os = "macos", target_os = "ios")),
         all(feature = "dx12", target_os = "windows"),
         feature = "vulkan",
         feature = "cuda",
@@ -1805,7 +1809,7 @@ pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBac
             tracing::info!("Creating DX12 backend");
             Ok(Box::new(dx12::Dx12Backend::new()?))
         }
-        #[cfg(all(feature = "metal", target_os = "macos"))]
+        #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
         BackendType::Metal => {
             tracing::info!("Creating Metal backend");
             Ok(Box::new(metal::MetalBackend::new()?))

@@ -10,7 +10,7 @@
     not(any(
         feature = "vulkan",
         all(feature = "dx12", target_os = "windows"),
-        all(feature = "metal", target_os = "macos"),
+        all(feature = "metal", any(target_os = "macos", target_os = "ios")),
     )),
     allow(dead_code)
 )]
@@ -21,7 +21,7 @@ use anyhow::Result;
 
 use super::DeviceHandle;
 #[cfg(any(
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
     all(feature = "dx12", target_os = "windows"),
 ))]
 use super::ShaderHandle;
@@ -193,14 +193,14 @@ impl SlotAllocator {
     /// Only compiled for tests and the Metal backend, which exercise slot
     /// recycling; other backends' production code uses [`Self::alloc`] /
     /// [`Self::free`] only.
-    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+    #[cfg(any(test, all(feature = "metal", any(target_os = "macos", target_os = "ios"))))]
     #[inline]
     pub fn free_count(&self) -> usize {
         self.free.len()
     }
 
     /// The next fresh slot that would be minted if the free list were empty.
-    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+    #[cfg(any(test, all(feature = "metal", any(target_os = "macos", target_os = "ios"))))]
     #[inline]
     pub fn next_fresh(&self) -> u32 {
         self.next
@@ -639,7 +639,7 @@ impl<'a> ShaderDesc<'a> {
 }
 
 /// Slang compile inputs for a single shader stage (Metal path; same field set as other backends).
-#[cfg(all(feature = "metal", target_os = "macos"))]
+#[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
 #[derive(Debug, Clone, Copy)]
 pub struct ShaderStageCompileDesc<'a> {
     pub slang_source: &'a str,
@@ -684,7 +684,7 @@ impl<'a> PipelineDesc<'a> {
 
 /// Full graphics pipeline creation inputs for backends that resolve shaders by handle.
 #[cfg(any(
-    all(feature = "metal", target_os = "macos"),
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
     all(feature = "dx12", target_os = "windows"),
 ))]
 #[derive(Debug, Clone, Copy)]

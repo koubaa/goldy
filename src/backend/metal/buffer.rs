@@ -326,7 +326,7 @@ pub(super) fn hint_unused_above(state: &mut MetalState, buffer_handle: BufferHan
     if b.parent_for_view.is_some() {
         return;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         use libc::{sysconf, _SC_PAGESIZE};
         let ptr = b.buffer.contents() as *mut u8;

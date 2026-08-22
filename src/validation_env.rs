@@ -99,7 +99,11 @@ pub fn layout_validation_enabled() -> bool {
 
 /// Vulkan Khronos validation + `VK_EXT_debug_utils`, Metal `MTL_SHADER_VALIDATION`,
 /// CUDA Driver diagnostics (JIT logs / eager sync / launch limits), etc.
-#[cfg(any(feature = "vulkan", feature = "cuda", all(feature = "metal", target_os = "macos"),))]
+#[cfg(any(
+    feature = "vulkan",
+    feature = "cuda",
+    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
+))]
 #[must_use]
 pub(crate) fn gpu_api_validation_enabled() -> bool {
     from_goldy_validation_var().gpu_api

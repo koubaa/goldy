@@ -38,6 +38,9 @@
 
 use super::super::{DeviceHandle, FrameToken, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use super::compute;
+#[cfg(target_os = "macos")]
+use super::objc_id::YES;
+use super::objc_id::{id, nil, NO};
 use super::types::{
     MetalState, ResourceRegistry, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE, MAX_FRAMES_IN_FLIGHT,
 };
@@ -45,7 +48,6 @@ use super::utils::depth_format_to_mtl;
 use crate::types::{DepthFormat, PresentMode, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use cocoa::base::{id, nil, NO, YES};
 use core_graphics_types::geometry::CGSize;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
@@ -73,13 +75,16 @@ pub(super) fn create(
         .window_handle()
         .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
 
-    let ns_view = match window_handle.as_raw() {
+    let view = match window_handle.as_raw() {
+        #[cfg(target_os = "macos")]
         RawWindowHandle::AppKit(handle) => handle.ns_view.as_ptr() as id,
-        _ => anyhow::bail!("Expected AppKit window handle on macOS"),
+        #[cfg(target_os = "ios")]
+        RawWindowHandle::UiKit(handle) => handle.ui_view.as_ptr() as id,
+        other => anyhow::bail!("expected AppKit/UiKit window handle, got {other:?}"),
     };
 
     let (layer, width, height) = unsafe {
-        let layer: id = msg_send![class!(CAMetalLayer), layer];
+        let mut layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
         // Use RGBA8Unorm instead of BGRA8Unorm: on Apple Silicon, BGRA8Unorm
         // does not support storage-class access (compute shader UAV writes),
@@ -90,15 +95,46 @@ pub(super) fn create(
         // Don't set framebufferOnly so the texture can be used with compute
         let () = msg_send![layer, setFramebufferOnly: NO];
 
-        let () = msg_send![ns_view, setWantsLayer: YES];
-        let () = msg_send![ns_view, setLayer: layer];
+        #[cfg(target_os = "macos")]
+        {
+            let () = msg_send![view, setWantsLayer: YES];
+            let () = msg_send![view, setLayer: layer];
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let scale: f64 = msg_send![view, contentScaleFactor];
+            let () = msg_send![layer, setContentsScale: scale];
+            let existing: id = msg_send![view, layer];
+            let is_metal: objc::runtime::BOOL = msg_send![existing, isKindOfClass: class!(CAMetalLayer)];
+            if is_metal != NO {
+                layer = existing;
+                let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
+                let () = msg_send![layer, setPixelFormat: MTLPixelFormat::RGBA8Unorm];
+                let () = msg_send![layer, setFramebufferOnly: NO];
+                let () = msg_send![layer, setContentsScale: scale];
+            } else {
+                let () = msg_send![existing, addSublayer: layer];
+            }
+        }
 
-        let frame: cocoa::foundation::NSRect = msg_send![ns_view, frame];
-        let size = CGSize::new(frame.size.width, frame.size.height);
+        let (fw, fh) = {
+            #[cfg(target_os = "macos")]
+            {
+                let r: cocoa::foundation::NSRect = msg_send![view, frame];
+                (r.size.width, r.size.height)
+            }
+            #[cfg(target_os = "ios")]
+            {
+                let r: core_graphics_types::geometry::CGRect = msg_send![view, bounds];
+                let scale: f64 = msg_send![view, contentScaleFactor];
+                (r.size.width * scale, r.size.height * scale)
+            }
+        };
+        let size = CGSize::new(fw, fh);
         let () = msg_send![layer, setDrawableSize: size];
 
-        let w = (frame.size.width as u32).max(1);
-        let h = (frame.size.height as u32).max(1);
+        let w = (fw as u32).max(1);
+        let h = (fh as u32).max(1);
 
         (layer, w, h)
     };

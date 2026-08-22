@@ -376,7 +376,11 @@ impl SlangLibrary {
         if SLANG_VERSION.is_empty() {
             return None;
         }
-        dirs::cache_dir().map(|d| {
+        let base = std::env::var_os("GOLDY_CACHE_DIR")
+            .map(PathBuf::from)
+            .or_else(dirs::cache_dir)
+            .or_else(|| Some(std::env::temp_dir().join("goldy-cache")));
+        base.map(|d| {
             let mut p = d.join("goldy").join("slang").join(SLANG_VERSION);
             if !SLANG_EMBED_PLATFORM.is_empty() {
                 p.push(SLANG_EMBED_PLATFORM);

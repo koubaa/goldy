@@ -24,6 +24,9 @@ PLATFORMS=(
     "macos-aarch64 macos-aarch64"
 )
 
+# Android aarch64 is a community zip (not shader-slang/slang).
+# goldy/build.rs downloads it when GOLDY_SLANG_PLATFORM=android-aarch64.
+
 for platform_pair in "${PLATFORMS[@]}"; do
     read -r github_name local_dir <<< "$platform_pair"
     
