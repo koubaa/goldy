@@ -42,15 +42,11 @@ impl CbReplayState {
     /// Topology/structural dirtiness forces re-record even when the GPU has not
     /// retired the prior partition timeline — do not gate re-record on stale TVs.
     pub fn invalidate(&mut self) {
-        for key in &mut self.partition_keys {
-            *key = None;
-        }
+        self.partition_keys.fill(None);
         for keys in &mut self.partition_slot_keys {
             *keys = None;
         }
-        for tv in &mut self.partition_last_tv {
-            *tv = None;
-        }
+        self.partition_last_tv.fill(None);
     }
 
     pub fn record_last_tv(&mut self, part_idx: usize, tv: TimelineValue) {
