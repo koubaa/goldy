@@ -13,6 +13,7 @@
 
 pub(super) mod api_log;
 mod buffer;
+mod objc_id;
 mod compute;
 mod context;
 mod device;

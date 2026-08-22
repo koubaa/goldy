@@ -351,6 +351,7 @@ fn load_manifest(path: &Path) -> io::Result<SlangManifest> {
         "linux-aarch64",
         "macos-x86_64",
         "macos-aarch64",
+        "android-aarch64",
     ] {
         if let Some(info) = extract_platform_info(&content, platform) {
             platforms.insert(platform.to_string(), info);
@@ -417,8 +418,27 @@ fn get_platform_dir() -> String {
         ("linux", "aarch64") => "linux-aarch64".into(),
         ("macos", "x86_64") => "macos-x86_64".into(),
         ("macos", "aarch64") => "macos-aarch64".into(),
+        ("android", "aarch64") => "android-aarch64".into(),
+        // Official Slang does not ship iOS zips. Embed macos-aarch64 dylibs so
+        // the crate compiles; device/simulator dlopen still needs an iOS Slang.
+        ("ios", "aarch64") => "macos-aarch64".into(),
         (os, arch) => panic!("Unsupported Slang target {os}-{arch} (set GOLDY_SLANG_PLATFORM to override)"),
     }
+}
+
+fn slang_download_url(platform_dir: &str, version: &str) -> (String, String) {
+    if platform_dir == "android-aarch64" {
+        let zip_name = format!("slang-android-v{version}.zip");
+        let url = format!(
+            "https://github.com/zeozeozeo/slang-android/releases/download/v{version}/{zip_name}"
+        );
+        return (zip_name, url);
+    }
+    let zip_name = format!("slang-{version}-{platform_dir}.zip");
+    let url = format!(
+        "https://github.com/shader-slang/slang/releases/download/v{version}/{zip_name}"
+    );
+    (zip_name, url)
 }
 
 /// Download Slang binaries directly to the vendored directory
@@ -431,11 +451,7 @@ fn download_slang_to_vendored(
     fs::create_dir_all(vendored_dir)?;
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let zip_name = format!("slang-{}-{}.zip", version, platform_dir);
-    let url = format!(
-        "https://github.com/shader-slang/slang/releases/download/v{}/{}",
-        version, zip_name
-    );
+    let (zip_name, url) = slang_download_url(platform_dir, version);
 
     let zip_path = out_dir.join(&zip_name);
 

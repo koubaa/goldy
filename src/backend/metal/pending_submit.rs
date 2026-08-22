@@ -11,7 +11,7 @@ use crate::timeline::TimelineValue;
 use ::metal as mtl;
 use anyhow::Result;
 use block::ConcreteBlock;
-use cocoa::base::id;
+use super::objc_id::id;
 use objc::rc::autoreleasepool;
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
