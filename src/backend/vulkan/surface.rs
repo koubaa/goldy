@@ -58,11 +58,11 @@ use ash::{khr, vk, Entry, Instance};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
 use raw_window_handle::RawWindowHandle;
 
 #[cfg(target_os = "linux")]
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::RawDisplayHandle;
 
 /// Create platform-specific Vulkan surface.
 pub(super) fn create_platform_surface(
@@ -71,18 +71,12 @@ pub(super) fn create_platform_surface(
     window: &dyn raw_window_handle::HasWindowHandle,
     _display: &dyn raw_window_handle::HasDisplayHandle,
 ) -> Result<vk::SurfaceKHR> {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
     let window_handle = window
         .window_handle()
         .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
 
-    #[cfg(target_os = "linux")]
-    let window_handle = window
-        .window_handle()
-        .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
-
-    // Silence unused warning on platforms where surface creation isn't supported
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android")))]
     let _ = window;
 
     #[cfg(target_os = "windows")]
@@ -121,7 +115,21 @@ pub(super) fn create_platform_surface(
         }
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "android")]
+    {
+        match window_handle.as_raw() {
+            RawWindowHandle::AndroidNdk(h) => {
+                let create_info = vk::AndroidSurfaceCreateInfoKHR::default()
+                    .window(h.a_native_window.as_ptr().cast());
+                let android_surface = khr::android_surface::Instance::new(entry, instance);
+                unsafe { android_surface.create_android_surface(&create_info, None) }
+                    .context("Failed to create Android surface")
+            }
+            _ => anyhow::bail!("Expected Android NDK window handle (ANativeWindow)"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android")))]
     {
         let _ = (entry, instance);
         anyhow::bail!("Surface creation not supported on this platform - use Metal backend on macOS")
@@ -153,13 +161,21 @@ pub(super) fn create(
     let capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface) }
         .context("Failed to get surface capabilities")?;
 
-    // Choose surface format (prefer BGRA8 for better compatibility)
     let formats = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface) }
         .context("Failed to get surface formats")?;
 
+    // Prefer BGRA8 on desktop WSI; Android compositors typically advertise RGBA8.
     let format = formats
         .iter()
-        .find(|f| f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::B8G8R8A8_UNORM)
+        .find(|f| {
+            matches!(
+                f.format,
+                vk::Format::B8G8R8A8_SRGB
+                    | vk::Format::B8G8R8A8_UNORM
+                    | vk::Format::R8G8B8A8_SRGB
+                    | vk::Format::R8G8B8A8_UNORM
+            )
+        })
         .or_else(|| formats.first())
         .context("No suitable surface format")?;
 
