@@ -1488,6 +1488,10 @@ pub(crate) struct SurfaceState {
     pub current_frame: usize,
     /// The CAMetalLayer (stored as raw pointer for objc interop)
     pub layer: *mut std::ffi::c_void,
+    /// iOS: layer was `addSublayer`'d onto a non-Metal UIView layer and must
+    /// follow the view bounds (winit's UIKit view is often a plain `CALayer`).
+    #[cfg(target_os = "ios")]
+    pub ios_hosted_as_sublayer: bool,
     /// Per-slot acquired CAMetalDrawables (set during acquire, cleared on present).
     pub drawable_slots: [Option<*mut std::ffi::c_void>; MAX_FRAMES_IN_FLIGHT],
     /// Texture handle for each slot's drawable (registered for bindless access).

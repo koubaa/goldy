@@ -83,6 +83,8 @@ pub(super) fn create(
         other => anyhow::bail!("expected AppKit/UiKit window handle, got {other:?}"),
     };
 
+    #[cfg(target_os = "ios")]
+    let mut ios_hosted_as_sublayer = false;
     let (layer, width, height) = unsafe {
         let mut layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
@@ -113,6 +115,12 @@ pub(super) fn create(
                 let () = msg_send![layer, setFramebufferOnly: NO];
                 let () = msg_send![layer, setContentsScale: scale];
             } else {
+                ios_hosted_as_sublayer = true;
+                let bounds: core_graphics_types::geometry::CGRect = msg_send![view, bounds];
+                let () = msg_send![layer, setFrame: bounds];
+                // UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight
+                let mask: usize = 18;
+                let () = msg_send![layer, setAutoresizingMask: mask];
                 let () = msg_send![existing, addSublayer: layer];
             }
         }
@@ -175,6 +183,8 @@ pub(super) fn create(
             depth_texture,
             current_frame: 0,
             layer: layer as *mut std::ffi::c_void,
+            #[cfg(target_os = "ios")]
+            ios_hosted_as_sublayer,
             drawable_slots: std::array::from_fn(|_| None),
             drawable_texture_handles: std::array::from_fn(|_| None),
             current_texture_handle: None,
@@ -630,6 +640,14 @@ pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32,
     let layer = surface_state.layer as id;
     let size = CGSize::new(width as f64, height as f64);
     unsafe {
+        #[cfg(target_os = "ios")]
+        if surface_state.ios_hosted_as_sublayer {
+            let superlayer: id = msg_send![layer, superlayer];
+            if superlayer != nil {
+                let bounds: core_graphics_types::geometry::CGRect = msg_send![superlayer, bounds];
+                let () = msg_send![layer, setFrame: bounds];
+            }
+        }
         let () = msg_send![layer, setDrawableSize: size];
     }
 
