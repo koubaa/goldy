@@ -61,12 +61,18 @@ COMMON_FLAGS=(
   -DSLANG_SLANG_LLVM_FLAVOR=DISABLE
 )
 
+# CI iOS jobs export IPHONEOS_DEPLOYMENT_TARGET, which makes host clang
+# target iPhone (Lua's system() is then unavailable). Generators must be macOS.
+HOST_ENV=(env -u IPHONEOS_DEPLOYMENT_TARGET -u SDKROOT)
+
 echo "Building host generators..."
-cmake -S "${SRC}" -B "${HOST_BUILD}" -G Ninja \
+"${HOST_ENV[@]}" cmake -S "${SRC}" -B "${HOST_BUILD}" -G Ninja \
   "${COMMON_FLAGS[@]}" \
+  -DCMAKE_OSX_SYSROOT=macosx \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
   -DSLANG_LIB_TYPE=SHARED
-cmake --build "${HOST_BUILD}" --target all-generators
-cmake --install "${HOST_BUILD}" --prefix "${HOST_GEN}" --component generators
+"${HOST_ENV[@]}" cmake --build "${HOST_BUILD}" --target all-generators
+"${HOST_ENV[@]}" cmake --install "${HOST_BUILD}" --prefix "${HOST_GEN}" --component generators
 
 GEN_BIN="${HOST_GEN}/bin"
 if [[ ! -d "${GEN_BIN}" ]]; then
