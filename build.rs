@@ -132,6 +132,16 @@ fn main() {
 
     let platform_dir = get_platform_dir();
     println!("cargo:warning=Goldy Slang embed platform: {}", platform_dir);
+
+    // iOS cannot dlopen unsigned dylibs extracted to Caches. Bundle signed
+    // copies under Foo.app/Frameworks instead (see slang/build-ios.sh).
+    if platform_dir == "ios-aarch64" {
+        println!("cargo:warning=iOS: skipping Slang embed; package Frameworks at runtime");
+        generate_empty_embedded_module(&platform_dir);
+        emit_goldy_cache_version(Some(manifest.version.as_str()));
+        return;
+    }
+
     let platform_info = match manifest.platforms.get(&platform_dir) {
         Some(info) => info,
         None => {
@@ -352,6 +362,7 @@ fn load_manifest(path: &Path) -> io::Result<SlangManifest> {
         "macos-x86_64",
         "macos-aarch64",
         "android-aarch64",
+        "ios-aarch64",
     ] {
         if let Some(info) = extract_platform_info(&content, platform) {
             platforms.insert(platform.to_string(), info);
@@ -419,14 +430,18 @@ fn get_platform_dir() -> String {
         ("macos", "x86_64") => "macos-x86_64".into(),
         ("macos", "aarch64") => "macos-aarch64".into(),
         ("android", "aarch64") => "android-aarch64".into(),
-        // Official Slang does not ship iOS zips. Embed macos-aarch64 dylibs so
-        // the crate compiles; device/simulator dlopen still needs an iOS Slang.
-        ("ios", "aarch64") => "macos-aarch64".into(),
+        ("ios", "aarch64") => "ios-aarch64".into(),
         (os, arch) => panic!("Unsupported Slang target {os}-{arch} (set GOLDY_SLANG_PLATFORM to override)"),
     }
 }
 
 fn slang_download_url(platform_dir: &str, version: &str) -> (String, String) {
+    if platform_dir == "ios-aarch64" {
+        panic!(
+            "Slang has no official iOS zip. Cross-compile with slang/build-ios.sh \
+             into slang/bin/ios-aarch64 (see slang/README.md)."
+        );
+    }
     if platform_dir == "android-aarch64" {
         let zip_name = format!("slang-android-v{version}.zip");
         let url = format!("https://github.com/zeozeozeo/slang-android/releases/download/v{version}/{zip_name}");

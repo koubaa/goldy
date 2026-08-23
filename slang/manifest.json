@@ -63,6 +63,13 @@
       ],
       "primary": "libslang-compiler.so",
       "download_url": "https://github.com/zeozeozeo/slang-android/releases/download/v{version}/slang-android-v{version}.zip"
+    },
+    "ios-aarch64": {
+      "files": [
+        "libslang-compiler.dylib",
+        "libslang.dylib"
+      ],
+      "primary": "libslang-compiler.dylib"
     }
   }
 }

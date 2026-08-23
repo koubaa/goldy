@@ -335,7 +335,8 @@ impl SlangLibrary {
             return Ok(path);
         }
 
-        // 3. Check/extract from cache
+        // 3. Check/extract from cache (not used on iOS: extracted dylibs are unsigned)
+        #[cfg(not(target_os = "ios"))]
         if let Some(path) = Self::ensure_cached_library() {
             tracing::debug!("Using Slang from cache: {}", path.display());
             return Ok(path);
@@ -357,9 +358,14 @@ impl SlangLibrary {
     fn find_vendored_library() -> Option<PathBuf> {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let path = exe_dir.join(SLANG_PRIMARY);
-                if path.exists() {
-                    return Some(path);
+                let candidates = [
+                    exe_dir.join(SLANG_PRIMARY),
+                    exe_dir.join("Frameworks").join(SLANG_PRIMARY),
+                ];
+                for path in candidates {
+                    if path.exists() {
+                        return Some(path);
+                    }
                 }
             }
         }
@@ -372,6 +378,7 @@ impl SlangLibrary {
     /// - Windows: %LOCALAPPDATA%\goldy\slang\{version}\
     /// - Linux: ~/.cache/goldy/slang/{version}/
     /// - macOS: ~/Library/Caches/goldy/slang/{version}/
+    #[cfg(not(target_os = "ios"))]
     fn cache_dir() -> Option<PathBuf> {
         if SLANG_VERSION.is_empty() {
             return None;
@@ -392,6 +399,7 @@ impl SlangLibrary {
     /// Ensure Slang libraries are extracted to the cache directory.
     ///
     /// Returns the path to the primary library if successful.
+    #[cfg(not(target_os = "ios"))]
     fn ensure_cached_library() -> Option<PathBuf> {
         if SLANG_FILES.is_empty() {
             tracing::debug!("No embedded Slang binaries available");
@@ -434,6 +442,7 @@ impl SlangLibrary {
     }
 
     /// Extract all embedded Slang files to the cache directory.
+    #[cfg(not(target_os = "ios"))]
     fn extract_to_cache(cache_dir: &PathBuf) -> Result<()> {
         tracing::info!("Extracting Slang {} to cache: {}", SLANG_VERSION, cache_dir.display());
 

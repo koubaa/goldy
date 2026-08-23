@@ -47,6 +47,21 @@ At runtime Goldy loads Slang dynamically (search order in `goldy/src/slang/loade
 2. Slang DLLs next to the running executable (wheel / FFI layout)
 3. Cache directory — extracted from bytes embedded at compile time
 
+### iOS
+
+Official Slang releases have no iOS zip. `build.rs` maps `aarch64-apple-ios` to
+`ios-aarch64` and does **not** embed macOS dylibs.
+
+Cross-compile on macOS (Xcode + CMake + Ninja):
+
+```bash
+./build-ios.sh                  # writes bin/ios-aarch64/
+./build-ios.sh /tmp/slang-ios   # custom dest
+```
+
+Koba Screen copies those dylibs into `KobaScreen.app/Frameworks` and codesigns
+them. At runtime Goldy loads `@executable_path/Frameworks/libslang-compiler.dylib`.
+
 ## Version
 
 Current pinned version: **2026.13**
