@@ -204,9 +204,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     // Requesting an unavailable VkPhysicalDeviceFeatures bit fails vkCreateDevice
     // with VK_ERROR_FEATURE_NOT_PRESENT.
     let vertex_pipeline_stores = if pdev_features.vertex_pipeline_stores_and_atomics == vk::FALSE {
-        tracing::warn!(
-            "vertexPipelineStoresAndAtomics not available; vertex-stage image/buffer stores disabled"
-        );
+        tracing::warn!("vertexPipelineStoresAndAtomics not available; vertex-stage image/buffer stores disabled");
         vk::FALSE
     } else {
         vk::TRUE

@@ -119,8 +119,7 @@ pub(super) fn create_platform_surface(
     {
         match window_handle.as_raw() {
             RawWindowHandle::AndroidNdk(h) => {
-                let create_info = vk::AndroidSurfaceCreateInfoKHR::default()
-                    .window(h.a_native_window.as_ptr().cast());
+                let create_info = vk::AndroidSurfaceCreateInfoKHR::default().window(h.a_native_window.as_ptr().cast());
                 let android_surface = khr::android_surface::Instance::new(entry, instance);
                 unsafe { android_surface.create_android_surface(&create_info, None) }
                     .context("Failed to create Android surface")
