@@ -1,7 +1,8 @@
 //! Vulkan backend implementation.
 //!
 //! Targets Vulkan 1.4+ with dynamic rendering.
-//! Supports surface presentation on Windows (VK_KHR_win32_surface) and Linux (VK_KHR_wayland_surface).
+//! Supports surface presentation on Windows (`VK_KHR_win32_surface`), Linux
+//! (`VK_KHR_wayland_surface`), and Android (`VK_KHR_android_surface`).
 //!
 //! ## Module Structure
 //!
@@ -158,6 +159,9 @@ impl VulkanBackend {
 
         #[cfg(target_os = "linux")]
         extensions.push(khr::wayland_surface::NAME.as_ptr());
+
+        #[cfg(target_os = "android")]
+        extensions.push(khr::android_surface::NAME.as_ptr());
 
         // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
         let enable_validation = vulkan_instance_validation_enabled();

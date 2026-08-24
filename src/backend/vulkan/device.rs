@@ -93,6 +93,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .context("No graphics queue family found")?;
 
     let pdev_features = unsafe { state.instance.get_physical_device_features(physical_device_handle) };
+    let require_core = |bit: vk::Bool32, name: &'static str| -> Result<vk::Bool32> {
+        if bit == vk::FALSE {
+            anyhow::bail!("required Vulkan feature {name} is not available on this device");
+        }
+        Ok(vk::TRUE)
+    };
     let supports_sparse = physical_device.supports_sparse_buffer;
     debug_assert_eq!(
         supports_sparse,
@@ -194,11 +200,23 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let mut compute_derivatives_features =
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default().compute_derivative_group_quads(true);
 
+    // Mali-G715 (and many mobile GPUs) lack vertex-stage image/buffer stores.
+    // Requesting an unavailable VkPhysicalDeviceFeatures bit fails vkCreateDevice
+    // with VK_ERROR_FEATURE_NOT_PRESENT.
+    let vertex_pipeline_stores = if pdev_features.vertex_pipeline_stores_and_atomics == vk::FALSE {
+        tracing::warn!("vertexPipelineStoresAndAtomics not available; vertex-stage image/buffer stores disabled");
+        vk::FALSE
+    } else {
+        vk::TRUE
+    };
     let core_features = vk::PhysicalDeviceFeatures {
-        vertex_pipeline_stores_and_atomics: vk::TRUE,
-        fragment_stores_and_atomics: vk::TRUE,
-        shader_int16: vk::TRUE,
-        shader_int64: vk::TRUE,
+        vertex_pipeline_stores_and_atomics: vertex_pipeline_stores,
+        fragment_stores_and_atomics: require_core(
+            pdev_features.fragment_stores_and_atomics,
+            "fragmentStoresAndAtomics",
+        )?,
+        shader_int16: require_core(pdev_features.shader_int16, "shaderInt16")?,
+        shader_int64: require_core(pdev_features.shader_int64, "shaderInt64")?,
         sparse_binding: if supports_sparse { vk::TRUE } else { vk::FALSE },
         sparse_residency_buffer: if supports_sparse { vk::TRUE } else { vk::FALSE },
         ..Default::default()
