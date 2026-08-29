@@ -288,8 +288,9 @@ notes:
   pitch; `query_texture_copy_footprint` reports the padded layout.
 - Surfaces (`graphics`): create/configure and `begin_frame` acquire a wgpu drawable
   and return an `Rgba8Unorm` storage scratch (swapchain images cannot be UAVs).
-  Copy-to-swapchain present is not wired yet. Graphics pipelines and render targets
-  remain unsupported.
+  Present copies scratch → swapchain on the same queue, then `SurfaceTexture::present`.
+  The copy waits before returning so the single scratch is not overwritten in flight.
+  Graphics pipelines and render targets remain unsupported.
 - Compute sampling must use `SampleLevel` (WGSL has no implicit derivatives in compute).
 
 ```bash

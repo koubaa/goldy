@@ -9,8 +9,8 @@
 //!
 //! Surfaces (`graphics` feature): the swapchain image is not a storage texture.
 //! `begin_frame` acquires the wgpu drawable for pacing and returns a separate
-//! `Rgba8Unorm` storage scratch. Present (copy + `SurfaceTexture::present`) is
-//! not wired yet.
+//! `Rgba8Unorm` storage scratch. Present copies that scratch onto the acquired
+//! `SurfaceTexture` (same queue, after compute) then calls `present()`.
 
 use super::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
 use super::*;
@@ -83,12 +83,12 @@ fn pick_alpha_mode(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMo
 }
 
 #[cfg(feature = "graphics")]
-fn surface_usage(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureUsages {
-    let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
-    if caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
-        usage |= wgpu::TextureUsages::COPY_DST;
-    }
-    usage
+fn surface_usage(caps: &wgpu::SurfaceCapabilities) -> Result<wgpu::TextureUsages> {
+    anyhow::ensure!(
+        caps.usages.contains(wgpu::TextureUsages::COPY_DST),
+        "WebGPU: surface must support COPY_DST for scratch→swapchain present"
+    );
+    Ok(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST)
 }
 
 fn map_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
@@ -285,7 +285,7 @@ struct WebGpuDevice {
     queue: wgpu::Queue,
     next_timeline: Arc<AtomicU64>,
     retired: Arc<AtomicU64>,
-    last_submission: Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>,
+    last_submission: Arc<Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>>,
     user_uniform: Option<wgpu::Buffer>,
     user_uniform_capacity: u64,
     uniform_offset_align: u64,
@@ -1574,21 +1574,195 @@ impl GpuBackendTimelineWait for WebGpuBackend {
 }
 
 #[cfg(feature = "graphics")]
+struct WebGpuSkipPresentGpuWork {
+    frame: FrameToken,
+    present_timeline: crate::timeline::TimelineValue,
+}
+
+#[cfg(feature = "graphics")]
+impl PresentGpuWork for WebGpuSkipPresentGpuWork {
+    fn run(self: Box<Self>) -> Result<PresentFinishState> {
+        Ok(PresentFinishState {
+            frame: self.frame,
+            return_fence: 0,
+            scratch_texture: None,
+            scratch_layout_updated: false,
+            present_timeline: self.present_timeline,
+            copy_timeline: None,
+            frame_compute_timeline: None,
+            signal_timeline: None,
+            render_pass_submitted: false,
+            present_ok: false,
+        })
+    }
+}
+
+#[cfg(feature = "graphics")]
+struct WebGpuPresentGpuWork {
+    frame: FrameToken,
+    acquired: wgpu::SurfaceTexture,
+    scratch: wgpu::Texture,
+    width: u32,
+    height: u32,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    context: Arc<WebGpuContext>,
+    next_timeline: Arc<AtomicU64>,
+    retired: Arc<AtomicU64>,
+    device_last_submission: Arc<Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>>,
+}
+
+#[cfg(feature = "graphics")]
+impl PresentGpuWork for WebGpuPresentGpuWork {
+    fn run(self: Box<Self>) -> Result<PresentFinishState> {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("goldy-webgpu-present-copy"),
+        });
+        let size = wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: 1,
+        };
+        encoder.copy_texture_to_texture(
+            texel_copy(&self.scratch, 0, 0),
+            texel_copy(&self.acquired.texture, 0, 0),
+            size,
+        );
+        let index = self.queue.submit([encoder.finish()]);
+        let value = crate::backend::submission_worker::allocate_timeline_value(&self.next_timeline);
+        self.context.submitted_max.fetch_max(value, Ordering::AcqRel);
+        *self.context.last_submission.lock().unwrap() = Some((value, index.clone()));
+        *self.device_last_submission.lock().unwrap() = Some((value, index.clone()));
+        self.queue.on_submitted_work_done({
+            let context = Arc::clone(&self.context);
+            let retired = Arc::clone(&self.retired);
+            move || {
+                context.completed.fetch_max(value, Ordering::Release);
+                retired.fetch_max(value, Ordering::AcqRel);
+                context.signal_queue.push_boundary_crossed(value);
+            }
+        });
+        self.acquired.present();
+        // One scratch is reused next acquire; wait so compute cannot overwrite it
+        // while this copy is still in flight.
+        poll_device(
+            &self.device,
+            wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: Some(TIMELINE_WAIT_TIMEOUT),
+            },
+        )?;
+        self.context
+            .signal_queue
+            .push(crate::signal::Signal::SwapchainReturned { image_index: 0 });
+        Ok(PresentFinishState {
+            frame: self.frame,
+            return_fence: value,
+            scratch_texture: None,
+            scratch_layout_updated: false,
+            present_timeline: value,
+            copy_timeline: Some(value),
+            frame_compute_timeline: None,
+            signal_timeline: Some(value),
+            render_pass_submitted: false,
+            present_ok: true,
+        })
+    }
+}
+
+#[cfg(feature = "graphics")]
 impl GpuBackendPresentSplit for WebGpuBackend {
     fn take_present_gpu_work(
         &mut self,
-        _frame: FrameToken,
-        _submit_tv: crate::timeline::TimelineValue,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn PresentGpuWork>> {
-        Self::unsupported("presentation")
+        let surface_device = self
+            .surfaces
+            .get(&frame.surface)
+            .context("WebGPU: invalid surface handle")?
+            .device;
+        anyhow::ensure!(
+            self.context_device(frame.context) == surface_device,
+            "WebGPU: present context does not match the surface device"
+        );
+        let acquired = {
+            let surface_state = self
+                .surfaces
+                .get_mut(&frame.surface)
+                .context("WebGPU: invalid surface handle")?;
+            surface_state.acquired.take()
+        };
+        let Some(acquired) = acquired else {
+            return Ok(Box::new(WebGpuSkipPresentGpuWork {
+                frame,
+                present_timeline: submit_tv,
+            }));
+        };
+        let (scratch_handle, width, height, swapchain_format) = {
+            let surface_state = self
+                .surfaces
+                .get(&frame.surface)
+                .context("WebGPU: invalid surface handle")?;
+            (
+                surface_state
+                    .scratch
+                    .context("WebGPU: present without a storage scratch")?,
+                surface_state.width.max(1),
+                surface_state.height.max(1),
+                surface_state.swapchain_format,
+            )
+        };
+        let scratch = self
+            .textures
+            .get(&scratch_handle)
+            .context("WebGPU: present scratch was destroyed")?;
+        anyhow::ensure!(
+            scratch.width == width && scratch.height == height,
+            "WebGPU: present scratch size {}x{} does not match surface {width}x{height}",
+            scratch.width,
+            scratch.height
+        );
+        let scratch_format = map_texture_format(scratch.format);
+        anyhow::ensure!(
+            scratch_format == swapchain_format && acquired.texture.format() == swapchain_format,
+            "WebGPU: scratch format {scratch_format:?} cannot copy to swapchain {swapchain_format:?}"
+        );
+        anyhow::ensure!(
+            acquired.texture.size().width >= width && acquired.texture.size().height >= height,
+            "WebGPU: acquired swapchain image is smaller than the surface"
+        );
+        let scratch_texture = scratch.texture.clone();
+        let gpu = self.device(surface_device)?;
+        let context = Arc::clone(self.context(frame.context)?);
+        Ok(Box::new(WebGpuPresentGpuWork {
+            frame,
+            acquired,
+            scratch: scratch_texture,
+            width,
+            height,
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            context,
+            next_timeline: Arc::clone(&gpu.next_timeline),
+            retired: Arc::clone(&gpu.retired),
+            device_last_submission: Arc::clone(&gpu.last_submission),
+        }))
     }
 
     fn finish_present(
         &mut self,
-        _finish: PresentFinishState,
-        _submit_tv: crate::timeline::TimelineValue,
+        finish: PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        Self::unsupported("presentation")
+        if let Some(state) = self.surfaces.get_mut(&finish.frame.surface) {
+            state.acquired = None;
+            if finish.present_ok {
+                state.current_texture_handle = state.scratch;
+            }
+        }
+        let _ = submit_tv;
+        Ok(finish.present_timeline)
     }
 }
 
@@ -1648,7 +1822,7 @@ impl GpuBackend for WebGpuBackend {
                 queue,
                 next_timeline: Arc::new(AtomicU64::new(1)),
                 retired: Arc::new(AtomicU64::new(0)),
-                last_submission: Mutex::new(None),
+                last_submission: Arc::new(Mutex::new(None)),
                 user_uniform: None,
                 user_uniform_capacity: 0,
                 uniform_offset_align,
@@ -2361,7 +2535,7 @@ impl GpuBackend for WebGpuBackend {
         let swapchain_format = pick_swapchain_format(&caps.formats)?;
         let present_mode = pick_present_mode(&caps.present_modes)?;
         let alpha_mode = pick_alpha_mode(&caps.alpha_modes);
-        let usage = surface_usage(&caps);
+        let usage = surface_usage(&caps)?;
         let handle = self.next_surface;
         self.next_surface += 1;
         self.surfaces.insert(
@@ -2545,8 +2719,18 @@ impl GpuBackend for WebGpuBackend {
     }
 
     #[cfg(feature = "graphics")]
-    fn submit_frame(&mut self, _frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
-        Self::unsupported("frames")
+    fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
+        let surface_device = self
+            .surfaces
+            .get(&frame.surface)
+            .context("WebGPU: invalid surface handle")?
+            .device;
+        anyhow::ensure!(
+            self.context_device(frame.context) == surface_device,
+            "WebGPU: submit_frame context does not match the surface device"
+        );
+        let context = self.context(frame.context)?;
+        Ok(context.submitted_max.load(Ordering::Acquire))
     }
 
     fn create_compute_pipeline(
@@ -3349,6 +3533,58 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         let device = backend.create_device(0)?;
         let ctx = backend.create_context(device)?;
         let err = backend.begin_frame(1, ctx).expect_err("unknown surface must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    fn dummy_frame(ctx: ContextHandle) -> FrameToken {
+        FrameToken {
+            surface: 1,
+            image: 0,
+            context: ctx,
+            frame_slot: 0,
+            present_slot: 0,
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn submit_frame_rejects_unknown_surface() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let err = backend
+            .submit_frame(&dummy_frame(ctx))
+            .expect_err("unknown surface must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn take_present_rejects_unknown_surface() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let err = match backend.take_present_gpu_work(dummy_frame(ctx), 0) {
+            Ok(_) => panic!("unknown surface must fail"),
+            Err(error) => error,
+        };
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
         Ok(())
