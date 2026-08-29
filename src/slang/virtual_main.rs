@@ -561,11 +561,11 @@ pub enum WgpuComputeResourceKind {
     StorageRead,
     /// Broadcast struct → uniform buffer.
     Uniform,
-    /// `Interpolated<T>` — not yet bound by the runtime.
+    /// `Interpolated<T>` → sampled texture.
     SampledTexture,
-    /// `DirectSpatial<T>` — not yet bound by the runtime.
+    /// `DirectSpatial<T>` → storage texture.
     StorageTexture,
-    /// `Filter` — not yet bound by the runtime.
+    /// `Filter` → sampler.
     Sampler,
 }
 
@@ -3563,6 +3563,33 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
                 scalar_count: 0,
             }
         );
+    }
+
+    #[test]
+    fn webgpu_compute_texture_and_sampler_layout() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(DirectSpatial<float4> dst, Interpolated<float4> src, Filter smp, ThreadId id) {
+    dst[int2(id.xy)] = src.Sample(smp, float2(0.5, 0.5));
+}
+"#;
+        assert_eq!(
+            extract_webgpu_compute_layout(src).unwrap(),
+            WgpuComputeLayout {
+                resources: Some(vec![
+                    WgpuComputeResourceKind::StorageTexture,
+                    WgpuComputeResourceKind::SampledTexture,
+                    WgpuComputeResourceKind::Sampler,
+                ]),
+                scalar_count: 0,
+            }
+        );
+        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        assert!(result.contains("RWTexture2D<float4>"), "{result}");
+        assert!(result.contains("register(t1, space0)"), "{result}");
+        assert!(result.contains("register(s2, space0)"), "{result}");
     }
 
     #[test]

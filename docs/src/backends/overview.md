@@ -268,7 +268,27 @@ With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnost
 
 ### WebGPU Backend (in progress)
 
-Cross-platform prototype built on [wgpu](https://github.com/gfx-rs/wgpu). Intended for broader portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature. Not yet at parity with the shipped Vulkan/DX12/Metal backends.
+Cross-platform prototype built on [wgpu](https://github.com/gfx-rs/wgpu). Intended for broader
+portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature. Not yet at
+parity with the shipped Vulkan/DX12/Metal backends.
+
+Compute buffers, scalar uniforms, **indirect dispatch**, and **2D textures/samplers** work.
+Resources bind as a single `@group(0)` in shader-parameter order (no bindless heap). Texture
+notes:
+
+- Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`, `Bgra8Unorm`,
+  `Bgra8UnormSrgb`, `Rgba16Float`, `Rgba32Float` (subject to adapter format features).
+- `DirectSpatial<T>` storage textures follow WGSL: the shader type encodes the format.
+  `DirectSpatial<float4>` therefore pairs with `Rgba32Float` (unlike native backends, which
+  often write `float4` into `Rgba8Unorm` UAVs). sRGB and BGRA are rejected for storage.
+- Uploads use `queue.write_texture`. Texture withdraw staging uses WebGPU's 256-byte row
+  pitch; `query_texture_copy_footprint` reports the padded layout.
+- Presentation, graphics pipelines, and render targets remain unsupported.
+- Compute sampling must use `SampleLevel` (WGSL has no implicit derivatives in compute).
+
+```bash
+cargo test --no-default-features --features webgpu --lib backend::webgpu
+```
 
 ### Tenstorrent Backend (planned)
 
