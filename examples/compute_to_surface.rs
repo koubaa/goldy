@@ -83,8 +83,7 @@ fn main() -> Result<()> {
 
     println!("Goldy — Compute to Surface Example");
     println!("===================================");
-    println!("Press V to toggle vsync, Escape to exit");
-    println!("Optional: GOLDY_WEBGPU_PRESENT=copy|blit\n");
+    println!("Press V to toggle vsync, Escape to exit\n");
 
     println!("Initializing GPU...");
     let warmup = warm_gpu()?;

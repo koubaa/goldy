@@ -50,8 +50,9 @@ the GPGPU compute surface (storage images, sampling, copies, deposits/withdrawal
 than the always-compiled mock backend. Enabling `gpu` alone does not compile a
 backend.
 
-`cuda` does **not** imply `graphics`. `webgpu` **does** imply `graphics` (wgpu is a
-full graphics+compute API). Neither is a platform default (Metal / DX12 / Vulkan
+`cuda` does **not** imply `graphics`.
+
+Neither `cude` nor `webgpu` are a platform default (Metal / DX12 / Vulkan
 remain the defaults in normal builds). When you compile **only** `cuda` or
 `webgpu` — no native backend — `Instance::new()` selects that backend
 automatically. In a default multi-backend build, opt in with
@@ -119,7 +120,7 @@ This can significantly reduce build times and binary size.
 | `dx12` | Windows only | Gated by `#[cfg(target_os = "windows")]` — the feature is ignored on other platforms; implies `graphics` |
 | `metal` | macOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms; implies `graphics` |
 | `cuda` | Any platform with CUDA toolkit | Compute prototype; on Windows with `cuda+graphics+dx12`, DX12 presentation companion + first-slice raster (`Rgba32Float` / `Rgba8Unorm`, indexed draws, DX12-only depth) are enabled. Does not imply `graphics` by itself. Vulkan interop still pending. |
-| `webgpu` | Cross-platform | **In progress** — via wgpu; implies `graphics` |
+| `webgpu` | Cross-platform | via wgpu; implies `graphics` |
 
 On macOS, the default backend is native Metal. Goldy does not require MoltenVK.
 

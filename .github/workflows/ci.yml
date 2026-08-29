@@ -13,8 +13,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    # Include stacked backend PRs (e.g. wgpu-compute), not only main/master.
-    branches: [main, master, wgpu-compute]
+    branches: [main, master]
 
 env:
   CARGO_TERM_COLOR: always

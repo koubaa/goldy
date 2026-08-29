@@ -45,9 +45,6 @@ float4 fs_main(Scattered<uint> CELLS, VSOutput input) : SV_Target {
     uint idx = y * GRID_WIDTH + x;
     uint cell = CELLS[idx];
 
-    // Fixed fraction of a cell (not fwidth): Slang's Metal fragment target
-    // rejects derivative builtins (`fwidth` / `ddx` / `ddy`, error E36107),
-    // and screenshot refs are captured with this threshold.
     float2 cellUV = frac(float2(uv.x * GRID_WIDTH, uv.y * GRID_HEIGHT));
     float gridLine = (cellUV.x < 0.05 || cellUV.y < 0.05) ? 0.15 : 0.0;
     
