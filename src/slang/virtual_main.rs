@@ -4040,6 +4040,42 @@ float4 fs_main(VSOutput input) : SV_Target {
         assert!(!result.contains("Scattered<Star> STARS"), "{result}");
     }
 
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn webgpu_graphics_example_render_shaders_use_readonly_storage() {
+        for (name, src) in [
+            (
+                "bouncing_lines_render",
+                include_str!("../../shaders/bouncing_lines_render.slang"),
+            ),
+            (
+                "instancing_render",
+                include_str!("../../shaders/instancing_render.slang"),
+            ),
+            ("particle_render", include_str!("../../shaders/particle_render.slang")),
+            ("rain_snow_render", include_str!("../../shaders/rain_snow_render.slang")),
+        ] {
+            let layout = extract_webgpu_graphics_layout(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let kinds = layout
+                .resources
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected explicit resources"));
+            assert!(
+                kinds.contains(&WgpuComputeResourceKind::StorageRead),
+                "{name}: {kinds:?}"
+            );
+            assert!(
+                !kinds.contains(&WgpuComputeResourceKind::StorageReadWrite),
+                "{name}: writable storage in VS/FS {kinds:?}"
+            );
+            let lowered = transform_virtual_main_webgpu_graphics(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                lowered.contains("register(t0, space0)"),
+                "{name}: expected read-only t-register\n{lowered}"
+            );
+        }
+    }
+
     #[test]
     fn webgpu_compute_bufro_slot_access_is_read() {
         let src = r#"import goldy_exp;

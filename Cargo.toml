@@ -138,7 +138,7 @@ gpu = []
 vulkan = ["dep:ash", "graphics", "gpu"]
 dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics", "gpu"]
 metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types", "dep:block", "graphics", "gpu"]
-webgpu = ["dep:wgpu", "dep:pollster", "graphics", "gpu"]
+webgpu = ["dep:wgpu", "dep:pollster", "graphics", "gpu", "dep:objc"]
 # NVIDIA CUDA compute-only prototype (Slang → PTX → Driver API)
 cuda = ["dep:cudarc", "gpu"]
 # Regenerate `tests/screenshots/*.png` via `cargo run --bin update-screenshots --features update-screenshots`

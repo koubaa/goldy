@@ -9,8 +9,11 @@
 //!
 //! Surfaces (`graphics` feature): `begin_frame` acquires the wgpu drawable.
 //! Presentation picks the cheapest path that actually works:
-//! 1. **Copy** — compute writes a same-format storage scratch, then `copy_texture_to_texture`.
-//! 2. **Blit** — compute writes `Rgba8Unorm` scratch, then a fullscreen pass to the swapchain.
+//! 1. **Copy** — compute/raster writes a same-format storage scratch, then `copy_texture_to_texture`.
+//! 2. **Blit** — writes `Rgba8Unorm` scratch, then a fullscreen pass to the swapchain.
+//!
+//! Present does not CPU-wait the GPU; each surface ping-pongs two scratches so the
+//! next frame can record while the previous swapchain copy is still in flight.
 //!
 //! **Direct** (compute writes the swapchain image) is implemented but not auto-selected:
 //! wgpu 28 hardcodes swapchain `format_features` to `RENDER_ATTACHMENT` only, so storage
@@ -46,6 +49,46 @@ const INDIRECT_DISPATCH_BYTES: u64 = 12;
 const DEFAULT_SURFACE_WIDTH: u32 = 800;
 #[cfg(feature = "graphics")]
 const DEFAULT_SURFACE_HEIGHT: u32 = 600;
+
+#[cfg(all(feature = "graphics", target_os = "macos"))]
+fn appkit_view_physical_size(window: &dyn raw_window_handle::HasWindowHandle) -> Option<(u32, u32)> {
+    use raw_window_handle::RawWindowHandle;
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NsPoint {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NsSize {
+        width: f64,
+        height: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NsRect {
+        origin: NsPoint,
+        size: NsSize,
+    }
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    let view: *mut objc::runtime::Object = appkit.ns_view.as_ptr().cast();
+    if view.is_null() {
+        return None;
+    }
+    unsafe {
+        #[allow(unused_imports)]
+        use objc::{msg_send, sel, sel_impl};
+        let frame: NsRect = msg_send![view, frame];
+        let backing: NsSize = msg_send![view, convertSizeToBacking: frame.size];
+        let width = backing.width.round().max(1.0) as u32;
+        let height = backing.height.round().max(1.0) as u32;
+        Some((width, height))
+    }
+}
 
 #[cfg(feature = "graphics")]
 const PRESENT_BLIT_WGSL: &str = r#"
@@ -497,6 +540,11 @@ struct WebGpuSurface {
     present_mode: wgpu::PresentMode,
     alpha_mode: wgpu::CompositeAlphaMode,
     usage: wgpu::TextureUsages,
+    /// Ping-pong present scratches so the next frame can record while the previous
+    /// copy/blit to the swapchain is still in flight.
+    scratches: [Option<TextureHandle>; 2],
+    scratch_slot: u8,
+    /// Scratch (or direct lease) used by the currently acquired frame.
     scratch: Option<TextureHandle>,
     /// Direct path: Goldy handle wrapping the acquired swapchain image for this frame.
     lease: Option<TextureHandle>,
@@ -840,24 +888,30 @@ impl WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn drop_surface_scratch(&mut self, surface: SurfaceHandle) {
         self.drop_surface_lease(surface);
-        let Some(handle) = self.surfaces.get_mut(&surface).and_then(|s| s.scratch.take()) else {
-            return;
-        };
-        if let Some(state) = self.surfaces.get_mut(&surface) {
+        let handles = {
+            let Some(state) = self.surfaces.get_mut(&surface) else {
+                return;
+            };
+            state.scratch = None;
             state.current_texture_handle = None;
+            state.scratch_slot = 0;
+            [state.scratches[0].take(), state.scratches[1].take()]
+        };
+        for handle in handles.into_iter().flatten() {
+            self.destroy_texture(handle);
         }
-        self.destroy_texture(handle);
     }
 
     #[cfg(feature = "graphics")]
     fn ensure_surface_scratch(&mut self, surface: SurfaceHandle) -> Result<TextureHandle> {
         let (device, width, height, existing, format, path) = {
             let state = self.surfaces.get(&surface).context("WebGPU: invalid surface handle")?;
+            let slot = usize::from(state.scratch_slot) & 1;
             (
                 state.device,
                 state.width.max(1),
                 state.height.max(1),
-                state.scratch,
+                state.scratches[slot],
                 state.compute_format,
                 state.present_path,
             )
@@ -873,11 +927,27 @@ impl WebGpuBackend {
                     && texture.format == format
                     && texture.storage_slot.is_some()
                 {
+                    let state = self
+                        .surfaces
+                        .get_mut(&surface)
+                        .context("WebGPU: invalid surface handle")?;
+                    state.scratch = Some(handle);
+                    state.current_texture_handle = Some(handle);
                     return Ok(handle);
                 }
             }
         }
-        self.drop_surface_scratch(surface);
+        let old = {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            let slot = usize::from(state.scratch_slot) & 1;
+            state.scratches[slot].take()
+        };
+        if let Some(old) = old {
+            self.destroy_texture(old);
+        }
         let kind = if path == WebGpuPresentPath::Blit {
             TextureKind::DirectInterpolated
         } else {
@@ -895,6 +965,8 @@ impl WebGpuBackend {
             .surfaces
             .get_mut(&surface)
             .context("WebGPU: invalid surface handle")?;
+        let slot = usize::from(state.scratch_slot) & 1;
+        state.scratches[slot] = Some(handle);
         state.scratch = Some(handle);
         state.current_texture_handle = Some(handle);
         Ok(handle)
@@ -2528,13 +2600,7 @@ impl PresentGpuWork for WebGpuPresentGpuWork {
                     }
                 });
                 self.acquired.present();
-                poll_device(
-                    &self.device,
-                    wgpu::PollType::Wait {
-                        submission_index: Some(index),
-                        timeout: Some(TIMELINE_WAIT_TIMEOUT),
-                    },
-                )?;
+                pump_device(&self.device);
                 value
             }
         };
@@ -3893,10 +3959,22 @@ impl GpuBackend for WebGpuBackend {
         let present_path = choose_present_path(caps.usages, swapchain_format, features, parse_present_override()?)?;
         let usage = surface_usage(&caps, present_path)?;
         let compute_format = compute_format_for_path(present_path, swapchain_format)?;
+        let (width, height) = {
+            #[cfg(target_os = "macos")]
+            {
+                appkit_view_physical_size(window).unwrap_or((DEFAULT_SURFACE_WIDTH, DEFAULT_SURFACE_HEIGHT))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                (DEFAULT_SURFACE_WIDTH, DEFAULT_SURFACE_HEIGHT)
+            }
+        };
         tracing::info!(
             ?present_path,
             ?swapchain_format,
             ?compute_format,
+            width,
+            height,
             "WebGPU surface present path"
         );
         let handle = self.next_surface;
@@ -3906,14 +3984,16 @@ impl GpuBackend for WebGpuBackend {
             WebGpuSurface {
                 device,
                 surface: wgpu_surface,
-                width: DEFAULT_SURFACE_WIDTH,
-                height: DEFAULT_SURFACE_HEIGHT,
+                width,
+                height,
                 swapchain_format,
                 compute_format,
                 present_path,
                 present_mode,
                 alpha_mode,
                 usage,
+                scratches: [None, None],
+                scratch_slot: 0,
                 scratch: None,
                 lease: None,
                 acquired: None,
@@ -3921,6 +4001,9 @@ impl GpuBackend for WebGpuBackend {
             },
         );
         self.configure_surface(handle)?;
+        if present_path == WebGpuPresentPath::Blit {
+            self.blit_pipeline(device, swapchain_format)?;
+        }
         Ok(handle)
     }
 
@@ -3931,8 +4014,10 @@ impl GpuBackend for WebGpuBackend {
             if let Some(lease) = state.lease.take() {
                 self.destroy_texture(lease);
             }
-            if let Some(scratch) = state.scratch.take() {
-                self.destroy_texture(scratch);
+            for scratch in state.scratches {
+                if let Some(scratch) = scratch {
+                    self.destroy_texture(scratch);
+                }
             }
         }
     }
@@ -3940,7 +4025,7 @@ impl GpuBackend for WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         anyhow::ensure!(width > 0 && height > 0, "WebGPU: surface size must be non-zero");
-        let device = {
+        {
             let state = self
                 .surfaces
                 .get_mut(&surface)
@@ -3952,10 +4037,9 @@ impl GpuBackend for WebGpuBackend {
             state.acquired = None;
             state.width = width;
             state.height = height;
-            state.device
-        };
-        // Old scratch may still be the source of an in-flight present copy.
-        self.device_wait_idle(device)?;
+        }
+        // In-flight present copies hold their own `wgpu::Texture` clones; ping-pong
+        // scratches keep the next frame off that GPU resource.
         self.drop_surface_scratch(surface);
         self.configure_surface(surface)?;
         let path = self
@@ -4110,6 +4194,7 @@ impl GpuBackend for WebGpuBackend {
                 .context("WebGPU: invalid surface handle")?;
             state.acquired = Some(acquired);
             state.current_texture_handle = Some(scratch);
+            state.scratch_slot ^= 1;
             scratch
         };
         if let Some(context) = self.contexts.get(&ctx) {
