@@ -1038,6 +1038,7 @@ impl WebGpuBackend {
         self.insert_owned_texture(device, texture, width, height, format, false, true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_owned_texture(
         &mut self,
         device: DeviceHandle,
@@ -1691,7 +1692,7 @@ impl WebGpuBackend {
     fn storage_binding<'a>(&self, buffer: &'a WebGpuBuffer) -> Result<wgpu::BufferBinding<'a>> {
         let align = self.device(buffer.device)?.storage_offset_align;
         anyhow::ensure!(
-            buffer.offset % align == 0,
+            buffer.offset.is_multiple_of(align),
             "WebGPU: storage buffer offset {} is not aligned to {align}",
             buffer.offset
         );
@@ -1705,7 +1706,7 @@ impl WebGpuBackend {
     fn uniform_binding<'a>(&self, buffer: &'a WebGpuBuffer) -> Result<wgpu::BufferBinding<'a>> {
         let align = self.device(buffer.device)?.uniform_offset_align;
         anyhow::ensure!(
-            buffer.offset % align == 0,
+            buffer.offset.is_multiple_of(align),
             "WebGPU: uniform buffer offset {} is not aligned to {align}",
             buffer.offset
         );
@@ -1794,6 +1795,7 @@ impl WebGpuBackend {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_copy_buffer_to_texture(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3223,7 +3225,7 @@ impl GpuBackend for WebGpuBackend {
             gpu.storage_offset_align
         };
         anyhow::ensure!(
-            abs_offset % align == 0,
+            abs_offset.is_multiple_of(align),
             "WebGPU: buffer view offset {abs_offset} is not aligned to {align}"
         );
         let handle = self.next_buffer;
@@ -3955,7 +3957,7 @@ impl GpuBackend for WebGpuBackend {
             lod_min_clamp: desc.lod_min_clamp,
             lod_max_clamp: desc.lod_max_clamp,
             compare: desc.compare.map(map_compare),
-            anisotropy_clamp: desc.max_anisotropy.max(1.0).min(16.0) as u16,
+            anisotropy_clamp: desc.max_anisotropy.clamp(1.0, 16.0) as u16,
             border_color: None,
         });
         let slot = self.alloc_registry_slot()?;
@@ -4073,10 +4075,8 @@ impl GpuBackend for WebGpuBackend {
             if let Some(lease) = state.lease.take() {
                 self.destroy_texture(lease);
             }
-            for scratch in state.scratches {
-                if let Some(scratch) = scratch {
-                    self.destroy_texture(scratch);
-                }
+            for scratch in state.scratches.into_iter().flatten() {
+                self.destroy_texture(scratch);
             }
         }
     }
