@@ -342,6 +342,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
+                        let (prev_w, prev_h) = state.surface.size();
+                        if size.width == prev_w && size.height == prev_h {
+                            return;
+                        }
                         state.surface.resize(size.width, size.height).ok();
                         if let Ok(pipeline) =
                             RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.surface)
