@@ -22,15 +22,17 @@ cargo add goldy
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `vulkan` | yes | Vulkan 1.4+ backend (Linux, Windows); implies `graphics` |
-| `dx12` | yes | DirectX 12 backend (Windows); implies `graphics` |
-| `metal` | yes | Metal Tier 2+ backend (macOS); implies `graphics` |
+| `vulkan` | yes | Vulkan 1.4+ backend (Linux, Windows); implies `graphics` and `gpu` |
+| `dx12` | yes | DirectX 12 backend (Windows); implies `graphics` and `gpu` |
+| `metal` | yes | Metal Tier 2+ backend (macOS); implies `graphics` and `gpu` |
 | `graphics` | yes | Raster pipelines, render targets, surfaces, and presentation |
-| `cuda` | no | CUDA backend (in progress; NVIDIA compute; does not imply `graphics`) |
-| `webgpu` | no | WebGPU backend (in progress; via wgpu; does not imply `graphics`) |
+| `gpu` | yes | Implied by every real GPU backend (not mock). Do not enable alone. |
+| `cuda` | no | CUDA backend (in progress; NVIDIA compute; implies `gpu`, not `graphics`) |
+| `webgpu` | no | WebGPU backend (in progress; via wgpu; implies `graphics` and `gpu`) |
 | `instrumentation` | yes | Structured tracing via `tracing-subscriber` (zero-cost when disabled) |
 
-`graphics` is implied by the native backends. Textures and samplers remain available without it for GPGPU workloads. CUDA is not a platform default; it auto-selects only in `--no-default-features --features cuda` builds (otherwise set `GOLDY_BACKEND=cuda`):
+`graphics` is implied by the native backends. `gpu` is implied by every real GPU
+backend (not mock). Textures and samplers remain available without `graphics` for GPGPU workloads. CUDA is not a platform default; it auto-selects only in `--no-default-features --features cuda` builds (otherwise set `GOLDY_BACKEND=cuda`):
 
 ```bash
 cargo test --no-default-features --features cuda --test scheme_compute_integration

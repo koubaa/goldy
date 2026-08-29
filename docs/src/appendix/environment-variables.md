@@ -78,3 +78,5 @@ Goldy also respects these non-Goldy environment variables:
 | `MTL_SHADER_VALIDATION` | Metal | When `GOLDY_VALIDATION` enables API validation and this variable is unset, Goldy sets it to `1` before creating the first Metal device. If you set it yourself, Goldy does not override it. |
 | `METAL_CAPTURE_ENABLED` | Metal | Required for programmatic GPU capture outside Xcode. Goldy sets this to `1` automatically when `GOLDY_METAL_CAPTURE` is set (if unset). |
 | `CUDA_LAUNCH_BLOCKING` | CUDA | When `GOLDY_VALIDATION` enables API validation and this variable is unset, Goldy sets it to `1` before CUDA driver init. If you set it yourself, Goldy does not override it. Forces synchronous kernel launches so errors surface at the launch site. |
+| `WGPU_BACKEND` | WebGPU | wgpu instance backend mask (`vulkan`, `metal`, `dx12`, `gl`, …). Goldy passes this through `wgpu::InstanceDescriptor::from_env_or_default()`. CI uses `vulkan` on Linux, `metal` on macOS, and `dx12` on Windows. |
+| `WGPU_FORCE_FALLBACK_ADAPTER` | WebGPU | When set (`1`/`true`), wgpu prefers a software adapter (WARP on Windows). Used in Windows CI because hosted runners have no discrete GPU. |

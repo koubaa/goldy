@@ -44,7 +44,7 @@ float4 fs_main(Scattered<uint> CELLS, VSOutput input) : SV_Target {
     
     uint idx = y * GRID_WIDTH + x;
     uint cell = CELLS[idx];
-    
+
     float2 cellUV = frac(float2(uv.x * GRID_WIDTH, uv.y * GRID_HEIGHT));
     float gridLine = (cellUV.x < 0.05 || cellUV.y < 0.05) ? 0.15 : 0.0;
     

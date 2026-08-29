@@ -5,7 +5,7 @@ mod submission;
 #[path = "common/upload.rs"]
 mod upload;
 
-#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
+#[cfg(feature = "gpu")]
 mod imp {
     use crate::submission::submission_context;
     use crate::upload::write_to_parcel;
@@ -76,6 +76,28 @@ mod imp {
             .expect("withdraw consume");
         assert_eq!(loan.len(), count * 4, "grant readback size");
         bytemuck::cast_slice(&loan).to_vec()
+    }
+
+    fn float4_storage_format(device: &Device) -> TextureFormat {
+        match device.backend_type() {
+            BackendType::Cuda | BackendType::WebGpu => TextureFormat::Rgba32Float,
+            _ => TextureFormat::Rgba8Unorm,
+        }
+    }
+
+    fn assert_write_texture_red_pixel(device: &Device, output: &[u8]) {
+        if matches!(device.backend_type(), BackendType::Cuda | BackendType::WebGpu) {
+            let floats: &[f32] = bytemuck::cast_slice(output);
+            assert_eq!(floats[0], 1.0, "R channel");
+            assert_eq!(floats[1], 0.0, "G channel");
+            assert_eq!(floats[2], 0.0, "B channel");
+            assert_eq!(floats[3], 1.0, "A channel");
+        } else {
+            assert_eq!(output[0], 255, "R channel");
+            assert_eq!(output[1], 0, "G channel");
+            assert_eq!(output[2], 0, "B channel");
+            assert_eq!(output[3], 255, "A channel");
+        }
     }
 
     /// Read parcel bytes after an upload micro-scheme (grant-only verification scheme).
@@ -1487,7 +1509,7 @@ mod imp {
         uint x = id.x;
         uint y = id.y;
         float2 uv = (float2(x, y) + 0.5) / float2(4.0, 4.0);
-        float4 v = src.Sample(smp, uv);
+        float4 v = src.SampleLevel(smp, uv, 0);
         uint r = uint(v.x * 255.0 + 0.5);
         uint g = uint(v.y * 255.0 + 0.5);
         uint b = uint(v.z * 255.0 + 0.5);
@@ -1639,12 +1661,7 @@ mod imp {
 
     fn scheme_compute_write_to_texture(device: &Device) {
         let ctx = submission_context(&device);
-        let is_cuda = device.backend_type() == BackendType::Cuda;
-        let format = if is_cuda {
-            TextureFormat::Rgba32Float
-        } else {
-            TextureFormat::Rgba8Unorm
-        };
+        let format = float4_storage_format(device);
 
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -1673,30 +1690,14 @@ mod imp {
         let output = &*loan;
         let nonzero = output.iter().filter(|&&b| b != 0).count();
         assert!(nonzero > 0, "texture readback all zeros");
-        if is_cuda {
-            let floats: &[f32] = bytemuck::cast_slice(output);
-            assert_eq!(floats[0], 1.0, "R channel");
-            assert_eq!(floats[1], 0.0, "G channel");
-            assert_eq!(floats[2], 0.0, "B channel");
-            assert_eq!(floats[3], 1.0, "A channel");
-        } else {
-            assert_eq!(output[0], 255, "R channel");
-            assert_eq!(output[1], 0, "G channel");
-            assert_eq!(output[2], 0, "B channel");
-            assert_eq!(output[3], 255, "A channel");
-        }
+        assert_write_texture_red_pixel(device, output);
     }
 
     /// Verify that a [`goldy::Texture`] from [`RetainedPool`] can be bound via
     /// [`goldy::scheme::SchemeNodeBuilder::with_parcel`] using its parcel stamp.
     fn scheme_with_parcel_raw_texture(device: &Device) {
         let ctx = submission_context(&device);
-        let is_cuda = device.backend_type() == BackendType::Cuda;
-        let format = if is_cuda {
-            TextureFormat::Rgba32Float
-        } else {
-            TextureFormat::Rgba8Unorm
-        };
+        let format = float4_storage_format(device);
 
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
@@ -1728,7 +1729,7 @@ mod imp {
 
         let output = read_texture_via_scheme_copy(&ctx, &texture);
 
-        if is_cuda {
+        if matches!(device.backend_type(), BackendType::Cuda | BackendType::WebGpu) {
             let floats: &[f32] = bytemuck::cast_slice(&output);
             assert_eq!(floats[0], 1.0, "R channel");
             assert_eq!(floats[1], 0.0, "G channel");
@@ -1837,12 +1838,7 @@ mod imp {
         const N: usize = (W * H) as usize;
 
         let ctx = submission_context(&device);
-        let is_cuda = device.backend_type() == BackendType::Cuda;
-        let format = if is_cuda {
-            TextureFormat::Rgba32Float
-        } else {
-            TextureFormat::Rgba8Unorm
-        };
+        let format = float4_storage_format(device);
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let tex = pool
@@ -2271,6 +2267,49 @@ mod imp {
         let result = read_grant_u32(&grant, &mut submission, N);
         let expected: Vec<u32> = input.iter().map(|v| v + OFFSET).collect();
         assert_eq!(result, expected);
+    }
+
+    fn scheme_dispatch_batch_distinct_scalars(device: &Device) {
+        const SHADER: &str = r#"
+    import goldy_exp;
+    [goldy_compute]
+    [numthreads(1, 1, 1)]
+    void cs_main(Scattered<uint> out, uint value, ThreadId id) {
+        out[0] = value;
+    }
+    "#;
+
+        let ctx = submission_context(&device);
+        let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
+        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let a = pool
+            .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("a");
+        let b = pool
+            .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("b");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("fill_a", &pipeline)
+            .with_parcel(&a, NodeAccess::Write)
+            .with_param(7u32)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("fill_b", &pipeline)
+            .with_parcel(&b, NodeAccess::Write)
+            .with_param(9u32)
+            .dispatch(1, 1, 1);
+        let grant_a = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &a)
+            .expect("grant a");
+        let grant_b = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &b)
+            .expect("grant b");
+        let mut submission = scheme.submit().expect("submit");
+        assert_eq!(read_grant_u32(&grant_a, &mut submission, 1)[0], 7);
+        assert_eq!(read_grant_u32(&grant_b, &mut submission, 1)[0], 9);
     }
 
     // ---------------------------------------------------------------------------
@@ -4024,11 +4063,7 @@ mod imp {
     const CROSS_RETENTION_TEX_H: u32 = 16;
 
     fn cross_retention_texture(device: &Device) -> goldy::Texture {
-        let format = if device.backend_type() == BackendType::Cuda {
-            TextureFormat::Rgba32Float
-        } else {
-            TextureFormat::Rgba8Unorm
-        };
+        let format = float4_storage_format(device);
         RetainedPool::new(Arc::new(device.clone()))
             .acquire_texture(
                 CROSS_RETENTION_TEX_W,
@@ -4122,12 +4157,7 @@ mod imp {
     /// machine that has those drivers to confirm stamp retirement on those paths.
     fn scheme_return_transient_texture_invalidates_retained_scheme(device: &Device) {
         let ctx = submission_context(&device);
-        let is_cuda = device.backend_type() == BackendType::Cuda;
-        let format = if is_cuda {
-            TextureFormat::Rgba32Float
-        } else {
-            TextureFormat::Rgba8Unorm
-        };
+        let format = float4_storage_format(device);
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("texture pipeline");
 
@@ -4631,8 +4661,26 @@ mod imp {
                 }));
             }};
         }
+        let textures = true;
+        // Wave intrinsics and retained-resubmit accounting are not in the WebGPU
+        // compute prototype (no subgroup feature; every submit re-records).
+        let wave_and_retain = device.backend_type() != BackendType::WebGpu;
+        macro_rules! trial_tex {
+            ($f:ident) => {
+                if textures {
+                    trial!($f);
+                }
+            };
+        }
+        macro_rules! trial_wave_retain {
+            ($f:ident) => {
+                if wave_and_retain {
+                    trial!($f);
+                }
+            };
+        }
 
-        trial!(scheme_graph_linear_chain);
+        trial_wave_retain!(scheme_graph_linear_chain);
         trial!(scheme_graph_independent_dispatches);
         trial!(scheme_graph_diamond_dependency);
         trial!(scheme_graph_fill_readback);
@@ -4642,7 +4690,7 @@ mod imp {
         trial!(scheme_stress_many_zero_writes_many_dispatches);
         trial!(scheme_stress_write_then_dispatch_chain);
         trial!(scheme_stress_two_phase_submission);
-        trial!(scheme_stress_rapid_submissions);
+        trial_wave_retain!(scheme_stress_rapid_submissions);
         trial!(scheme_compute_dispatch_empty);
         trial!(scheme_compute_write_and_readback);
         trial!(scheme_compute_with_uav_parcel);
@@ -4651,7 +4699,7 @@ mod imp {
         trial!(scheme_parcel_write_zeros_partial);
         trial!(scheme_parcel_write_zeros_to_end);
         trial!(scheme_zeros_before_copy_dispatch);
-        trial!(scheme_write_to_parcel_zeros_between_submissions);
+        trial_wave_retain!(scheme_write_to_parcel_zeros_between_submissions);
         trial!(scheme_upload_frame_unwaited_serializes_before_worker_submit);
         trial!(scheme_compute_many_resource_slots);
         trial!(scheme_regular_buffer_write_then_copy);
@@ -4661,19 +4709,16 @@ mod imp {
         trial!(scheme_cpu_readable_compute_write_and_read);
         trial!(scheme_cpu_readable_write_to_parcel_roundtrip);
         trial!(scheme_scattered_typed_variable_assignment);
-        // CUDA deliberately deferred texture/sampler GPGPU during the buffer-only
-        // prototype. Native CUDA arrays / tex / surf objects are now wired; keep this
-        // comment so the historical gate remains discoverable.
-        trial!(scheme_compute_write_to_texture);
-        trial!(scheme_with_parcel_raw_texture);
-        trial!(scheme_wave_inclusive_scan_uniform_64);
-        trial!(scheme_wave_inclusive_scan_ramp_64);
-        trial!(scheme_wave_inclusive_scan_uniform_256);
+        trial_tex!(scheme_compute_write_to_texture);
+        trial_tex!(scheme_with_parcel_raw_texture);
+        trial_wave_retain!(scheme_wave_inclusive_scan_uniform_64);
+        trial_wave_retain!(scheme_wave_inclusive_scan_ramp_64);
+        trial_wave_retain!(scheme_wave_inclusive_scan_uniform_256);
         trial!(scheme_workgroup_reduce_uint_correct);
         trial!(scheme_workgroup_inclusive_scan_uint_correct);
         trial!(scheme_workgroup_broadcast_correct);
         trial!(scheme_workgroup_upper_bound_linear);
-        trial!(scheme_texture_dual_view_round_trip);
+        trial_tex!(scheme_texture_dual_view_round_trip);
         trial!(scheme_two_contexts_both_submit_and_complete);
         trial!(scheme_two_contexts_reclaim_independently);
         trial!(scheme_deposit_buffer_reuse_across_submissions);
@@ -4683,6 +4728,7 @@ mod imp {
         trial!(scheme_uniform_param_float_reinterpret);
         trial!(scheme_uniform_two_independent_scalar_params);
         trial!(scheme_uniform_scalar_after_two_buffer_params);
+        trial!(scheme_dispatch_batch_distinct_scalars);
         trial!(scheme_buffer_view_copy_between_sub_regions);
         trial!(scheme_buffer_view_isolation);
         trial!(scheme_compute_dispatch_indirect);
@@ -4693,40 +4739,40 @@ mod imp {
         trial!(scheme_clear_parcel_full);
         trial!(scheme_clear_parcel_partial_preserves_edges);
         trial!(scheme_clear_parcel_size_zero_fills_to_end);
-        trial!(scheme_clear_parcel_requires_buffer_parcel);
+        trial_tex!(scheme_clear_parcel_requires_buffer_parcel);
         trial!(scheme_copy_buffer_parcel_basic);
         trial!(scheme_copy_buffer_parcel_partial_with_offsets);
-        trial!(scheme_copy_buffer_parcel_rejects_texture_src);
-        trial!(scheme_copy_buffer_parcel_rejects_texture_dst);
-        trial!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
+        trial_tex!(scheme_copy_buffer_parcel_rejects_texture_src);
+        trial_tex!(scheme_copy_buffer_parcel_rejects_texture_dst);
+        trial_wave_retain!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
         trial!(scheme_cpu_writable_staging_write_then_copy);
-        trial!(scheme_cpu_writable_staging_update_each_frame);
-        trial!(scheme_write_texture_round_trip);
-        trial!(scheme_write_texture_wrong_size_returns_error);
-        trial!(scheme_write_texture_marks_scheme_dirty);
-        trial!(scheme_write_texture_region_round_trip);
-        trial!(scheme_write_texture_region_oob_returns_error);
-        trial!(scheme_write_texture_region_multiple_non_overlapping);
-        trial!(scheme_copy_buffer_to_texture_parcel_full_texture);
-        trial!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
-        trial!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
-        trial!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
-        trial!(scheme_copy_buffer_to_texture_pitched_resubmit_is_retained);
-        trial!(cross_scheme_grant_read_reader_is_topology_invisible);
-        trial!(cross_scheme_copy_reader_forces_one_topology_record);
-        trial!(single_scheme_write_then_readback_records_once);
-        trial!(cross_scheme_grant_reader_steady_state_stays_at_one);
-        trial!(cross_scheme_copy_reader_steady_state_does_not_thrash);
-        trial!(cross_scheme_foreign_writer_forces_one_topology_record);
-        trial!(cross_scheme_submit_order_steady_state_is_stable);
-        trial!(cross_scheme_two_foreign_copy_readers_record_once_then_stable);
-        trial!(cross_scheme_copy_reader_disappearing_does_not_re_dirty);
-        trial!(cross_scheme_disjoint_parcels_never_cross_dirty);
-        trial!(cross_scheme_grant_then_copy_reader_boundary);
-        trial!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
-        trial!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
-        trial!(cross_scheme_texture_readback_retained_loop_records_twice);
-        trial!(scheme_return_transient_texture_invalidates_retained_scheme);
+        trial_wave_retain!(scheme_cpu_writable_staging_update_each_frame);
+        trial_tex!(scheme_write_texture_round_trip);
+        trial_tex!(scheme_write_texture_wrong_size_returns_error);
+        trial_tex!(scheme_write_texture_marks_scheme_dirty);
+        trial_tex!(scheme_write_texture_region_round_trip);
+        trial_tex!(scheme_write_texture_region_oob_returns_error);
+        trial_tex!(scheme_write_texture_region_multiple_non_overlapping);
+        trial_tex!(scheme_copy_buffer_to_texture_parcel_full_texture);
+        trial_tex!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
+        trial_tex!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
+        trial_wave_retain!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
+        trial_wave_retain!(scheme_copy_buffer_to_texture_pitched_resubmit_is_retained);
+        trial_wave_retain!(cross_scheme_grant_read_reader_is_topology_invisible);
+        trial_wave_retain!(cross_scheme_copy_reader_forces_one_topology_record);
+        trial_wave_retain!(single_scheme_write_then_readback_records_once);
+        trial_wave_retain!(cross_scheme_grant_reader_steady_state_stays_at_one);
+        trial_wave_retain!(cross_scheme_copy_reader_steady_state_does_not_thrash);
+        trial_wave_retain!(cross_scheme_foreign_writer_forces_one_topology_record);
+        trial_wave_retain!(cross_scheme_submit_order_steady_state_is_stable);
+        trial_wave_retain!(cross_scheme_two_foreign_copy_readers_record_once_then_stable);
+        trial_wave_retain!(cross_scheme_copy_reader_disappearing_does_not_re_dirty);
+        trial_wave_retain!(cross_scheme_disjoint_parcels_never_cross_dirty);
+        trial_wave_retain!(cross_scheme_grant_then_copy_reader_boundary);
+        trial_wave_retain!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
+        trial_wave_retain!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
+        trial_wave_retain!(cross_scheme_texture_readback_retained_loop_records_twice);
+        trial_tex!(scheme_return_transient_texture_invalidates_retained_scheme);
         trial!(cuda_rejects_bgra_texture);
         trial!(cuda_float4_writes_rgba8_unorm);
         trial!(cuda_float4_rgba8_rmw);
@@ -4748,6 +4794,6 @@ mod imp {
 }
 
 fn main() {
-    #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "cuda"))]
+    #[cfg(feature = "gpu")]
     imp::run();
 }

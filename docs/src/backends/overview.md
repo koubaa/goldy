@@ -268,7 +268,45 @@ With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnost
 
 ### WebGPU Backend (in progress)
 
-Cross-platform prototype built on [wgpu](https://github.com/gfx-rs/wgpu). Intended for broader portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature. Not yet at parity with the shipped Vulkan/DX12/Metal backends.
+Cross-platform prototype built on [wgpu](https://github.com/gfx-rs/wgpu). Intended for broader
+portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature. Not yet at
+parity with the shipped Vulkan/DX12/Metal backends.
+
+Compute buffers, scalar uniforms, **indirect dispatch**, and **2D textures/samplers** work.
+Submit is **non-blocking**: the context timeline advances from wgpu's
+`on_submitted_work_done` callback (pumped by `Device::poll`). Host waits
+(`Context::wait_until`, withdraw) block on the submission index, not on submit
+itself. Resources bind as a single `@group(0)` in shader-parameter order (no bindless heap). Texture
+notes:
+
+- Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`, `Bgra8Unorm`,
+  `Bgra8UnormSrgb`, `Rgba16Float`, `Rgba32Float` (subject to adapter format features).
+- `DirectSpatial<T>` storage textures follow WGSL: the shader type encodes the format.
+  Identity `DirectSpatial<float4>` is `rgba32float`. Goldy specializes packed 8-bit
+  surfaces at dispatch: `Rgba8Unorm` → `rgba8unorm`, `Bgra8Unorm` → `bgra8unorm`
+  (the latter needs wgpu `BGRA8UNORM_STORAGE`). sRGB formats are rejected for storage.
+- Uploads use `queue.write_texture`. Texture withdraw staging uses WebGPU's 256-byte row
+  pitch; `query_texture_copy_footprint` reports the padded layout.
+- Surfaces: `begin_frame` acquires the wgpu drawable. Present picks
+  **Copy** (same-format storage scratch → swapchain) when the scratch format can
+  be a UAV (`Rgba8Unorm`, or `Bgra8Unorm` with `BGRA8UNORM_STORAGE`), otherwise
+  **Blit** (`Rgba8Unorm` scratch + fullscreen pass for BGRA/sRGB). **Direct**
+  compute-to-swapchain is not selected: wgpu 28 swapchain images only expose
+  `RENDER_ATTACHMENT`, so storage bind groups fail even when the surface
+  advertises `STORAGE_BINDING`. Override with `GOLDY_WEBGPU_PRESENT=copy|blit`.
+  `DirectSpatial<float4>` shaders do not change; packed storage is specialized
+  to the compute format (`surface_format()`). `finish_present` drops the acquired
+  image and publishes `SwapchainReturned`. `surface_resize` reconfigures the
+  swapchain and recreates scratch.
+- Raster: offscreen render targets, graphics PSOs (Slang → WGSL `vs_main`/`fs_main`),
+  indexed and non-indexed draws, optional depth-stencil, and `CopyRenderTarget`.
+  Vertex/fragment resources use the same packed `@group(0)` lowering as compute
+  (no bindless heap). The `webgpu` feature implies `graphics`.
+- Compute sampling must use `SampleLevel` (WGSL has no implicit derivatives in compute).
+
+```bash
+cargo test --no-default-features --features webgpu --lib backend::webgpu
+```
 
 ### Tenstorrent Backend (planned)
 

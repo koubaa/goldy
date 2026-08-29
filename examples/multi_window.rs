@@ -560,7 +560,16 @@ impl ApplicationHandler for App {
                     println!("[{}] Reset (click)", s.effect_type.title());
                 }
             }
-            WindowEvent::RedrawRequested => {}
+            WindowEvent::RedrawRequested => {
+                let Some(ctx) = self.ctx.clone() else {
+                    return;
+                };
+                if let Some(s) = self.windows.get_mut(&window_id) {
+                    if let Err(e) = s.render(&ctx) {
+                        tracing::error!("[{}] Render error: {}", s.effect_type.title(), e);
+                    }
+                }
+            }
             WindowEvent::Resized(new_size) => {
                 if let Some(s) = self.windows.get_mut(&window_id) {
                     s.handle_resize(new_size.width, new_size.height);
@@ -573,17 +582,14 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         common::exit_if_timed_out(event_loop, self.start_time);
 
-        let ctx = match &self.ctx {
-            Some(c) => c,
-            None => return,
-        };
+        if self.ctx.is_none() {
+            return;
+        }
 
         self.frame_count += 1;
 
-        for state in self.windows.values_mut() {
-            if let Err(e) = state.render(ctx) {
-                tracing::error!("[{}] Render error: {}", state.effect_type.title(), e);
-            }
+        for state in self.windows.values() {
+            state.window.request_redraw();
         }
     }
 }

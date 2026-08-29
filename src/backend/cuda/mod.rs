@@ -567,6 +567,7 @@ fn cuda_spec_dump_tag(specs: &[CudaStorageTextureSpec]) -> String {
             .map(|spec| match spec {
                 CudaStorageTextureSpec::Identity => "id",
                 CudaStorageTextureSpec::Float4Rgba8Unorm => "f4rgba8",
+                CudaStorageTextureSpec::Float4Bgra8Unorm => "f4bgra8",
             })
             .collect::<Vec<_>>()
             .join("-")
