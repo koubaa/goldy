@@ -203,6 +203,12 @@ jobs:
             features: dx12
           - os: macos-latest
             features: metal
+          - os: ubuntu-latest
+            features: webgpu
+          - os: windows-latest
+            features: webgpu
+          - os: macos-latest
+            features: webgpu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

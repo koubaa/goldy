@@ -1,5 +1,5 @@
 # Build and publish the lavapipe CI container to GHCR.
-# CI jobs (test-vulkan, python-linux, cpp-linux) pull this image instead of
+# CI jobs (test-vulkan, test-webgpu-linux, python-linux, cpp-linux) pull this image instead of
 # running apt-get upgrade/install on every run.
 #
 # Run manually via workflow_dispatch when the image should be rebuilt
