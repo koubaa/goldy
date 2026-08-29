@@ -33,7 +33,7 @@ pub(crate) mod mock;
 #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
 pub(crate) mod metal;
 
-// Portable WebGPU backend (compute-only prototype).
+// Portable WebGPU backend (compute + raster via wgpu).
 #[cfg(feature = "webgpu")]
 pub(crate) mod webgpu;
 
@@ -1757,7 +1757,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
         not(feature = "vulkan")
     ))]
     {
-        tracing::info!("Creating WebGPU backend (compute-only build, no native backend compiled in)");
+        tracing::info!("Creating WebGPU backend (no native backend compiled in)");
         Ok(Box::new(webgpu::WebGpuBackend::new()?))
     }
 
@@ -1816,7 +1816,7 @@ pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBac
         }
         #[cfg(feature = "webgpu")]
         BackendType::WebGpu => {
-            tracing::info!("Creating WebGPU backend (compute-only)");
+            tracing::info!("Creating WebGPU backend");
             Ok(Box::new(webgpu::WebGpuBackend::new()?))
         }
         #[cfg(feature = "cuda")]

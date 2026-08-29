@@ -287,7 +287,7 @@ notes:
   (the latter needs wgpu `BGRA8UNORM_STORAGE`). sRGB formats are rejected for storage.
 - Uploads use `queue.write_texture`. Texture withdraw staging uses WebGPU's 256-byte row
   pitch; `query_texture_copy_footprint` reports the padded layout.
-- Surfaces (`graphics`): `begin_frame` acquires the wgpu drawable. Present picks
+- Surfaces: `begin_frame` acquires the wgpu drawable. Present picks
   **Copy** (same-format storage scratch → swapchain) when the scratch format can
   be a UAV (`Rgba8Unorm`, or `Bgra8Unorm` with `BGRA8UNORM_STORAGE`), otherwise
   **Blit** (`Rgba8Unorm` scratch + fullscreen pass for BGRA/sRGB). **Direct**
@@ -297,8 +297,11 @@ notes:
   `DirectSpatial<float4>` shaders do not change; packed storage is specialized
   to the compute format (`surface_format()`). `finish_present` drops the acquired
   image and publishes `SwapchainReturned`. `surface_resize` reconfigures the
-  swapchain and recreates scratch. Graphics pipelines remain unsupported; present
-  blit is an internal pass.
+  swapchain and recreates scratch.
+- Raster: offscreen render targets, graphics PSOs (Slang → WGSL `vs_main`/`fs_main`),
+  indexed and non-indexed draws, optional depth-stencil, and `CopyRenderTarget`.
+  Vertex/fragment resources use the same packed `@group(0)` lowering as compute
+  (no bindless heap). The `webgpu` feature implies `graphics`.
 - Compute sampling must use `SampleLevel` (WGSL has no implicit derivatives in compute).
 
 ```bash

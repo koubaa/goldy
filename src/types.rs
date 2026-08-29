@@ -658,7 +658,7 @@ pub enum BackendType {
     Vulkan,
     Metal,
     Dx12,
-    /// Portable WebGPU backend (currently compute-only).
+    /// Portable WebGPU backend (compute + raster via wgpu).
     WebGpu,
     /// NVIDIA CUDA backend (compute + Windows DX12 presentation/raster when
     /// `cuda+graphics+dx12` are enabled).

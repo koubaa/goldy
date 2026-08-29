@@ -15,7 +15,7 @@ Use `--no-default-features --features <backend>` when you need:
 - **Faster builds** — skip compiling heavy backend dependencies
 - **Missing SDK** — build on a system that lacks the Vulkan SDK or Windows SDK
 - **CI matrix** — verify each backend compiles independently
-- **Compute-only builds** — CUDA/WebGPU without raster, surfaces, or presentation
+- **Compute-only builds** — CUDA without raster, surfaces, or presentation
 
 ## Feature Flags
 
@@ -31,7 +31,7 @@ dx12    = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics", "
 metal   = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types",
            "dep:foreign-types", "dep:block", "graphics", "gpu"]
 cuda    = ["dep:cudarc", "gpu"]
-webgpu  = ["dep:wgpu", "dep:pollster", "gpu"]
+webgpu  = ["dep:wgpu", "dep:pollster", "graphics", "gpu"]
 
 instrumentation = ["dep:tracing-subscriber"]
 ```
@@ -50,10 +50,11 @@ the GPGPU compute surface (storage images, sampling, copies, deposits/withdrawal
 than the always-compiled mock backend. Enabling `gpu` alone does not compile a
 backend.
 
-`cuda` and `webgpu` do **not** imply `graphics` and are **not** platform defaults
-(Metal / DX12 / Vulkan remain the defaults in normal builds). When you compile
-**only** `cuda` or `webgpu` — no native backend — `Instance::new()` selects that
-backend automatically. In a default multi-backend build, opt in with
+`cuda` does **not** imply `graphics`. `webgpu` **does** imply `graphics` (wgpu is a
+full graphics+compute API). Neither is a platform default (Metal / DX12 / Vulkan
+remain the defaults in normal builds). When you compile **only** `cuda` or
+`webgpu` — no native backend — `Instance::new()` selects that backend
+automatically. In a default multi-backend build, opt in with
 `GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu`.
 
 On Windows, enabling `cuda` together with `graphics` and `dx12` (the usual case
@@ -118,7 +119,7 @@ This can significantly reduce build times and binary size.
 | `dx12` | Windows only | Gated by `#[cfg(target_os = "windows")]` — the feature is ignored on other platforms; implies `graphics` |
 | `metal` | macOS only | Gated by `#[cfg(target_os = "macos")]` — the feature is ignored on other platforms; implies `graphics` |
 | `cuda` | Any platform with CUDA toolkit | Compute prototype; on Windows with `cuda+graphics+dx12`, DX12 presentation companion + first-slice raster (`Rgba32Float` / `Rgba8Unorm`, indexed draws, DX12-only depth) are enabled. Does not imply `graphics` by itself. Vulkan interop still pending. |
-| `webgpu` | Cross-platform | **In progress** — via wgpu; does not imply `graphics` |
+| `webgpu` | Cross-platform | **In progress** — via wgpu; implies `graphics` |
 
 On macOS, the default backend is native Metal. Goldy does not require MoltenVK.
 

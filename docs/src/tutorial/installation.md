@@ -28,7 +28,7 @@ cargo add goldy
 | `graphics` | yes | Raster pipelines, render targets, surfaces, and presentation |
 | `gpu` | yes | Implied by every real GPU backend (not mock). Do not enable alone. |
 | `cuda` | no | CUDA backend (in progress; NVIDIA compute; implies `gpu`, not `graphics`) |
-| `webgpu` | no | WebGPU backend (in progress; via wgpu; implies `gpu`, not `graphics`) |
+| `webgpu` | no | WebGPU backend (in progress; via wgpu; implies `graphics` and `gpu`) |
 | `instrumentation` | yes | Structured tracing via `tracing-subscriber` (zero-cost when disabled) |
 
 `graphics` is implied by the native backends. `gpu` is implied by every real GPU

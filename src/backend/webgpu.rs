@@ -11,19 +11,24 @@
 //! Presentation picks the cheapest path that actually works:
 //! 1. **Copy** — compute writes a same-format storage scratch, then `copy_texture_to_texture`.
 //! 2. **Blit** — compute writes `Rgba8Unorm` scratch, then a fullscreen pass to the swapchain.
+//!
 //! **Direct** (compute writes the swapchain image) is implemented but not auto-selected:
 //! wgpu 28 hardcodes swapchain `format_features` to `RENDER_ATTACHMENT` only, so storage
 //! bind groups fail even when `SurfaceCapabilities` advertise `STORAGE_BINDING`.
 //! Override with `GOLDY_WEBGPU_PRESENT=copy|blit` (`direct` is rejected until wgpu fixes this).
+//!
+//! Raster: offscreen color (optional depth) targets, graphics PSOs from Slang WGSL, and
+//! `CopyRenderTarget` into a texture. Vertex/fragment resources use the same packed bind
+//! group as compute.
 
 use super::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
 use super::*;
 use crate::frame_table::dispatch_table_base_word_index;
-use crate::slang::virtual_main::{
-    CudaStorageTextureSpec, WgpuComputeLayout, WgpuComputeResourceKind,
-};
+use crate::slang::virtual_main::{CudaStorageTextureSpec, WgpuComputeLayout, WgpuComputeResourceKind};
+use crate::slang::OwnedLayoutCheck;
 use crate::types::{
-    AddressMode, BufferKind, BufferResizeCost, CompareFunction, DeviceType, FilterMode, ResourceCategory,
+    AddressMode, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType, FilterMode,
+    IndexFormat, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
 };
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
@@ -84,18 +89,14 @@ fn parse_present_override() -> Result<Option<WebGpuPresentPath>> {
         "direct" => Ok(Some(WebGpuPresentPath::Direct)),
         "copy" => Ok(Some(WebGpuPresentPath::Copy)),
         "blit" => Ok(Some(WebGpuPresentPath::Blit)),
-        other => anyhow::bail!(
-            "GOLDY_WEBGPU_PRESENT={other:?} is invalid (expected direct, copy, or blit)"
-        ),
+        other => anyhow::bail!("GOLDY_WEBGPU_PRESENT={other:?} is invalid (expected direct, copy, or blit)"),
     }
 }
 
 #[cfg(feature = "graphics")]
 fn storage_capable_scratch(format: wgpu::TextureFormat, features: wgpu::Features) -> bool {
     match format {
-        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rgba32Float => {
-            true
-        }
+        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rgba32Float => true,
         wgpu::TextureFormat::Bgra8Unorm => features.contains(wgpu::Features::BGRA8UNORM_STORAGE),
         _ => false,
     }
@@ -291,6 +292,64 @@ fn map_compare(compare: CompareFunction) -> wgpu::CompareFunction {
     }
 }
 
+#[cfg(feature = "graphics")]
+fn map_vertex_format(format: VertexFormat) -> wgpu::VertexFormat {
+    match format {
+        VertexFormat::Float32 => wgpu::VertexFormat::Float32,
+        VertexFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
+        VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
+        VertexFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
+        VertexFormat::Uint32 => wgpu::VertexFormat::Uint32,
+        VertexFormat::Sint32 => wgpu::VertexFormat::Sint32,
+        VertexFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
+        VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+    }
+}
+
+#[cfg(feature = "graphics")]
+fn map_topology(topology: PrimitiveTopology) -> wgpu::PrimitiveTopology {
+    match topology {
+        PrimitiveTopology::PointList => wgpu::PrimitiveTopology::PointList,
+        PrimitiveTopology::LineList => wgpu::PrimitiveTopology::LineList,
+        PrimitiveTopology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+        PrimitiveTopology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
+        PrimitiveTopology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+    }
+}
+
+#[cfg(feature = "graphics")]
+fn map_index_format(format: IndexFormat) -> wgpu::IndexFormat {
+    match format {
+        IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+        IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
+    }
+}
+
+#[cfg(feature = "graphics")]
+fn map_depth_format(format: DepthFormat) -> wgpu::TextureFormat {
+    match format {
+        DepthFormat::Depth16Unorm => wgpu::TextureFormat::Depth16Unorm,
+        DepthFormat::Depth24Plus => wgpu::TextureFormat::Depth24Plus,
+        DepthFormat::Depth24PlusStencil8 => wgpu::TextureFormat::Depth24PlusStencil8,
+        DepthFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
+        DepthFormat::Depth32FloatStencil8 => wgpu::TextureFormat::Depth32FloatStencil8,
+    }
+}
+
+#[cfg(feature = "graphics")]
+fn map_color_load(load: crate::types::TargetLoad) -> wgpu::LoadOp<wgpu::Color> {
+    match load {
+        crate::types::TargetLoad::Clear(color) => wgpu::LoadOp::Clear(wgpu::Color {
+            r: color.r as f64,
+            g: color.g as f64,
+            b: color.b as f64,
+            a: color.a as f64,
+        }),
+        crate::types::TargetLoad::Load => wgpu::LoadOp::Load,
+        crate::types::TargetLoad::Discard => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+    }
+}
+
 fn copy_row_pitch(width: u32, format: TextureFormat) -> u32 {
     let tight = width.saturating_mul(format.bytes_per_pixel()).max(1);
     tight.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
@@ -415,6 +474,15 @@ pub(crate) struct WebGpuBackend {
     free_slots: Vec<u32>,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
+    #[cfg(feature = "graphics")]
+    graphics_pipelines: HashMap<PipelineHandle, WebGpuGraphicsPipeline>,
+    #[cfg(feature = "graphics")]
+    render_targets: HashMap<RenderTargetHandle, WebGpuRenderTarget>,
+    #[cfg(feature = "graphics")]
+    next_graphics_pipeline: PipelineHandle,
+    #[cfg(feature = "graphics")]
+    next_render_target: RenderTargetHandle,
+    last_frame_table: Option<Arc<[u32]>>,
 }
 
 #[cfg(feature = "graphics")]
@@ -558,9 +626,7 @@ fn patch_wgsl_storage_formats(wgsl: &str, replacements: &[(u32, &str)]) -> Resul
             .unwrap_or(after.len());
         let decl = &after[..next_binding];
         let Some(rel) = decl.find("texture_storage_2d<rgba32float") else {
-            anyhow::bail!(
-                "WebGPU: expected texture_storage_2d<rgba32float at {needle} for float4→{to_format}"
-            );
+            anyhow::bail!("WebGPU: expected texture_storage_2d<rgba32float at {needle} for float4→{to_format}");
         };
         let abs = decl_start + rel + "texture_storage_2d<".len();
         const FROM: &str = "rgba32float";
@@ -570,7 +636,10 @@ fn patch_wgsl_storage_formats(wgsl: &str, replacements: &[(u32, &str)]) -> Resul
         );
         out.replace_range(abs..abs + FROM.len(), to_format);
         let access_at = abs + to_format.len();
-        if out.get(access_at..).is_some_and(|rest| rest.starts_with(", read_write")) {
+        if out
+            .get(access_at..)
+            .is_some_and(|rest| rest.starts_with(", read_write"))
+        {
             out.replace_range(access_at..access_at + ", read_write".len(), ", write");
         }
     }
@@ -614,6 +683,29 @@ struct WebGpuShader {
     search_paths: Vec<String>,
     defines: Vec<(String, String)>,
     optimization_level: crate::types::OptimizationLevel,
+    layout_checks: Vec<OwnedLayoutCheck>,
+}
+
+#[cfg(feature = "graphics")]
+struct WebGpuGraphicsPipeline {
+    device: DeviceHandle,
+    pipeline: wgpu::RenderPipeline,
+    layout: WgpuComputeLayout,
+    #[allow(dead_code)]
+    vertex_stride: u32,
+    #[allow(dead_code)]
+    topology: PrimitiveTopology,
+}
+
+#[cfg(feature = "graphics")]
+struct WebGpuRenderTarget {
+    device: DeviceHandle,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    color: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    depth: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 struct WebGpuComputePipeline {
@@ -675,6 +767,15 @@ impl WebGpuBackend {
             free_slots: Vec::new(),
             next_shader: 1,
             next_compute_pipeline: 1,
+            #[cfg(feature = "graphics")]
+            graphics_pipelines: HashMap::new(),
+            #[cfg(feature = "graphics")]
+            render_targets: HashMap::new(),
+            #[cfg(feature = "graphics")]
+            next_graphics_pipeline: 1,
+            #[cfg(feature = "graphics")]
+            next_render_target: 1,
+            last_frame_table: None,
         })
     }
 
@@ -686,6 +787,7 @@ impl WebGpuBackend {
         self.contexts.get(&handle).context("WebGPU: invalid context handle")
     }
 
+    #[allow(dead_code)]
     fn unsupported<T>(operation: &str) -> Result<T> {
         anyhow::bail!("WebGPU compute-only backend does not support {operation}")
     }
@@ -871,7 +973,11 @@ impl WebGpuBackend {
     }
 
     #[cfg(feature = "graphics")]
-    fn blit_pipeline(&mut self, device: DeviceHandle, target_format: wgpu::TextureFormat) -> Result<WebGpuBlitPipeline> {
+    fn blit_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<WebGpuBlitPipeline> {
         if let Some(cached) = self.device(device)?.blit.get(&target_format) {
             return Ok(cached.clone());
         }
@@ -933,12 +1039,7 @@ impl WebGpuBackend {
     }
 
     #[cfg(all(feature = "graphics", test))]
-    fn blit_texture_to_target(
-        &mut self,
-        device: DeviceHandle,
-        src: TextureHandle,
-        dst: TextureHandle,
-    ) -> Result<()> {
+    fn blit_texture_to_target(&mut self, device: DeviceHandle, src: TextureHandle, dst: TextureHandle) -> Result<()> {
         let src_tex = self.textures.get(&src).context("WebGPU: invalid blit source")?;
         let dst_tex = self.textures.get(&dst).context("WebGPU: invalid blit destination")?;
         anyhow::ensure!(
@@ -958,15 +1059,7 @@ impl WebGpuBackend {
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("goldy-webgpu-offscreen-blit"),
         });
-        encode_present_blit(
-            &mut encoder,
-            &gpu.device,
-            &blit,
-            &src_view,
-            &dst_texture,
-            width,
-            height,
-        );
+        encode_present_blit(&mut encoder, &gpu.device, &blit, &src_view, &dst_texture, width, height);
         let index = gpu.queue.submit([encoder.finish()]);
         poll_device(
             &gpu.device,
@@ -1048,7 +1141,9 @@ impl WebGpuBackend {
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::INDIRECT,
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::INDEX,
             mapped_at_creation: false,
         });
         let handle = self.next_buffer;
@@ -1100,7 +1195,7 @@ impl WebGpuBackend {
             &[("cs_main", crate::slang::SlangStage::Compute)],
             &paths,
             &defines,
-            &[],
+            &shader.layout_checks,
             shader.optimization_level,
         )?;
         let source = compiled
@@ -1112,7 +1207,88 @@ impl WebGpuBackend {
         Ok((source, access, layout))
     }
 
-    fn storage_texture_specs(&self, shader_source: &str, layout: &WgpuComputeLayout, indices: &[u32]) -> Result<Vec<CudaStorageTextureSpec>> {
+    #[cfg(feature = "graphics")]
+    fn compile_graphics_stage_wgsl(
+        &self,
+        shader: &WebGpuShader,
+        lowered: &str,
+        entry: &'static str,
+        stage: crate::slang::SlangStage,
+    ) -> Result<String> {
+        let compiler = crate::slang::SlangCompiler::new().context("WebGPU: initialize Slang")?;
+        let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
+        let defines: Vec<(&str, &str)> = shader
+            .defines
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let compiled = compiler.compile_bindless_with_reflection_and_defines(
+            lowered,
+            crate::slang::ShaderTarget::Wgsl,
+            &[(entry, stage)],
+            &paths,
+            &defines,
+            &shader.layout_checks,
+            shader.optimization_level,
+        )?;
+        compiled
+            .shader
+            .as_str()
+            .context("WebGPU: Slang returned non-text WGSL output")
+            .map(str::to_owned)
+    }
+
+    #[cfg(feature = "graphics")]
+    fn compile_graphics_wgsl(&self, shader: &WebGpuShader) -> Result<(String, String, WgpuComputeLayout)> {
+        let has_goldy = shader.source.contains("[goldy_vertex]") || shader.source.contains("[goldy_fragment]");
+        let (lowered, layout) = if has_goldy {
+            let layout = crate::slang::virtual_main::extract_webgpu_graphics_layout(&shader.source)
+                .map_err(|error| anyhow::anyhow!("WebGPU graphics shader layout failed: {error}"))?;
+            let lowered = crate::slang::virtual_main::transform_virtual_main_webgpu_graphics(&shader.source)
+                .map_err(|error| anyhow::anyhow!("WebGPU graphics shader lowering failed: {error}"))?;
+            (lowered, layout)
+        } else {
+            (shader.source.clone(), WgpuComputeLayout::inferred_storage())
+        };
+        let vs = self.compile_graphics_stage_wgsl(shader, &lowered, "vs_main", crate::slang::SlangStage::Vertex)?;
+        let fs = self.compile_graphics_stage_wgsl(shader, &lowered, "fs_main", crate::slang::SlangStage::Fragment)?;
+        Ok((vs, fs, layout))
+    }
+
+    #[cfg(feature = "graphics")]
+    fn raster_bind_indices(
+        &self,
+        layout: &WgpuComputeLayout,
+        indices: &[u32],
+        frame_table_base: u32,
+    ) -> Result<Vec<u32>> {
+        if !indices.is_empty() {
+            return Ok(indices.to_vec());
+        }
+        let n = layout.registry_index_count().unwrap_or(0);
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let table = self
+            .last_frame_table
+            .as_ref()
+            .context("WebGPU: graphics bind needs FrameTableStaging")?;
+        let start = frame_table_base as usize;
+        let end = start.checked_add(n).context("WebGPU: frame-table range overflow")?;
+        anyhow::ensure!(
+            end <= table.len(),
+            "WebGPU: graphics bind frame-table range [{start}, {end}) exceeds staging len {}",
+            table.len()
+        );
+        Ok(table[start..end].to_vec())
+    }
+
+    fn storage_texture_specs(
+        &self,
+        shader_source: &str,
+        layout: &WgpuComputeLayout,
+        indices: &[u32],
+    ) -> Result<Vec<CudaStorageTextureSpec>> {
         let Some(kinds) = layout.resources.as_ref() else {
             return Ok(Vec::new());
         };
@@ -1130,9 +1306,9 @@ impl WebGpuBackend {
             if kind != WgpuComputeResourceKind::StorageTexture {
                 continue;
             }
-            let element = texels.get(texel_i).ok_or_else(|| {
-                anyhow::anyhow!("WebGPU: missing DirectSpatial element for storage slot {texel_i}")
-            })?;
+            let element = texels
+                .get(texel_i)
+                .ok_or_else(|| anyhow::anyhow!("WebGPU: missing DirectSpatial element for storage slot {texel_i}"))?;
             texel_i += 1;
             let texture = self.lookup_registry_texture(index)?;
             specs.push(
@@ -1180,7 +1356,10 @@ impl WebGpuBackend {
         Ok(pipeline)
     }
 
-    fn packed_storage_bindings(layout: &WgpuComputeLayout, specs: &[CudaStorageTextureSpec]) -> Vec<(u32, &'static str)> {
+    fn packed_storage_bindings(
+        layout: &WgpuComputeLayout,
+        specs: &[CudaStorageTextureSpec],
+    ) -> Vec<(u32, &'static str)> {
         let Some(kinds) = layout.resources.as_ref() else {
             return Vec::new();
         };
@@ -1190,7 +1369,11 @@ impl WebGpuBackend {
             if kind != WgpuComputeResourceKind::StorageTexture {
                 continue;
             }
-            if let Some(format) = specs.get(spec_i).copied().unwrap_or_default().wgsl_storage_texel_format()
+            if let Some(format) = specs
+                .get(spec_i)
+                .copied()
+                .unwrap_or_default()
+                .wgsl_storage_texel_format()
             {
                 bindings.push((binding as u32, format));
             }
@@ -1275,7 +1458,7 @@ impl WebGpuBackend {
         &self,
         device: DeviceHandle,
         layout: &WgpuComputeLayout,
-        pipeline: &wgpu::ComputePipeline,
+        bind_layout: impl FnOnce() -> wgpu::BindGroupLayout,
         indices: &[u32],
         user_uniform: Option<(&wgpu::Buffer, u64)>,
     ) -> Result<Option<wgpu::BindGroup>> {
@@ -1360,9 +1543,9 @@ impl WebGpuBackend {
         if entries.is_empty() {
             return Ok(None);
         }
+        let bind_layout = bind_layout();
         let gpu = self.device(device)?;
         let error_scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let bind_layout = pipeline.get_bind_group_layout(0);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("goldy-webgpu-dispatch-bindings"),
             layout: &bind_layout,
@@ -1804,8 +1987,7 @@ impl WebGpuBackend {
                     workgroups_z,
                 } => {
                     let pipeline_handle = current_pipeline.context("WebGPU: dispatch without a compute pipeline")?;
-                    let (wgpu_pipeline, layout) =
-                        self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
+                    let (wgpu_pipeline, layout) = self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
                     let device = self
                         .compute_pipelines
                         .get(&pipeline_handle)
@@ -1828,8 +2010,13 @@ impl WebGpuBackend {
                     } else {
                         None
                     };
-                    let bind_group =
-                        self.create_bind_group(device, &layout, &wgpu_pipeline, &current_indices, user_binding)?;
+                    let bind_group = self.create_bind_group(
+                        device,
+                        &layout,
+                        || wgpu_pipeline.get_bind_group_layout(0),
+                        &current_indices,
+                        user_binding,
+                    )?;
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: *label,
                         timestamp_writes: None,
@@ -1842,8 +2029,7 @@ impl WebGpuBackend {
                 }
                 GpuCommand::DispatchIndirect { buffer, offset, label } => {
                     let pipeline_handle = current_pipeline.context("WebGPU: indirect dispatch without a pipeline")?;
-                    let (wgpu_pipeline, layout) =
-                        self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
+                    let (wgpu_pipeline, layout) = self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
                     let device = self
                         .compute_pipelines
                         .get(&pipeline_handle)
@@ -1874,8 +2060,13 @@ impl WebGpuBackend {
                     } else {
                         None
                     };
-                    let bind_group =
-                        self.create_bind_group(device, &layout, &wgpu_pipeline, &current_indices, user_binding)?;
+                    let bind_group = self.create_bind_group(
+                        device,
+                        &layout,
+                        || wgpu_pipeline.get_bind_group_layout(0),
+                        &current_indices,
+                        user_binding,
+                    )?;
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: *label,
                         timestamp_writes: None,
@@ -1922,6 +2113,7 @@ impl WebGpuBackend {
                 }
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table = Some(data.as_ref());
+                    self.last_frame_table = Some(Arc::clone(data));
                 }
                 GpuCommand::ResourceBarrier { .. } => {
                     // WebGPU tracks resource transitions within a submitted command buffer.
@@ -1986,8 +2178,13 @@ impl WebGpuBackend {
                             None
                         };
                         let (wgpu_pipeline, layout) = self.wgpu_pipeline_for_dispatch(pipeline_handle, &indices)?;
-                        let bind_group =
-                            self.create_bind_group(device, &layout, &wgpu_pipeline, &indices, user_binding)?;
+                        let bind_group = self.create_bind_group(
+                            device,
+                            &layout,
+                            || wgpu_pipeline.get_bind_group_layout(0),
+                            &indices,
+                            user_binding,
+                        )?;
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: *label,
                             timestamp_writes: None,
@@ -2020,8 +2217,38 @@ impl WebGpuBackend {
                 GpuCommand::CopyTexture { src, dst } => {
                     self.record_copy_texture(&mut encoder, *src, *dst)?;
                 }
-                GpuCommand::CopyRenderTarget { .. } => {
-                    anyhow::bail!("WebGPU compute-only backend: CopyRenderTarget is not supported")
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    #[cfg(feature = "graphics")]
+                    {
+                        let src_rt = self
+                            .render_targets
+                            .get(src)
+                            .context("WebGPU: invalid CopyRenderTarget source")?;
+                        let dst_tex = self
+                            .textures
+                            .get(dst)
+                            .context("WebGPU: invalid CopyRenderTarget destination")?;
+                        anyhow::ensure!(
+                            src_rt.width == dst_tex.width
+                                && src_rt.height == dst_tex.height
+                                && src_rt.format == dst_tex.format,
+                            "WebGPU: CopyRenderTarget requires identical size and format"
+                        );
+                        encoder.copy_texture_to_texture(
+                            texel_copy(&src_rt.color, 0, 0),
+                            texel_copy(&dst_tex.texture, 0, 0),
+                            wgpu::Extent3d {
+                                width: src_rt.width,
+                                height: src_rt.height,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                    #[cfg(not(feature = "graphics"))]
+                    {
+                        let _ = (src, dst);
+                        anyhow::bail!("WebGPU: CopyRenderTarget requires the graphics feature");
+                    }
                 }
                 GpuCommand::CopyBufferToTexture {
                     src,
@@ -2493,7 +2720,14 @@ impl GpuBackend for WebGpuBackend {
                 TextureFormat::Rgba8UnormSrgb,
                 TextureFormat::Bgra8UnormSrgb,
             ],
-            supported_render_target_formats: Vec::new(),
+            supported_render_target_formats: vec![
+                TextureFormat::Rgba8Unorm,
+                TextureFormat::Bgra8Unorm,
+                TextureFormat::Rgba8UnormSrgb,
+                TextureFormat::Bgra8UnormSrgb,
+                TextureFormat::Rgba16Float,
+                TextureFormat::Rgba32Float,
+            ],
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_decommit_supported: false,
@@ -2511,7 +2745,8 @@ impl GpuBackend for WebGpuBackend {
             .with_context(|| format!("WebGPU: invalid adapter id {adapter_id}"))?;
         let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgpu::Features::FLOAT32_FILTERABLE
-            | wgpu::Features::BGRA8UNORM_STORAGE;
+            | wgpu::Features::BGRA8UNORM_STORAGE
+            | wgpu::Features::VERTEX_WRITABLE_STORAGE;
         let required_features = adapter.features() & wanted;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("goldy-webgpu-device"),
@@ -2914,7 +3149,9 @@ impl GpuBackend for WebGpuBackend {
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::INDIRECT,
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::INDEX,
             mapped_at_creation: false,
         });
         if preserve_contents {
@@ -2958,6 +3195,36 @@ impl GpuBackend for WebGpuBackend {
                     .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                     .collect(),
                 optimization_level,
+                layout_checks: Vec::new(),
+            },
+        );
+        Ok(handle)
+    }
+
+    fn create_shader_with_checks(
+        &mut self,
+        device: DeviceHandle,
+        slang_source: &str,
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: crate::types::OptimizationLevel,
+        layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    ) -> Result<ShaderHandle> {
+        self.device(device)?;
+        let handle = self.next_shader;
+        self.next_shader += 1;
+        self.shaders.insert(
+            handle,
+            WebGpuShader {
+                device,
+                source: slang_source.to_owned(),
+                search_paths: search_paths.iter().map(|value| (*value).to_owned()).collect(),
+                defines: defines
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                    .collect(),
+                optimization_level,
+                layout_checks,
             },
         );
         Ok(handle)
@@ -2970,57 +3237,471 @@ impl GpuBackend for WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn create_pipeline(
         &mut self,
-        _device: DeviceHandle,
-        _vertex_shader: ShaderHandle,
-        _fragment_shader: ShaderHandle,
-        _vertex_layout: &VertexBufferLayout,
-        _topology: PrimitiveTopology,
-        _target_format: TextureFormat,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        Self::unsupported("graphics pipelines")
+        self.create_pipeline_with_depth(
+            device,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            topology,
+            target_format,
+            None,
+        )
     }
 
     #[cfg(feature = "graphics")]
-    fn destroy_pipeline(&mut self, _pipeline: PipelineHandle) {}
+    fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
+        self.graphics_pipelines.remove(&pipeline);
+    }
 
     #[cfg(feature = "graphics")]
     fn create_pipeline_with_depth(
         &mut self,
-        _device: DeviceHandle,
-        _vertex_shader: ShaderHandle,
-        _fragment_shader: ShaderHandle,
-        _vertex_layout: &VertexBufferLayout,
-        _topology: PrimitiveTopology,
-        _target_format: TextureFormat,
-        _depth_stencil: Option<&DepthStencilState>,
+        device: DeviceHandle,
+        vertex_shader: ShaderHandle,
+        fragment_shader: ShaderHandle,
+        vertex_layout: &VertexBufferLayout,
+        topology: PrimitiveTopology,
+        target_format: TextureFormat,
+        depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        Self::unsupported("graphics pipelines")
+        let vs_shader = self
+            .shaders
+            .get(&vertex_shader)
+            .context("WebGPU: invalid vertex shader")?
+            .clone();
+        anyhow::ensure!(
+            vs_shader.device == device,
+            "WebGPU: vertex shader belongs to another device"
+        );
+        let fs_shader = self
+            .shaders
+            .get(&fragment_shader)
+            .context("WebGPU: invalid fragment shader")?
+            .clone();
+        anyhow::ensure!(
+            fs_shader.device == device,
+            "WebGPU: fragment shader belongs to another device"
+        );
+        let (vs_wgsl, fs_wgsl, vs_layout) = self.compile_graphics_wgsl(&vs_shader)?;
+        let (_fs_only, fs_wgsl_other, fs_layout) = if vertex_shader == fragment_shader {
+            (String::new(), fs_wgsl.clone(), vs_layout.clone())
+        } else {
+            self.compile_graphics_wgsl(&fs_shader)?
+        };
+        let fs_wgsl = if vertex_shader == fragment_shader {
+            fs_wgsl
+        } else {
+            fs_wgsl_other
+        };
+        let layout = if fs_layout.resources.as_ref().is_some_and(|r| !r.is_empty()) || fs_layout.scalar_count > 0 {
+            fs_layout
+        } else {
+            vs_layout
+        };
+
+        let gpu = self.device(device)?;
+        let error_scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let vs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("goldy-webgpu-vs"),
+            source: wgpu::ShaderSource::Wgsl(vs_wgsl.into()),
+        });
+        let fs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("goldy-webgpu-fs"),
+            source: wgpu::ShaderSource::Wgsl(fs_wgsl.into()),
+        });
+
+        let attributes: Vec<wgpu::VertexAttribute> = vertex_layout
+            .attributes
+            .iter()
+            .map(|attr| wgpu::VertexAttribute {
+                format: map_vertex_format(attr.format),
+                offset: u64::from(attr.offset),
+                shader_location: attr.location,
+            })
+            .collect();
+        let vertex_buffers: Vec<wgpu::VertexBufferLayout<'_>> = if attributes.is_empty() {
+            Vec::new()
+        } else {
+            vec![wgpu::VertexBufferLayout {
+                array_stride: u64::from(vertex_layout.stride),
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &attributes,
+            }]
+        };
+        let strip_index_format = matches!(
+            topology,
+            PrimitiveTopology::LineStrip | PrimitiveTopology::TriangleStrip
+        )
+        .then_some(wgpu::IndexFormat::Uint16);
+        let depth_stencil = depth_stencil.map(|ds| wgpu::DepthStencilState {
+            format: map_depth_format(ds.format),
+            depth_write_enabled: ds.depth_write_enabled,
+            depth_compare: map_compare(ds.depth_compare),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+        let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("goldy-webgpu-graphics"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &vs_module,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &vertex_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: map_topology(topology),
+                strip_index_format,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fs_module,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: map_texture_format(target_format),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        if let Some(error) = pollster::block_on(error_scope.pop()) {
+            anyhow::bail!("WebGPU graphics pipeline validation failed: {error}");
+        }
+
+        let handle = self.next_graphics_pipeline;
+        self.next_graphics_pipeline += 1;
+        self.graphics_pipelines.insert(
+            handle,
+            WebGpuGraphicsPipeline {
+                device,
+                pipeline,
+                layout,
+                vertex_stride: vertex_layout.stride,
+                topology,
+            },
+        );
+        Ok(handle)
     }
 
     #[cfg(feature = "graphics")]
     fn create_render_target_with_depth(
         &mut self,
-        _device: DeviceHandle,
-        _width: u32,
-        _height: u32,
-        _color_format: TextureFormat,
-        _depth_format: Option<DepthFormat>,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        color_format: TextureFormat,
+        depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
-        Self::unsupported("render targets")
+        anyhow::ensure!(width > 0 && height > 0, "WebGPU: render target size must be non-zero");
+        let gpu = self.device(device)?;
+        let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("goldy-webgpu-rt-color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: map_texture_format(color_format),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("goldy-webgpu-rt-color-view"),
+            usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
+            ..Default::default()
+        });
+        let depth = depth_format
+            .map(|format| -> Result<_> {
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("goldy-webgpu-rt-depth"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: map_depth_format(format),
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("goldy-webgpu-rt-depth-view"),
+                    usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                    ..Default::default()
+                });
+                Ok((texture, view))
+            })
+            .transpose()?;
+        let handle = self.next_render_target;
+        self.next_render_target += 1;
+        self.render_targets.insert(
+            handle,
+            WebGpuRenderTarget {
+                device,
+                width,
+                height,
+                format: color_format,
+                color,
+                color_view,
+                depth,
+            },
+        );
+        Ok(handle)
     }
 
     #[cfg(feature = "graphics")]
-    fn destroy_render_target(&mut self, _target: RenderTargetHandle) {}
+    fn destroy_render_target(&mut self, target: RenderTargetHandle) {
+        self.render_targets.remove(&target);
+    }
 
     #[cfg(feature = "graphics")]
     fn render_to_target(
         &mut self,
-        _device: DeviceHandle,
-        _target: RenderTargetHandle,
-        _color_load: crate::types::TargetLoad,
-        _commands: &[RenderCommand],
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        color_load: crate::types::TargetLoad,
+        commands: &[RenderCommand],
     ) -> Result<()> {
-        Self::unsupported("rendering")
+        let (color_view, depth_view, width, height) = {
+            let rt = self
+                .render_targets
+                .get(&target)
+                .context("WebGPU: invalid render target")?;
+            anyhow::ensure!(rt.device == device, "WebGPU: render target belongs to another device");
+            (
+                rt.color_view.clone(),
+                rt.depth.as_ref().map(|(_, view)| view.clone()),
+                rt.width,
+                rt.height,
+            )
+        };
+        let clear_depth = commands.iter().find_map(|cmd| match cmd {
+            RenderCommand::ClearDepth(depth) => Some(*depth),
+            _ => None,
+        });
+        let gpu = self.device(device)?;
+        let queue = gpu.queue.clone();
+        let wgpu_device = gpu.device.clone();
+        let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("goldy-webgpu-render"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("goldy-webgpu-render-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: map_color_load(color_load),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: depth_view.as_ref().map(|view| wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: match clear_depth {
+                            Some(depth) => wgpu::LoadOp::Clear(depth),
+                            None => wgpu::LoadOp::Load,
+                        },
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, width, height);
+
+            let mut current_pipeline: Option<PipelineHandle> = None;
+            let mut bind_group_keep: Option<wgpu::BindGroup> = None;
+            for command in commands {
+                match command {
+                    RenderCommand::ClearDepth(_) => {}
+                    RenderCommand::SetPipeline(handle) => {
+                        let pipeline = self
+                            .graphics_pipelines
+                            .get(handle)
+                            .context("WebGPU: invalid graphics pipeline")?;
+                        anyhow::ensure!(pipeline.device == device, "WebGPU: pipeline belongs to another device");
+                        pass.set_pipeline(&pipeline.pipeline);
+                        current_pipeline = Some(*handle);
+                    }
+                    RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
+                        let buf = self.buffers.get(buffer).context("WebGPU: invalid vertex buffer")?;
+                        ensure_buffer_range(buf, *offset, 0, "vertex buffer")?;
+                        pass.set_vertex_buffer(*slot, buf.buffer.slice(buf.offset + offset..));
+                    }
+                    RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                        let buf = self.buffers.get(buffer).context("WebGPU: invalid index buffer")?;
+                        ensure_buffer_range(buf, *offset, 0, "index buffer")?;
+                        pass.set_index_buffer(buf.buffer.slice(buf.offset + offset..), map_index_format(*format));
+                    }
+                    RenderCommand::BindResources { buffers } => {
+                        let pipeline_handle =
+                            current_pipeline.context("WebGPU: BindResources without a graphics pipeline")?;
+                        let layout = self
+                            .graphics_pipelines
+                            .get(&pipeline_handle)
+                            .context("WebGPU: invalid graphics pipeline")?
+                            .layout
+                            .clone();
+                        let pipeline = self
+                            .graphics_pipelines
+                            .get(&pipeline_handle)
+                            .context("WebGPU: invalid graphics pipeline")?
+                            .pipeline
+                            .clone();
+                        let indices: Vec<u32> = buffers
+                            .iter()
+                            .map(|h| {
+                                self.buffer_bindless_index(*h)
+                                    .context("WebGPU: BindResources buffer missing registry key")
+                            })
+                            .collect::<Result<_>>()?;
+                        let bg = self.create_bind_group(
+                            device,
+                            &layout,
+                            || pipeline.get_bind_group_layout(0),
+                            &indices,
+                            None,
+                        )?;
+                        if let Some(bg) = bg.as_ref() {
+                            pass.set_bind_group(0, bg, &[]);
+                        }
+                        bind_group_keep = bg;
+                    }
+                    RenderCommand::BindResourcesTyped { handles } => {
+                        let pipeline_handle =
+                            current_pipeline.context("WebGPU: BindResourcesTyped without a graphics pipeline")?;
+                        let layout = self
+                            .graphics_pipelines
+                            .get(&pipeline_handle)
+                            .context("WebGPU: invalid graphics pipeline")?
+                            .layout
+                            .clone();
+                        let pipeline = self
+                            .graphics_pipelines
+                            .get(&pipeline_handle)
+                            .context("WebGPU: invalid graphics pipeline")?
+                            .pipeline
+                            .clone();
+                        let indices: Vec<u32> = handles.iter().map(|h| h.index()).collect();
+                        let bg = self.create_bind_group(
+                            device,
+                            &layout,
+                            || pipeline.get_bind_group_layout(0),
+                            &indices,
+                            None,
+                        )?;
+                        if let Some(bg) = bg.as_ref() {
+                            pass.set_bind_group(0, bg, &[]);
+                        }
+                        bind_group_keep = bg;
+                    }
+                    RenderCommand::BindResourcesRaw {
+                        indices,
+                        user,
+                        frame_table_base,
+                    } => {
+                        let pipeline_handle =
+                            current_pipeline.context("WebGPU: BindResourcesRaw without a graphics pipeline")?;
+                        let layout = self
+                            .graphics_pipelines
+                            .get(&pipeline_handle)
+                            .context("WebGPU: invalid graphics pipeline")?
+                            .layout
+                            .clone();
+                        let pipeline = self
+                            .graphics_pipelines
+                            .get(&pipeline_handle)
+                            .context("WebGPU: invalid graphics pipeline")?
+                            .pipeline
+                            .clone();
+                        let resolved = self.raster_bind_indices(&layout, indices, *frame_table_base)?;
+                        let user_binding = if layout.scalar_count > 0 {
+                            require_user_scalars(user, layout.scalar_count)?;
+                            self.ensure_user_uniform(device, USER_UNIFORM_BYTES)?;
+                            let gpu = self.device(device)?;
+                            let buffer = gpu
+                                .user_uniform
+                                .as_ref()
+                                .context("WebGPU: scalar draw missing user uniform buffer")?;
+                            gpu.queue.write_buffer(buffer, 0, &pack_user_uniform(user));
+                            Some((buffer.clone(), 0u64))
+                        } else if !user.is_empty() {
+                            anyhow::bail!(
+                                "WebGPU: graphics shader has no scalar parameters but BindResourcesRaw.user is non-empty"
+                            );
+                        } else {
+                            None
+                        };
+                        let user_ref = user_binding.as_ref().map(|(b, off)| (b, *off));
+                        let bg = self.create_bind_group(
+                            device,
+                            &layout,
+                            || pipeline.get_bind_group_layout(0),
+                            &resolved,
+                            user_ref,
+                        )?;
+                        if let Some(bg) = bg.as_ref() {
+                            pass.set_bind_group(0, bg, &[]);
+                        }
+                        bind_group_keep = bg;
+                    }
+                    RenderCommand::Draw {
+                        vertex_count,
+                        instance_count,
+                        first_vertex,
+                        first_instance,
+                    } => {
+                        pass.draw(
+                            *first_vertex..first_vertex + vertex_count,
+                            *first_instance..first_instance + instance_count,
+                        );
+                    }
+                    RenderCommand::DrawIndexed {
+                        index_count,
+                        instance_count,
+                        first_index,
+                        base_vertex,
+                        first_instance,
+                    } => {
+                        pass.draw_indexed(
+                            *first_index..first_index + index_count,
+                            *base_vertex,
+                            *first_instance..first_instance + instance_count,
+                        );
+                    }
+                }
+            }
+            let _ = bind_group_keep;
+            let _ = current_pipeline;
+        }
+        queue.submit([encoder.finish()]);
+        poll_device(&wgpu_device, wgpu::PollType::wait_indefinitely())?;
+        Ok(())
     }
 
     fn create_texture(
@@ -3209,12 +3890,7 @@ impl GpuBackend for WebGpuBackend {
         let present_mode = pick_present_mode(&caps.present_modes)?;
         let alpha_mode = pick_alpha_mode(&caps.alpha_modes);
         let features = self.device(device)?.features;
-        let present_path = choose_present_path(
-            caps.usages,
-            swapchain_format,
-            features,
-            parse_present_override()?,
-        )?;
+        let present_path = choose_present_path(caps.usages, swapchain_format, features, parse_present_override()?)?;
         let usage = surface_usage(&caps, present_path)?;
         let compute_format = compute_format_for_path(present_path, swapchain_format)?;
         tracing::info!(
@@ -3417,13 +4093,7 @@ impl GpuBackend for WebGpuBackend {
                 let state = self.surfaces.get(&surface).context("WebGPU: invalid surface handle")?;
                 (state.width.max(1), state.height.max(1), state.compute_format)
             };
-            let lease = self.register_surface_lease(
-                surface_device,
-                acquired.texture.clone(),
-                width,
-                height,
-                format,
-            )?;
+            let lease = self.register_surface_lease(surface_device, acquired.texture.clone(), width, height, format)?;
             let state = self
                 .surfaces
                 .get_mut(&surface)
@@ -4506,6 +5176,139 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 
     #[cfg(feature = "graphics")]
     #[test]
+    fn slang_emits_wgsl_for_vertex_fragment() -> Result<()> {
+        let compiler = crate::slang::SlangCompiler::new()?;
+        let src = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
+struct VertexOutput {
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;
+}
+"#;
+        let vs = compiler.compile_bindless_with_reflection_and_defines(
+            src,
+            crate::slang::ShaderTarget::Wgsl,
+            &[("vs_main", crate::slang::SlangStage::Vertex)],
+            &[],
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let fs = compiler.compile_bindless_with_reflection_and_defines(
+            src,
+            crate::slang::ShaderTarget::Wgsl,
+            &[("fs_main", crate::slang::SlangStage::Fragment)],
+            &[],
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let vs_wgsl = vs.shader.as_str().context("expected text WGSL")?;
+        let fs_wgsl = fs.shader.as_str().context("expected text WGSL")?;
+        assert!(vs_wgsl.contains("@vertex"), "missing vertex entry:\n{vs_wgsl}");
+        assert!(fs_wgsl.contains("@fragment"), "missing fragment entry:\n{fs_wgsl}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn raster_triangle_to_render_target() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU raster test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            crate::shaders::VERTEX_COLOR_2D,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_pipeline(
+            device,
+            shader,
+            shader,
+            &crate::types::Vertex2D::layout(),
+            PrimitiveTopology::TriangleList,
+            TextureFormat::Rgba8Unorm,
+        )?;
+        let verts = [
+            crate::types::Vertex2D::new(0.0, -0.5, crate::types::Color::RED),
+            crate::types::Vertex2D::new(-0.5, 0.5, crate::types::Color::GREEN),
+            crate::types::Vertex2D::new(0.5, 0.5, crate::types::Color::BLUE),
+        ];
+        let vbuf = backend.create_buffer(
+            device,
+            std::mem::size_of_val(&verts) as u64,
+            BufferKind::Scattered,
+            None,
+            crate::types::BufferFlags::empty(),
+        )?;
+        backend.write_buffer(vbuf, 0, bytemuck::bytes_of(&verts))?;
+        let rt = backend.create_render_target_with_depth(device, 8, 8, TextureFormat::Rgba8Unorm, None)?;
+        backend.render_to_target(
+            device,
+            rt,
+            crate::types::TargetLoad::Clear(crate::types::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            &[
+                RenderCommand::SetPipeline(pipeline),
+                RenderCommand::SetVertexBuffer {
+                    slot: 0,
+                    buffer: vbuf,
+                    offset: 0,
+                },
+                RenderCommand::Draw {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                },
+            ],
+        )?;
+        let dst = backend.create_texture(
+            device,
+            8,
+            8,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        )?;
+        backend.submit_standalone(ctx, &[GpuCommand::CopyRenderTarget { src: rt, dst }], None)?;
+        let bytes = readback_texture(&mut backend, ctx, device, dst, TextureFormat::Rgba8Unorm, 8, 8)?;
+        assert_eq!(bytes.len(), 8 * 8 * 4);
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "expected rasterized pixels, got all zeros"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
     fn swapchain_format_prefers_rgba8_unorm() {
         let formats = [
             wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -4637,7 +5440,9 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
                 return Ok(());
             }
         };
-        let err = backend.surface_resize(1, 640, 480).expect_err("unknown surface must fail");
+        let err = backend
+            .surface_resize(1, 640, 480)
+            .expect_err("unknown surface must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
         Ok(())
