@@ -552,13 +552,119 @@ pub fn transform_virtual_main(source: &str) -> String {
     wrapper_block + "#line 1\n" + &modified
 }
 
+/// How a `[goldy_compute]` resource parameter is bound on the WebGPU prototype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgpuComputeResourceKind {
+    /// `Scattered` / `ByteAddress` → storage buffer (read-write).
+    StorageReadWrite,
+    /// `BufRO` → storage buffer (read-only).
+    StorageRead,
+    /// Broadcast struct → uniform buffer.
+    Uniform,
+    /// `Interpolated<T>` — not yet bound by the runtime.
+    SampledTexture,
+    /// `DirectSpatial<T>` — not yet bound by the runtime.
+    StorageTexture,
+    /// `Filter` — not yet bound by the runtime.
+    Sampler,
+}
+
+/// Portable compute binding layout for the WebGPU prototype.
+///
+/// `resources` is `None` when the source has no `[goldy_compute]` entries (raw WGSL
+/// or unannotated Slang). The backend then treats every registry key as a storage
+/// buffer. `scalar_count` is the number of `with_param` words packed into the
+/// trailing uniform cbuffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WgpuComputeLayout {
+    pub resources: Option<Vec<WgpuComputeResourceKind>>,
+    pub scalar_count: u32,
+}
+
+impl WgpuComputeLayout {
+    /// Layout used for shaders that did not go through `[goldy_compute]` lowering.
+    pub fn inferred_storage() -> Self {
+        Self {
+            resources: None,
+            scalar_count: 0,
+        }
+    }
+
+    /// Number of `BindResourcesRaw.indices` words a dispatch of this layout consumes.
+    pub fn registry_index_count(&self) -> Option<usize> {
+        self.resources.as_ref().map(|resources| resources.len())
+    }
+}
+
+/// Reflect the WebGPU compute binding layout for `[goldy_compute]` source.
+pub fn extract_webgpu_compute_layout(source: &str) -> Result<WgpuComputeLayout, String> {
+    let entries = find_all_entries(source);
+    if entries.is_empty() {
+        return Ok(WgpuComputeLayout::inferred_storage());
+    }
+
+    fn resource_kind(param: &Param) -> Result<WgpuComputeResourceKind, String> {
+        let ty = param.ty.trim();
+        if ty.starts_with("Scattered<") || ty == "ByteAddress" {
+            Ok(WgpuComputeResourceKind::StorageReadWrite)
+        } else if ty.starts_with("BufRO<") {
+            Ok(WgpuComputeResourceKind::StorageRead)
+        } else if ty.starts_with("Interpolated<") {
+            Ok(WgpuComputeResourceKind::SampledTexture)
+        } else if ty.starts_with("DirectSpatial<") {
+            Ok(WgpuComputeResourceKind::StorageTexture)
+        } else if ty == "Filter" {
+            Ok(WgpuComputeResourceKind::Sampler)
+        } else if matches!(param.kind, ParamKind::Broadcast) {
+            Ok(WgpuComputeResourceKind::Uniform)
+        } else {
+            Err(format!("unsupported WebGPU resource parameter type `{ty}`"))
+        }
+    }
+
+    let mut resources = Vec::new();
+    let mut scalar_count = 0u32;
+    for entry in &entries {
+        if entry.stage != Stage::Compute {
+            return Err("WebGPU prototype only lowers [goldy_compute] entry points".to_string());
+        }
+        resources.clear();
+        scalar_count = 0;
+        for item in &entry.params {
+            let ParamItem::Single(param) = item else {
+                return Err("conditional parameters are not supported by the WebGPU prototype".to_string());
+            };
+            match &param.kind {
+                ParamKind::Resource | ParamKind::Broadcast => {
+                    resources.push(resource_kind(param)?);
+                }
+                ParamKind::Scalar => {
+                    hlsl_scalar_from_uint_word(&param.ty, "_")?;
+                    scalar_count += 1;
+                }
+                ParamKind::SystemValue(_) => {}
+                ParamKind::PassThrough => {
+                    return Err(format!(
+                        "WebGPU compute entry has unsupported pass-through parameter `{}`",
+                        param.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(WgpuComputeLayout {
+        resources: Some(resources),
+        scalar_count,
+    })
+}
+
 /// WebGPU compute lowering for `[goldy_compute]` entry points.
 ///
 /// Unlike the native lowering, resources become fixed `@group(0)` bindings
 /// (expressed as HLSL registers for Slang) and are passed directly to the
-/// renamed user function. This intentionally supports only the portable,
-/// bounded resource model; scalar dispatch parameters still require a future
-/// uniform-ring ABI.
+/// renamed user function. Single-word scalars (`uint`/`float`/`int`/`bool`) are
+/// packed into a trailing `ConstantBuffer` of eight `uint` words, filled from
+/// `BindResourcesRaw.user`.
 pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
@@ -593,9 +699,11 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
 
         let mut binding = 0u32;
         let mut sv_index = 0u32;
+        let mut user = 0u32;
         let mut signature = Vec::new();
         let mut body = String::new();
         let mut call_args = Vec::new();
+        let mut resource_decls = String::new();
 
         for item in &entry.params {
             let ParamItem::Single(param) = item else {
@@ -604,10 +712,11 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
             match &param.kind {
                 ParamKind::Resource | ParamKind::Broadcast => {
                     let global = format!("_goldy_wgpu_binding_{binding}");
-                    generated.push_str(&resource_decl(param, binding, &global)?);
-                    generated.push('\n');
+                    resource_decls.push_str(&resource_decl(param, binding, &global)?);
+                    resource_decls.push('\n');
                     if matches!(param.kind, ParamKind::Broadcast) {
-                        call_args.push(format!("*{global}"));
+                        body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, global));
+                        call_args.push(param.name.clone());
                     } else if param.ty.trim().starts_with("DirectSpatial<") {
                         let ty = param.ty.trim();
                         body.push_str(&format!("    {ty} {} = {ty}({});\n", param.name, global));
@@ -625,10 +734,14 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
                     sv_index += 1;
                 }
                 ParamKind::Scalar => {
-                    return Err(format!(
-                        "WebGPU prototype does not yet lower scalar dispatch parameter `{}`; bind a broadcast buffer",
-                        param.name
-                    ));
+                    let word = format!("_goldy_wgpu_user._uw{user}");
+                    let init = hlsl_scalar_from_uint_word(&param.ty, &word)?;
+                    body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, init));
+                    call_args.push(param.name.clone());
+                    user += 1;
+                    if user > 8 {
+                        return Err("WebGPU prototype supports at most 8 scalar dispatch parameters".to_string());
+                    }
                 }
                 ParamKind::PassThrough => {
                     return Err(format!(
@@ -637,6 +750,23 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
                     ));
                 }
             }
+        }
+
+        generated.push_str(&resource_decls);
+        if user > 0 {
+            generated.push_str(&format!(
+                "struct _GoldyWgpuUserParams {{\n\
+                 \tuint _uw0;\n\
+                 \tuint _uw1;\n\
+                 \tuint _uw2;\n\
+                 \tuint _uw3;\n\
+                 \tuint _uw4;\n\
+                 \tuint _uw5;\n\
+                 \tuint _uw6;\n\
+                 \tuint _uw7;\n\
+                 }};\n\
+                 ConstantBuffer<_GoldyWgpuUserParams> _goldy_wgpu_user : register(b{binding}, space0);\n"
+            ));
         }
 
         generated.push_str(entry.stage.shader_attr());
@@ -855,7 +985,7 @@ pub fn extract_cuda_compute_launch_layout(
                 }
             }
             ParamKind::Scalar => {
-                cuda_scalar_init_expr(&param.ty, "_")?;
+                hlsl_scalar_from_uint_word(&param.ty, "_")?;
                 layout.push(CudaLaunchArgKind::Scalar);
             }
             ParamKind::SystemValue(_) => {}
@@ -870,15 +1000,15 @@ pub fn extract_cuda_compute_launch_layout(
     Ok(layout)
 }
 
-/// Reinterpret a `uniform uint` launch word into the author scalar type.
-fn cuda_scalar_init_expr(ty: &str, word: &str) -> Result<String, String> {
+/// Reinterpret a `uniform uint` word into the author scalar type (HLSL).
+fn hlsl_scalar_from_uint_word(ty: &str, word: &str) -> Result<String, String> {
     match ty.trim() {
         "uint" => Ok(word.to_string()),
         "float" => Ok(format!("asfloat({word})")),
         "int" => Ok(format!("asint({word})")),
         "bool" => Ok(format!("{word} != 0u")),
         other => Err(format!(
-            "CUDA prototype only lowers single-word scalar types (uint/float/int/bool); \
+            "compute prototype only lowers single-word scalar types (uint/float/int/bool); \
              got `{other}` — bind a broadcast buffer for wider uniforms"
         )),
     }
@@ -1029,7 +1159,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
                 }
                 ParamKind::Scalar => {
                     let word = format!("_goldy_cuda_user_{user}");
-                    let init = cuda_scalar_init_expr(&param.ty, &word)?;
+                    let init = hlsl_scalar_from_uint_word(&param.ty, &word)?;
                     signature.push(format!("uniform uint {word}"));
                     body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, init));
                     call_args.push(param.name.clone());
@@ -3349,6 +3479,103 @@ void cs_main(Scattered<uint> base,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn webgpu_compute_scalar_uint_in_user_cbuffer() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> values, uint base, ThreadId id) {
+    values[id.x] = base;
+}
+"#;
+        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        assert!(
+            result.contains("Scattered<uint> _goldy_wgpu_binding_0 : register(u0, space0);"),
+            "{result}"
+        );
+        assert!(
+            result.contains("ConstantBuffer<_GoldyWgpuUserParams> _goldy_wgpu_user : register(b1, space0);"),
+            "{result}"
+        );
+        assert!(result.contains("uint base = _goldy_wgpu_user._uw0;"), "{result}");
+        assert!(
+            result.contains("_goldy_user_cs_main(_goldy_wgpu_binding_0, base, id)"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_webgpu_compute_layout(src).unwrap(),
+            WgpuComputeLayout {
+                resources: Some(vec![WgpuComputeResourceKind::StorageReadWrite]),
+                scalar_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn webgpu_compute_float_scalar_uses_asfloat() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<float> values, float scale, ThreadId id) {
+    values[id.x] = values[id.x] * scale;
+}
+"#;
+        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        assert!(
+            result.contains("float scale = asfloat(_goldy_wgpu_user._uw0);"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn webgpu_compute_broadcast_is_constant_buffer() {
+        let src = r#"import goldy_exp;
+
+struct Params { uint mul; };
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
+    values[id.x] = values[id.x] * cfg.mul;
+}
+"#;
+        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        assert!(
+            result.contains("ConstantBuffer<Params> _goldy_wgpu_binding_0 : register(b0, space0);"),
+            "{result}"
+        );
+        assert!(result.contains("Params cfg = _goldy_wgpu_binding_0;"), "{result}");
+        assert!(
+            result.contains("_goldy_user_cs_main(cfg, _goldy_wgpu_binding_1, id)"),
+            "{result}"
+        );
+        assert_eq!(
+            extract_webgpu_compute_layout(src).unwrap(),
+            WgpuComputeLayout {
+                resources: Some(vec![
+                    WgpuComputeResourceKind::Uniform,
+                    WgpuComputeResourceKind::StorageReadWrite,
+                ]),
+                scalar_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn webgpu_compute_rejects_vector_scalar() {
+        let err = transform_virtual_main_webgpu_compute(
+            r#"
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> values, uint3 base, ThreadId id) {}
+"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("single-word"), "{err}");
     }
 
     #[test]

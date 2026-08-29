@@ -132,12 +132,15 @@ default = ["vulkan", "metal", "dx12", "instrumentation", "graphics"]
 # Raster, surfaces, render/present APIs. Native backends imply this.
 # Textures and samplers stay available without this feature (GPGPU).
 graphics = ["dep:raw-window-handle"]
-vulkan = ["dep:ash", "graphics"]
-dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics"]
-metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types", "dep:block", "graphics"]
-webgpu = ["dep:wgpu", "dep:pollster"]
+# Implied by every real GPU backend (not mock). Gate Instance::new() integration
+# tests with `cfg(feature = "gpu")` instead of enumerating backends.
+gpu = []
+vulkan = ["dep:ash", "graphics", "gpu"]
+dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics", "gpu"]
+metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types", "dep:block", "graphics", "gpu"]
+webgpu = ["dep:wgpu", "dep:pollster", "gpu"]
 # NVIDIA CUDA compute-only prototype (Slang → PTX → Driver API)
-cuda = ["dep:cudarc"]
+cuda = ["dep:cudarc", "gpu"]
 # Regenerate `tests/screenshots/*.png` via `cargo run --bin update-screenshots --features update-screenshots`
 update-screenshots = ["dep:image"]
 # Structured instrumentation with named observation points (zero-cost when disabled)

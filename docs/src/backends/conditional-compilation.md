@@ -19,18 +19,19 @@ Use `--no-default-features --features <backend>` when you need:
 
 ## Feature Flags
 
-Goldy defines one feature per backend, plus `graphics` and `instrumentation`:
+Goldy defines one feature per backend, plus `gpu`, `graphics`, and `instrumentation`:
 
 ```toml
 [features]
 default = ["vulkan", "metal", "dx12", "instrumentation", "graphics"]
 graphics = ["dep:raw-window-handle"]
-vulkan  = ["dep:ash", "graphics"]
-dx12    = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics"]
+gpu     = []   # implied by every real GPU backend (not mock)
+vulkan  = ["dep:ash", "graphics", "gpu"]
+dx12    = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics", "gpu"]
 metal   = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types",
-           "dep:foreign-types", "dep:block", "graphics"]
-cuda    = ["dep:cudarc"]
-webgpu  = ["dep:wgpu", "dep:pollster"]
+           "dep:foreign-types", "dep:block", "graphics", "gpu"]
+cuda    = ["dep:cudarc", "gpu"]
+webgpu  = ["dep:wgpu", "dep:pollster", "gpu"]
 
 instrumentation = ["dep:tracing-subscriber"]
 ```
@@ -43,6 +44,11 @@ them keeps the full graphics+compute API.
 
 Textures and samplers remain available **without** `graphics` — they are part of
 the GPGPU compute surface (storage images, sampling, copies, deposits/withdrawals).
+
+`gpu` is an empty umbrella enabled by `vulkan`, `dx12`, `metal`, `cuda`, and
+`webgpu`. Use `cfg(feature = "gpu")` for tests that need `Instance::new()` rather
+than the always-compiled mock backend. Enabling `gpu` alone does not compile a
+backend.
 
 `cuda` and `webgpu` do **not** imply `graphics` and are **not** platform defaults
 (Metal / DX12 / Vulkan remain the defaults in normal builds). When you compile
@@ -78,6 +84,7 @@ Building with only one backend excludes both the **code** and the
 
 | Feature | Dependencies |
 |---------|-------------|
+| `gpu` | none (umbrella; implied by each backend below) |
 | `vulkan` | `ash` (+ `graphics` / `raw-window-handle`) |
 | `dx12` | `windows`, `gpu-allocator`, `windows-core` (+ `graphics`) |
 | `metal` | `metal`, `cocoa`, `objc`, `core-graphics-types`, `foreign-types`, `block` (+ `graphics`) |
