@@ -3,6 +3,9 @@
 //! This backend deliberately does not emulate Goldy's native bindless heap. The
 //! raw indices in [`GpuCommand::BindResourcesRaw`] are interpreted as backend
 //! registry keys and packed into one fixed bind group in shader-parameter order.
+//!
+//! Submit is non-blocking: the timeline advances from `Queue::on_submitted_work_done`
+//! (pumped by `Device::poll`). Host waits use a stored [`wgpu::SubmissionIndex`].
 
 use super::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
 use super::*;
@@ -15,10 +18,12 @@ use anyhow::{Context as _, Result};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const RAW_WGSL_MARKER: &str = "// @goldy-wgsl";
 const USER_UNIFORM_BYTES: u64 = (MAX_USER_SLOTS * 4) as u64;
+const TIMELINE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn align_up(value: u64, align: u64) -> u64 {
     if align <= 1 {
@@ -165,6 +170,7 @@ struct WebGpuDevice {
     queue: wgpu::Queue,
     next_timeline: Arc<AtomicU64>,
     retired: Arc<AtomicU64>,
+    last_submission: Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>,
     user_uniform: Option<wgpu::Buffer>,
     user_uniform_capacity: u64,
     uniform_offset_align: u64,
@@ -172,7 +178,10 @@ struct WebGpuDevice {
 
 struct WebGpuContext {
     device: DeviceHandle,
+    wgpu_device: wgpu::Device,
     completed: AtomicU64,
+    submitted_max: AtomicU64,
+    last_submission: Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>,
     signal_queue: crate::signal::SignalQueue,
 }
 
@@ -182,21 +191,71 @@ struct WebGpuProgress {
 
 impl ContextGpuProgress for WebGpuProgress {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        pump_device(&self.context.wgpu_device);
         self.context.completed.load(Ordering::Acquire)
     }
 }
 
-struct WebGpuDestroyContext;
+struct WebGpuDestroyContext {
+    device: wgpu::Device,
+}
 
 impl ContextDestroyHandle for WebGpuDestroyContext {
     fn wait(&self) -> Result<()> {
-        Ok(())
+        poll_device(&self.device, wgpu::PollType::wait_indefinitely()).map(|_| ())
     }
 
     fn finish(self: Box<Self>) -> Result<()> {
         Ok(())
     }
 }
+
+struct WebGpuTimelineWait {
+    device: wgpu::Device,
+    index: wgpu::SubmissionIndex,
+    context: Arc<WebGpuContext>,
+    retired: Arc<AtomicU64>,
+    value: crate::timeline::TimelineValue,
+}
+
+impl TimelineBlockingWait for WebGpuTimelineWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        let value = self.value;
+        if !self.block_timeout(u32::try_from(TIMELINE_WAIT_TIMEOUT.as_millis()).unwrap_or(u32::MAX))? {
+            anyhow::bail!("WebGPU: timed out after 60 s waiting for timeline value {value}");
+        }
+        Ok(())
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        if self.context.completed.load(Ordering::Acquire) >= self.value {
+            return Ok(true);
+        }
+        match self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(self.index),
+            timeout: Some(Duration::from_millis(u64::from(timeout_ms))),
+        }) {
+            Ok(_) => {
+                self.context.completed.fetch_max(self.value, Ordering::Release);
+                self.retired.fetch_max(self.value, Ordering::AcqRel);
+                Ok(true)
+            }
+            Err(wgpu::PollError::Timeout) => Ok(false),
+            Err(error) => Err(anyhow::anyhow!("WebGPU device poll failed: {error}")),
+        }
+    }
+}
+
+fn pump_device(device: &wgpu::Device) {
+    let _ = device.poll(wgpu::PollType::Poll);
+}
+
+fn poll_device(device: &wgpu::Device, poll_type: wgpu::PollType) -> Result<wgpu::PollStatus> {
+    device
+        .poll(poll_type)
+        .map_err(|error| anyhow::anyhow!("WebGPU device poll failed: {error}"))
+}
+
 
 #[derive(Clone)]
 struct WebGpuBuffer {
@@ -1134,15 +1193,27 @@ impl WebGpuBackend {
             }
         }
 
-        queue.submit([encoder.finish()]);
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| anyhow::anyhow!("WebGPU device poll failed: {error}"))?;
+        let index = queue.submit([encoder.finish()]);
+        let value = crate::backend::submission_worker::allocate_timeline_value(&next_timeline);
+        context.submitted_max.fetch_max(value, Ordering::AcqRel);
+        {
+            let mut last = context.last_submission.lock().unwrap();
+            *last = Some((value, index.clone()));
+        }
+        if let Some(gpu) = self.devices.get(&device_handle) {
+            *gpu.last_submission.lock().unwrap() = Some((value, index.clone()));
+        }
 
-        let value = next_timeline.fetch_add(1, Ordering::AcqRel);
-        context.completed.store(value, Ordering::Release);
-        retired.fetch_max(value, Ordering::AcqRel);
-        context.signal_queue.push_boundary_crossed(value);
+        queue.on_submitted_work_done({
+            let context = Arc::clone(&context);
+            let retired = Arc::clone(&retired);
+            move || {
+                context.completed.fetch_max(value, Ordering::Release);
+                retired.fetch_max(value, Ordering::AcqRel);
+                context.signal_queue.push_boundary_crossed(value);
+            }
+        });
+        pump_device(&device);
         Ok(value)
     }
 }
@@ -1177,17 +1248,38 @@ impl GpuBackendTimelineWait for WebGpuBackend {
 
     fn take_timeline_blocking_wait(
         &self,
-        _ctx: ContextHandle,
-        _value: crate::timeline::TimelineValue,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
     ) -> Result<Option<Box<dyn TimelineBlockingWait>>> {
-        Ok(None)
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let context = Arc::clone(self.context(ctx)?);
+        if context.submitted_max.load(Ordering::Acquire) < value {
+            anyhow::bail!("WebGPU: timeline value {value} was not submitted on context {ctx}");
+        }
+        let last = context.last_submission.lock().unwrap().clone();
+        let Some((submitted, index)) = last else {
+            anyhow::bail!("WebGPU: timeline value {value} was not submitted on context {ctx}");
+        };
+        if submitted < value {
+            anyhow::bail!("WebGPU: timeline value {value} was not submitted on context {ctx}");
+        }
+        let gpu = self.device(context.device)?;
+        Ok(Some(Box::new(WebGpuTimelineWait {
+            device: gpu.device.clone(),
+            index,
+            context,
+            retired: Arc::clone(&gpu.retired),
+            value,
+        })))
     }
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        if self.gpu_progress(ctx) < value {
-            anyhow::bail!("WebGPU: timeline value {value} was not submitted on context {ctx}");
+        if self.gpu_progress(ctx) >= value {
+            return Ok(());
         }
-        Ok(())
+        anyhow::bail!("WebGPU: timeline value {value} was not submitted on context {ctx}")
     }
 }
 
@@ -1270,6 +1362,7 @@ impl GpuBackend for WebGpuBackend {
                 queue,
                 next_timeline: Arc::new(AtomicU64::new(1)),
                 retired: Arc::new(AtomicU64::new(0)),
+                last_submission: Mutex::new(None),
                 user_uniform: None,
                 user_uniform_capacity: 0,
                 uniform_offset_align,
@@ -1300,22 +1393,21 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn device_wait_idle(&mut self, device: DeviceHandle) -> Result<()> {
-        self.device(device)?
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map(|_| ())
-            .map_err(|error| anyhow::anyhow!("WebGPU device poll failed: {error}"))
+        poll_device(&self.device(device)?.device, wgpu::PollType::wait_indefinitely()).map(|_| ())
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
-        self.device(device)?;
+        let wgpu_device = self.device(device)?.device.clone();
         let handle = self.next_context;
         self.next_context += 1;
         self.contexts.insert(
             handle,
             Arc::new(WebGpuContext {
                 device,
+                wgpu_device,
                 completed: AtomicU64::new(0),
+                submitted_max: AtomicU64::new(0),
+                last_submission: Mutex::new(None),
                 signal_queue: crate::signal::SignalQueue::new(),
             }),
         );
@@ -1323,8 +1415,10 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>> {
-        self.contexts.remove(&ctx)?;
-        Some(Box::new(WebGpuDestroyContext))
+        let context = self.contexts.remove(&ctx)?;
+        Some(Box::new(WebGpuDestroyContext {
+            device: context.wgpu_device.clone(),
+        }))
     }
 
     fn clone_context_deletion_flush(
@@ -1439,10 +1533,7 @@ impl GpuBackend for WebGpuBackend {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device(buffer.device)?
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| anyhow::anyhow!("WebGPU readback poll failed: {error}"))?;
+        poll_device(&self.device(buffer.device)?.device, wgpu::PollType::wait_indefinitely())?;
         rx.recv().context("WebGPU readback callback dropped")??;
         output.copy_from_slice(&slice.get_mapped_range());
         buffer.buffer.unmap();
@@ -1495,10 +1586,7 @@ impl GpuBackend for WebGpuBackend {
         });
         encoder.clear_buffer(&target.buffer, target.offset + offset, (size != 0).then_some(size));
         gpu.queue.submit([encoder.finish()]);
-        gpu.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map(|_| ())
-            .map_err(|error| anyhow::anyhow!("WebGPU clear poll failed: {error}"))
+        Ok(())
     }
 
     fn buffer_size(&self, buffer: BufferHandle) -> u64 {
@@ -1605,9 +1693,7 @@ impl GpuBackend for WebGpuBackend {
                 });
                 encoder.copy_buffer_to_buffer(&old.buffer, old.offset, &replacement, 0, copy_size);
                 gpu.queue.submit([encoder.finish()]);
-                gpu.device
-                    .poll(wgpu::PollType::wait_indefinitely())
-                    .map_err(|error| anyhow::anyhow!("WebGPU resize poll failed: {error}"))?;
+                poll_device(&gpu.device, wgpu::PollType::wait_indefinitely())?;
             }
         }
         let target = self.buffers.get_mut(&buffer).expect("validated above");
@@ -1916,22 +2002,49 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
-        self.contexts
-            .get(&ctx)
-            .map(|context| context.completed.load(Ordering::Acquire))
-            .unwrap_or(0)
+        let Some(context) = self.contexts.get(&ctx) else {
+            return 0;
+        };
+        pump_device(&context.wgpu_device);
+        context.completed.load(Ordering::Acquire)
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
-        self.devices
-            .get(&device)
-            .map(|device| device.retired.load(Ordering::Acquire))
-            .unwrap_or(0)
+        let Some(gpu) = self.devices.get(&device) else {
+            return 0;
+        };
+        pump_device(&gpu.device);
+        gpu.retired.load(Ordering::Acquire)
     }
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        self.device_wait_idle(device)?;
-        if self.device_timeline_retired(device) < value {
+        let gpu = self.device(device)?;
+        if gpu.retired.load(Ordering::Acquire) >= value {
+            return Ok(());
+        }
+        let last = gpu.last_submission.lock().unwrap().clone();
+        let wgpu_device = gpu.device.clone();
+        let retired = Arc::clone(&gpu.retired);
+        let horizon = gpu.next_timeline.load(Ordering::Acquire).saturating_sub(1);
+        if value > horizon {
+            anyhow::bail!("WebGPU: timeline value {value} has not been submitted");
+        }
+        match last {
+            Some((submitted, index)) if submitted >= value => {
+                poll_device(
+                    &wgpu_device,
+                    wgpu::PollType::Wait {
+                        submission_index: Some(index),
+                        timeout: Some(TIMELINE_WAIT_TIMEOUT),
+                    },
+                )?;
+            }
+            _ => {
+                poll_device(&wgpu_device, wgpu::PollType::wait_indefinitely())?;
+            }
+        }
+        retired.fetch_max(value, Ordering::AcqRel);
+        if retired.load(Ordering::Acquire) < value {
             anyhow::bail!("WebGPU: timeline value {value} has not been submitted");
         }
         Ok(())
@@ -1942,10 +2055,12 @@ impl GpuBackend for WebGpuBackend {
         ctx: ContextHandle,
         _progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::QueuedSignal> {
-        self.contexts
-            .get(&ctx)
-            .map(|context| crate::signal::drain_all_queued_signals(&context.signal_queue))
-            .unwrap_or_default()
+        if let Some(context) = self.contexts.get(&ctx) {
+            pump_device(&context.wgpu_device);
+            crate::signal::drain_all_queued_signals(&context.signal_queue)
+        } else {
+            Vec::new()
+        }
     }
 
     fn submit_standalone(
@@ -2166,6 +2281,11 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             ],
             None,
         )?;
+        assert!(
+            backend.gpu_progress(ctx) <= submitted,
+            "progress must not exceed the submitted timeline value"
+        );
+        backend.wait_until(ctx, submitted)?;
         assert_eq!(backend.gpu_progress(ctx), submitted);
 
         let readback = backend.alloc_readback_buffer(device, 16)?;
@@ -2194,6 +2314,58 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     #[test]
     fn slang_compute_dispatch_and_readback() -> Result<()> {
         run_compute_dispatch_and_readback(DOUBLE_SLANG)
+    }
+
+    #[test]
+    fn overlapping_submits_complete_on_wait() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU overlapping submit test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("double"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let commands = [
+            GpuCommand::SetPipeline(pipeline),
+            GpuCommand::BindResourcesRaw {
+                indices: vec![slot],
+                user: vec![],
+                frame_table_base: 0,
+            },
+            GpuCommand::Dispatch {
+                label: Some("double"),
+                workgroups_x: 4,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            },
+        ];
+        let first = backend.submit_standalone(ctx, &commands, None)?;
+        let second = backend.submit_standalone(ctx, &commands, None)?;
+        assert!(first < second, "each submit must allocate a new timeline value");
+        assert!(backend.gpu_progress(ctx) <= second);
+        backend.wait_until(ctx, second)?;
+        assert_eq!(backend.gpu_progress(ctx), second);
+        assert!(backend.device_timeline_retired(device) >= second);
+        Ok(())
     }
 
     fn run_scheme_compute_and_withdraw(shader_source: &str) -> Result<()> {

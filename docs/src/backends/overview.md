@@ -273,7 +273,10 @@ portability and browser-adjacent targets. Enable with the `webgpu` Cargo feature
 parity with the shipped Vulkan/DX12/Metal backends.
 
 Compute buffers, scalar uniforms, **indirect dispatch**, and **2D textures/samplers** work.
-Resources bind as a single `@group(0)` in shader-parameter order (no bindless heap). Texture
+Submit is **non-blocking**: the context timeline advances from wgpu's
+`on_submitted_work_done` callback (pumped by `Device::poll`). Host waits
+(`Context::wait_until`, withdraw) block on the submission index, not on submit
+itself. Resources bind as a single `@group(0)` in shader-parameter order (no bindless heap). Texture
 notes:
 
 - Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`, `Bgra8Unorm`,
