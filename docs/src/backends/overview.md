@@ -290,6 +290,8 @@ notes:
   and return an `Rgba8Unorm` storage scratch (swapchain images cannot be UAVs).
   Present copies scratch → swapchain on the same queue, then `SurfaceTexture::present`.
   The copy waits before returning so the single scratch is not overwritten in flight.
+  `finish_present` drops the acquired image and publishes `SwapchainReturned`.
+  `surface_resize` reconfigures the swapchain and recreates scratch.
   Graphics pipelines and render targets remain unsupported.
 - Compute sampling must use `SampleLevel` (WGSL has no implicit derivatives in compute).
 

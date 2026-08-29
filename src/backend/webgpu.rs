@@ -1602,6 +1602,7 @@ struct WebGpuPresentGpuWork {
     frame: FrameToken,
     acquired: wgpu::SurfaceTexture,
     scratch: wgpu::Texture,
+    scratch_handle: TextureHandle,
     width: u32,
     height: u32,
     device: wgpu::Device,
@@ -1652,13 +1653,10 @@ impl PresentGpuWork for WebGpuPresentGpuWork {
                 timeout: Some(TIMELINE_WAIT_TIMEOUT),
             },
         )?;
-        self.context
-            .signal_queue
-            .push(crate::signal::Signal::SwapchainReturned { image_index: 0 });
         Ok(PresentFinishState {
             frame: self.frame,
             return_fence: value,
-            scratch_texture: None,
+            scratch_texture: Some(self.scratch_handle),
             scratch_layout_updated: false,
             present_timeline: value,
             copy_timeline: Some(value),
@@ -1739,6 +1737,7 @@ impl GpuBackendPresentSplit for WebGpuBackend {
             frame,
             acquired,
             scratch: scratch_texture,
+            scratch_handle,
             width,
             height,
             device: gpu.device.clone(),
@@ -1753,15 +1752,28 @@ impl GpuBackendPresentSplit for WebGpuBackend {
     fn finish_present(
         &mut self,
         finish: PresentFinishState,
-        submit_tv: crate::timeline::TimelineValue,
+        _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        if let Some(state) = self.surfaces.get_mut(&finish.frame.surface) {
+        let ctx = finish.frame.context;
+        {
+            let state = self
+                .surfaces
+                .get_mut(&finish.frame.surface)
+                .context("WebGPU: invalid surface handle")?;
+            // Drawable was moved into PresentGpuWork (or never acquired on skip).
             state.acquired = None;
             if finish.present_ok {
-                state.current_texture_handle = state.scratch;
+                state.current_texture_handle = finish.scratch_texture.or(state.scratch);
             }
         }
-        let _ = submit_tv;
+        if let Some(context) = self.contexts.get(&ctx) {
+            pump_device(&context.wgpu_device);
+            if finish.present_ok {
+                context.signal_queue.push(crate::signal::Signal::SwapchainReturned {
+                    image_index: finish.frame.image as u32,
+                });
+            }
+        }
         Ok(finish.present_timeline)
     }
 }
@@ -2571,17 +2583,26 @@ impl GpuBackend for WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         anyhow::ensure!(width > 0 && height > 0, "WebGPU: surface size must be non-zero");
-        let state = self
-            .surfaces
-            .get_mut(&surface)
-            .context("WebGPU: invalid surface handle")?;
-        if state.width == width && state.height == height {
-            return Ok(());
-        }
-        state.width = width;
-        state.height = height;
+        let device = {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            if state.width == width && state.height == height {
+                return Ok(());
+            }
+            // wgpu panics if a SurfaceTexture is live across configure().
+            state.acquired = None;
+            state.width = width;
+            state.height = height;
+            state.device
+        };
+        // Old scratch may still be the source of an in-flight present copy.
+        self.device_wait_idle(device)?;
         self.drop_surface_scratch(surface);
-        self.configure_surface(surface)
+        self.configure_surface(surface)?;
+        self.ensure_surface_scratch(surface)?;
+        Ok(())
     }
 
     #[cfg(feature = "graphics")]
@@ -3587,6 +3608,70 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         };
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn finish_present_rejects_unknown_surface() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let finish = PresentFinishState {
+            frame: dummy_frame(ctx),
+            return_fence: 0,
+            scratch_texture: None,
+            scratch_layout_updated: false,
+            present_timeline: 0,
+            copy_timeline: None,
+            frame_compute_timeline: None,
+            signal_timeline: None,
+            render_pass_submitted: false,
+            present_ok: false,
+        };
+        let err = backend
+            .finish_present(finish, 0)
+            .expect_err("unknown surface must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn surface_resize_rejects_unknown_surface() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let err = backend.surface_resize(1, 640, 480).expect_err("unknown surface must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn surface_resize_rejects_zero_size() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let err = backend.surface_resize(1, 0, 480).expect_err("zero width must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("non-zero"), "{msg}");
         Ok(())
     }
 }
