@@ -282,17 +282,23 @@ notes:
 - Sampled formats: `R8Unorm`, `Rg8Unorm`, `Rgba8Unorm`, `Rgba8UnormSrgb`, `Bgra8Unorm`,
   `Bgra8UnormSrgb`, `Rgba16Float`, `Rgba32Float` (subject to adapter format features).
 - `DirectSpatial<T>` storage textures follow WGSL: the shader type encodes the format.
-  `DirectSpatial<float4>` therefore pairs with `Rgba32Float` (unlike native backends, which
-  often write `float4` into `Rgba8Unorm` UAVs). sRGB and BGRA are rejected for storage.
+  Identity `DirectSpatial<float4>` is `rgba32float`. Goldy specializes packed 8-bit
+  surfaces at dispatch: `Rgba8Unorm` → `rgba8unorm`, `Bgra8Unorm` → `bgra8unorm`
+  (the latter needs wgpu `BGRA8UNORM_STORAGE`). sRGB formats are rejected for storage.
 - Uploads use `queue.write_texture`. Texture withdraw staging uses WebGPU's 256-byte row
   pitch; `query_texture_copy_footprint` reports the padded layout.
-- Surfaces (`graphics`): create/configure and `begin_frame` acquire a wgpu drawable
-  and return an `Rgba8Unorm` storage scratch (swapchain images cannot be UAVs).
-  Present copies scratch → swapchain on the same queue, then `SurfaceTexture::present`.
-  The copy waits before returning so the single scratch is not overwritten in flight.
-  `finish_present` drops the acquired image and publishes `SwapchainReturned`.
-  `surface_resize` reconfigures the swapchain and recreates scratch.
-  Graphics pipelines and render targets remain unsupported.
+- Surfaces (`graphics`): `begin_frame` acquires the wgpu drawable. Present picks
+  **Copy** (same-format storage scratch → swapchain) when the scratch format can
+  be a UAV (`Rgba8Unorm`, or `Bgra8Unorm` with `BGRA8UNORM_STORAGE`), otherwise
+  **Blit** (`Rgba8Unorm` scratch + fullscreen pass for BGRA/sRGB). **Direct**
+  compute-to-swapchain is not selected: wgpu 28 swapchain images only expose
+  `RENDER_ATTACHMENT`, so storage bind groups fail even when the surface
+  advertises `STORAGE_BINDING`. Override with `GOLDY_WEBGPU_PRESENT=copy|blit`.
+  `DirectSpatial<float4>` shaders do not change; packed storage is specialized
+  to the compute format (`surface_format()`). `finish_present` drops the acquired
+  image and publishes `SwapchainReturned`. `surface_resize` reconfigures the
+  swapchain and recreates scratch. Graphics pipelines remain unsupported; present
+  blit is an internal pass.
 - Compute sampling must use `SampleLevel` (WGSL has no implicit derivatives in compute).
 
 ```bash

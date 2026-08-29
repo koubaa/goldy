@@ -683,6 +683,29 @@ pub fn extract_webgpu_compute_layout(source: &str) -> Result<WgpuComputeLayout, 
     })
 }
 
+/// Logical `DirectSpatial<T>` element types in author order for WebGPU storage specialization.
+pub fn webgpu_direct_spatial_texels(source: &str) -> Result<Vec<String>, String> {
+    let entries = find_all_entries(source);
+    let mut texels = Vec::new();
+    for entry in &entries {
+        if entry.stage != Stage::Compute {
+            continue;
+        }
+        texels.clear();
+        for item in &entry.params {
+            let ParamItem::Single(param) = item else {
+                continue;
+            };
+            let ty = param.ty.trim();
+            if ty.starts_with("DirectSpatial<") {
+                let logical = cuda_texture_element(ty, "DirectSpatial<")?;
+                texels.push(logical.split(',').next().unwrap_or(&logical).trim().to_string());
+            }
+        }
+    }
+    Ok(texels)
+}
+
 /// WebGPU compute lowering for `[goldy_compute]` entry points.
 ///
 /// Unlike the native lowering, resources become fixed `@group(0)` bindings
@@ -878,6 +901,8 @@ pub enum CudaStorageTextureSpec {
     Identity,
     /// `DirectSpatial<float4>` bound to `Rgba8Unorm` → `DirectSpatial<float4, uint8_t4>`.
     Float4Rgba8Unorm,
+    /// `DirectSpatial<float4>` bound to `Bgra8Unorm` (WebGPU `bgra8unorm` storage).
+    Float4Bgra8Unorm,
 }
 
 impl CudaStorageTextureSpec {
@@ -892,9 +917,10 @@ impl CudaStorageTextureSpec {
             | ("vector<uint8_t, 4>", TextureFormat::Rgba8Unorm)
             | ("vector<uint8_t,4>", TextureFormat::Rgba8Unorm) => Ok(Self::Identity),
             ("float4", TextureFormat::Rgba8Unorm) => Ok(Self::Float4Rgba8Unorm),
+            ("float4", TextureFormat::Bgra8Unorm) => Ok(Self::Float4Bgra8Unorm),
             _ => Err(format!(
-                "CUDA: DirectSpatial<{element}> cannot access {:?}; \
-                 supported: float4↔Rgba32Float|Rgba8Unorm (packed), half4↔Rgba16Float, uint8_t4↔Rgba8Unorm",
+                "DirectSpatial<{element}> cannot access {:?}; \
+                 supported: float4↔Rgba32Float|Rgba8Unorm|Bgra8Unorm (packed), half4↔Rgba16Float, uint8_t4↔Rgba8Unorm",
                 format
             )),
         }
@@ -903,6 +929,15 @@ impl CudaStorageTextureSpec {
     /// True when this specialization packs logical float4 through an rgba8 surface.
     pub fn packs_float4_as_rgba8(self) -> bool {
         matches!(self, Self::Float4Rgba8Unorm)
+    }
+
+    /// WGSL storage texel format to rewrite from Slang's identity `rgba32float`, if any.
+    pub fn wgsl_storage_texel_format(self) -> Option<&'static str> {
+        match self {
+            Self::Identity => None,
+            Self::Float4Rgba8Unorm => Some("rgba8unorm"),
+            Self::Float4Bgra8Unorm => Some("bgra8unorm"),
+        }
     }
 }
 
@@ -1168,6 +1203,11 @@ pub fn transform_virtual_main_cuda_compute_specialized(
                                 call_args.push(param.name.clone());
                                 user_param_rewrites.push((user_fn.clone(), param.name.clone(), wrapped_ty.to_string()));
                             }
+                            CudaStorageTextureSpec::Float4Bgra8Unorm => {
+                                return Err(
+                                    "CUDA does not specialize DirectSpatial<float4> to Bgra8Unorm storage".into(),
+                                );
+                            }
                         }
                     } else {
                         let param_ty = resource_param_ty(&param)?;
@@ -1243,7 +1283,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
         rewrite_cuda_user_direct_spatial_param(&mut modified, user_fn, param_name, new_ty)?;
     }
     if needs_packed_helper_overloads {
-        inject_direct_spatial_float4_packed_overloads(&mut modified)?;
+        inject_direct_spatial_float4_packed_overloads(&mut modified, "DirectSpatial<float4, uint8_t4>")?;
     }
     Ok(generated + "#line 1\n" + &modified)
 }
@@ -1297,9 +1337,9 @@ fn rewrite_cuda_user_direct_spatial_param(
 /// Skips Goldy-generated `_goldy_*` symbols. Each matching function body is duplicated
 /// with `DirectSpatial<float4>` → `DirectSpatial<float4, uint8_t4>` in the signature and body
 /// parameter types (body uses the same identifiers; only the signature types change).
-fn inject_direct_spatial_float4_packed_overloads(source: &mut String) -> Result<(), String> {
+fn inject_direct_spatial_float4_packed_overloads(source: &mut String, packed: &str) -> Result<(), String> {
     const IDENTITY: &str = "DirectSpatial<float4>";
-    const PACKED: &str = "DirectSpatial<float4, uint8_t4>";
+    let packed_ty = packed;
 
     // Collect unique function spans that need an overload.
     let mut fn_spans: Vec<(usize, usize)> = Vec::new();
@@ -1341,14 +1381,14 @@ fn inject_direct_spatial_float4_packed_overloads(source: &mut String) -> Result<
     fn_spans.sort_by_key(|(s, _)| *s);
     for &(fn_start, fn_end) in fn_spans.iter().rev() {
         let original = source[fn_start..fn_end].to_string();
-        if original.contains(PACKED) {
+        if original.contains(packed_ty) {
             continue;
         }
-        let overload = original.replace(IDENTITY, PACKED);
+        let overload = original.replace(IDENTITY, packed_ty);
         if overload == original {
             continue;
         }
-        let insertion = format!("\n\n// [goldy] DirectSpatial<float4, uint8_t4> overload\n{overload}");
+        let insertion = format!("\n\n// [goldy] {packed_ty} overload\n{overload}");
         source.insert_str(fn_end, &insertion);
     }
     Ok(())
@@ -3992,6 +4032,10 @@ void cs_main(DirectSpatial<float4> output,
         assert_eq!(
             CudaStorageTextureSpec::from_element_and_format("float4", TextureFormat::Rgba8Unorm).unwrap(),
             CudaStorageTextureSpec::Float4Rgba8Unorm
+        );
+        assert_eq!(
+            CudaStorageTextureSpec::from_element_and_format("float4", TextureFormat::Bgra8Unorm).unwrap(),
+            CudaStorageTextureSpec::Float4Bgra8Unorm
         );
         assert!(CudaStorageTextureSpec::from_element_and_format("uint8_t4", TextureFormat::Rgba32Float).is_err());
     }
