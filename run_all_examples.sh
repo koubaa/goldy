@@ -8,6 +8,7 @@
 # Usage:
 #   GOLDY_BACKEND=vk ./run_all_examples.sh          # normal
 #   GOLDY_BACKEND=cuda ./run_all_examples.sh         # enables cuda feature + CUDA backend
+#   GOLDY_BACKEND=webgpu ./run_all_examples.sh       # enables webgpu feature + WebGPU backend
 #   SLEEP_BETWEEN=3 ./run_all_examples.sh            # 3s sleep between examples
 #   EXAMPLE_TIMEOUT=10 ./run_all_examples.sh         # auto-exit each example after 10s
 #   VULKAN_VALIDATE=1 ./run_all_examples.sh          # with validation layers
@@ -21,10 +22,18 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-0}"
 EXAMPLE_TIMEOUT="${EXAMPLE_TIMEOUT:-0}"
 
 CARGO_FEATURES="examples"
-case "${GOLDY_BACKEND,,}" in
+CARGO_BUILD_EXTRA=()
+backend_lc="$(printf '%s' "${GOLDY_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
+case "$backend_lc" in
     cuda)
         CARGO_FEATURES="examples,cuda"
         echo "GOLDY_BACKEND=cuda: building with --features $CARGO_FEATURES"
+        ;;
+    webgpu|wgpu)
+        # webgpu is not in the default feature set; compile it in or GOLDY_BACKEND=webgpu fails.
+        CARGO_FEATURES="webgpu,examples"
+        CARGO_BUILD_EXTRA=(--no-default-features)
+        echo "GOLDY_BACKEND=webgpu: building with --no-default-features --features $CARGO_FEATURES"
         ;;
 esac
 
@@ -50,9 +59,9 @@ fi
 
 echo ""
 echo "========================================"
-echo "Building all examples (--features $CARGO_FEATURES)"
+echo "Building all examples (${CARGO_BUILD_EXTRA[*]} --features $CARGO_FEATURES)"
 echo "========================================"
-cargo build --examples --features "$CARGO_FEATURES"
+cargo build --examples "${CARGO_BUILD_EXTRA[@]}" --features "$CARGO_FEATURES"
 
 # On Windows cargo puts binaries in target/debug/examples/*.exe
 EXAMPLE_BIN_DIR="target/debug/examples"
