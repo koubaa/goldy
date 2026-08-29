@@ -24,6 +24,8 @@ use std::time::Duration;
 const RAW_WGSL_MARKER: &str = "// @goldy-wgsl";
 const USER_UNIFORM_BYTES: u64 = (MAX_USER_SLOTS * 4) as u64;
 const TIMELINE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const WEBGPU_REGISTRY_CAP: u32 = 4096;
+const INDIRECT_DISPATCH_BYTES: u64 = 12;
 
 fn align_up(value: u64, align: u64) -> u64 {
     if align <= 1 {
@@ -142,6 +144,41 @@ fn pack_user_uniform(user: &[u32]) -> [u8; USER_UNIFORM_BYTES as usize] {
     bytes
 }
 
+fn write_queue_buffer(queue: &wgpu::Queue, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    let aligned = align_up(data.len() as u64, wgpu::COPY_BUFFER_ALIGNMENT);
+    if aligned as usize == data.len() {
+        queue.write_buffer(buffer, offset, data);
+        return;
+    }
+    let mut padded = vec![0u8; aligned as usize];
+    padded[..data.len()].copy_from_slice(data);
+    queue.write_buffer(buffer, offset, &padded);
+}
+
+fn require_user_scalars(user: &[u32], expected: u32) -> Result<()> {
+    anyhow::ensure!(
+        user.len() >= expected as usize,
+        "WebGPU: shader expects {expected} scalar words, BindResourcesRaw.user has {}",
+        user.len()
+    );
+    Ok(())
+}
+
+fn ensure_buffer_range(buffer: &WebGpuBuffer, offset: u64, size: u64, what: &str) -> Result<()> {
+    let end = offset
+        .checked_add(size)
+        .context("WebGPU: buffer range overflow")?;
+    anyhow::ensure!(
+        end <= buffer.size,
+        "WebGPU: {what} range {offset}+{size} exceeds logical size {}",
+        buffer.size
+    );
+    Ok(())
+}
+
 pub(crate) struct WebGpuBackend {
     adapters: Vec<wgpu::Adapter>,
     adapter_info: Vec<AdapterInfo>,
@@ -161,6 +198,7 @@ pub(crate) struct WebGpuBackend {
     next_texture: TextureHandle,
     next_sampler: SamplerHandle,
     next_slot: u32,
+    free_slots: Vec<u32>,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
 }
@@ -174,6 +212,8 @@ struct WebGpuDevice {
     user_uniform: Option<wgpu::Buffer>,
     user_uniform_capacity: u64,
     uniform_offset_align: u64,
+    storage_offset_align: u64,
+    adapter_id: u32,
 }
 
 struct WebGpuContext {
@@ -343,6 +383,7 @@ impl WebGpuBackend {
             next_texture: 1,
             next_sampler: 1,
             next_slot: 0,
+            free_slots: Vec::new(),
             next_shader: 1,
             next_compute_pipeline: 1,
         })
@@ -361,12 +402,19 @@ impl WebGpuBackend {
     }
 
     fn alloc_registry_slot(&mut self) -> Result<u32> {
+        if let Some(slot) = self.free_slots.pop() {
+            return Ok(slot);
+        }
         let slot = self.next_slot;
         self.next_slot = self
             .next_slot
             .checked_add(1)
             .context("WebGPU resource registry exhausted")?;
         Ok(slot)
+    }
+
+    fn recycle_registry_slot(&mut self, slot: u32) {
+        self.free_slots.push(slot);
     }
 
     fn create_storage_buffer(
@@ -380,7 +428,7 @@ impl WebGpuBackend {
         let capacity = if uniform {
             align_up(capacity.max(logical_size).max(min_capacity), 16)
         } else {
-            capacity.max(logical_size).max(min_capacity)
+            align_up(capacity.max(logical_size).max(min_capacity), wgpu::COPY_BUFFER_ALIGNMENT)
         };
         let gpu = self.device(device)?;
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -450,19 +498,7 @@ impl WebGpuBackend {
             .as_str()
             .context("WebGPU: Slang returned non-text WGSL output")?
             .to_owned();
-        let access = crate::slang::virtual_main::extract_push_constant_categories(&shader.source)
-            .iter()
-            .map(|category| {
-                category.map(|category| match category {
-                    crate::types::ResourceCategory::Broadcast
-                    | crate::types::ResourceCategory::Texture
-                    | crate::types::ResourceCategory::Sampler => ResourceAccess::Read,
-                    crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
-                        ResourceAccess::ReadWrite
-                    }
-                })
-            })
-            .collect();
+        let access = layout.slot_access();
         Ok((source, access, layout))
     }
 
@@ -593,6 +629,12 @@ impl WebGpuBackend {
     }
 
     fn storage_binding<'a>(&self, buffer: &'a WebGpuBuffer) -> Result<wgpu::BufferBinding<'a>> {
+        let align = self.device(buffer.device)?.storage_offset_align;
+        anyhow::ensure!(
+            buffer.offset % align == 0,
+            "WebGPU: storage buffer offset {} is not aligned to {align}",
+            buffer.offset
+        );
         Ok(wgpu::BufferBinding {
             buffer: &buffer.buffer,
             offset: buffer.offset,
@@ -601,6 +643,12 @@ impl WebGpuBackend {
     }
 
     fn uniform_binding<'a>(&self, buffer: &'a WebGpuBuffer) -> Result<wgpu::BufferBinding<'a>> {
+        let align = self.device(buffer.device)?.uniform_offset_align;
+        anyhow::ensure!(
+            buffer.offset % align == 0,
+            "WebGPU: uniform buffer offset {} is not aligned to {align}",
+            buffer.offset
+        );
         let remaining = buffer.buffer.size().saturating_sub(buffer.offset);
         let size = align_up(buffer.size.max(16), 16).min(remaining);
         anyhow::ensure!(
@@ -719,8 +767,17 @@ impl WebGpuBackend {
             pitch >= tight,
             "WebGPU: CopyBufferToTexture row pitch {pitch} < tight {tight}"
         );
-        let aligned = height == 1 || pitch % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT == 0;
-        if aligned {
+        let needed = src_offset
+            .checked_add(u64::from(pitch) * u64::from(height.saturating_sub(1)))
+            .and_then(|v| v.checked_add(u64::from(tight)))
+            .context("WebGPU: CopyBufferToTexture size overflow")?;
+        anyhow::ensure!(
+            needed <= src.size,
+            "WebGPU: CopyBufferToTexture exceeds source buffer (need {needed}, have {})",
+            src.size
+        );
+        let gpu = self.device(dst.device)?;
+        if pitch % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT == 0 {
             encoder.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
                     buffer: &src.buffer,
@@ -739,13 +796,28 @@ impl WebGpuBackend {
             );
             return Ok(());
         }
+        let scratch_pitch = copy_row_pitch(width, dst.format);
+        let row_copy = align_up(u64::from(tight), wgpu::COPY_BUFFER_ALIGNMENT);
+        let scratch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("goldy-webgpu-b2t-row"),
+            size: u64::from(scratch_pitch).max(row_copy),
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         for row in 0..height {
+            encoder.copy_buffer_to_buffer(
+                &src.buffer,
+                src.offset + src_offset + u64::from(row) * u64::from(pitch),
+                &scratch,
+                0,
+                row_copy,
+            );
             encoder.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
-                    buffer: &src.buffer,
+                    buffer: &scratch,
                     layout: wgpu::TexelCopyBufferLayout {
-                        offset: src.offset + src_offset + u64::from(row) * u64::from(pitch),
-                        bytes_per_row: Some(tight),
+                        offset: 0,
+                        bytes_per_row: Some(scratch_pitch),
                         rows_per_image: Some(1),
                     },
                 },
@@ -782,6 +854,15 @@ impl WebGpuBackend {
         anyhow::ensure!(
             layout.width == src.width && layout.height == src.height && layout.format == src.format,
             "WebGPU: texture readback footprint does not match source"
+        );
+        let needed = layout
+            .footprint_offset
+            .checked_add(layout.staging_bytes)
+            .context("WebGPU: texture readback footprint overflow")?;
+        anyhow::ensure!(
+            needed <= dst.size,
+            "WebGPU: CopyTextureToReadback exceeds staging buffer (need {needed}, have {})",
+            dst.size
         );
         if layout.width == 0 || layout.height == 0 {
             return Ok(());
@@ -983,6 +1064,7 @@ impl WebGpuBackend {
                         .cloned()
                         .context("WebGPU: invalid compute pipeline")?;
                     let user_binding = if pipeline.layout.scalar_count > 0 {
+                        require_user_scalars(&current_user, pipeline.layout.scalar_count)?;
                         let buffer = user_uniform_buffer
                             .as_ref()
                             .context("WebGPU: scalar dispatch missing user uniform buffer")?;
@@ -1017,9 +1099,15 @@ impl WebGpuBackend {
                         .cloned()
                         .context("WebGPU: invalid compute pipeline")?;
                     let args = self.buffers.get(buffer).context("WebGPU: invalid indirect buffer")?;
+                    ensure_buffer_range(args, *offset, INDIRECT_DISPATCH_BYTES, "DispatchIndirect")?;
+                    anyhow::ensure!(
+                        *offset % 4 == 0,
+                        "WebGPU: DispatchIndirect offset {offset} must be 4-byte aligned"
+                    );
                     let args_buffer = args.buffer.clone();
                     let args_offset = args.offset + offset;
                     let user_binding = if pipeline.layout.scalar_count > 0 {
+                        require_user_scalars(&current_user, pipeline.layout.scalar_count)?;
                         let buffer = user_uniform_buffer
                             .as_ref()
                             .context("WebGPU: scalar dispatch missing user uniform buffer")?;
@@ -1048,12 +1136,18 @@ impl WebGpuBackend {
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let buffer = self.buffers.get(buffer).context("WebGPU: invalid clear buffer")?;
-                    let size = (*size != 0).then_some(*size);
-                    encoder.clear_buffer(&buffer.buffer, buffer.offset + offset, size);
+                    let clear_size = if *size == 0 {
+                        buffer.size.saturating_sub(*offset)
+                    } else {
+                        *size
+                    };
+                    ensure_buffer_range(buffer, *offset, clear_size, "ClearBuffer")?;
+                    encoder.clear_buffer(&buffer.buffer, buffer.offset + offset, (*size != 0).then_some(*size));
                 }
                 GpuCommand::WriteBuffer { buffer, offset, data } => {
                     let buffer = self.buffers.get(buffer).context("WebGPU: invalid write buffer")?;
-                    queue.write_buffer(&buffer.buffer, buffer.offset + offset, data);
+                    ensure_buffer_range(buffer, *offset, data.len() as u64, "WriteBuffer")?;
+                    write_queue_buffer(&queue, &buffer.buffer, buffer.offset + offset, data);
                 }
                 GpuCommand::CopyBuffer {
                     src,
@@ -1064,6 +1158,8 @@ impl WebGpuBackend {
                 } => {
                     let src = self.buffers.get(src).context("WebGPU: invalid copy source")?;
                     let dst = self.buffers.get(dst).context("WebGPU: invalid copy destination")?;
+                    ensure_buffer_range(src, *src_offset, *size, "CopyBuffer source")?;
+                    ensure_buffer_range(dst, *dst_offset, *size, "CopyBuffer destination")?;
                     encoder.copy_buffer_to_buffer(
                         &src.buffer,
                         src.offset + src_offset,
@@ -1113,7 +1209,9 @@ impl WebGpuBackend {
                                 n_scalars <= MAX_USER_SLOTS,
                                 "WebGPU: DispatchBatch entry {i} expects {n_scalars} scalars"
                             );
-                            push.user[..n_scalars].to_vec()
+                            let user = push.user[..n_scalars].to_vec();
+                            require_user_scalars(&user, n_scalars as u32)?;
+                            user
                         };
                         let user_binding = if n_scalars > 0 {
                             let buffer = user_uniform_buffer
@@ -1319,13 +1417,8 @@ impl GpuBackend for WebGpuBackend {
         crate::device::DeviceCapabilities {
             preferred_surface_format: TextureFormat::Rgba8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
-            supported_surface_formats: vec![TextureFormat::Rgba8Unorm, TextureFormat::Bgra8Unorm],
-            supported_render_target_formats: vec![
-                TextureFormat::Rgba8Unorm,
-                TextureFormat::Rgba8UnormSrgb,
-                TextureFormat::Rgba16Float,
-                TextureFormat::Rgba32Float,
-            ],
+            supported_surface_formats: Vec::new(),
+            supported_render_target_formats: Vec::new(),
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_decommit_supported: false,
@@ -1353,6 +1446,7 @@ impl GpuBackend for WebGpuBackend {
         }))
         .context("WebGPU: request device")?;
         let uniform_offset_align = device.limits().min_uniform_buffer_offset_alignment.max(16) as u64;
+        let storage_offset_align = device.limits().min_storage_buffer_offset_alignment.max(4) as u64;
         let handle = self.next_device;
         self.next_device += 1;
         self.devices.insert(
@@ -1366,6 +1460,8 @@ impl GpuBackend for WebGpuBackend {
                 user_uniform: None,
                 user_uniform_capacity: 0,
                 uniform_offset_align,
+                storage_offset_align,
+                adapter_id,
             },
         );
         Ok(handle)
@@ -1478,6 +1574,7 @@ impl GpuBackend for WebGpuBackend {
         if let Some(buffer) = self.buffers.remove(&buffer) {
             if let Some(slot) = buffer.slot {
                 self.buffer_slots.remove(&slot);
+                self.recycle_registry_slot(slot);
             }
         }
     }
@@ -1487,15 +1584,18 @@ impl GpuBackend for WebGpuBackend {
         if offset + data.len() as u64 > buffer.size {
             anyhow::bail!("WebGPU: write exceeds logical buffer size");
         }
-        self.device(buffer.device)?
-            .queue
-            .write_buffer(&buffer.buffer, buffer.offset + offset, data);
+        write_queue_buffer(
+            &self.device(buffer.device)?.queue,
+            &buffer.buffer,
+            buffer.offset + offset,
+            data,
+        );
         Ok(())
     }
 
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         let gpu = self.device(device)?;
-        let capacity = size.max(4);
+        let capacity = align_up(size.max(4), wgpu::COPY_BUFFER_ALIGNMENT);
         let raw = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("goldy-webgpu-readback"),
             size: capacity,
@@ -1579,13 +1679,38 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
-        let gpu = self.device(device)?;
-        let target = self.buffers.get(&buffer).context("WebGPU: invalid buffer handle")?;
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let (wgpu_device, queue, raw, abs_offset, clear_size) = {
+            let gpu = self.device(device)?;
+            let target = self.buffers.get(&buffer).context("WebGPU: invalid buffer handle")?;
+            if target.device != device {
+                anyhow::bail!("WebGPU: buffer belongs to another device");
+            }
+            let clear_size = if size == 0 {
+                target.size.saturating_sub(offset)
+            } else {
+                size
+            };
+            ensure_buffer_range(target, offset, clear_size, "clear_buffer")?;
+            (
+                gpu.device.clone(),
+                gpu.queue.clone(),
+                target.buffer.clone(),
+                target.offset + offset,
+                (size != 0).then_some(size),
+            )
+        };
+        let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("goldy-webgpu-clear"),
         });
-        encoder.clear_buffer(&target.buffer, target.offset + offset, (size != 0).then_some(size));
-        gpu.queue.submit([encoder.finish()]);
+        encoder.clear_buffer(&raw, abs_offset, clear_size);
+        let index = queue.submit([encoder.finish()]);
+        poll_device(
+            &wgpu_device,
+            wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: None,
+            },
+        )?;
         Ok(())
     }
 
@@ -1634,6 +1759,17 @@ impl GpuBackend for WebGpuBackend {
         if offset + size > parent.size {
             anyhow::bail!("WebGPU: buffer view exceeds parent");
         }
+        let abs_offset = parent.offset + offset;
+        let gpu = self.device(parent.device)?;
+        let align = if parent.uniform {
+            gpu.uniform_offset_align
+        } else {
+            gpu.storage_offset_align
+        };
+        anyhow::ensure!(
+            abs_offset % align == 0,
+            "WebGPU: buffer view offset {abs_offset} is not aligned to {align}"
+        );
         let handle = self.next_buffer;
         self.next_buffer += 1;
         let slot = self.alloc_registry_slot()?;
@@ -1673,7 +1809,7 @@ impl GpuBackend for WebGpuBackend {
         let capacity = if old.uniform {
             align_up(new_size.max(16), 16)
         } else {
-            new_size.max(4)
+            align_up(new_size.max(4), wgpu::COPY_BUFFER_ALIGNMENT)
         };
         let replacement = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("goldy-webgpu-resized-buffer"),
@@ -1801,6 +1937,10 @@ impl GpuBackend for WebGpuBackend {
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
         anyhow::ensure!(
+            width > 0 && height > 0,
+            "WebGPU: texture width and height must be non-zero"
+        );
+        anyhow::ensure!(
             !flags.contains(TextureFlags::RENDER_TARGET),
             "WebGPU compute-only backend does not support render-target textures"
         );
@@ -1816,8 +1956,12 @@ impl GpuBackend for WebGpuBackend {
         }
 
         let wgpu_format = map_texture_format(format);
-        let gpu = self.device(device)?;
-        let format_features = wgpu_format.guaranteed_format_features(gpu.device.features());
+        let adapter_id = self.device(device)?.adapter_id;
+        let adapter = self
+            .adapters
+            .get(adapter_id as usize)
+            .context("WebGPU: texture create missing adapter")?;
+        let format_features = adapter.get_texture_format_features(wgpu_format);
         let mut usage = wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
         if needs_sampled {
             usage |= wgpu::TextureUsages::TEXTURE_BINDING;
@@ -1837,11 +1981,12 @@ impl GpuBackend for WebGpuBackend {
             usage
         );
 
+        let gpu = self.device(device)?;
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("goldy-webgpu-texture"),
             size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1921,9 +2066,11 @@ impl GpuBackend for WebGpuBackend {
         if let Some(resource) = self.textures.remove(&texture) {
             if let Some(slot) = resource.storage_slot {
                 self.texture_slots.remove(&slot);
+                self.recycle_registry_slot(slot);
             }
             if let Some(slot) = resource.sampled_slot {
                 self.texture_slots.remove(&slot);
+                self.recycle_registry_slot(slot);
             }
         }
     }
@@ -1965,6 +2112,7 @@ impl GpuBackend for WebGpuBackend {
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         if let Some(resource) = self.samplers.remove(&sampler) {
             self.sampler_slots.remove(&resource.slot);
+            self.recycle_registry_slot(resource.slot);
         }
     }
 
@@ -2152,25 +2300,25 @@ impl GpuBackend for WebGpuBackend {
             .unwrap_or_default()
     }
 
-    fn max_bindless_slots_per_category(&self, device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
-        let Some(gpu) = self.devices.get(&device) else {
-            return 0;
-        };
-        let limits = gpu.device.limits();
-        match category {
-            ResourceCategory::Scattered | ResourceCategory::Broadcast => limits.max_storage_buffers_per_shader_stage,
-            ResourceCategory::Texture => limits.max_sampled_textures_per_shader_stage,
-            ResourceCategory::StorageImage => limits.max_storage_textures_per_shader_stage,
-            ResourceCategory::Sampler => limits.max_samplers_per_shader_stage,
+    fn max_bindless_slots_per_category(&self, device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {
+        if self.devices.contains_key(&device) {
+            WEBGPU_REGISTRY_CAP
+        } else {
+            0
         }
     }
 
     fn available_bindless_slots(&self, device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
         let used = match category {
-            ResourceCategory::Scattered | ResourceCategory::Broadcast => self
+            ResourceCategory::Scattered => self
                 .buffers
                 .values()
-                .filter(|buffer| buffer.device == device && buffer.slot.is_some())
+                .filter(|buffer| buffer.device == device && buffer.slot.is_some() && !buffer.uniform)
+                .count() as u32,
+            ResourceCategory::Broadcast => self
+                .buffers
+                .values()
+                .filter(|buffer| buffer.device == device && buffer.slot.is_some() && buffer.uniform)
                 .count() as u32,
             ResourceCategory::Texture => self
                 .textures
@@ -2509,6 +2657,72 @@ void cs_main(BufRO<float> input, Scattered<float> output, float scale, ThreadId 
         let bytes = withdraw.claim(&mut submission)?.consume()?;
         let got: &[f32] = bytemuck::cast_slice(&bytes);
         assert_eq!(got, &[2.0, 4.0, 6.0, 8.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_dispatch_batch_distinct_scalars() -> Result<()> {
+        let Some(device) = scheme_device()? else {
+            return Ok(());
+        };
+        const SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<uint> out, uint value, ThreadId id) {
+    out[0] = value;
+}
+"#;
+        let ctx = device.create_context()?;
+        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let a = pool.acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
+        let b = pool.acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
+        let shader = crate::ShaderModule::from_slang(&device, SHADER)?;
+        let pipeline = crate::ComputePipeline::new(&device, &shader)?;
+        let mut scheme = crate::Scheme::new(&ctx);
+        scheme
+            .node("fill_a", &pipeline)
+            .with_parcel(&a, crate::NodeAccess::Write)
+            .with_param(7u32)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("fill_b", &pipeline)
+            .with_parcel(&b, crate::NodeAccess::Write)
+            .with_param(9u32)
+            .dispatch(1, 1, 1);
+        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
+        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+        let mut submission = scheme.submit()?;
+        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
+        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[7]);
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[9]);
+        Ok(())
+    }
+
+    #[test]
+    fn buffer_view_rejects_unaligned_offset() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU scheme test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let (handle, _) = backend.create_buffer_with_capacity(
+            device,
+            1024,
+            1024,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )?;
+        let err = backend
+            .create_buffer_view(handle, 1, 16, None)
+            .expect_err("unaligned storage view offset must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("aligned") || msg.contains("align"), "{msg}");
         Ok(())
     }
 
