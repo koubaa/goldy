@@ -45,14 +45,11 @@ float4 fs_main(Scattered<uint> CELLS, VSOutput input) : SV_Target {
     uint idx = y * GRID_WIDTH + x;
     uint cell = CELLS[idx];
 
-    // ~1px lines on every cell edge. A fixed 0.05-of-cell threshold is often
-    // thinner than a pixel, so many lines vanish or look chopped.
-    float2 gridUV = float2(uv.x * float(GRID_WIDTH), uv.y * float(GRID_HEIGHT));
-    float2 cellUV = frac(gridUV);
-    float2 fw = max(fwidth(gridUV), float2(1e-5, 1e-5));
-    float2 edge = min(cellUV, 1.0 - cellUV);
-    float2 line = 1.0 - smoothstep(float2(0.0, 0.0), fw, edge);
-    float gridLine = saturate(max(line.x, line.y)) * 0.2;
+    // Fixed fraction of a cell (not fwidth): Slang's Metal fragment target
+    // rejects derivative builtins (`fwidth` / `ddx` / `ddy`, error E36107),
+    // and screenshot refs are captured with this threshold.
+    float2 cellUV = frac(float2(uv.x * GRID_WIDTH, uv.y * GRID_HEIGHT));
+    float gridLine = (cellUV.x < 0.05 || cellUV.y < 0.05) ? 0.15 : 0.0;
     
     if (cell == 1) {
         float3 alive = float3(0.2, 0.9, 0.3);

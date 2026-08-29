@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI coverage for the WebGPU (`wgpu`) backend on Linux (Vulkan/lavapipe), macOS (Metal),
   and Windows (DX12/WARP), plus clippy for `--features webgpu`.
 
+### Fixed
+
+- Game of Life render shader no longer uses `fwidth` (Slang Metal fragment target
+  rejects derivative builtins). Restores screenshot tests and the Python headless example.
+
 - **Rust compute kernels (issue #78, initial design)** — `#[goldy::compute]` proc-macro
   lowers a restricted GPU dialect to canonical `[goldy_compute]` Slang plus structured
   `KernelDef` / `KernelParam` ABI metadata (`goldy_shader_ir`). Host API:
