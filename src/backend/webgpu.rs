@@ -1,4 +1,4 @@
-//! Compute-only WebGPU backend prototype.
+//! WebGPU backend prototype (via wgpu).
 //!
 //! This backend deliberately does not emulate Goldy's native bindless heap. The
 //! raw indices in [`GpuCommand::BindResourcesRaw`] are interpreted as backend
@@ -6,6 +6,11 @@
 //!
 //! Submit is non-blocking: the timeline advances from `Queue::on_submitted_work_done`
 //! (pumped by `Device::poll`). Host waits use a stored [`wgpu::SubmissionIndex`].
+//!
+//! Surfaces (`graphics` feature): the swapchain image is not a storage texture.
+//! `begin_frame` acquires the wgpu drawable for pacing and returns a separate
+//! `Rgba8Unorm` storage scratch. Present (copy + `SurfaceTexture::present`) is
+//! not wired yet.
 
 use super::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
 use super::*;
@@ -26,12 +31,64 @@ const USER_UNIFORM_BYTES: u64 = (MAX_USER_SLOTS * 4) as u64;
 const TIMELINE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const WEBGPU_REGISTRY_CAP: u32 = 4096;
 const INDIRECT_DISPATCH_BYTES: u64 = 12;
+#[cfg(feature = "graphics")]
+const DEFAULT_SURFACE_WIDTH: u32 = 800;
+#[cfg(feature = "graphics")]
+const DEFAULT_SURFACE_HEIGHT: u32 = 600;
+/// Compute/present-lease format. Swapchain images are not storage-capable.
+#[cfg(feature = "graphics")]
+const SURFACE_COMPUTE_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 fn align_up(value: u64, align: u64) -> u64 {
     if align <= 1 {
         return value;
     }
     value.div_ceil(align) * align
+}
+
+#[cfg(feature = "graphics")]
+fn pick_swapchain_format(formats: &[wgpu::TextureFormat]) -> Result<wgpu::TextureFormat> {
+    const PREFERRED: &[wgpu::TextureFormat] = &[
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+    ];
+    for preferred in PREFERRED {
+        if formats.contains(preferred) {
+            return Ok(*preferred);
+        }
+    }
+    formats
+        .first()
+        .copied()
+        .context("WebGPU: surface has no presentable formats")
+}
+
+#[cfg(feature = "graphics")]
+fn pick_present_mode(modes: &[wgpu::PresentMode]) -> Result<wgpu::PresentMode> {
+    if modes.contains(&wgpu::PresentMode::Fifo) {
+        return Ok(wgpu::PresentMode::Fifo);
+    }
+    modes.first().copied().context("WebGPU: surface has no present modes")
+}
+
+#[cfg(feature = "graphics")]
+fn pick_alpha_mode(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
+    if modes.contains(&wgpu::CompositeAlphaMode::Auto) {
+        wgpu::CompositeAlphaMode::Auto
+    } else {
+        modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Opaque)
+    }
+}
+
+#[cfg(feature = "graphics")]
+fn surface_usage(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureUsages {
+    let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+    if caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
+        usage |= wgpu::TextureUsages::COPY_DST;
+    }
+    usage
 }
 
 fn map_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
@@ -168,9 +225,7 @@ fn require_user_scalars(user: &[u32], expected: u32) -> Result<()> {
 }
 
 fn ensure_buffer_range(buffer: &WebGpuBuffer, offset: u64, size: u64, what: &str) -> Result<()> {
-    let end = offset
-        .checked_add(size)
-        .context("WebGPU: buffer range overflow")?;
+    let end = offset.checked_add(size).context("WebGPU: buffer range overflow")?;
     anyhow::ensure!(
         end <= buffer.size,
         "WebGPU: {what} range {offset}+{size} exceeds logical size {}",
@@ -180,6 +235,9 @@ fn ensure_buffer_range(buffer: &WebGpuBuffer, offset: u64, size: u64, what: &str
 }
 
 pub(crate) struct WebGpuBackend {
+    /// Retained for `create_surface` (`graphics`). Unused in compute-only builds.
+    #[cfg_attr(not(feature = "graphics"), allow(dead_code))]
+    instance: wgpu::Instance,
     adapters: Vec<wgpu::Adapter>,
     adapter_info: Vec<AdapterInfo>,
     devices: HashMap<DeviceHandle, WebGpuDevice>,
@@ -192,15 +250,34 @@ pub(crate) struct WebGpuBackend {
     sampler_slots: HashMap<u32, SamplerHandle>,
     shaders: HashMap<ShaderHandle, WebGpuShader>,
     compute_pipelines: HashMap<ComputePipelineHandle, WebGpuComputePipeline>,
+    #[cfg(feature = "graphics")]
+    surfaces: HashMap<SurfaceHandle, WebGpuSurface>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
     next_texture: TextureHandle,
     next_sampler: SamplerHandle,
+    #[cfg(feature = "graphics")]
+    next_surface: SurfaceHandle,
     next_slot: u32,
     free_slots: Vec<u32>,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
+}
+
+#[cfg(feature = "graphics")]
+struct WebGpuSurface {
+    device: DeviceHandle,
+    surface: wgpu::Surface<'static>,
+    width: u32,
+    height: u32,
+    swapchain_format: wgpu::TextureFormat,
+    present_mode: wgpu::PresentMode,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    usage: wgpu::TextureUsages,
+    scratch: Option<TextureHandle>,
+    acquired: Option<wgpu::SurfaceTexture>,
+    current_texture_handle: Option<TextureHandle>,
 }
 
 struct WebGpuDevice {
@@ -296,7 +373,6 @@ fn poll_device(device: &wgpu::Device, poll_type: wgpu::PollType) -> Result<wgpu:
         .map_err(|error| anyhow::anyhow!("WebGPU device poll failed: {error}"))
 }
 
-
 #[derive(Clone)]
 struct WebGpuBuffer {
     device: DeviceHandle,
@@ -365,6 +441,7 @@ impl WebGpuBackend {
             })
             .collect();
         Ok(Self {
+            instance,
             adapters,
             adapter_info,
             devices: HashMap::new(),
@@ -377,11 +454,15 @@ impl WebGpuBackend {
             sampler_slots: HashMap::new(),
             shaders: HashMap::new(),
             compute_pipelines: HashMap::new(),
+            #[cfg(feature = "graphics")]
+            surfaces: HashMap::new(),
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
             next_texture: 1,
             next_sampler: 1,
+            #[cfg(feature = "graphics")]
+            next_surface: 1,
             next_slot: 0,
             free_slots: Vec::new(),
             next_shader: 1,
@@ -399,6 +480,114 @@ impl WebGpuBackend {
 
     fn unsupported<T>(operation: &str) -> Result<T> {
         anyhow::bail!("WebGPU compute-only backend does not support {operation}")
+    }
+
+    #[cfg(feature = "graphics")]
+    fn surface_config(surface: &WebGpuSurface) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: surface.usage,
+            format: surface.swapchain_format,
+            width: surface.width.max(1),
+            height: surface.height.max(1),
+            present_mode: surface.present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: surface.alpha_mode,
+            view_formats: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    fn configure_surface(&mut self, surface: SurfaceHandle) -> Result<()> {
+        let device = self
+            .surfaces
+            .get(&surface)
+            .context("WebGPU: invalid surface handle")?
+            .device;
+        let wgpu_device = self.device(device)?.device.clone();
+        let surface_state = self
+            .surfaces
+            .get_mut(&surface)
+            .context("WebGPU: invalid surface handle")?;
+        surface_state.acquired = None;
+        let config = Self::surface_config(surface_state);
+        surface_state.surface.configure(&wgpu_device, &config);
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    fn drop_surface_scratch(&mut self, surface: SurfaceHandle) {
+        let Some(handle) = self.surfaces.get_mut(&surface).and_then(|s| s.scratch.take()) else {
+            return;
+        };
+        if let Some(state) = self.surfaces.get_mut(&surface) {
+            state.current_texture_handle = None;
+        }
+        self.destroy_texture(handle);
+    }
+
+    #[cfg(feature = "graphics")]
+    fn ensure_surface_scratch(&mut self, surface: SurfaceHandle) -> Result<TextureHandle> {
+        let (device, width, height, existing) = {
+            let state = self.surfaces.get(&surface).context("WebGPU: invalid surface handle")?;
+            (state.device, state.width.max(1), state.height.max(1), state.scratch)
+        };
+        if let Some(handle) = existing {
+            if let Some(texture) = self.textures.get(&handle) {
+                if texture.width == width
+                    && texture.height == height
+                    && texture.format == SURFACE_COMPUTE_FORMAT
+                    && texture.storage_slot.is_some()
+                {
+                    return Ok(handle);
+                }
+            }
+        }
+        self.drop_surface_scratch(surface);
+        let handle = self.create_texture(
+            device,
+            width,
+            height,
+            SURFACE_COMPUTE_FORMAT,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        )?;
+        let state = self
+            .surfaces
+            .get_mut(&surface)
+            .context("WebGPU: invalid surface handle")?;
+        state.scratch = Some(handle);
+        state.current_texture_handle = Some(handle);
+        Ok(handle)
+    }
+
+    #[cfg(feature = "graphics")]
+    fn acquire_surface_texture(&mut self, surface: SurfaceHandle) -> Result<wgpu::SurfaceTexture> {
+        {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            state.acquired = None;
+        }
+        let first = self
+            .surfaces
+            .get(&surface)
+            .context("WebGPU: invalid surface handle")?
+            .surface
+            .get_current_texture();
+        match first {
+            Ok(texture) => Ok(texture),
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost | wgpu::SurfaceError::Timeout) => {
+                self.configure_surface(surface)?;
+                self.surfaces
+                    .get(&surface)
+                    .context("WebGPU: invalid surface handle")?
+                    .surface
+                    .get_current_texture()
+                    .context("WebGPU: get_current_texture after reconfigure")
+            }
+            Err(error) => Err(anyhow::anyhow!("WebGPU: get_current_texture failed: {error}")),
+        }
     }
 
     fn alloc_registry_slot(&mut self) -> Result<u32> {
@@ -428,7 +617,10 @@ impl WebGpuBackend {
         let capacity = if uniform {
             align_up(capacity.max(logical_size).max(min_capacity), 16)
         } else {
-            align_up(capacity.max(logical_size).max(min_capacity), wgpu::COPY_BUFFER_ALIGNMENT)
+            align_up(
+                capacity.max(logical_size).max(min_capacity),
+                wgpu::COPY_BUFFER_ALIGNMENT,
+            )
         };
         let gpu = self.device(device)?;
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1417,7 +1609,7 @@ impl GpuBackend for WebGpuBackend {
         crate::device::DeviceCapabilities {
             preferred_surface_format: TextureFormat::Rgba8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
-            supported_surface_formats: Vec::new(),
+            supported_surface_formats: vec![TextureFormat::Rgba8Unorm],
             supported_render_target_formats: Vec::new(),
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
@@ -1468,6 +1660,18 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
+        #[cfg(feature = "graphics")]
+        {
+            let surface_handles: Vec<_> = self
+                .surfaces
+                .iter()
+                .filter(|(_, surface)| surface.device == device)
+                .map(|(handle, _)| *handle)
+                .collect();
+            for handle in surface_handles {
+                self.destroy_surface(handle);
+            }
+        }
         if let Some(gpu) = self.devices.remove(&device) {
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         }
@@ -2123,30 +2327,100 @@ impl GpuBackend for WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn create_surface(
         &mut self,
-        _device: DeviceHandle,
-        _window: &dyn raw_window_handle::HasWindowHandle,
-        _display: &dyn raw_window_handle::HasDisplayHandle,
+        device: DeviceHandle,
+        window: &dyn raw_window_handle::HasWindowHandle,
+        display: &dyn raw_window_handle::HasDisplayHandle,
         _depth_format: Option<DepthFormat>,
     ) -> Result<SurfaceHandle> {
-        Self::unsupported("surfaces")
+        let adapter_id = self.device(device)?.adapter_id;
+        let adapter = self
+            .adapters
+            .get(adapter_id as usize)
+            .context("WebGPU: surface create missing adapter")?;
+        let window_handle = window
+            .window_handle()
+            .map_err(|error| anyhow::anyhow!("WebGPU: window handle: {error:?}"))?;
+        let display_handle = display
+            .display_handle()
+            .map_err(|error| anyhow::anyhow!("WebGPU: display handle: {error:?}"))?;
+        // SAFETY: Goldy surfaces require the window to outlive the `Surface` handle,
+        // matching native backends that store HWND / NSView / wl_surface pointers.
+        let wgpu_surface = unsafe {
+            self.instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: display_handle.as_raw(),
+                    raw_window_handle: window_handle.as_raw(),
+                })
+        }
+        .context("WebGPU: create_surface")?;
+        anyhow::ensure!(
+            adapter.is_surface_supported(&wgpu_surface),
+            "WebGPU: adapter does not support this surface"
+        );
+        let caps = wgpu_surface.get_capabilities(adapter);
+        let swapchain_format = pick_swapchain_format(&caps.formats)?;
+        let present_mode = pick_present_mode(&caps.present_modes)?;
+        let alpha_mode = pick_alpha_mode(&caps.alpha_modes);
+        let usage = surface_usage(&caps);
+        let handle = self.next_surface;
+        self.next_surface += 1;
+        self.surfaces.insert(
+            handle,
+            WebGpuSurface {
+                device,
+                surface: wgpu_surface,
+                width: DEFAULT_SURFACE_WIDTH,
+                height: DEFAULT_SURFACE_HEIGHT,
+                swapchain_format,
+                present_mode,
+                alpha_mode,
+                usage,
+                scratch: None,
+                acquired: None,
+                current_texture_handle: None,
+            },
+        );
+        self.configure_surface(handle)?;
+        Ok(handle)
     }
 
     #[cfg(feature = "graphics")]
-    fn destroy_surface(&mut self, _surface: SurfaceHandle) {}
-
-    #[cfg(feature = "graphics")]
-    fn surface_resize(&mut self, _surface: SurfaceHandle, _width: u32, _height: u32) -> Result<()> {
-        Self::unsupported("surfaces")
+    fn destroy_surface(&mut self, surface: SurfaceHandle) {
+        if let Some(mut state) = self.surfaces.remove(&surface) {
+            state.acquired = None;
+            if let Some(scratch) = state.scratch.take() {
+                self.destroy_texture(scratch);
+            }
+        }
     }
 
     #[cfg(feature = "graphics")]
-    fn surface_size(&self, _surface: SurfaceHandle) -> (u32, u32) {
-        (0, 0)
+    fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+        anyhow::ensure!(width > 0 && height > 0, "WebGPU: surface size must be non-zero");
+        let state = self
+            .surfaces
+            .get_mut(&surface)
+            .context("WebGPU: invalid surface handle")?;
+        if state.width == width && state.height == height {
+            return Ok(());
+        }
+        state.width = width;
+        state.height = height;
+        self.drop_surface_scratch(surface);
+        self.configure_surface(surface)
+    }
+
+    #[cfg(feature = "graphics")]
+    fn surface_size(&self, surface: SurfaceHandle) -> (u32, u32) {
+        self.surfaces
+            .get(&surface)
+            .map(|surface| (surface.width, surface.height))
+            .unwrap_or((0, 0))
     }
 
     #[cfg(feature = "graphics")]
     fn surface_format(&self, _surface: SurfaceHandle) -> TextureFormat {
-        TextureFormat::Bgra8UnormSrgb
+        SURFACE_COMPUTE_FORMAT
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
@@ -2235,8 +2509,39 @@ impl GpuBackend for WebGpuBackend {
     }
 
     #[cfg(feature = "graphics")]
-    fn begin_frame(&mut self, _surface: SurfaceHandle, _ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
-        Self::unsupported("frames")
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
+        let surface_device = self
+            .surfaces
+            .get(&surface)
+            .context("WebGPU: invalid surface handle")?
+            .device;
+        anyhow::ensure!(
+            self.context_device(ctx) == surface_device,
+            "WebGPU: begin_frame context does not match the surface device"
+        );
+        let acquired = self.acquire_surface_texture(surface)?;
+        let scratch = self.ensure_surface_scratch(surface)?;
+        let state = self
+            .surfaces
+            .get_mut(&surface)
+            .context("WebGPU: invalid surface handle")?;
+        state.acquired = Some(acquired);
+        state.current_texture_handle = Some(scratch);
+        if let Some(context) = self.contexts.get(&ctx) {
+            context
+                .signal_queue
+                .push(crate::signal::Signal::SwapchainAcquired { image_index: 0 });
+        }
+        Ok((
+            FrameToken {
+                surface,
+                image: 0,
+                context: ctx,
+                frame_slot: 0,
+                present_slot: 0,
+            },
+            scratch,
+        ))
     }
 
     #[cfg(feature = "graphics")]
@@ -3007,6 +3312,45 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
             wgsl.contains("@binding(0)"),
             "Slang output did not preserve the storage binding:\n{wgsl}"
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn swapchain_format_prefers_rgba8_unorm() {
+        let formats = [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ];
+        assert_eq!(
+            pick_swapchain_format(&formats).unwrap(),
+            wgpu::TextureFormat::Rgba8Unorm
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_mode_prefers_fifo() {
+        let modes = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo];
+        assert_eq!(pick_present_mode(&modes).unwrap(), wgpu::PresentMode::Fifo);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn begin_frame_rejects_unknown_surface() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let err = backend.begin_frame(1, ctx).expect_err("unknown surface must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid surface") || msg.contains("surface"), "{msg}");
         Ok(())
     }
 }
