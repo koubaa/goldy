@@ -40,6 +40,60 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Slang's WGSL backend assigns vertex-input `@location`s from HLSL semantics
+/// (`POSITION` → 0, `TEXCOORD1` → 1, `TEXCOORD0` remapped to 2). Goldy vertex
+/// layouts number attributes in declaration order (0, 1, 2). Remap input-struct
+/// locations to sequential indices so `POSITION`+`TEXCOORD0`+`TEXCOORD1` matches
+/// the CPU layout. Varying structs that carry `@builtin(position)` are left as-is.
+#[cfg(feature = "graphics")]
+fn remap_wgsl_vs_input_locations(wgsl: &str) -> String {
+    let mut out = String::with_capacity(wgsl.len());
+    let mut rest = wgsl;
+    while let Some(struct_at) = rest.find("struct ") {
+        out.push_str(&rest[..struct_at]);
+        let after = &rest[struct_at..];
+        let Some(brace) = after.find('{') else {
+            out.push_str(after);
+            return out;
+        };
+        let Some(rel_end) = after[brace..].find('}') else {
+            out.push_str(after);
+            return out;
+        };
+        let end = brace + rel_end;
+        let header = &after[..brace];
+        let body = &after[brace..=end];
+        let remapped = if body.contains("@builtin(position)") || !body.contains("@location(") {
+            body.to_string()
+        } else {
+            let mut body_out = String::with_capacity(body.len());
+            let mut body_rest = body;
+            let mut next = 0u32;
+            while let Some(loc_at) = body_rest.find("@location(") {
+                body_out.push_str(&body_rest[..loc_at]);
+                let after_kw = &body_rest[loc_at + "@location(".len()..];
+                let Some(close) = after_kw.find(')') else {
+                    body_out.push_str(body_rest);
+                    body_rest = "";
+                    break;
+                };
+                body_out.push_str("@location(");
+                body_out.push_str(&next.to_string());
+                body_out.push(')');
+                next += 1;
+                body_rest = &after_kw[close + 1..];
+            }
+            body_out.push_str(body_rest);
+            body_out
+        };
+        out.push_str(header);
+        out.push_str(&remapped);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 const RAW_WGSL_MARKER: &str = "// @goldy-wgsl";
 const USER_UNIFORM_BYTES: u64 = (MAX_USER_SLOTS * 4) as u64;
 const TIMELINE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1322,7 +1376,12 @@ impl WebGpuBackend {
         } else {
             (shader.source.clone(), WgpuComputeLayout::inferred_storage())
         };
-        let vs = self.compile_graphics_stage_wgsl(shader, &lowered, "vs_main", crate::slang::SlangStage::Vertex)?;
+        let vs = remap_wgsl_vs_input_locations(&self.compile_graphics_stage_wgsl(
+            shader,
+            &lowered,
+            "vs_main",
+            crate::slang::SlangStage::Vertex,
+        )?);
         let fs = self.compile_graphics_stage_wgsl(shader, &lowered, "fs_main", crate::slang::SlangStage::Fragment)?;
         Ok((vs, fs, layout))
     }
