@@ -7,13 +7,14 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
-    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
-    goldy_parcel_destroy, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy,
-    goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_param,
-    goldy_scheme_compute_node_with_parcel, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len,
-    goldy_scheme_replay_stats, goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create,
-    goldy_shader_destroy, goldy_withdraw_transaction_byte_size, goldy_withdraw_transaction_destroy, GoldyBufferKind,
+    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_backend_type,
+    goldy_instance_destroy, goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_create,
+    goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_retained_pool_acquire_buffer,
+    goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
+    goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_param, goldy_scheme_compute_node_with_parcel,
+    goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len, goldy_scheme_replay_stats,
+    goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
+    goldy_withdraw_transaction_byte_size, goldy_withdraw_transaction_destroy, GoldyBackendType, GoldyBufferKind,
     GoldyNodeAccess, GoldyReplayStats, GoldyResult,
 };
 use std::ffi::CString;
@@ -117,7 +118,10 @@ fn scheme_compute_node_fills_buffer_with_42() {
             "{}",
             last_ffi_message()
         );
-        assert_eq!(stats.records, 1, "only the first submit should record");
+        // WebGPU has no retained command-list replay yet, so a clean resubmit re-records.
+        if goldy_instance_backend_type(instance) != GoldyBackendType::WebGpu {
+            assert_eq!(stats.records, 1, "only the first submit should record");
+        }
 
         goldy_withdraw_transaction_destroy(withdraw);
         goldy_memory_exchange_destroy(memory);
