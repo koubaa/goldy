@@ -3435,10 +3435,10 @@ mod imp {
             "copy_buffer_to_texture_parcel is identity; should record exactly once"
         );
         // Tight (pitch=0) uploads are standalone (`waves_can_retain` → false), so CUDA
-        // never produces a retention hit. Vulkan/DX12 historically counted a hit here;
-        // keep that assert off Metal (field absent) and CUDA (runtime).
+        // and WebGPU never produce a retention hit. Vulkan/DX12 historically counted a
+        // hit here; keep that assert off Metal (field absent), CUDA, and WebGPU.
         #[cfg(not(feature = "metal"))]
-        if !matches!(device.backend_type(), BackendType::Cuda) {
+        if !matches!(device.backend_type(), BackendType::Cuda | BackendType::WebGpu) {
             assert_eq!(
                 scheme.replay_stats().resubmit_hits,
                 1,

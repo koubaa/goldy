@@ -697,7 +697,7 @@ struct WebGpuDevice {
     /// Vulkan-only (`Features::PIPELINE_CACHE`). `None` on DX12/Metal wgpu.
     pipeline_cache: Option<wgpu::PipelineCache>,
     pipeline_cache_path: Option<PathBuf>,
-    /// Packed dispatch/draw bind groups keyed by layout + registry resources.
+    /// Packed dispatch/draw bind groups keyed by exclusive pipeline layout + resources.
     bind_groups: HashMap<BindGroupCacheKey, wgpu::BindGroup>,
     /// Bumped when the device user-uniform buffer is replaced.
     user_uniform_gen: u64,
@@ -723,6 +723,7 @@ struct WebGpuPreparedDispatch {
     device: DeviceHandle,
     pipeline: wgpu::ComputePipeline,
     layout: Arc<WgpuComputeLayout>,
+    spec_mask: u64,
     /// Zero-scalar bind groups are immutable for the retained graph. Scalar
     /// bindings remain dynamic because another scheme may replace the shared
     /// user-uniform buffer between resubmits.
@@ -916,8 +917,22 @@ enum BindGroupResourceKey {
     },
 }
 
+/// Pipelines are created with `layout: None`, so `get_bind_group_layout` is
+/// exclusive to that PSO. Cache keys must not share bind groups across PSOs
+/// even when [`WgpuComputeLayout`] matches.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum BindGroupOwner {
+    Compute {
+        pipeline: ComputePipelineHandle,
+        spec_mask: u64,
+    },
+    #[cfg(feature = "graphics")]
+    Graphics(PipelineHandle),
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct BindGroupCacheKey {
+    owner: BindGroupOwner,
     layout: WgpuComputeLayout,
     indices: Box<[u32]>,
     resources: Box<[BindGroupResourceKey]>,
@@ -1989,7 +2004,7 @@ impl WebGpuBackend {
         &mut self,
         pipeline_handle: ComputePipelineHandle,
         indices: &[u32],
-    ) -> Result<(wgpu::ComputePipeline, WgpuComputeLayout)> {
+    ) -> Result<(wgpu::ComputePipeline, WgpuComputeLayout, u64)> {
         let (device, mut shader, layout, identity) = {
             let pipeline = self
                 .compute_pipelines
@@ -2010,14 +2025,14 @@ impl WebGpuBackend {
         let specs = self.storage_texture_specs(&shader.source, &layout, indices, &defines)?;
         let mask = Self::spec_mask(&specs);
         if mask == 0 {
-            return Ok((identity, layout));
+            return Ok((identity, layout, 0));
         }
         if let Some(variant) = self
             .compute_pipelines
             .get(&pipeline_handle)
             .and_then(|pipeline| pipeline.variants.get(&mask))
         {
-            return Ok((variant.clone(), layout));
+            return Ok((variant.clone(), layout, mask));
         }
         let debug_name = Some("goldy-webgpu-packed-storage");
         let (wgsl, _, _) = self.cached_compute_wgsl(&mut shader)?;
@@ -2038,7 +2053,7 @@ impl WebGpuBackend {
             .context("WebGPU: invalid compute pipeline")?;
         pipeline.shader.compute = shader.compute;
         pipeline.variants.insert(mask, variant.clone());
-        Ok((variant, layout))
+        Ok((variant, layout, mask))
     }
 
     fn lookup_registry_buffer(&self, index: u32) -> Result<&WebGpuBuffer> {
@@ -2074,6 +2089,7 @@ impl WebGpuBackend {
     fn bind_group_cache_key(
         &self,
         device: DeviceHandle,
+        owner: BindGroupOwner,
         layout: &WgpuComputeLayout,
         indices: &[u32],
         user_uniform: Option<(&wgpu::Buffer, u64)>,
@@ -2126,6 +2142,7 @@ impl WebGpuBackend {
         }
         let gpu = self.device(device)?;
         Ok(BindGroupCacheKey {
+            owner,
             layout: layout.clone(),
             indices: indices.into(),
             resources: resources.into(),
@@ -2184,6 +2201,7 @@ impl WebGpuBackend {
     fn create_bind_group(
         &mut self,
         device: DeviceHandle,
+        owner: BindGroupOwner,
         layout: &WgpuComputeLayout,
         bind_layout: impl FnOnce() -> wgpu::BindGroupLayout,
         indices: &[u32],
@@ -2192,7 +2210,7 @@ impl WebGpuBackend {
         if indices.is_empty() && layout.scalar_count == 0 {
             return Ok(None);
         }
-        let key = self.bind_group_cache_key(device, layout, indices, user_uniform)?;
+        let key = self.bind_group_cache_key(device, owner, layout, indices, user_uniform)?;
         if let Some(cached) = self.device(device)?.bind_groups.get(&key) {
             return Ok(Some(cached.clone()));
         }
@@ -2656,14 +2674,24 @@ impl WebGpuBackend {
         kind: WebGpuPreparedDispatchKind,
         indirect: Option<(BufferHandle, u64)>,
     ) -> Result<WebGpuPreparedDispatch> {
-        let (pipeline, layout) = self.wgpu_pipeline_for_dispatch(pipeline_handle, indices)?;
+        let (pipeline, layout, spec_mask) = self.wgpu_pipeline_for_dispatch(pipeline_handle, indices)?;
         let device = self
             .compute_pipelines
             .get(&pipeline_handle)
             .context("WebGPU: invalid compute pipeline")?
             .device;
         let bind_group = if layout.scalar_count == 0 {
-            Some(self.create_bind_group(device, &layout, || pipeline.get_bind_group_layout(0), indices, None)?)
+            Some(self.create_bind_group(
+                device,
+                BindGroupOwner::Compute {
+                    pipeline: pipeline_handle,
+                    spec_mask,
+                },
+                &layout,
+                || pipeline.get_bind_group_layout(0),
+                indices,
+                None,
+            )?)
         } else {
             None
         };
@@ -2684,6 +2712,7 @@ impl WebGpuBackend {
             device,
             pipeline,
             layout: Arc::new(layout),
+            spec_mask,
             bind_group,
             indirect_args,
         })
@@ -2861,19 +2890,22 @@ impl WebGpuBackend {
                             Some(cursor) => Some(cursor.take(WebGpuPreparedDispatchKind::Direct)?),
                             None => None,
                         };
-                        let (wgpu_pipeline, layout, device) = match prepared_dispatch {
-                            Some(prepared) => {
-                                (prepared.pipeline.clone(), Arc::clone(&prepared.layout), prepared.device)
-                            }
+                        let (wgpu_pipeline, layout, device, spec_mask) = match prepared_dispatch {
+                            Some(prepared) => (
+                                prepared.pipeline.clone(),
+                                Arc::clone(&prepared.layout),
+                                prepared.device,
+                                prepared.spec_mask,
+                            ),
                             None => {
-                                let (pipeline, layout) =
+                                let (pipeline, layout, spec_mask) =
                                     self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
                                 let device = self
                                     .compute_pipelines
                                     .get(&pipeline_handle)
                                     .context("WebGPU: invalid compute pipeline")?
                                     .device;
-                                (pipeline, Arc::new(layout), device)
+                                (pipeline, Arc::new(layout), device, spec_mask)
                             }
                         };
                         let user_binding = if layout.scalar_count > 0 {
@@ -2899,6 +2931,10 @@ impl WebGpuBackend {
                             Some(bind_group) => bind_group.clone(),
                             None => self.create_bind_group(
                                 device,
+                                BindGroupOwner::Compute {
+                                    pipeline: pipeline_handle,
+                                    spec_mask,
+                                },
                                 &layout,
                                 || wgpu_pipeline.get_bind_group_layout(0),
                                 &current_indices,
@@ -2922,10 +2958,13 @@ impl WebGpuBackend {
                             Some(cursor) => Some(cursor.take(WebGpuPreparedDispatchKind::Indirect)?),
                             None => None,
                         };
-                        let (wgpu_pipeline, layout, device) = match prepared_dispatch {
-                            Some(prepared) => {
-                                (prepared.pipeline.clone(), Arc::clone(&prepared.layout), prepared.device)
-                            }
+                        let (wgpu_pipeline, layout, device, spec_mask) = match prepared_dispatch {
+                            Some(prepared) => (
+                                prepared.pipeline.clone(),
+                                Arc::clone(&prepared.layout),
+                                prepared.device,
+                                prepared.spec_mask,
+                            ),
                             None => {
                                 let pipeline_and_layout = {
                                     let _tz = tracy_zone!("wgpu.dispatch_indirect.pipeline");
@@ -2936,7 +2975,12 @@ impl WebGpuBackend {
                                     .get(&pipeline_handle)
                                     .context("WebGPU: invalid compute pipeline")?
                                     .device;
-                                (pipeline_and_layout.0, Arc::new(pipeline_and_layout.1), device)
+                                (
+                                    pipeline_and_layout.0,
+                                    Arc::new(pipeline_and_layout.1),
+                                    device,
+                                    pipeline_and_layout.2,
+                                )
                             }
                         };
                         let (args_buffer, args_offset) = match prepared_dispatch.and_then(|p| p.indirect_args.as_ref())
@@ -2978,6 +3022,10 @@ impl WebGpuBackend {
                                 let _tz = tracy_zone!("wgpu.dispatch_indirect.bind_group");
                                 self.create_bind_group(
                                     device,
+                                    BindGroupOwner::Compute {
+                                        pipeline: pipeline_handle,
+                                        spec_mask,
+                                    },
                                     &layout,
                                     || wgpu_pipeline.get_bind_group_layout(0),
                                     &current_indices,
@@ -3109,20 +3157,27 @@ impl WebGpuBackend {
                             } else {
                                 None
                             };
-                            let (wgpu_pipeline, dispatch_layout, dispatch_device) = match prepared_dispatch {
-                                Some(prepared) => {
-                                    (prepared.pipeline.clone(), Arc::clone(&prepared.layout), prepared.device)
-                                }
+                            let (wgpu_pipeline, dispatch_layout, dispatch_device, spec_mask) = match prepared_dispatch {
+                                Some(prepared) => (
+                                    prepared.pipeline.clone(),
+                                    Arc::clone(&prepared.layout),
+                                    prepared.device,
+                                    prepared.spec_mask,
+                                ),
                                 None => {
-                                    let (pipeline, layout) =
+                                    let (pipeline, layout, spec_mask) =
                                         self.wgpu_pipeline_for_dispatch(pipeline_handle, &indices)?;
-                                    (pipeline, Arc::new(layout), device)
+                                    (pipeline, Arc::new(layout), device, spec_mask)
                                 }
                             };
                             let bind_group = match prepared_dispatch.and_then(|prepared| prepared.bind_group.as_ref()) {
                                 Some(bind_group) => bind_group.clone(),
                                 None => self.create_bind_group(
                                     dispatch_device,
+                                    BindGroupOwner::Compute {
+                                        pipeline: pipeline_handle,
+                                        spec_mask,
+                                    },
                                     &dispatch_layout,
                                     || wgpu_pipeline.get_bind_group_layout(0),
                                     &indices,
@@ -4646,6 +4701,7 @@ impl GpuBackend for WebGpuBackend {
                             .collect::<Result<_>>()?;
                         let bg = self.create_bind_group(
                             device,
+                            BindGroupOwner::Graphics(pipeline_handle),
                             &layout,
                             || pipeline.get_bind_group_layout(0),
                             &indices,
@@ -4674,6 +4730,7 @@ impl GpuBackend for WebGpuBackend {
                         let indices: Vec<u32> = handles.iter().map(|h| h.index()).collect();
                         let bg = self.create_bind_group(
                             device,
+                            BindGroupOwner::Graphics(pipeline_handle),
                             &layout,
                             || pipeline.get_bind_group_layout(0),
                             &indices,
@@ -4724,6 +4781,7 @@ impl GpuBackend for WebGpuBackend {
                         let user_ref = user_binding.as_ref().map(|(b, off)| (b, *off));
                         let bg = self.create_bind_group(
                             device,
+                            BindGroupOwner::Graphics(pipeline_handle),
                             &layout,
                             || pipeline.get_bind_group_layout(0),
                             &resolved,
@@ -5692,6 +5750,85 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             backend.device(device)?.bind_groups.is_empty(),
             "destroying a bound buffer must drop cached bind groups"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bind_group_cache_does_not_share_across_exclusive_pipelines() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU bind-group cache test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader_a = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let shader_b = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline_a = backend.create_compute_pipeline(device, shader_a, Some("double-a"))?;
+        let pipeline_b = backend.create_compute_pipeline(device, shader_b, Some("double-b"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let dispatch = |pipeline| {
+            [
+                GpuCommand::SetPipeline(pipeline),
+                GpuCommand::BindResourcesRaw {
+                    indices: vec![slot],
+                    user: vec![],
+                    frame_table_base: 0,
+                },
+                GpuCommand::Dispatch {
+                    label: Some("double"),
+                    workgroups_x: 4,
+                    workgroups_y: 1,
+                    workgroups_z: 1,
+                },
+            ]
+        };
+        let first = backend.submit_standalone(ctx, &dispatch(pipeline_a), None)?;
+        backend.wait_until(ctx, first)?;
+        let second = backend.submit_standalone(ctx, &dispatch(pipeline_b), None)?;
+        backend.wait_until(ctx, second)?;
+        assert_eq!(
+            backend.device(device)?.bind_groups.len(),
+            2,
+            "exclusive pipeline layouts must not share cached bind groups"
+        );
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: buffer,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        let mut bytes = [0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[4, 8, 12, 16]);
         Ok(())
     }
 
