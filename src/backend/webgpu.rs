@@ -688,6 +688,58 @@ struct WebGpuDevice {
 struct WebGpuRetainedGraph {
     commands: Arc<[GraphCommand]>,
     used_slots: Vec<u32>,
+    prepared_dispatches: Arc<[WebGpuPreparedDispatch]>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WebGpuPreparedDispatchKind {
+    Direct,
+    Indirect,
+    Batch,
+}
+
+struct WebGpuPreparedDispatch {
+    kind: WebGpuPreparedDispatchKind,
+    device: DeviceHandle,
+    pipeline: wgpu::ComputePipeline,
+    layout: Arc<WgpuComputeLayout>,
+    /// Zero-scalar bind groups are immutable for the retained graph. Scalar
+    /// bindings remain dynamic because another scheme may replace the shared
+    /// user-uniform buffer between resubmits.
+    bind_group: Option<Option<wgpu::BindGroup>>,
+    indirect_args: Option<(wgpu::Buffer, u64)>,
+}
+
+struct WebGpuPreparedCursor<'a> {
+    dispatches: &'a [WebGpuPreparedDispatch],
+    next: usize,
+}
+
+impl<'a> WebGpuPreparedCursor<'a> {
+    fn new(dispatches: &'a [WebGpuPreparedDispatch]) -> Self {
+        Self { dispatches, next: 0 }
+    }
+
+    fn take(&mut self, expected: WebGpuPreparedDispatchKind) -> Result<&'a WebGpuPreparedDispatch> {
+        let prepared = self
+            .dispatches
+            .get(self.next)
+            .context("WebGPU: retained dispatch preparation underflow")?;
+        anyhow::ensure!(
+            prepared.kind == expected,
+            "WebGPU: retained dispatch preparation order mismatch"
+        );
+        self.next += 1;
+        Ok(prepared)
+    }
+
+    fn finish(self) -> Result<()> {
+        anyhow::ensure!(
+            self.next == self.dispatches.len(),
+            "WebGPU: retained dispatch preparation overflow"
+        );
+        Ok(())
+    }
 }
 
 struct WebGpuContext {
@@ -1864,13 +1916,10 @@ impl WebGpuBackend {
         let (wgsl, _, _) = self.cached_compute_wgsl(&mut shader)?;
         let packed = Self::packed_storage_bindings(&layout, &specs);
         let wgsl = patch_wgsl_storage_formats(&wgsl, &packed)?;
-        let identity_module = self
-            .compute_pipelines
-            .get(&pipeline_handle)
-            .and_then(|pipeline| {
-                let identity_wgsl = pipeline.shader.compute.as_ref()?.wgsl.as_str();
-                (identity_wgsl == wgsl).then(|| pipeline.module.clone())
-            });
+        let identity_module = self.compute_pipelines.get(&pipeline_handle).and_then(|pipeline| {
+            let identity_wgsl = pipeline.shader.compute.as_ref()?.wgsl.as_str();
+            (identity_wgsl == wgsl).then(|| pipeline.module.clone())
+        });
         let module = match identity_module {
             Some(module) => module,
             None => self.get_or_create_shader_module(device, &wgsl, debug_name)?,
@@ -1948,20 +1997,14 @@ impl WebGpuBackend {
                                 .texture_slots
                                 .get(&index)
                                 .with_context(|| format!("WebGPU: unknown texture registry key {index}"))?;
-                            resources.push(BindGroupResourceKey::Texture {
-                                handle,
-                                storage: false,
-                            });
+                            resources.push(BindGroupResourceKey::Texture { handle, storage: false });
                         }
                         WgpuComputeResourceKind::StorageTexture => {
                             let handle = *self
                                 .texture_slots
                                 .get(&index)
                                 .with_context(|| format!("WebGPU: unknown texture registry key {index}"))?;
-                            resources.push(BindGroupResourceKey::Texture {
-                                handle,
-                                storage: true,
-                            });
+                            resources.push(BindGroupResourceKey::Texture { handle, storage: true });
                         }
                         WgpuComputeResourceKind::Sampler => {
                             let handle = *self
@@ -2004,9 +2047,9 @@ impl WebGpuBackend {
     fn invalidate_bind_groups_buffer(&mut self, device: DeviceHandle, handle: BufferHandle) {
         if let Some(gpu) = self.devices.get_mut(&device) {
             gpu.bind_groups.retain(|key, _| {
-                !key.resources.iter().any(|resource| {
-                    matches!(resource, BindGroupResourceKey::Buffer { handle: h, .. } if *h == handle)
-                })
+                !key.resources
+                    .iter()
+                    .any(|resource| matches!(resource, BindGroupResourceKey::Buffer { handle: h, .. } if *h == handle))
             });
         }
     }
@@ -2014,9 +2057,9 @@ impl WebGpuBackend {
     fn invalidate_bind_groups_texture(&mut self, device: DeviceHandle, handle: TextureHandle) {
         if let Some(gpu) = self.devices.get_mut(&device) {
             gpu.bind_groups.retain(|key, _| {
-                !key.resources.iter().any(|resource| {
-                    matches!(resource, BindGroupResourceKey::Texture { handle: h, .. } if *h == handle)
-                })
+                !key.resources
+                    .iter()
+                    .any(|resource| matches!(resource, BindGroupResourceKey::Texture { handle: h, .. } if *h == handle))
             });
         }
     }
@@ -2143,10 +2186,7 @@ impl WebGpuBackend {
                 })
             },
         )?;
-        let gpu = self
-            .devices
-            .get_mut(&device)
-            .context("WebGPU: invalid device handle")?;
+        let gpu = self.devices.get_mut(&device).context("WebGPU: invalid device handle")?;
         if gpu.bind_groups.len() >= BIND_GROUP_CACHE_CAP {
             gpu.bind_groups.clear();
         }
@@ -2502,10 +2542,122 @@ impl WebGpuBackend {
         Ok(table[start..end].to_vec())
     }
 
+    fn prepare_retained_dispatch(
+        &mut self,
+        pipeline_handle: ComputePipelineHandle,
+        indices: &[u32],
+        kind: WebGpuPreparedDispatchKind,
+        indirect: Option<(BufferHandle, u64)>,
+    ) -> Result<WebGpuPreparedDispatch> {
+        let (pipeline, layout) = self.wgpu_pipeline_for_dispatch(pipeline_handle, indices)?;
+        let device = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .context("WebGPU: invalid compute pipeline")?
+            .device;
+        let bind_group = if layout.scalar_count == 0 {
+            Some(self.create_bind_group(device, &layout, || pipeline.get_bind_group_layout(0), indices, None)?)
+        } else {
+            None
+        };
+        let indirect_args = match indirect {
+            Some((buffer, offset)) => {
+                let args = self.buffers.get(&buffer).context("WebGPU: invalid indirect buffer")?;
+                ensure_buffer_range(args, offset, INDIRECT_DISPATCH_BYTES, "DispatchIndirect")?;
+                anyhow::ensure!(
+                    offset % 4 == 0,
+                    "WebGPU: DispatchIndirect offset {offset} must be 4-byte aligned"
+                );
+                Some((args.buffer.clone(), args.offset + offset))
+            }
+            None => None,
+        };
+        Ok(WebGpuPreparedDispatch {
+            kind,
+            device,
+            pipeline,
+            layout: Arc::new(layout),
+            bind_group,
+            indirect_args,
+        })
+    }
+
+    fn prepare_retained_compute_batch(
+        &mut self,
+        commands: &[&GpuCommand],
+        prepared: &mut Vec<WebGpuPreparedDispatch>,
+    ) -> Result<()> {
+        let mut current_pipeline: Option<ComputePipelineHandle> = None;
+        let mut current_indices: &[u32] = &[];
+        let mut frame_table: Option<&[u32]> = None;
+        for command in commands {
+            match command {
+                GpuCommand::SetPipeline(pipeline) => current_pipeline = Some(*pipeline),
+                GpuCommand::BindResourcesRaw { indices, .. } => current_indices = indices,
+                GpuCommand::FrameTableStaging { data } => frame_table = Some(data),
+                GpuCommand::Dispatch { .. } => {
+                    let pipeline = current_pipeline.context("WebGPU: dispatch without a compute pipeline")?;
+                    prepared.push(self.prepare_retained_dispatch(
+                        pipeline,
+                        current_indices,
+                        WebGpuPreparedDispatchKind::Direct,
+                        None,
+                    )?);
+                }
+                GpuCommand::DispatchIndirect { buffer, offset, .. } => {
+                    let pipeline = current_pipeline.context("WebGPU: indirect dispatch without a pipeline")?;
+                    prepared.push(self.prepare_retained_dispatch(
+                        pipeline,
+                        current_indices,
+                        WebGpuPreparedDispatchKind::Indirect,
+                        Some((*buffer, *offset)),
+                    )?);
+                }
+                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                    let pipeline = current_pipeline.context("WebGPU: DispatchBatch without a compute pipeline")?;
+                    let layout = self
+                        .compute_pipelines
+                        .get(&pipeline)
+                        .context("WebGPU: invalid compute pipeline")?
+                        .layout
+                        .clone();
+                    for entry in 0..*count as usize {
+                        let indices = self.batch_indices(&layout, frame_table, arg_data, *count, entry)?;
+                        prepared.push(self.prepare_retained_dispatch(
+                            pipeline,
+                            &indices,
+                            WebGpuPreparedDispatchKind::Batch,
+                            None,
+                        )?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_retained_graph(&mut self, commands: &[GraphCommand]) -> Result<Arc<[WebGpuPreparedDispatch]>> {
+        let mut prepared = Vec::new();
+        let mut batch = Vec::new();
+        for command in commands {
+            match command {
+                GraphCommand::Compute(command) => batch.push(command),
+                GraphCommand::Render { .. } => {
+                    self.prepare_retained_compute_batch(&batch, &mut prepared)?;
+                    batch.clear();
+                }
+            }
+        }
+        self.prepare_retained_compute_batch(&batch, &mut prepared)?;
+        Ok(prepared.into())
+    }
+
     fn submit_commands(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        mut prepared: Option<&mut WebGpuPreparedCursor<'_>>,
     ) -> Result<crate::timeline::TimelineValue> {
         let _tz = tracy_zone!("wgpu.submit");
         let context = Arc::clone(self.context(ctx)?);
@@ -2598,13 +2750,25 @@ impl WebGpuBackend {
                         let _tz = tracy_zone!("wgpu.dispatch");
                         let pipeline_handle =
                             current_pipeline.context("WebGPU: dispatch without a compute pipeline")?;
-                        let (wgpu_pipeline, layout) =
-                            self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
-                        let device = self
-                            .compute_pipelines
-                            .get(&pipeline_handle)
-                            .context("WebGPU: invalid compute pipeline")?
-                            .device;
+                        let prepared_dispatch = match prepared.as_deref_mut() {
+                            Some(cursor) => Some(cursor.take(WebGpuPreparedDispatchKind::Direct)?),
+                            None => None,
+                        };
+                        let (wgpu_pipeline, layout, device) = match prepared_dispatch {
+                            Some(prepared) => {
+                                (prepared.pipeline.clone(), Arc::clone(&prepared.layout), prepared.device)
+                            }
+                            None => {
+                                let (pipeline, layout) =
+                                    self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
+                                let device = self
+                                    .compute_pipelines
+                                    .get(&pipeline_handle)
+                                    .context("WebGPU: invalid compute pipeline")?
+                                    .device;
+                                (pipeline, Arc::new(layout), device)
+                            }
+                        };
                         let user_binding = if layout.scalar_count > 0 {
                             require_user_scalars(&current_user, layout.scalar_count)?;
                             let buffer = user_uniform_buffer
@@ -2624,13 +2788,16 @@ impl WebGpuBackend {
                         } else {
                             None
                         };
-                        let bind_group = self.create_bind_group(
-                            device,
-                            &layout,
-                            || wgpu_pipeline.get_bind_group_layout(0),
-                            &current_indices,
-                            user_binding,
-                        )?;
+                        let bind_group = match prepared_dispatch.and_then(|prepared| prepared.bind_group.as_ref()) {
+                            Some(bind_group) => bind_group.clone(),
+                            None => self.create_bind_group(
+                                device,
+                                &layout,
+                                || wgpu_pipeline.get_bind_group_layout(0),
+                                &current_indices,
+                                user_binding,
+                            )?,
+                        };
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: *label,
                             timestamp_writes: None,
@@ -2644,23 +2811,40 @@ impl WebGpuBackend {
                     GpuCommand::DispatchIndirect { buffer, offset, label } => {
                         let pipeline_handle =
                             current_pipeline.context("WebGPU: indirect dispatch without a pipeline")?;
-                        let (wgpu_pipeline, layout) = {
-                            let _tz = tracy_zone!("wgpu.dispatch_indirect.pipeline");
-                            self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?
+                        let prepared_dispatch = match prepared.as_deref_mut() {
+                            Some(cursor) => Some(cursor.take(WebGpuPreparedDispatchKind::Indirect)?),
+                            None => None,
                         };
-                        let device = self
-                            .compute_pipelines
-                            .get(&pipeline_handle)
-                            .context("WebGPU: invalid compute pipeline")?
-                            .device;
-                        let args = self.buffers.get(buffer).context("WebGPU: invalid indirect buffer")?;
-                        ensure_buffer_range(args, *offset, INDIRECT_DISPATCH_BYTES, "DispatchIndirect")?;
-                        anyhow::ensure!(
-                            *offset % 4 == 0,
-                            "WebGPU: DispatchIndirect offset {offset} must be 4-byte aligned"
-                        );
-                        let args_buffer = args.buffer.clone();
-                        let args_offset = args.offset + offset;
+                        let (wgpu_pipeline, layout, device) = match prepared_dispatch {
+                            Some(prepared) => {
+                                (prepared.pipeline.clone(), Arc::clone(&prepared.layout), prepared.device)
+                            }
+                            None => {
+                                let pipeline_and_layout = {
+                                    let _tz = tracy_zone!("wgpu.dispatch_indirect.pipeline");
+                                    self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?
+                                };
+                                let device = self
+                                    .compute_pipelines
+                                    .get(&pipeline_handle)
+                                    .context("WebGPU: invalid compute pipeline")?
+                                    .device;
+                                (pipeline_and_layout.0, Arc::new(pipeline_and_layout.1), device)
+                            }
+                        };
+                        let (args_buffer, args_offset) = match prepared_dispatch.and_then(|p| p.indirect_args.as_ref())
+                        {
+                            Some((buffer, offset)) => (buffer.clone(), *offset),
+                            None => {
+                                let args = self.buffers.get(buffer).context("WebGPU: invalid indirect buffer")?;
+                                ensure_buffer_range(args, *offset, INDIRECT_DISPATCH_BYTES, "DispatchIndirect")?;
+                                anyhow::ensure!(
+                                    *offset % 4 == 0,
+                                    "WebGPU: DispatchIndirect offset {offset} must be 4-byte aligned"
+                                );
+                                (args.buffer.clone(), args.offset + offset)
+                            }
+                        };
                         let user_binding = if layout.scalar_count > 0 {
                             let _tz = tracy_zone!("wgpu.dispatch_indirect.user_uniform");
                             require_user_scalars(&current_user, layout.scalar_count)?;
@@ -2681,15 +2865,18 @@ impl WebGpuBackend {
                         } else {
                             None
                         };
-                        let bind_group = {
-                            let _tz = tracy_zone!("wgpu.dispatch_indirect.bind_group");
-                            self.create_bind_group(
-                                device,
-                                &layout,
-                                || wgpu_pipeline.get_bind_group_layout(0),
-                                &current_indices,
-                                user_binding,
-                            )?
+                        let bind_group = match prepared_dispatch.and_then(|prepared| prepared.bind_group.as_ref()) {
+                            Some(bind_group) => bind_group.clone(),
+                            None => {
+                                let _tz = tracy_zone!("wgpu.dispatch_indirect.bind_group");
+                                self.create_bind_group(
+                                    device,
+                                    &layout,
+                                    || wgpu_pipeline.get_bind_group_layout(0),
+                                    &current_indices,
+                                    user_binding,
+                                )?
+                            }
                         };
                         {
                             let _tz = tracy_zone!("wgpu.dispatch_indirect.pass");
@@ -2779,6 +2966,10 @@ impl WebGpuBackend {
                         );
                         let n_scalars = layout.scalar_count as usize;
                         for i in 0..entry_count {
+                            let prepared_dispatch = match prepared.as_deref_mut() {
+                                Some(cursor) => Some(cursor.take(WebGpuPreparedDispatchKind::Batch)?),
+                                None => None,
+                            };
                             let base = i * DISPATCH_BATCH_STRIDE;
                             let push: PushLayout = *bytemuck::from_bytes(&arg_data[base..base + TOTAL_PUSH_BYTES]);
                             let wg_off = base + TOTAL_PUSH_BYTES;
@@ -2812,14 +3003,26 @@ impl WebGpuBackend {
                             } else {
                                 None
                             };
-                            let (wgpu_pipeline, layout) = self.wgpu_pipeline_for_dispatch(pipeline_handle, &indices)?;
-                            let bind_group = self.create_bind_group(
-                                device,
-                                &layout,
-                                || wgpu_pipeline.get_bind_group_layout(0),
-                                &indices,
-                                user_binding,
-                            )?;
+                            let (wgpu_pipeline, dispatch_layout, dispatch_device) = match prepared_dispatch {
+                                Some(prepared) => {
+                                    (prepared.pipeline.clone(), Arc::clone(&prepared.layout), prepared.device)
+                                }
+                                None => {
+                                    let (pipeline, layout) =
+                                        self.wgpu_pipeline_for_dispatch(pipeline_handle, &indices)?;
+                                    (pipeline, Arc::new(layout), device)
+                                }
+                            };
+                            let bind_group = match prepared_dispatch.and_then(|prepared| prepared.bind_group.as_ref()) {
+                                Some(bind_group) => bind_group.clone(),
+                                None => self.create_bind_group(
+                                    dispatch_device,
+                                    &dispatch_layout,
+                                    || wgpu_pipeline.get_bind_group_layout(0),
+                                    &indices,
+                                    user_binding,
+                                )?,
+                            };
                             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                                 label: *label,
                                 timestamp_writes: None,
@@ -2945,6 +3148,87 @@ impl WebGpuBackend {
         });
         pump_device(&device);
         Ok(value)
+    }
+
+    fn submit_standalone_prepared(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+        prepared: Option<&mut WebGpuPreparedCursor<'_>>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        if let Some(sync) = sync {
+            if !sync.cpu_waits.is_empty() || !sync.host_observed_waits.is_empty() {
+                let _tz = tracy_zone!("wgpu.submit_standalone.sync_wait");
+                let device = self.context_device(ctx);
+                for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
+                    self.device_wait_until(device, epoch.value)?;
+                }
+            }
+            for write in &sync.deferred_host_writes {
+                self.write_buffer(write.buffer, write.offset, &write.data)?;
+            }
+        }
+        let effective = commands_with_sync_prologue(commands, sync);
+        let _tz = tracy_zone!("wgpu.submit_standalone");
+        self.submit_commands(ctx, &effective, prepared)
+    }
+
+    fn submit_graph_prepared(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+        mut prepared: Option<&mut WebGpuPreparedCursor<'_>>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let _tz = tracy_zone!("wgpu.submit_graph");
+        let mut batch: Vec<GpuCommand> = Vec::new();
+        let mut last_tv = self.gpu_progress(ctx);
+        for cmd in commands {
+            match cmd {
+                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Render {
+                    target,
+                    color_load,
+                    commands: render_cmds,
+                } => {
+                    #[cfg(feature = "graphics")]
+                    {
+                        if !batch.is_empty() {
+                            {
+                                let _tz = tracy_zone!("wgpu.submit_graph.compute_batch");
+                                last_tv =
+                                    self.submit_standalone_prepared(ctx, &batch, sync, prepared.as_deref_mut())?;
+                            }
+                            {
+                                let _tz = tracy_zone!("wgpu.submit_graph.wait_until");
+                                self.wait_until(ctx, last_tv)?;
+                            }
+                            batch.clear();
+                        }
+                        {
+                            let _tz = tracy_zone!("wgpu.submit_graph.render");
+                            let device = self.context_device(ctx);
+                            self.render_to_target(device, *target, *color_load, render_cmds)?;
+                        }
+                        {
+                            let _tz = tracy_zone!("wgpu.submit_graph.render_signal");
+                            last_tv = self.submit_standalone_prepared(ctx, &[], sync, None)?;
+                        }
+                    }
+                    #[cfg(not(feature = "graphics"))]
+                    {
+                        let _ = (target, color_load, render_cmds);
+                        anyhow::bail!("render graph commands require the `graphics` feature");
+                    }
+                }
+            }
+        }
+        if !batch.is_empty() {
+            let _tz = tracy_zone!("wgpu.submit_graph.final_batch");
+            last_tv = self.submit_standalone_prepared(ctx, &batch, sync, prepared)?;
+        }
+        Ok(last_tv)
     }
 }
 
@@ -4757,53 +5041,7 @@ impl GpuBackend for WebGpuBackend {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let _tz = tracy_zone!("wgpu.submit_graph");
-        let mut batch: Vec<GpuCommand> = Vec::new();
-        let mut last_tv = self.gpu_progress(ctx);
-        for cmd in commands {
-            match cmd {
-                GraphCommand::Compute(c) => batch.push(c.clone()),
-                GraphCommand::Render {
-                    target,
-                    color_load,
-                    commands: render_cmds,
-                } => {
-                    #[cfg(feature = "graphics")]
-                    {
-                        if !batch.is_empty() {
-                            {
-                                let _tz = tracy_zone!("wgpu.submit_graph.compute_batch");
-                                last_tv = self.submit_standalone(ctx, &batch, sync)?;
-                            }
-                            {
-                                let _tz = tracy_zone!("wgpu.submit_graph.wait_until");
-                                self.wait_until(ctx, last_tv)?;
-                            }
-                            batch.clear();
-                        }
-                        {
-                            let _tz = tracy_zone!("wgpu.submit_graph.render");
-                            let device = self.context_device(ctx);
-                            self.render_to_target(device, *target, *color_load, render_cmds)?;
-                        }
-                        {
-                            let _tz = tracy_zone!("wgpu.submit_graph.render_signal");
-                            last_tv = self.submit_standalone(ctx, &[], sync)?;
-                        }
-                    }
-                    #[cfg(not(feature = "graphics"))]
-                    {
-                        let _ = (target, color_load, render_cmds);
-                        anyhow::bail!("render graph commands require the `graphics` feature");
-                    }
-                }
-            }
-        }
-        if !batch.is_empty() {
-            let _tz = tracy_zone!("wgpu.submit_graph.final_batch");
-            last_tv = self.submit_standalone(ctx, &batch, sync)?;
-        }
-        Ok(last_tv)
+        self.submit_graph_prepared(ctx, commands, sync, None)
     }
 
     fn submit_graph_and_retain(
@@ -4817,13 +5055,17 @@ impl GpuBackend for WebGpuBackend {
         if let Some(context) = self.contexts.get(&ctx) {
             context.retained_graphs.lock().unwrap().remove(&key);
         }
-        let tv = self.submit_graph(ctx, commands, sync)?;
+        let prepared_dispatches = self.prepare_retained_graph(commands)?;
+        let mut cursor = WebGpuPreparedCursor::new(&prepared_dispatches);
+        let tv = self.submit_graph_prepared(ctx, commands, sync, Some(&mut cursor))?;
+        cursor.finish()?;
         if let Some(context) = self.contexts.get(&ctx) {
             context.retained_graphs.lock().unwrap().insert(
                 key,
                 WebGpuRetainedGraph {
                     commands: Arc::from(commands),
                     used_slots: Self::collect_webgpu_slots_from_graph_commands(commands),
+                    prepared_dispatches,
                 },
             );
         }
@@ -4836,18 +5078,21 @@ impl GpuBackend for WebGpuBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let commands = self.contexts.get(&ctx).and_then(|context| {
+        let retained = self.contexts.get(&ctx).and_then(|context| {
             context
                 .retained_graphs
                 .lock()
                 .unwrap()
                 .get(&key)
-                .map(|graph| graph.commands.clone())
+                .map(|graph| (graph.commands.clone(), graph.prepared_dispatches.clone()))
         });
-        let Some(commands) = commands else {
+        let Some((commands, prepared_dispatches)) = retained else {
             return Ok(None);
         };
-        Ok(Some(self.submit_graph(ctx, &commands, sync)?))
+        let mut cursor = WebGpuPreparedCursor::new(&prepared_dispatches);
+        let tv = self.submit_graph_prepared(ctx, &commands, sync, Some(&mut cursor))?;
+        cursor.finish()?;
+        Ok(Some(tv))
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
@@ -4862,25 +5107,7 @@ impl GpuBackend for WebGpuBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        if let Some(sync) = sync {
-            // `SubmitSync::waits` are GPU queue-order dependencies. WebGPU has one
-            // `wgpu::Queue` per device, so prior submits are already ordered — a CPU
-            // `device_wait_until` here was turning present easement / upload→worker
-            // queue waits into host stalls. Only true host waits remain.
-            if !sync.cpu_waits.is_empty() || !sync.host_observed_waits.is_empty() {
-                let _tz = tracy_zone!("wgpu.submit_standalone.sync_wait");
-                let device = self.context_device(ctx);
-                for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
-                    self.device_wait_until(device, epoch.value)?;
-                }
-            }
-            for write in &sync.deferred_host_writes {
-                self.write_buffer(write.buffer, write.offset, &write.data)?;
-            }
-        }
-        let effective = commands_with_sync_prologue(commands, sync);
-        let _tz = tracy_zone!("wgpu.submit_standalone");
-        self.submit_commands(ctx, &effective)
+        self.submit_standalone_prepared(ctx, commands, sync, None)
     }
 
     #[cfg(feature = "graphics")]
@@ -5340,11 +5567,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         )?;
         let _pipeline = backend.create_compute_pipeline(device, shader, Some("cache"))?;
         backend.destroy_device(device);
-        assert!(
-            path.exists(),
-            "expected wgpu pipeline cache at {}",
-            path.display()
-        );
+        assert!(path.exists(), "expected wgpu pipeline cache at {}", path.display());
         Ok(())
     }
 
