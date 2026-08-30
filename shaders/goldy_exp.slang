@@ -15,7 +15,10 @@
 //       data[id.x] = data[id.x] + cfg.base;
 //   }
 //
-// Works on SPIRV, DX12, and Metal (Argument Buffers Tier 2 required).
+// Works on SPIRV, DX12, Metal, CUDA, and WebGPU.
+//
+// `Interlocked<T>` is a 4-byte atomic cell (`uint`/`int` + HLSL Interlocked*
+// on native targets; `Atomic<T>` on WGSL). Use InterlockedLoad/Store/Add/Or/Xor/Min/Max/Exchange.
 //
 
 module goldy_exp;
@@ -26,6 +29,7 @@ __include "goldy_exp/math";
 __include "goldy_exp/color";
 __include "goldy_exp/vertex";
 __include "goldy_exp/types";
+__include "goldy_exp/interlocked";
 __include "goldy_exp/primitives";
 __include "goldy_exp/descriptor_handle";
 __include "goldy_exp/bindless_resources";

@@ -237,10 +237,13 @@ impl ShaderLibrary {
                     "goldy_exp/collectives",
                     include_str!("../shaders/goldy_exp/collectives.slang"),
                 ),
-                ("goldy_exp/atomics", include_str!("../shaders/goldy_exp/atomics.slang")),
                 ("goldy_exp/color", include_str!("../shaders/goldy_exp/color.slang")),
                 ("goldy_exp/vertex", include_str!("../shaders/goldy_exp/vertex.slang")),
                 ("goldy_exp/types", include_str!("../shaders/goldy_exp/types.slang")),
+                (
+                    "goldy_exp/interlocked",
+                    include_str!("../shaders/goldy_exp/interlocked.slang"),
+                ),
                 (
                     "goldy_exp/primitives",
                     include_str!("../shaders/goldy_exp/primitives.slang"),
@@ -313,10 +316,10 @@ mod tests {
         assert!(lib.has_module("goldy_exp"));
         assert!(lib.has_module("goldy_exp/math"));
         assert!(lib.has_module("goldy_exp/algebra"));
-        assert!(lib.has_module("goldy_exp/atomics"));
         assert!(lib.has_module("goldy_exp/color"));
         assert!(lib.has_module("goldy_exp/vertex"));
         assert!(lib.has_module("goldy_exp/types"));
+        assert!(lib.has_module("goldy_exp/interlocked"));
         assert!(lib.has_module("goldy_exp/primitives"));
         assert!(lib.has_module("goldy_exp/bindless"));
         assert!(lib.has_module("goldy_exp/descriptor_handle"));

@@ -1312,9 +1312,9 @@ impl WebGpuBackend {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        let layout = crate::slang::virtual_main::extract_webgpu_compute_layout(&shader.source)
+        let layout = crate::slang::virtual_main::extract_webgpu_compute_layout(&shader.source, &defines)
             .map_err(|error| anyhow::anyhow!("WebGPU shader layout failed: {error}"))?;
-        let webgpu_source = crate::slang::virtual_main::transform_virtual_main_webgpu_compute(&shader.source)
+        let webgpu_source = crate::slang::virtual_main::transform_virtual_main_webgpu_compute(&shader.source, &defines)
             .map_err(|error| anyhow::anyhow!("WebGPU shader lowering failed: {error}"))?;
         let compiled = compiler.compile_bindless_with_reflection_and_defines(
             &webgpu_source,
@@ -1420,11 +1420,12 @@ impl WebGpuBackend {
         shader_source: &str,
         layout: &WgpuComputeLayout,
         indices: &[u32],
+        defines: &[(&str, &str)],
     ) -> Result<Vec<CudaStorageTextureSpec>> {
         let Some(kinds) = layout.resources.as_ref() else {
             return Ok(Vec::new());
         };
-        let texels = crate::slang::virtual_main::webgpu_direct_spatial_texels(shader_source)
+        let texels = crate::slang::virtual_main::webgpu_direct_spatial_texels(shader_source, defines)
             .map_err(|error| anyhow::anyhow!("WebGPU: {error}"))?;
         let mut texel_i = 0usize;
         let mut specs = Vec::new();
@@ -1531,7 +1532,12 @@ impl WebGpuBackend {
                 pipeline.pipeline.clone(),
             )
         };
-        let specs = self.storage_texture_specs(&shader.source, &layout, indices)?;
+        let defines: Vec<(&str, &str)> = shader
+            .defines
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let specs = self.storage_texture_specs(&shader.source, &layout, indices, &defines)?;
         let mask = Self::spec_mask(&specs);
         if mask == 0 {
             return Ok((identity, layout));
