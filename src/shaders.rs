@@ -324,7 +324,7 @@ mod tests {
     /// Test that goldy_exp math and primitives utilities compile for all targets.
     ///
     /// Covers: `positive_mod` (float and float2), `modelview_right`,
-    /// `billboard_cylindrical_offset`, `erf7`, `signed_atomic_min` / `signed_atomic_max`.
+    /// `billboard_cylindrical_offset`, `erf7`.
     #[test]
     fn test_goldy_exp_math_compiles() {
         use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
@@ -390,6 +390,80 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    /// Portable `Interlocked<T>` cells: native Interlocked* on a scalar field,
+    /// WGSL `Atomic<T>` methods. Covers storage + groupshared.
+    #[test]
+    fn test_goldy_exp_interlocked_compiles() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+
+        let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shader_path = manifest_dir.join("shaders");
+        let shader_path_str = shader_path.to_string_lossy();
+
+        let test_shader = std::fs::read_to_string(shader_path.join("test_goldy_exp_interlocked.slang"))
+            .expect("Failed to read test_goldy_exp_interlocked.slang");
+
+        let entry = &[("cs_main", SlangStage::Compute)];
+
+        let compile = |target: ShaderTarget| {
+            let result = compiler.compile_bindless_with_reflection_and_defines(
+                &test_shader,
+                target,
+                entry,
+                &[&shader_path_str],
+                &[],
+                &[],
+                OptimizationLevel::Default,
+            );
+            assert!(
+                result.is_ok(),
+                "test_goldy_exp_interlocked failed to compile for {target:?}: {:?}",
+                result.err()
+            );
+        };
+
+        compile(ShaderTarget::Spirv);
+        compile(ShaderTarget::Metal);
+        #[cfg(windows)]
+        compile(ShaderTarget::Dxil);
+
+        let wgsl_source = crate::slang::virtual_main::transform_virtual_main_webgpu_compute(&test_shader, &[])
+            .expect("WebGPU virtual-main lowering");
+        let wgsl = compiler.compile_bindless_with_reflection_and_defines(
+            &wgsl_source,
+            ShaderTarget::Wgsl,
+            entry,
+            &[&shader_path_str],
+            &[],
+            &[],
+            OptimizationLevel::Default,
+        );
+        assert!(
+            wgsl.is_ok(),
+            "test_goldy_exp_interlocked failed to compile for Wgsl: {:?}",
+            wgsl.err()
+        );
+
+        let cuda_source = crate::slang::virtual_main::transform_virtual_main_cuda_compute(&test_shader, &[])
+            .expect("CUDA virtual-main lowering");
+        let cuda = compiler.compile_bindless_with_reflection_and_defines(
+            &cuda_source,
+            ShaderTarget::CudaSource,
+            entry,
+            &[&shader_path_str],
+            &[],
+            &[],
+            OptimizationLevel::Default,
+        );
+        assert!(
+            cuda.is_ok(),
+            "test_goldy_exp_interlocked failed to compile for CudaSource: {:?}",
+            cuda.err()
+        );
     }
 
     /// Test that IMonoid interface and generic groupshared T[N] function parameters

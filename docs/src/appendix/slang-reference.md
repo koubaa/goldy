@@ -278,6 +278,7 @@ are also push-constant bindings — no wrapper struct needed.
 | `goldy_exp/types.slang` | `Particle2D`, `Particle3D`, `FrameUniforms`, `Transform2D`, `DispatchShape` |
 | `goldy_exp/vertex.slang` | `FullscreenVarying`, `ColoredVertex`, `ColoredVarying`, `vs_fullscreen_triangle()` |
 | `goldy_exp/access.slang` | Resource type aliases and system-value types (documented above) |
+| `goldy_exp/interlocked.slang` | `Interlocked<T>` cells; `InterlockedLoad`/`Store`/`Add`/`Or`/`Xor`/`Min`/`Max`/`Exchange` |
 
 ## Further Reading
 

@@ -617,7 +617,10 @@ impl WgpuComputeLayout {
 }
 
 /// Reflect the WebGPU compute binding layout for `[goldy_compute]` source.
-pub fn extract_webgpu_compute_layout(source: &str) -> Result<WgpuComputeLayout, String> {
+///
+/// `#ifdef` parameter blocks are resolved against `defines` (must match the
+/// defines passed to Slang for this shader variant, e.g. `msaa` / `msaa8`).
+pub fn extract_webgpu_compute_layout(source: &str, defines: &[(&str, &str)]) -> Result<WgpuComputeLayout, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
         return Ok(WgpuComputeLayout::inferred_storage());
@@ -652,13 +655,10 @@ pub fn extract_webgpu_compute_layout(source: &str) -> Result<WgpuComputeLayout, 
         saw_compute = true;
         resources.clear();
         scalar_count = 0;
-        for item in &entry.params {
-            let ParamItem::Single(param) = item else {
-                return Err("conditional parameters are not supported by the WebGPU prototype".to_string());
-            };
+        for param in resolve_cuda_params(&entry.params, defines) {
             match &param.kind {
                 ParamKind::Resource | ParamKind::Broadcast => {
-                    resources.push(resource_kind(param)?);
+                    resources.push(resource_kind(&param)?);
                 }
                 ParamKind::Scalar => {
                     hlsl_scalar_from_uint_word(&param.ty, "_")?;
@@ -745,7 +745,7 @@ pub fn extract_webgpu_graphics_layout(source: &str) -> Result<WgpuComputeLayout,
 }
 
 /// Logical `DirectSpatial<T>` element types in author order for WebGPU storage specialization.
-pub fn webgpu_direct_spatial_texels(source: &str) -> Result<Vec<String>, String> {
+pub fn webgpu_direct_spatial_texels(source: &str, defines: &[(&str, &str)]) -> Result<Vec<String>, String> {
     let entries = find_all_entries(source);
     let mut texels = Vec::new();
     for entry in &entries {
@@ -753,10 +753,7 @@ pub fn webgpu_direct_spatial_texels(source: &str) -> Result<Vec<String>, String>
             continue;
         }
         texels.clear();
-        for item in &entry.params {
-            let ParamItem::Single(param) = item else {
-                continue;
-            };
+        for param in resolve_cuda_params(&entry.params, defines) {
             let ty = param.ty.trim();
             if ty.starts_with("DirectSpatial<") {
                 let logical = cuda_texture_element(ty, "DirectSpatial<")?;
@@ -774,7 +771,7 @@ pub fn webgpu_direct_spatial_texels(source: &str) -> Result<Vec<String>, String>
 /// renamed user function. Single-word scalars (`uint`/`float`/`int`/`bool`) are
 /// packed into a trailing `ConstantBuffer` of eight `uint` words, filled from
 /// `BindResourcesRaw.user`.
-pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, String> {
+pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &str)]) -> Result<String, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
         return Ok(source.to_string());
@@ -816,14 +813,11 @@ pub fn transform_virtual_main_webgpu_compute(source: &str) -> Result<String, Str
         let mut call_args = Vec::new();
         let mut resource_decls = String::new();
 
-        for item in &entry.params {
-            let ParamItem::Single(param) = item else {
-                return Err("conditional parameters are not supported by the WebGPU prototype".to_string());
-            };
+        for param in resolve_cuda_params(&entry.params, defines) {
             match &param.kind {
                 ParamKind::Resource | ParamKind::Broadcast => {
                     let global = format!("_goldy_wgpu_binding_{binding}");
-                    resource_decls.push_str(&resource_decl(param, binding, &global)?);
+                    resource_decls.push_str(&resource_decl(&param, binding, &global)?);
                     resource_decls.push('\n');
                     if matches!(param.kind, ParamKind::Broadcast) {
                         body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, global));
@@ -3789,7 +3783,7 @@ void cs_main(Scattered<uint> values, uint base, ThreadId id) {
     values[id.x] = base;
 }
 "#;
-        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        let result = transform_virtual_main_webgpu_compute(src, &[]).unwrap();
         assert!(
             result.contains("Scattered<uint> _goldy_wgpu_binding_0 : register(u0, space0);"),
             "{result}"
@@ -3804,7 +3798,7 @@ void cs_main(Scattered<uint> values, uint base, ThreadId id) {
             "{result}"
         );
         assert_eq!(
-            extract_webgpu_compute_layout(src).unwrap(),
+            extract_webgpu_compute_layout(src, &[]).unwrap(),
             WgpuComputeLayout {
                 resources: Some(vec![WgpuComputeResourceKind::StorageReadWrite]),
                 scalar_count: 1,
@@ -3822,7 +3816,7 @@ void cs_main(Scattered<float> values, float scale, ThreadId id) {
     values[id.x] = values[id.x] * scale;
 }
 "#;
-        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        let result = transform_virtual_main_webgpu_compute(src, &[]).unwrap();
         assert!(
             result.contains("float scale = asfloat(_goldy_wgpu_user._uw0);"),
             "{result}"
@@ -3841,7 +3835,7 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
     values[id.x] = values[id.x] * cfg.mul;
 }
 "#;
-        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        let result = transform_virtual_main_webgpu_compute(src, &[]).unwrap();
         assert!(
             result.contains("ConstantBuffer<Params> _goldy_wgpu_binding_0 : register(b0, space0);"),
             "{result}"
@@ -3852,7 +3846,7 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
             "{result}"
         );
         assert_eq!(
-            extract_webgpu_compute_layout(src).unwrap(),
+            extract_webgpu_compute_layout(src, &[]).unwrap(),
             WgpuComputeLayout {
                 resources: Some(vec![
                     WgpuComputeResourceKind::Uniform,
@@ -3874,7 +3868,7 @@ void cs_main(DirectSpatial<float4> dst, Interpolated<float4> src, Filter smp, Th
 }
 "#;
         assert_eq!(
-            extract_webgpu_compute_layout(src).unwrap(),
+            extract_webgpu_compute_layout(src, &[]).unwrap(),
             WgpuComputeLayout {
                 resources: Some(vec![
                     WgpuComputeResourceKind::StorageTexture,
@@ -3884,7 +3878,7 @@ void cs_main(DirectSpatial<float4> dst, Interpolated<float4> src, Filter smp, Th
                 scalar_count: 0,
             }
         );
-        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        let result = transform_virtual_main_webgpu_compute(src, &[]).unwrap();
         assert!(result.contains("RWTexture2D<float4>"), "{result}");
         assert!(result.contains("register(t1, space0)"), "{result}");
         assert!(result.contains("register(s2, space0)"), "{result}");
@@ -3898,6 +3892,7 @@ void cs_main(DirectSpatial<float4> dst, Interpolated<float4> src, Filter smp, Th
 [numthreads(1, 1, 1)]
 void cs_main(Scattered<uint> values, uint3 base, ThreadId id) {}
 "#,
+            &[],
         )
         .unwrap_err();
         assert!(err.contains("single-word"), "{err}");
@@ -3920,13 +3915,13 @@ void cs_main(Scattered<uint> values, ThreadId id) {
 }
 "#;
         assert_eq!(
-            extract_webgpu_compute_layout(src).unwrap(),
+            extract_webgpu_compute_layout(src, &[]).unwrap(),
             WgpuComputeLayout {
                 resources: Some(vec![WgpuComputeResourceKind::StorageReadWrite]),
                 scalar_count: 0,
             }
         );
-        let result = transform_virtual_main_webgpu_compute(src).unwrap();
+        let result = transform_virtual_main_webgpu_compute(src, &[]).unwrap();
         assert!(result.contains("_goldy_user_cs_main"), "{result}");
         assert!(!result.contains("_goldy_user_vs_main"), "{result}");
     }
@@ -4086,7 +4081,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     output[id.x] = input[id.x];
 }
 "#;
-        let layout = extract_webgpu_compute_layout(src).unwrap();
+        let layout = extract_webgpu_compute_layout(src, &[]).unwrap();
         assert_eq!(
             layout.resources,
             Some(vec![
