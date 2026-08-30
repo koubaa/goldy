@@ -553,7 +553,7 @@ pub fn transform_virtual_main(source: &str) -> String {
 }
 
 /// How a `[goldy_compute]` resource parameter is bound on the WebGPU prototype.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WgpuComputeResourceKind {
     /// `Scattered` / `ByteAddress` → storage buffer (read-write).
     StorageReadWrite,
@@ -587,7 +587,7 @@ impl WgpuComputeResourceKind {
 /// or unannotated Slang). The backend then treats every registry key as a storage
 /// buffer. `scalar_count` is the number of `with_param` words packed into the
 /// trailing uniform cbuffer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WgpuComputeLayout {
     pub resources: Option<Vec<WgpuComputeResourceKind>>,
     pub scalar_count: u32,

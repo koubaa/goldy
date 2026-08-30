@@ -38,6 +38,7 @@ use anyhow::{Context as _, Result};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -673,6 +674,13 @@ struct WebGpuDevice {
     /// In-process naga modules keyed by WGSL content hash. Shared across pipelines
     /// (identity + packed variants, graphics VS/FS, present blit formats).
     shader_modules: HashMap<u64, wgpu::ShaderModule>,
+    /// Vulkan-only (`Features::PIPELINE_CACHE`). `None` on DX12/Metal wgpu.
+    pipeline_cache: Option<wgpu::PipelineCache>,
+    pipeline_cache_path: Option<PathBuf>,
+    /// Packed dispatch/draw bind groups keyed by layout + registry resources.
+    bind_groups: HashMap<BindGroupCacheKey, wgpu::BindGroup>,
+    /// Bumped when the device user-uniform buffer is replaced.
+    user_uniform_gen: u64,
     #[cfg(feature = "graphics")]
     blit: HashMap<wgpu::TextureFormat, WebGpuBlitPipeline>,
 }
@@ -812,6 +820,77 @@ struct WebGpuBuffer {
     slot: Option<u32>,
     readback: bool,
     uniform: bool,
+    /// Bumped on [`GpuBackend::resize_buffer`] so bind-group cache keys miss.
+    bind_epoch: u64,
+}
+
+const BIND_GROUP_CACHE_CAP: usize = 512;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum BindGroupResourceKey {
+    Buffer {
+        handle: BufferHandle,
+        offset: u64,
+        size: u64,
+        epoch: u64,
+    },
+    Texture {
+        handle: TextureHandle,
+        storage: bool,
+    },
+    Sampler {
+        handle: SamplerHandle,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct BindGroupCacheKey {
+    layout: WgpuComputeLayout,
+    indices: Box<[u32]>,
+    resources: Box<[BindGroupResourceKey]>,
+    user_uniform_gen: u64,
+    user_uniform_offset: Option<u64>,
+}
+
+fn load_wgpu_pipeline_cache(
+    device: &wgpu::Device,
+    adapter: &wgpu::Adapter,
+) -> (Option<wgpu::PipelineCache>, Option<PathBuf>) {
+    if !device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+        return (None, None);
+    }
+    let info = adapter.get_info();
+    let Some(filename) = wgpu::util::pipeline_cache_key(&info) else {
+        return (None, None);
+    };
+    let path = dirs::cache_dir().map(|root| root.join("goldy").join(filename));
+    let data = path.as_ref().and_then(|p| std::fs::read(p).ok());
+    // Safety: `data` is either empty or bytes previously produced by `PipelineCache::get_data`
+    // for this adapter class (`pipeline_cache_key`). `fallback: true` ignores a mismatch.
+    let cache = unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("goldy-webgpu-pipeline-cache"),
+            data: data.as_deref(),
+            fallback: true,
+        })
+    };
+    (Some(cache), path)
+}
+
+fn write_wgpu_pipeline_cache(path: &Path, cache: &wgpu::PipelineCache) {
+    let Some(data) = cache.get_data() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("new");
+    if std::fs::write(&tmp, &data).is_err() {
+        return;
+    }
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 struct WebGpuTexture {
@@ -1261,7 +1340,7 @@ impl WebGpuBackend {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
         let created = WebGpuBlitPipeline { pipeline, layout };
         self.devices
@@ -1443,6 +1522,7 @@ impl WebGpuBackend {
                 slot: Some(slot),
                 readback: false,
                 uniform,
+                bind_epoch: 0,
             },
         );
         Ok(handle)
@@ -1703,7 +1783,7 @@ impl WebGpuBackend {
                     module,
                     entry_point: Some("cs_main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
+                    cache: gpu.pipeline_cache.as_ref(),
                 })
             },
         )
@@ -1835,14 +1915,137 @@ impl WebGpuBackend {
             .with_context(|| format!("WebGPU: registry key {index} references a destroyed sampler"))
     }
 
-    fn create_bind_group(
+    fn bind_group_cache_key(
         &self,
+        device: DeviceHandle,
+        layout: &WgpuComputeLayout,
+        indices: &[u32],
+        user_uniform: Option<(&wgpu::Buffer, u64)>,
+    ) -> Result<BindGroupCacheKey> {
+        let mut resources = Vec::with_capacity(indices.len());
+        match &layout.resources {
+            None => {
+                for index in indices.iter().copied() {
+                    resources.push(self.buffer_resource_key(index)?);
+                }
+            }
+            Some(kinds) => {
+                anyhow::ensure!(
+                    indices.len() == kinds.len(),
+                    "WebGPU: dispatch bound {} resources, shader expects {}",
+                    indices.len(),
+                    kinds.len()
+                );
+                for (kind, index) in kinds.iter().copied().zip(indices.iter().copied()) {
+                    match kind {
+                        WgpuComputeResourceKind::StorageReadWrite
+                        | WgpuComputeResourceKind::StorageRead
+                        | WgpuComputeResourceKind::Uniform => {
+                            resources.push(self.buffer_resource_key(index)?);
+                        }
+                        WgpuComputeResourceKind::SampledTexture => {
+                            let handle = *self
+                                .texture_slots
+                                .get(&index)
+                                .with_context(|| format!("WebGPU: unknown texture registry key {index}"))?;
+                            resources.push(BindGroupResourceKey::Texture {
+                                handle,
+                                storage: false,
+                            });
+                        }
+                        WgpuComputeResourceKind::StorageTexture => {
+                            let handle = *self
+                                .texture_slots
+                                .get(&index)
+                                .with_context(|| format!("WebGPU: unknown texture registry key {index}"))?;
+                            resources.push(BindGroupResourceKey::Texture {
+                                handle,
+                                storage: true,
+                            });
+                        }
+                        WgpuComputeResourceKind::Sampler => {
+                            let handle = *self
+                                .sampler_slots
+                                .get(&index)
+                                .with_context(|| format!("WebGPU: unknown sampler registry key {index}"))?;
+                            resources.push(BindGroupResourceKey::Sampler { handle });
+                        }
+                    }
+                }
+            }
+        }
+        let gpu = self.device(device)?;
+        Ok(BindGroupCacheKey {
+            layout: layout.clone(),
+            indices: indices.into(),
+            resources: resources.into(),
+            user_uniform_gen: gpu.user_uniform_gen,
+            user_uniform_offset: user_uniform.map(|(_, offset)| offset),
+        })
+    }
+
+    fn buffer_resource_key(&self, index: u32) -> Result<BindGroupResourceKey> {
+        let handle = *self
+            .buffer_slots
+            .get(&index)
+            .with_context(|| format!("WebGPU: unknown buffer registry key {index}"))?;
+        let buffer = self
+            .buffers
+            .get(&handle)
+            .with_context(|| format!("WebGPU: registry key {index} references a destroyed buffer"))?;
+        Ok(BindGroupResourceKey::Buffer {
+            handle,
+            offset: buffer.offset,
+            size: buffer.size,
+            epoch: buffer.bind_epoch,
+        })
+    }
+
+    fn invalidate_bind_groups_buffer(&mut self, device: DeviceHandle, handle: BufferHandle) {
+        if let Some(gpu) = self.devices.get_mut(&device) {
+            gpu.bind_groups.retain(|key, _| {
+                !key.resources.iter().any(|resource| {
+                    matches!(resource, BindGroupResourceKey::Buffer { handle: h, .. } if *h == handle)
+                })
+            });
+        }
+    }
+
+    fn invalidate_bind_groups_texture(&mut self, device: DeviceHandle, handle: TextureHandle) {
+        if let Some(gpu) = self.devices.get_mut(&device) {
+            gpu.bind_groups.retain(|key, _| {
+                !key.resources.iter().any(|resource| {
+                    matches!(resource, BindGroupResourceKey::Texture { handle: h, .. } if *h == handle)
+                })
+            });
+        }
+    }
+
+    fn invalidate_bind_groups_sampler(&mut self, device: DeviceHandle, handle: SamplerHandle) {
+        if let Some(gpu) = self.devices.get_mut(&device) {
+            gpu.bind_groups.retain(|key, _| {
+                !key.resources
+                    .iter()
+                    .any(|resource| matches!(resource, BindGroupResourceKey::Sampler { handle: h } if *h == handle))
+            });
+        }
+    }
+
+    fn create_bind_group(
+        &mut self,
         device: DeviceHandle,
         layout: &WgpuComputeLayout,
         bind_layout: impl FnOnce() -> wgpu::BindGroupLayout,
         indices: &[u32],
         user_uniform: Option<(&wgpu::Buffer, u64)>,
     ) -> Result<Option<wgpu::BindGroup>> {
+        if indices.is_empty() && layout.scalar_count == 0 {
+            return Ok(None);
+        }
+        let key = self.bind_group_cache_key(device, layout, indices, user_uniform)?;
+        if let Some(cached) = self.device(device)?.bind_groups.get(&key) {
+            return Ok(Some(cached.clone()));
+        }
         let mut entries = Vec::new();
         match &layout.resources {
             None => {
@@ -1940,6 +2143,14 @@ impl WebGpuBackend {
                 })
             },
         )?;
+        let gpu = self
+            .devices
+            .get_mut(&device)
+            .context("WebGPU: invalid device handle")?;
+        if gpu.bind_groups.len() >= BIND_GROUP_CACHE_CAP {
+            gpu.bind_groups.clear();
+        }
+        gpu.bind_groups.insert(key, bind_group.clone());
         Ok(Some(bind_group))
     }
 
@@ -2225,6 +2436,8 @@ impl WebGpuBackend {
             mapped_at_creation: false,
         });
         let gpu = self.devices.get_mut(&device).context("WebGPU: invalid device handle")?;
+        gpu.user_uniform_gen = gpu.user_uniform_gen.wrapping_add(1);
+        gpu.bind_groups.retain(|key, _| key.user_uniform_offset.is_none());
         gpu.user_uniform = Some(buffer);
         gpu.user_uniform_capacity = size;
         Ok(())
@@ -3163,7 +3376,8 @@ impl GpuBackend for WebGpuBackend {
         let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgpu::Features::FLOAT32_FILTERABLE
             | wgpu::Features::BGRA8UNORM_STORAGE
-            | wgpu::Features::VERTEX_WRITABLE_STORAGE;
+            | wgpu::Features::VERTEX_WRITABLE_STORAGE
+            | wgpu::Features::PIPELINE_CACHE;
         let required_features = adapter.features() & wanted;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("goldy-webgpu-device"),
@@ -3178,6 +3392,7 @@ impl GpuBackend for WebGpuBackend {
         device.on_uncaptured_error(Arc::new(|error| {
             eprintln!("WebGPU uncaptured error: {error}");
         }));
+        let (pipeline_cache, pipeline_cache_path) = load_wgpu_pipeline_cache(&device, adapter);
         let uniform_offset_align = device.limits().min_uniform_buffer_offset_alignment.max(16) as u64;
         let storage_offset_align = device.limits().min_storage_buffer_offset_alignment.max(4) as u64;
         let handle = self.next_device;
@@ -3197,6 +3412,10 @@ impl GpuBackend for WebGpuBackend {
                 storage_offset_align,
                 adapter_id,
                 shader_modules: HashMap::new(),
+                pipeline_cache,
+                pipeline_cache_path,
+                bind_groups: HashMap::new(),
+                user_uniform_gen: 0,
                 #[cfg(feature = "graphics")]
                 blit: HashMap::new(),
             },
@@ -3218,6 +3437,9 @@ impl GpuBackend for WebGpuBackend {
             }
         }
         if let Some(gpu) = self.devices.remove(&device) {
+            if let (Some(cache), Some(path)) = (gpu.pipeline_cache.as_ref(), gpu.pipeline_cache_path.as_ref()) {
+                write_wgpu_pipeline_cache(path, cache);
+            }
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         }
         self.contexts.retain(|_, context| context.device != device);
@@ -3321,9 +3543,10 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn destroy_buffer(&mut self, buffer: BufferHandle) {
-        if let Some(buffer) = self.buffers.remove(&buffer) {
-            if let Some(slot) = buffer.slot {
-                self.evict_retained_graphs_using_slots(buffer.device, &[slot]);
+        if let Some(resource) = self.buffers.remove(&buffer) {
+            self.invalidate_bind_groups_buffer(resource.device, buffer);
+            if let Some(slot) = resource.slot {
+                self.evict_retained_graphs_using_slots(resource.device, &[slot]);
                 self.buffer_slots.remove(&slot);
                 self.recycle_registry_slot(slot);
             }
@@ -3366,6 +3589,7 @@ impl GpuBackend for WebGpuBackend {
                 slot: None,
                 readback: true,
                 uniform: false,
+                bind_epoch: 0,
             },
         );
         Ok(handle)
@@ -3536,6 +3760,7 @@ impl GpuBackend for WebGpuBackend {
                 slot: Some(slot),
                 readback: false,
                 uniform: parent.uniform,
+                bind_epoch: parent.bind_epoch,
             },
         );
         Ok(handle)
@@ -3590,6 +3815,8 @@ impl GpuBackend for WebGpuBackend {
         target.offset = 0;
         target.size = new_size;
         target.capacity = capacity;
+        target.bind_epoch = target.bind_epoch.wrapping_add(1);
+        self.invalidate_bind_groups_buffer(device, buffer);
         Ok(())
     }
 
@@ -3793,7 +4020,7 @@ impl GpuBackend for WebGpuBackend {
                         })],
                     }),
                     multiview_mask: None,
-                    cache: None,
+                    cache: gpu.pipeline_cache.as_ref(),
                 })
             },
         )?;
@@ -4214,6 +4441,7 @@ impl GpuBackend for WebGpuBackend {
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
         if let Some(resource) = self.textures.remove(&texture) {
+            self.invalidate_bind_groups_texture(resource.device, texture);
             let mut slots = Vec::new();
             if let Some(slot) = resource.storage_slot {
                 slots.push(slot);
@@ -4265,6 +4493,7 @@ impl GpuBackend for WebGpuBackend {
 
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         if let Some(resource) = self.samplers.remove(&sampler) {
+            self.invalidate_bind_groups_sampler(resource.device, sampler);
             self.evict_retained_graphs_using_slots(resource.device, &[resource.slot]);
             self.sampler_slots.remove(&resource.slot);
             self.recycle_registry_slot(resource.slot);
@@ -5007,6 +5236,104 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         let mut bytes = [0u8; 16];
         backend.read_readback_buffer(readback, &mut bytes)?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn bind_group_cache_hits_second_identical_dispatch() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU bind-group cache test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("double"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let commands = [
+            GpuCommand::SetPipeline(pipeline),
+            GpuCommand::BindResourcesRaw {
+                indices: vec![slot],
+                user: vec![],
+                frame_table_base: 0,
+            },
+            GpuCommand::Dispatch {
+                label: Some("double"),
+                workgroups_x: 4,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            },
+        ];
+        let first = backend.submit_standalone(ctx, &commands, None)?;
+        backend.wait_until(ctx, first)?;
+        assert_eq!(
+            backend.device(device)?.bind_groups.len(),
+            1,
+            "first dispatch should insert one bind group"
+        );
+        let second = backend.submit_standalone(ctx, &commands, None)?;
+        backend.wait_until(ctx, second)?;
+        assert_eq!(
+            backend.device(device)?.bind_groups.len(),
+            1,
+            "identical bindings should reuse the cached bind group"
+        );
+        backend.destroy_buffer(buffer);
+        assert!(
+            backend.device(device)?.bind_groups.is_empty(),
+            "destroying a bound buffer must drop cached bind groups"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wgpu_pipeline_cache_file_written_when_supported() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU pipeline cache test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let Some(path) = backend.device(device)?.pipeline_cache_path.clone() else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            backend.device(device)?.pipeline_cache.is_some(),
+            "pipeline cache path without a live PipelineCache"
+        );
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let _pipeline = backend.create_compute_pipeline(device, shader, Some("cache"))?;
+        backend.destroy_device(device);
+        assert!(
+            path.exists(),
+            "expected wgpu pipeline cache at {}",
+            path.display()
+        );
         Ok(())
     }
 
