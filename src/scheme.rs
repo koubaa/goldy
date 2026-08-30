@@ -720,8 +720,9 @@ pub struct Lease<T> {
 /// Outcome counters for [`Scheme::submit`] (retention-recovery assertions and telemetry).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReplayStats {
-    /// Submissions that skipped re-recording because the backend re-executed a cached command
-    /// list without re-recording (Vulkan / DX12 only; absent when the `metal` feature is enabled).
+    /// Submissions that skipped IR re-recording because the backend reused a retained graph
+    /// (native CB replay on Vulkan/DX12, soft re-record on WebGPU). Absent when the `metal`
+    /// feature is enabled so macOS CI can compile this struct without the field.
     #[cfg(not(feature = "metal"))]
     pub resubmit_hits: u64,
     /// Submissions that recorded (first submit, post-mutation submits, retention misses).

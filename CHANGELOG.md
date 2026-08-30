@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- WebGPU bind-group cache keys include the exclusive pipeline identity so
+  structurally identical layouts from different PSOs are not reused.
+- Tight (`src_row_pitch == 0`) `copy_buffer_to_texture_parcel` resubmits are
+  not asserted as retention hits on WebGPU; they are standalone partitions.
+
 - Game of Life render shader no longer uses `fwidth` (Slang Metal fragment target
   rejects derivative builtins). Restores screenshot tests and the Python headless example.
 

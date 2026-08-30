@@ -3435,10 +3435,10 @@ mod imp {
             "copy_buffer_to_texture_parcel is identity; should record exactly once"
         );
         // Tight (pitch=0) uploads are standalone (`waves_can_retain` → false), so CUDA
-        // never produces a retention hit. Vulkan/DX12 historically counted a hit here;
-        // keep that assert off Metal (field absent) and CUDA (runtime).
+        // and WebGPU never produce a retention hit. Vulkan/DX12 historically counted a
+        // hit here; keep that assert off Metal (field absent), CUDA, and WebGPU.
         #[cfg(not(feature = "metal"))]
-        if !matches!(device.backend_type(), BackendType::Cuda) {
+        if !matches!(device.backend_type(), BackendType::Cuda | BackendType::WebGpu) {
             assert_eq!(
                 scheme.replay_stats().resubmit_hits,
                 1,
@@ -4662,9 +4662,9 @@ mod imp {
             }};
         }
         let textures = true;
-        // Wave intrinsics and retained-resubmit accounting are not in the WebGPU
-        // compute prototype (no subgroup feature; every submit re-records).
-        let wave_and_retain = device.backend_type() != BackendType::WebGpu;
+        // Wave intrinsics are not in the WebGPU compute prototype (no subgroup feature).
+        let wave = device.backend_type() != BackendType::WebGpu;
+        let retain = true;
         macro_rules! trial_tex {
             ($f:ident) => {
                 if textures {
@@ -4672,15 +4672,22 @@ mod imp {
                 }
             };
         }
-        macro_rules! trial_wave_retain {
+        macro_rules! trial_wave {
             ($f:ident) => {
-                if wave_and_retain {
+                if wave {
+                    trial!($f);
+                }
+            };
+        }
+        macro_rules! trial_retain {
+            ($f:ident) => {
+                if retain {
                     trial!($f);
                 }
             };
         }
 
-        trial_wave_retain!(scheme_graph_linear_chain);
+        trial_retain!(scheme_graph_linear_chain);
         trial!(scheme_graph_independent_dispatches);
         trial!(scheme_graph_diamond_dependency);
         trial!(scheme_graph_fill_readback);
@@ -4690,7 +4697,7 @@ mod imp {
         trial!(scheme_stress_many_zero_writes_many_dispatches);
         trial!(scheme_stress_write_then_dispatch_chain);
         trial!(scheme_stress_two_phase_submission);
-        trial_wave_retain!(scheme_stress_rapid_submissions);
+        trial_retain!(scheme_stress_rapid_submissions);
         trial!(scheme_compute_dispatch_empty);
         trial!(scheme_compute_write_and_readback);
         trial!(scheme_compute_with_uav_parcel);
@@ -4699,7 +4706,7 @@ mod imp {
         trial!(scheme_parcel_write_zeros_partial);
         trial!(scheme_parcel_write_zeros_to_end);
         trial!(scheme_zeros_before_copy_dispatch);
-        trial_wave_retain!(scheme_write_to_parcel_zeros_between_submissions);
+        trial_retain!(scheme_write_to_parcel_zeros_between_submissions);
         trial!(scheme_upload_frame_unwaited_serializes_before_worker_submit);
         trial!(scheme_compute_many_resource_slots);
         trial!(scheme_regular_buffer_write_then_copy);
@@ -4711,9 +4718,9 @@ mod imp {
         trial!(scheme_scattered_typed_variable_assignment);
         trial_tex!(scheme_compute_write_to_texture);
         trial_tex!(scheme_with_parcel_raw_texture);
-        trial_wave_retain!(scheme_wave_inclusive_scan_uniform_64);
-        trial_wave_retain!(scheme_wave_inclusive_scan_ramp_64);
-        trial_wave_retain!(scheme_wave_inclusive_scan_uniform_256);
+        trial_wave!(scheme_wave_inclusive_scan_uniform_64);
+        trial_wave!(scheme_wave_inclusive_scan_ramp_64);
+        trial_wave!(scheme_wave_inclusive_scan_uniform_256);
         trial!(scheme_workgroup_reduce_uint_correct);
         trial!(scheme_workgroup_inclusive_scan_uint_correct);
         trial!(scheme_workgroup_broadcast_correct);
@@ -4744,9 +4751,9 @@ mod imp {
         trial!(scheme_copy_buffer_parcel_partial_with_offsets);
         trial_tex!(scheme_copy_buffer_parcel_rejects_texture_src);
         trial_tex!(scheme_copy_buffer_parcel_rejects_texture_dst);
-        trial_wave_retain!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
+        trial_retain!(scheme_copy_buffer_parcel_resubmit_does_not_rerecord);
         trial!(scheme_cpu_writable_staging_write_then_copy);
-        trial_wave_retain!(scheme_cpu_writable_staging_update_each_frame);
+        trial_retain!(scheme_cpu_writable_staging_update_each_frame);
         trial_tex!(scheme_write_texture_round_trip);
         trial_tex!(scheme_write_texture_wrong_size_returns_error);
         trial_tex!(scheme_write_texture_marks_scheme_dirty);
@@ -4756,22 +4763,22 @@ mod imp {
         trial_tex!(scheme_copy_buffer_to_texture_parcel_full_texture);
         trial_tex!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
         trial_tex!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);
-        trial_wave_retain!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
-        trial_wave_retain!(scheme_copy_buffer_to_texture_pitched_resubmit_is_retained);
-        trial_wave_retain!(cross_scheme_grant_read_reader_is_topology_invisible);
-        trial_wave_retain!(cross_scheme_copy_reader_forces_one_topology_record);
-        trial_wave_retain!(single_scheme_write_then_readback_records_once);
-        trial_wave_retain!(cross_scheme_grant_reader_steady_state_stays_at_one);
-        trial_wave_retain!(cross_scheme_copy_reader_steady_state_does_not_thrash);
-        trial_wave_retain!(cross_scheme_foreign_writer_forces_one_topology_record);
-        trial_wave_retain!(cross_scheme_submit_order_steady_state_is_stable);
-        trial_wave_retain!(cross_scheme_two_foreign_copy_readers_record_once_then_stable);
-        trial_wave_retain!(cross_scheme_copy_reader_disappearing_does_not_re_dirty);
-        trial_wave_retain!(cross_scheme_disjoint_parcels_never_cross_dirty);
-        trial_wave_retain!(cross_scheme_grant_then_copy_reader_boundary);
-        trial_wave_retain!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
-        trial_wave_retain!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
-        trial_wave_retain!(cross_scheme_texture_readback_retained_loop_records_twice);
+        trial_retain!(scheme_copy_buffer_to_texture_parcel_resubmit_is_retained);
+        trial_retain!(scheme_copy_buffer_to_texture_pitched_resubmit_is_retained);
+        trial_retain!(cross_scheme_grant_read_reader_is_topology_invisible);
+        trial_retain!(cross_scheme_copy_reader_forces_one_topology_record);
+        trial_retain!(single_scheme_write_then_readback_records_once);
+        trial_retain!(cross_scheme_grant_reader_steady_state_stays_at_one);
+        trial_retain!(cross_scheme_copy_reader_steady_state_does_not_thrash);
+        trial_retain!(cross_scheme_foreign_writer_forces_one_topology_record);
+        trial_retain!(cross_scheme_submit_order_steady_state_is_stable);
+        trial_retain!(cross_scheme_two_foreign_copy_readers_record_once_then_stable);
+        trial_retain!(cross_scheme_copy_reader_disappearing_does_not_re_dirty);
+        trial_retain!(cross_scheme_disjoint_parcels_never_cross_dirty);
+        trial_retain!(cross_scheme_grant_then_copy_reader_boundary);
+        trial_retain!(cross_scheme_grant_read_observes_worker_writes_without_re_record);
+        trial_retain!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
+        trial_retain!(cross_scheme_texture_readback_retained_loop_records_twice);
         trial_tex!(scheme_return_transient_texture_invalidates_retained_scheme);
         trial!(cuda_rejects_bgra_texture);
         trial!(cuda_float4_writes_rgba8_unorm);
