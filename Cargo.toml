@@ -69,7 +69,7 @@ thiserror = "2.0"
 # Logging and instrumentation
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-tracy-client = { version = "0.18", default-features = false, optional = true }
+tracy-client = { version = "0.19", default-features = false, optional = true }
 
 # Utilities
 bitflags = "2.6"
