@@ -836,6 +836,17 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
     }
 
     fn retains_present_partitions(&self) -> bool;
+
+    /// When true, a cache miss that re-records must wait until the previous
+    /// retained command storage for that partition has retired on the GPU
+    /// (DX12/Vulkan/CUDA native command lists and CUDA graphs).
+    ///
+    /// Metal and WebGPU re-record into a fresh encoder each time, so this is
+    /// `false` and the task graph may record frame N+1 while N is still in flight.
+    fn requires_retained_storage_retirement(&self) -> bool {
+        true
+    }
+
     fn submit_standalone(
         &self,
         ctx: ContextHandle,
@@ -894,7 +905,17 @@ impl LockedSubmitSession {
 
 impl ContextSubmitSession for LockedSubmitSession {
     fn retains_present_partitions(&self) -> bool {
-        !matches!(self.backend_type, crate::types::BackendType::Metal)
+        !matches!(
+            self.backend_type,
+            crate::types::BackendType::Metal | crate::types::BackendType::WebGpu
+        )
+    }
+
+    fn requires_retained_storage_retirement(&self) -> bool {
+        !matches!(
+            self.backend_type,
+            crate::types::BackendType::Metal | crate::types::BackendType::WebGpu
+        )
     }
 
     fn submit_standalone(
@@ -1510,7 +1531,8 @@ pub(crate) trait GpuBackend:
     /// [`Self::try_resubmit_retained`] instead of re-recording.
     ///
     /// The DX12 backend implements this by keeping the closed `ID3D12GraphicsCommandList`
-    /// alive (without `Reset`) and re-executing it via `ExecuteCommandLists`.  Other
+    /// alive (without `Reset`) and re-executing it via `ExecuteCommandLists`. Metal and
+    /// WebGPU keep a command snapshot and re-record a fresh encoder on resubmit. Other
     /// backends default to a normal [`Self::submit_graph`] (safe fallback, no caching).
     fn submit_graph_and_retain(
         &mut self,

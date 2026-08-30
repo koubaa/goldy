@@ -305,8 +305,16 @@ fn backend_try_resubmit_retained(
     session.try_resubmit_retained(ctx, key, waits_only.as_ref())
 }
 
-/// Re-record allocates a fresh CB/allocator; backends must not reuse in-flight retained storage.
-fn ensure_partition_retired_before_rerecord(context: &crate::Context, prev_tv: Option<TimelineValue>) -> Result<()> {
+/// Re-record replaces in-flight native CB/allocator/CUDA-graph storage. Soft-retain
+/// backends (Metal, WebGPU) skip this wait: they encode a new command buffer each time.
+fn ensure_partition_retired_before_rerecord(
+    session: &dyn crate::backend::ContextSubmitSession,
+    context: &crate::Context,
+    prev_tv: Option<TimelineValue>,
+) -> Result<()> {
+    if !session.requires_retained_storage_retirement() {
+        return Ok(());
+    }
     if let Some(prev_tv) = prev_tv {
         if context.gpu_progress() < prev_tv {
             context.wait_until(prev_tv)?;
@@ -1377,7 +1385,7 @@ fn submit_resolved_ir_partitions_replay(
                     )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-                ensure_partition_retired_before_rerecord(context, replay.partition_last_tv[part_idx])?;
+                ensure_partition_retired_before_rerecord(session, context, replay.partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, merged.as_ref())?;
                 replay.partition_keys[part_idx] = Some(merged_fp);
                 replay.partition_keys[part_idx + 1] = Some(merged_fp);
@@ -1521,7 +1529,7 @@ fn submit_resolved_ir_partitions_replay(
                     )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.slot_record");
-                ensure_partition_retired_before_rerecord(context, replay.partition_last_tv[part_idx])?;
+                ensure_partition_retired_before_rerecord(session, context, replay.partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, merged.as_ref())?;
                 replay.partition_slot_keys[part_idx]
                     .get_or_insert_with(std::collections::HashSet::new)
@@ -1562,7 +1570,7 @@ fn submit_resolved_ir_partitions_replay(
                 partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-            ensure_partition_retired_before_rerecord(context, replay.partition_last_tv[part_idx])?;
+            ensure_partition_retired_before_rerecord(session, context, replay.partition_last_tv[part_idx])?;
             last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, merged.as_ref())?;
             replay.partition_keys[part_idx] = Some(part_fp);
             replay.record_last_tv(part_idx, last_tv);

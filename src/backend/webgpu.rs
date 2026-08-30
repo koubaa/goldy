@@ -35,7 +35,8 @@ use crate::types::{
     IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
 };
 use anyhow::{Context as _, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -669,8 +670,16 @@ struct WebGpuDevice {
     uniform_offset_align: u64,
     storage_offset_align: u64,
     adapter_id: u32,
+    /// In-process naga modules keyed by WGSL content hash. Shared across pipelines
+    /// (identity + packed variants, graphics VS/FS, present blit formats).
+    shader_modules: HashMap<u64, wgpu::ShaderModule>,
     #[cfg(feature = "graphics")]
     blit: HashMap<wgpu::TextureFormat, WebGpuBlitPipeline>,
+}
+
+struct WebGpuRetainedGraph {
+    commands: Arc<[GraphCommand]>,
+    used_slots: Vec<u32>,
 }
 
 struct WebGpuContext {
@@ -679,6 +688,7 @@ struct WebGpuContext {
     completed: AtomicU64,
     submitted_max: AtomicU64,
     last_submission: Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>,
+    retained_graphs: Mutex<HashMap<u64, WebGpuRetainedGraph>>,
     signal_queue: crate::signal::SignalQueue,
 }
 
@@ -902,6 +912,9 @@ struct WebGpuComputePipeline {
     device: DeviceHandle,
     /// Cloned Slang source so float4→rgba8unorm PSO variants survive `destroy_shader`.
     shader: WebGpuShader,
+    /// Unpatched WGSL module used by [`Self::pipeline`]. Packed-storage variants
+    /// compile a different module (format rewrite) and share via the device cache.
+    module: wgpu::ShaderModule,
     pipeline: wgpu::ComputePipeline,
     /// Specialized PSOs: bit `i` set when DirectSpatial slot `i` is float4→rgba8unorm.
     variants: HashMap<u64, wgpu::ComputePipeline>,
@@ -1205,11 +1218,8 @@ impl WebGpuBackend {
         if let Some(cached) = self.device(device)?.blit.get(&target_format) {
             return Ok(cached.clone());
         }
+        let module = self.get_or_create_shader_module(device, PRESENT_BLIT_WGSL, Some("goldy-webgpu-present-blit"))?;
         let gpu = self.device(device)?;
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("goldy-webgpu-present-blit"),
-            source: wgpu::ShaderSource::Wgsl(PRESENT_BLIT_WGSL.into()),
-        });
         let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("goldy-webgpu-present-blit-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -1339,6 +1349,54 @@ impl WebGpuBackend {
 
     fn recycle_registry_slot(&mut self, slot: u32) {
         self.free_slots.push(slot);
+    }
+
+    fn evict_retained_graphs_using_slots(&self, device: DeviceHandle, slots: &[u32]) {
+        if slots.is_empty() {
+            return;
+        }
+        let wanted: HashSet<u32> = slots.iter().copied().collect();
+        for context in self.contexts.values() {
+            if context.device != device {
+                continue;
+            }
+            context
+                .retained_graphs
+                .lock()
+                .unwrap()
+                .retain(|_, graph| !graph.used_slots.iter().any(|slot| wanted.contains(slot)));
+        }
+    }
+
+    fn collect_webgpu_slots_from_graph_commands(commands: &[GraphCommand]) -> Vec<u32> {
+        let mut slots = Vec::new();
+        for command in commands {
+            if let GraphCommand::Compute(gpu) = command {
+                Self::collect_webgpu_slots_from_gpu_command(gpu, &mut slots);
+            }
+        }
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
+    fn collect_webgpu_slots_from_gpu_command(command: &GpuCommand, slots: &mut Vec<u32>) {
+        match command {
+            GpuCommand::BindResourcesRaw { indices, .. } => slots.extend(indices.iter().copied()),
+            GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                let layout_size = std::mem::size_of::<PushLayout>();
+                for i in 0..*count as usize {
+                    let base = i * DISPATCH_BATCH_STRIDE;
+                    if base + layout_size <= arg_data.len() {
+                        let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                        for &idx in &layout.bindless {
+                            slots.push(u32::from(idx));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn create_storage_buffer(
@@ -1588,10 +1646,49 @@ impl WebGpuBackend {
         cfg!(debug_assertions) || self.gpu_api_validation
     }
 
-    fn create_wgpu_compute_pipeline(
-        &self,
+    fn hash_wgsl(wgsl: &str) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        wgsl.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn get_or_create_shader_module(
+        &mut self,
         device: DeviceHandle,
         wgsl: &str,
+        label: Option<&str>,
+    ) -> Result<wgpu::ShaderModule> {
+        let key = Self::hash_wgsl(wgsl);
+        if let Some(module) = self.device(device)?.shader_modules.get(&key) {
+            return Ok(module.clone());
+        }
+        let pso_scopes = self.pso_error_scopes();
+        let module = {
+            let gpu = self.device(device)?;
+            with_wgpu_error_scope(
+                &gpu.device,
+                pso_scopes,
+                "WebGPU shader module validation failed",
+                || {
+                    gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label,
+                        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                    })
+                },
+            )?
+        };
+        self.devices
+            .get_mut(&device)
+            .context("WebGPU: invalid device handle")?
+            .shader_modules
+            .insert(key, module.clone());
+        Ok(module)
+    }
+
+    fn create_compute_pso(
+        &self,
+        device: DeviceHandle,
+        module: &wgpu::ShaderModule,
         debug_name: Option<&str>,
     ) -> Result<wgpu::ComputePipeline> {
         let gpu = self.device(device)?;
@@ -1600,20 +1697,27 @@ impl WebGpuBackend {
             self.pso_error_scopes(),
             "WebGPU shader/pipeline validation failed",
             || {
-                let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: debug_name,
-                    source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-                });
                 gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: debug_name,
                     layout: None,
-                    module: &module,
+                    module,
                     entry_point: Some("cs_main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     cache: None,
                 })
             },
         )
+    }
+
+    fn create_wgpu_compute_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        wgsl: &str,
+        debug_name: Option<&str>,
+    ) -> Result<(wgpu::ShaderModule, wgpu::ComputePipeline)> {
+        let module = self.get_or_create_shader_module(device, wgsl, debug_name)?;
+        let pipeline = self.create_compute_pso(device, &module, debug_name)?;
+        Ok((module, pipeline))
     }
 
     fn packed_storage_bindings(
@@ -1680,7 +1784,18 @@ impl WebGpuBackend {
         let (wgsl, _, _) = self.cached_compute_wgsl(&mut shader)?;
         let packed = Self::packed_storage_bindings(&layout, &specs);
         let wgsl = patch_wgsl_storage_formats(&wgsl, &packed)?;
-        let variant = self.create_wgpu_compute_pipeline(device, &wgsl, debug_name)?;
+        let identity_module = self
+            .compute_pipelines
+            .get(&pipeline_handle)
+            .and_then(|pipeline| {
+                let identity_wgsl = pipeline.shader.compute.as_ref()?.wgsl.as_str();
+                (identity_wgsl == wgsl).then(|| pipeline.module.clone())
+            });
+        let module = match identity_module {
+            Some(module) => module,
+            None => self.get_or_create_shader_module(device, &wgsl, debug_name)?,
+        };
+        let variant = self.create_compute_pso(device, &module, debug_name)?;
         let pipeline = self
             .compute_pipelines
             .get_mut(&pipeline_handle)
@@ -3031,7 +3146,9 @@ impl GpuBackend for WebGpuBackend {
             has_zero_copy_storage_readback: false,
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_decommit_supported: false,
-            host_sidecar_on_submit_worker: false,
+            // No dedicated worker thread: deferred host writes run at enqueue via
+            // queue-ordered `Queue::write_buffer`. Ekrano keys nonblocking reuse off this flag.
+            host_sidecar_on_submit_worker: true,
             split_compute_partitions_on_barrier_cost: false,
             fuse_upload_with_compute_partitions: true,
             ..crate::device::DeviceCapabilities::default()
@@ -3079,6 +3196,7 @@ impl GpuBackend for WebGpuBackend {
                 uniform_offset_align,
                 storage_offset_align,
                 adapter_id,
+                shader_modules: HashMap::new(),
                 #[cfg(feature = "graphics")]
                 blit: HashMap::new(),
             },
@@ -3135,6 +3253,7 @@ impl GpuBackend for WebGpuBackend {
                 completed: AtomicU64::new(0),
                 submitted_max: AtomicU64::new(0),
                 last_submission: Mutex::new(None),
+                retained_graphs: Mutex::new(HashMap::new()),
                 signal_queue: crate::signal::SignalQueue::new(),
             }),
         );
@@ -3204,6 +3323,7 @@ impl GpuBackend for WebGpuBackend {
     fn destroy_buffer(&mut self, buffer: BufferHandle) {
         if let Some(buffer) = self.buffers.remove(&buffer) {
             if let Some(slot) = buffer.slot {
+                self.evict_retained_graphs_using_slots(buffer.device, &[slot]);
                 self.buffer_slots.remove(&slot);
                 self.recycle_registry_slot(slot);
             }
@@ -3607,7 +3727,6 @@ impl GpuBackend for WebGpuBackend {
             vs_layout
         };
 
-        let gpu = self.device(device)?;
         let attributes: Vec<wgpu::VertexAttribute> = vertex_layout
             .attributes
             .iter()
@@ -3638,20 +3757,15 @@ impl GpuBackend for WebGpuBackend {
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         });
+        let vs_module = self.get_or_create_shader_module(device, &vs_wgsl, Some("goldy-webgpu-vs"))?;
+        let fs_module = self.get_or_create_shader_module(device, &fs_wgsl, Some("goldy-webgpu-fs"))?;
+        let gpu = self.device(device)?;
         let pso_scopes = self.pso_error_scopes();
         let pipeline = with_wgpu_error_scope(
             &gpu.device,
             pso_scopes,
             "WebGPU graphics pipeline validation failed",
             || {
-                let vs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("goldy-webgpu-vs"),
-                    source: wgpu::ShaderSource::Wgsl(vs_wgsl.into()),
-                });
-                let fs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("goldy-webgpu-fs"),
-                    source: wgpu::ShaderSource::Wgsl(fs_wgsl.into()),
-                });
                 gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("goldy-webgpu-graphics"),
                     layout: None,
@@ -4100,14 +4214,18 @@ impl GpuBackend for WebGpuBackend {
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
         if let Some(resource) = self.textures.remove(&texture) {
+            let mut slots = Vec::new();
             if let Some(slot) = resource.storage_slot {
+                slots.push(slot);
                 self.texture_slots.remove(&slot);
                 self.recycle_registry_slot(slot);
             }
             if let Some(slot) = resource.sampled_slot {
+                slots.push(slot);
                 self.texture_slots.remove(&slot);
                 self.recycle_registry_slot(slot);
             }
+            self.evict_retained_graphs_using_slots(resource.device, &slots);
         }
     }
 
@@ -4147,6 +4265,7 @@ impl GpuBackend for WebGpuBackend {
 
     fn destroy_sampler(&mut self, sampler: SamplerHandle) {
         if let Some(resource) = self.samplers.remove(&sampler) {
+            self.evict_retained_graphs_using_slots(resource.device, &[resource.slot]);
             self.sampler_slots.remove(&resource.slot);
             self.recycle_registry_slot(resource.slot);
         }
@@ -4454,9 +4573,47 @@ impl GpuBackend for WebGpuBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let _ = key;
         let _tz = tracy_zone!("wgpu.submit_graph_and_retain");
-        self.submit_graph(ctx, commands, sync)
+        if let Some(context) = self.contexts.get(&ctx) {
+            context.retained_graphs.lock().unwrap().remove(&key);
+        }
+        let tv = self.submit_graph(ctx, commands, sync)?;
+        if let Some(context) = self.contexts.get(&ctx) {
+            context.retained_graphs.lock().unwrap().insert(
+                key,
+                WebGpuRetainedGraph {
+                    commands: Arc::from(commands),
+                    used_slots: Self::collect_webgpu_slots_from_graph_commands(commands),
+                },
+            );
+        }
+        Ok(tv)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        let commands = self.contexts.get(&ctx).and_then(|context| {
+            context
+                .retained_graphs
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|graph| graph.commands.clone())
+        });
+        let Some(commands) = commands else {
+            return Ok(None);
+        };
+        Ok(Some(self.submit_graph(ctx, &commands, sync)?))
+    }
+
+    fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
+        if let Some(context) = self.contexts.get(&ctx) {
+            context.retained_graphs.lock().unwrap().remove(&key);
+        }
     }
 
     fn submit_standalone(
@@ -4579,7 +4736,7 @@ impl GpuBackend for WebGpuBackend {
         if let Some(stored) = self.shaders.get_mut(&compute_shader) {
             stored.compute = shader.compute.clone();
         }
-        let pipeline = self.create_wgpu_compute_pipeline(device, &wgsl, debug_name)?;
+        let (module, pipeline) = self.create_wgpu_compute_pipeline(device, &wgsl, debug_name)?;
         let handle = self.next_compute_pipeline;
         self.next_compute_pipeline += 1;
         self.compute_pipelines.insert(
@@ -4587,6 +4744,7 @@ impl GpuBackend for WebGpuBackend {
             WebGpuComputePipeline {
                 device,
                 shader,
+                module,
                 pipeline,
                 variants: HashMap::new(),
                 slot_access,
@@ -4895,6 +5053,11 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             backend.slang_compiler.is_none(),
             "cached WGSL must not re-initialize Slang"
         );
+        assert_eq!(
+            backend.devices.get(&device).map(|d| d.shader_modules.len()),
+            Some(1),
+            "second compute pipeline must reuse the identity ShaderModule"
+        );
         Ok(())
     }
 
@@ -4937,6 +5100,38 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         assert!(
             backend.slang_compiler.is_none(),
             "cached graphics WGSL must not re-initialize Slang"
+        );
+        let module_count = backend.devices.get(&device).map(|d| d.shader_modules.len());
+        assert_eq!(
+            module_count,
+            Some(2),
+            "second graphics pipeline must reuse the VS and FS ShaderModules"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn blit_formats_share_shader_module() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU blit module test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        backend.blit_pipeline(device, wgpu::TextureFormat::Bgra8Unorm)?;
+        assert_eq!(
+            backend.devices.get(&device).map(|d| d.shader_modules.len()),
+            Some(1),
+            "first blit PSO creates one present-blit ShaderModule"
+        );
+        backend.blit_pipeline(device, wgpu::TextureFormat::Rgba8Unorm)?;
+        assert_eq!(
+            backend.devices.get(&device).map(|d| d.shader_modules.len()),
+            Some(1),
+            "second blit format must reuse the present-blit ShaderModule"
         );
         Ok(())
     }
@@ -4990,6 +5185,61 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         backend.wait_until(ctx, second)?;
         assert_eq!(backend.gpu_progress(ctx), second);
         assert!(backend.device_timeline_retired(device) >= second);
+        Ok(())
+    }
+
+    #[test]
+    fn soft_retain_resubmits_without_waiting_prior() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU retain test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("double"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let commands = [
+            GraphCommand::Compute(GpuCommand::SetPipeline(pipeline)),
+            GraphCommand::Compute(GpuCommand::BindResourcesRaw {
+                indices: vec![slot],
+                user: vec![],
+                frame_table_base: 0,
+            }),
+            GraphCommand::Compute(GpuCommand::Dispatch {
+                label: Some("double"),
+                workgroups_x: 4,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            }),
+        ];
+        const KEY: u64 = 0xA11C_EDED;
+        let first = backend.submit_graph_and_retain(ctx, &commands, KEY, None)?;
+        let second = backend
+            .try_resubmit_retained(ctx, KEY, None)?
+            .context("expected Metal-style soft-retained resubmit")?;
+        assert!(first < second, "resubmit must allocate a new timeline value");
+        backend.wait_until(ctx, second)?;
+        backend.evict_retained(ctx, KEY);
+        assert!(backend.try_resubmit_retained(ctx, KEY, None)?.is_none());
+        backend.destroy_buffer(buffer);
         Ok(())
     }
 

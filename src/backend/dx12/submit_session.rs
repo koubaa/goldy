@@ -273,6 +273,10 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         true
     }
 
+    fn requires_retained_storage_retirement(&self) -> bool {
+        true
+    }
+
     fn submit_standalone(
         &self,
         ctx: ContextHandle,
