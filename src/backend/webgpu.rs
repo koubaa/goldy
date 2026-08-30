@@ -2642,11 +2642,12 @@ impl WebGpuBackend {
                         pass.dispatch_workgroups(*workgroups_x, *workgroups_y, *workgroups_z);
                     }
                     GpuCommand::DispatchIndirect { buffer, offset, label } => {
-                        let _tz = tracy_zone!("wgpu.dispatch_indirect");
                         let pipeline_handle =
                             current_pipeline.context("WebGPU: indirect dispatch without a pipeline")?;
-                        let (wgpu_pipeline, layout) =
-                            self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?;
+                        let (wgpu_pipeline, layout) = {
+                            let _tz = tracy_zone!("wgpu.dispatch_indirect.pipeline");
+                            self.wgpu_pipeline_for_dispatch(pipeline_handle, &current_indices)?
+                        };
                         let device = self
                             .compute_pipelines
                             .get(&pipeline_handle)
@@ -2661,6 +2662,7 @@ impl WebGpuBackend {
                         let args_buffer = args.buffer.clone();
                         let args_offset = args.offset + offset;
                         let user_binding = if layout.scalar_count > 0 {
+                            let _tz = tracy_zone!("wgpu.dispatch_indirect.user_uniform");
                             require_user_scalars(&current_user, layout.scalar_count)?;
                             let buffer = user_uniform_buffer
                                 .as_ref()
@@ -2679,22 +2681,31 @@ impl WebGpuBackend {
                         } else {
                             None
                         };
-                        let bind_group = self.create_bind_group(
-                            device,
-                            &layout,
-                            || wgpu_pipeline.get_bind_group_layout(0),
-                            &current_indices,
-                            user_binding,
-                        )?;
-                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: *label,
-                            timestamp_writes: None,
-                        });
-                        pass.set_pipeline(&wgpu_pipeline);
-                        if let Some(bind_group) = bind_group.as_ref() {
-                            pass.set_bind_group(0, bind_group, &[]);
+                        let bind_group = {
+                            let _tz = tracy_zone!("wgpu.dispatch_indirect.bind_group");
+                            self.create_bind_group(
+                                device,
+                                &layout,
+                                || wgpu_pipeline.get_bind_group_layout(0),
+                                &current_indices,
+                                user_binding,
+                            )?
+                        };
+                        {
+                            let _tz = tracy_zone!("wgpu.dispatch_indirect.pass");
+                            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: *label,
+                                timestamp_writes: None,
+                            });
+                            pass.set_pipeline(&wgpu_pipeline);
+                            if let Some(bind_group) = bind_group.as_ref() {
+                                pass.set_bind_group(0, bind_group, &[]);
+                            }
+                            {
+                                let _tz = tracy_zone!("wgpu.dispatch_indirect.dispatch");
+                                pass.dispatch_workgroups_indirect(&args_buffer, args_offset);
+                            }
                         }
-                        pass.dispatch_workgroups_indirect(&args_buffer, args_offset);
                     }
                     GpuCommand::ClearBuffer { buffer, offset, size } => {
                         let _tz = tracy_zone!("wgpu.clear_buffer");
