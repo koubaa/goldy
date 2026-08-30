@@ -31,7 +31,7 @@ use crate::slang::virtual_main::{CudaStorageTextureSpec, WgpuComputeLayout, Wgpu
 use crate::slang::OwnedLayoutCheck;
 use crate::types::{
     AddressMode, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType, FilterMode,
-    IndexFormat, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
+    IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
 };
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
@@ -297,11 +297,24 @@ fn pick_swapchain_format(formats: &[wgpu::TextureFormat]) -> Result<wgpu::Textur
 }
 
 #[cfg(feature = "graphics")]
-fn pick_present_mode(modes: &[wgpu::PresentMode]) -> Result<wgpu::PresentMode> {
-    if modes.contains(&wgpu::PresentMode::Fifo) {
-        return Ok(wgpu::PresentMode::Fifo);
-    }
-    modes.first().copied().context("WebGPU: surface has no present modes")
+fn map_present_mode(requested: PresentMode, modes: &[wgpu::PresentMode]) -> Result<wgpu::PresentMode> {
+    let first_supported = |candidates: &[wgpu::PresentMode]| {
+        candidates.iter().copied().find(|mode| modes.contains(mode))
+    };
+    let mapped = match requested {
+        PresentMode::Fifo => first_supported(&[wgpu::PresentMode::Fifo]),
+        PresentMode::Mailbox => first_supported(&[wgpu::PresentMode::Mailbox]),
+        // AutoNoVsync is wgpu's portable "prefer unlocked" mode when Immediate is absent.
+        PresentMode::Immediate => first_supported(&[
+            wgpu::PresentMode::Immediate,
+            wgpu::PresentMode::AutoNoVsync,
+            wgpu::PresentMode::Mailbox,
+        ]),
+        PresentMode::Auto => first_supported(&[wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo]),
+    };
+    mapped.with_context(|| {
+        format!("WebGPU: present mode {requested:?} is not supported (available: {modes:?})")
+    })
 }
 
 #[cfg(feature = "graphics")]
@@ -592,6 +605,7 @@ struct WebGpuSurface {
     compute_format: TextureFormat,
     present_path: WebGpuPresentPath,
     present_mode: wgpu::PresentMode,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     alpha_mode: wgpu::CompositeAlphaMode,
     usage: wgpu::TextureUsages,
     /// Ping-pong present scratches so the next frame can record while the previous
@@ -4020,7 +4034,7 @@ impl GpuBackend for WebGpuBackend {
         );
         let caps = wgpu_surface.get_capabilities(adapter);
         let swapchain_format = pick_swapchain_format(&caps.formats)?;
-        let present_mode = pick_present_mode(&caps.present_modes)?;
+        let present_mode = map_present_mode(PresentMode::Auto, &caps.present_modes)?;
         let alpha_mode = pick_alpha_mode(&caps.alpha_modes);
         let features = self.device(device)?.features;
         let present_path = choose_present_path(caps.usages, swapchain_format, features, parse_present_override()?)?;
@@ -4057,6 +4071,7 @@ impl GpuBackend for WebGpuBackend {
                 compute_format,
                 present_path,
                 present_mode,
+                supported_present_modes: caps.present_modes.clone(),
                 alpha_mode,
                 usage,
                 scratches: [None, None],
@@ -4132,6 +4147,33 @@ impl GpuBackend for WebGpuBackend {
             .get(&surface)
             .map(|surface| surface.compute_format)
             .unwrap_or(TextureFormat::Rgba8Unorm)
+    }
+
+    #[cfg(feature = "graphics")]
+    fn surface_set_present_mode(&mut self, surface: SurfaceHandle, mode: PresentMode) -> Result<()> {
+        let (current, mapped) = {
+            let state = self
+                .surfaces
+                .get(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            let mapped = map_present_mode(mode, &state.supported_present_modes)?;
+            (state.present_mode, mapped)
+        };
+        if current == mapped {
+            return Ok(());
+        }
+        {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            // wgpu panics if a SurfaceTexture is live across configure().
+            state.acquired = None;
+            state.present_mode = mapped;
+        }
+        self.configure_surface(surface)?;
+        tracing::info!(?mode, ?mapped, "WebGPU surface present mode");
+        Ok(())
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
@@ -5473,9 +5515,78 @@ float4 fs_main(VertexOutput input) : SV_Target {
 
     #[cfg(feature = "graphics")]
     #[test]
-    fn present_mode_prefers_fifo() {
+    fn present_mode_fifo_when_requested() {
         let modes = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo];
-        assert_eq!(pick_present_mode(&modes).unwrap(), wgpu::PresentMode::Fifo);
+        assert_eq!(
+            map_present_mode(PresentMode::Fifo, &modes).unwrap(),
+            wgpu::PresentMode::Fifo
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_mode_auto_prefers_mailbox() {
+        let modes = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo];
+        assert_eq!(
+            map_present_mode(PresentMode::Auto, &modes).unwrap(),
+            wgpu::PresentMode::Mailbox
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_mode_immediate_maps_direct() {
+        let modes = [wgpu::PresentMode::Immediate, wgpu::PresentMode::Fifo];
+        assert_eq!(
+            map_present_mode(PresentMode::Immediate, &modes).unwrap(),
+            wgpu::PresentMode::Immediate
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_mode_immediate_falls_back_to_autonovsync() {
+        let modes = [wgpu::PresentMode::AutoNoVsync, wgpu::PresentMode::Fifo];
+        assert_eq!(
+            map_present_mode(PresentMode::Immediate, &modes).unwrap(),
+            wgpu::PresentMode::AutoNoVsync
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_mode_immediate_falls_back_to_mailbox() {
+        let modes = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo];
+        assert_eq!(
+            map_present_mode(PresentMode::Immediate, &modes).unwrap(),
+            wgpu::PresentMode::Mailbox
+        );
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_mode_immediate_errors_when_only_fifo() {
+        let modes = [wgpu::PresentMode::Fifo];
+        let err = map_present_mode(PresentMode::Immediate, &modes).unwrap_err();
+        assert!(format!("{err:#}").contains("Immediate"), "{err:#}");
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn surface_set_present_mode_rejects_unknown_surface() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU surface test: {error:#}");
+                return Ok(());
+            }
+        };
+        let err = backend
+            .surface_set_present_mode(1, PresentMode::Immediate)
+            .expect_err("unknown surface must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid surface"), "{msg}");
+        Ok(())
     }
 
     #[cfg(feature = "graphics")]
