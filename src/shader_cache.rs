@@ -20,7 +20,10 @@ pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 /// instead of `reflect_type_size_with_category(Uniform)` (cbuffer-padded size).  A
 /// single-float struct like `SimParams` was previously reported as stride 16 instead
 /// of 4, causing false validation errors for correctly-created buffers.
-const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v4";
+///
+/// v5: `CompiledShaderWithReflection` gained `extra_entry_points`. Old v4 blobs
+/// cannot decode, so keys must miss rather than fail the compile.
+const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v5";
 
 /// Content hash of the `shaders/goldy_exp/*.slang` library sources, baked in at
 /// build time by `build.rs`.  Changes when any library file is edited, so compiled
@@ -413,6 +416,7 @@ mod tests {
                 target: ShaderTarget::Spirv,
             },
             reflection: ShaderReflection::default(),
+            extra_entry_points: Vec::new(),
         }
     }
 
@@ -613,6 +617,27 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
         let got = c.get(7).unwrap().unwrap();
         assert_eq!(got.shader.data, v.shader.data);
         assert_eq!(got.shader.target, v.shader.target);
+        assert!(got.extra_entry_points.is_empty());
+    }
+
+    #[test]
+    fn extra_entry_points_survive_disk_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shader_cache.bin.zst");
+        let mut v = dummy_compiled();
+        v.extra_entry_points.push(CompiledShader {
+            data: b"fs_main_wgsl".to_vec(),
+            target: ShaderTarget::Wgsl,
+        });
+        {
+            let mut c = ShaderBytecodeDiskCache::new_at_path(path.clone());
+            c.insert(3, &v).unwrap();
+            c.flush_to_disk_best_effort();
+        }
+        let mut c = ShaderBytecodeDiskCache::new_at_path(path);
+        let got = c.get(3).unwrap().unwrap();
+        assert_eq!(got.entry_point(1).unwrap().data, b"fs_main_wgsl");
+        assert_eq!(got.entry_point(1).unwrap().target, ShaderTarget::Wgsl);
     }
 
     #[test]

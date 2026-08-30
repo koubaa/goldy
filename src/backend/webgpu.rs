@@ -1418,38 +1418,6 @@ impl WebGpuBackend {
     }
 
     #[cfg(feature = "graphics")]
-    fn compile_graphics_stage_wgsl(
-        &mut self,
-        shader: &WebGpuShader,
-        lowered: &str,
-        entry: &'static str,
-        stage: crate::slang::SlangStage,
-    ) -> Result<String> {
-        let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
-        let defines: Vec<(&str, &str)> = shader
-            .defines
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let compiled = self
-            .slang_compiler_or_init()?
-            .compile_bindless_with_reflection_and_defines(
-                lowered,
-                crate::slang::ShaderTarget::Wgsl,
-                &[(entry, stage)],
-                &paths,
-                &defines,
-                &shader.layout_checks,
-                shader.optimization_level,
-            )?;
-        compiled
-            .shader
-            .as_str()
-            .context("WebGPU: Slang returned non-text WGSL output")
-            .map(str::to_owned)
-    }
-
-    #[cfg(feature = "graphics")]
     fn cached_graphics_wgsl(&mut self, shader: &mut WebGpuShader) -> Result<(String, String, WgpuComputeLayout)> {
         if let Some(cached) = &shader.graphics {
             return Ok((cached.vs.clone(), cached.fs.clone(), cached.layout.clone()));
@@ -1475,13 +1443,37 @@ impl WebGpuBackend {
         } else {
             (shader.source.clone(), WgpuComputeLayout::inferred_storage())
         };
-        let vs = remap_wgsl_vs_input_locations(&self.compile_graphics_stage_wgsl(
-            shader,
-            &lowered,
-            "vs_main",
-            crate::slang::SlangStage::Vertex,
-        )?);
-        let fs = self.compile_graphics_stage_wgsl(shader, &lowered, "fs_main", crate::slang::SlangStage::Fragment)?;
+        let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
+        let defines: Vec<(&str, &str)> = shader
+            .defines
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let compiled = self
+            .slang_compiler_or_init()?
+            .compile_bindless_with_reflection_and_defines(
+                &lowered,
+                crate::slang::ShaderTarget::Wgsl,
+                &[
+                    ("vs_main", crate::slang::SlangStage::Vertex),
+                    ("fs_main", crate::slang::SlangStage::Fragment),
+                ],
+                &paths,
+                &defines,
+                &shader.layout_checks,
+                shader.optimization_level,
+            )?;
+        let vs = remap_wgsl_vs_input_locations(
+            compiled
+                .shader
+                .as_str()
+                .context("WebGPU: Slang returned non-text WGSL for vs_main")?,
+        );
+        let fs = compiled
+            .entry_point(1)
+            .and_then(|shader| shader.as_str())
+            .context("WebGPU: Slang returned no WGSL for fs_main")?
+            .to_owned();
         Ok((vs, fs, layout))
     }
 
@@ -4434,7 +4426,7 @@ impl GpuBackend for WebGpuBackend {
             // `device_wait_until` here was turning present easement / upload→worker
             // queue waits into host stalls. Only true host waits remain.
             if !sync.cpu_waits.is_empty() || !sync.host_observed_waits.is_empty() {
-            let _tz = tracy_zone!("wgpu.submit_standalone.sync_wait");
+                let _tz = tracy_zone!("wgpu.submit_standalone.sync_wait");
                 let device = self.context_device(ctx);
                 for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
                     self.device_wait_until(device, epoch.value)?;
@@ -5668,26 +5660,23 @@ float4 fs_main(VertexOutput input) : SV_Target {
     return input.color;
 }
 "#;
-        let vs = compiler.compile_bindless_with_reflection_and_defines(
+        let compiled = compiler.compile_bindless_with_reflection_and_defines(
             src,
             crate::slang::ShaderTarget::Wgsl,
-            &[("vs_main", crate::slang::SlangStage::Vertex)],
+            &[
+                ("vs_main", crate::slang::SlangStage::Vertex),
+                ("fs_main", crate::slang::SlangStage::Fragment),
+            ],
             &[],
             &[],
             &[],
             crate::types::OptimizationLevel::Default,
         )?;
-        let fs = compiler.compile_bindless_with_reflection_and_defines(
-            src,
-            crate::slang::ShaderTarget::Wgsl,
-            &[("fs_main", crate::slang::SlangStage::Fragment)],
-            &[],
-            &[],
-            &[],
-            crate::types::OptimizationLevel::Default,
-        )?;
-        let vs_wgsl = vs.shader.as_str().context("expected text WGSL")?;
-        let fs_wgsl = fs.shader.as_str().context("expected text WGSL")?;
+        let vs_wgsl = compiled.shader.as_str().context("expected text WGSL for vs_main")?;
+        let fs_wgsl = compiled
+            .entry_point(1)
+            .and_then(|shader| shader.as_str())
+            .context("expected text WGSL for fs_main")?;
         assert!(vs_wgsl.contains("@vertex"), "missing vertex entry:\n{vs_wgsl}");
         assert!(fs_wgsl.contains("@fragment"), "missing fragment entry:\n{fs_wgsl}");
         Ok(())

@@ -253,10 +253,23 @@ impl OwnedLayoutCheck {
 /// Compiled shader output with optional reflection data.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompiledShaderWithReflection {
-    /// The compiled shader
+    /// Code for `entry_points[0]` of the compile request.
     pub shader: CompiledShader,
     /// Reflection data (if requested)
     pub reflection: ShaderReflection,
+    /// Code for `entry_points[1..]` in request order. Empty for a single-entry compile.
+    #[serde(default)]
+    pub extra_entry_points: Vec<CompiledShader>,
+}
+
+impl CompiledShaderWithReflection {
+    /// Compiled blob for `entry_points[index]` from the compile request.
+    pub fn entry_point(&self, index: usize) -> Option<&CompiledShader> {
+        match index {
+            0 => Some(&self.shader),
+            i => self.extra_entry_points.get(i - 1),
+        }
+    }
 }
 
 /// Shader compilation target.
@@ -332,6 +345,23 @@ impl CompiledShader {
             None
         }
     }
+}
+
+fn entry_point_code_blob(
+    library: &SlangLibrary,
+    request: *mut SlangCompileRequest,
+    entry_index: i32,
+    target_index: i32,
+) -> Result<Vec<u8>> {
+    let mut blob: *mut ISlangBlob = ptr::null_mut();
+    let result = unsafe { (library.get_entry_point_code_blob)(request, entry_index, target_index, &mut blob) };
+    if !slang_succeeded(result) || blob.is_null() {
+        anyhow::bail!("Failed to get compiled shader code for entry point {entry_index}");
+    }
+    let (data_ptr, data_size) = unsafe { blob_get_data(blob) };
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
+    unsafe { blob_release(blob) };
+    Ok(data)
 }
 
 /// Return the byte stride of a Slang built-in scalar/vector/matrix type, or
@@ -672,16 +702,16 @@ impl SlangCompiler {
             defines,
             optimization_level,
             |slf, request, target_index| {
-                let mut blob: *mut ISlangBlob = ptr::null_mut();
-                let result = unsafe { (slf.library.get_entry_point_code_blob)(request, 0, target_index, &mut blob) };
-
-                if !slang_succeeded(result) || blob.is_null() {
-                    anyhow::bail!("Failed to get compiled shader code");
+                let ep_count = entry_points.len().max(1);
+                let mut blobs = Vec::with_capacity(ep_count);
+                for i in 0..ep_count {
+                    blobs.push(entry_point_code_blob(&slf.library, request, i as i32, target_index)?);
                 }
-
-                let (data_ptr, data_size) = unsafe { blob_get_data(blob) };
-                let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
-                unsafe { blob_release(blob) };
+                let data = blobs.remove(0);
+                let extra_entry_points = blobs
+                    .into_iter()
+                    .map(|data| CompiledShader { data, target })
+                    .collect();
 
                 let mut reflection = slf.extract_reflection(request)?;
 
@@ -704,6 +734,7 @@ impl SlangCompiler {
                 Ok(CompiledShaderWithReflection {
                     shader: CompiledShader { data, target },
                     reflection,
+                    extra_entry_points,
                 })
             },
         )?;
@@ -2024,6 +2055,56 @@ mod uniform_entry_point_param_binding_tests {
             !msl.contains("GoldyDynamicSlots"),
             "GoldyDynamicSlots must not appear in output MSL"
         );
+    }
+}
+
+#[cfg(test)]
+mod multi_entry_wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn compile_vertex_and_fragment_wgsl_in_one_request() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let src = r#"
+struct VertexInput {
+    float2 position : POSITION;
+    float4 color : COLOR;
+};
+struct VertexOutput {
+    float4 position : SV_Position;
+    float4 color : COLOR;
+};
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+[shader("fragment")]
+float4 fs_main(VertexOutput input) : SV_Target {
+    return input.color;
+}
+"#;
+        let compiled = compiler
+            .compile_bindless_with_reflection_and_defines(
+                src,
+                ShaderTarget::Wgsl,
+                &[("vs_main", SlangStage::Vertex), ("fs_main", SlangStage::Fragment)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::Default,
+            )
+            .expect("combined vs/fs WGSL compile");
+        let vs = compiled.shader.as_str().expect("vs WGSL");
+        let fs = compiled
+            .entry_point(1)
+            .and_then(|s| s.as_str())
+            .expect("fs WGSL");
+        assert!(vs.contains("@vertex"), "missing vertex entry:\n{vs}");
+        assert!(fs.contains("@fragment"), "missing fragment entry:\n{fs}");
+        assert_eq!(compiled.extra_entry_points.len(), 1);
     }
 }
 
