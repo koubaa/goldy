@@ -835,10 +835,10 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
 
     /// Reflection schema constant is present and matches the expected version.
     #[test]
-    fn reflection_stride_schema_is_v4() {
+    fn reflection_stride_schema_is_v5() {
         assert_eq!(
-            REFLECTION_STRIDE_SCHEMA, "bind-stride-v4",
-            "schema must be v4 after search-path cache invalidation"
+            REFLECTION_STRIDE_SCHEMA, "bind-stride-v5",
+            "schema must be v5 after extra_entry_points decode invalidation"
         );
     }
 
