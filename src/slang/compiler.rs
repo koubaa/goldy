@@ -708,10 +708,7 @@ impl SlangCompiler {
                     blobs.push(entry_point_code_blob(&slf.library, request, i as i32, target_index)?);
                 }
                 let data = blobs.remove(0);
-                let extra_entry_points = blobs
-                    .into_iter()
-                    .map(|data| CompiledShader { data, target })
-                    .collect();
+                let extra_entry_points = blobs.into_iter().map(|data| CompiledShader { data, target }).collect();
 
                 let mut reflection = slf.extract_reflection(request)?;
 
@@ -2098,10 +2095,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
             )
             .expect("combined vs/fs WGSL compile");
         let vs = compiled.shader.as_str().expect("vs WGSL");
-        let fs = compiled
-            .entry_point(1)
-            .and_then(|s| s.as_str())
-            .expect("fs WGSL");
+        let fs = compiled.entry_point(1).and_then(|s| s.as_str()).expect("fs WGSL");
         assert!(vs.contains("@vertex"), "missing vertex entry:\n{vs}");
         assert!(fs.contains("@fragment"), "missing fragment entry:\n{fs}");
         assert_eq!(compiled.extra_entry_points.len(), 1);
