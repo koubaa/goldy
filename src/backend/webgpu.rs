@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -620,7 +620,8 @@ pub(crate) struct WebGpuBackend {
     next_graphics_pipeline: PipelineHandle,
     #[cfg(feature = "graphics")]
     next_render_target: RenderTargetHandle,
-    last_frame_table: Option<Arc<[u32]>>,
+    /// Frame-table for an in-progress mixed compute+render encode (not global).
+    render_frame_table: Option<Arc<[u32]>>,
     /// `None` after [`GpuBackend::release_idle_shader_compiler`]; recreated on the next compile.
     slang_compiler: Option<crate::slang::SlangCompiler>,
     /// Snapshotted at backend init (`GOLDY_VALIDATION` `api` / `all` / `1`).
@@ -650,6 +651,25 @@ struct WebGpuSurface {
     lease: Option<TextureHandle>,
     acquired: Option<wgpu::SurfaceTexture>,
     current_texture_handle: Option<TextureHandle>,
+    /// True while `PresentGpuWork` holds a live `SurfaceTexture`.
+    present_in_flight: Arc<AtomicBool>,
+    pending_width: Option<u32>,
+    pending_height: Option<u32>,
+    pending_present_mode: Option<wgpu::PresentMode>,
+    pending_destroy: bool,
+}
+
+/// Clears [`WebGpuSurface::present_in_flight`] when present GPU work drops.
+#[cfg(feature = "graphics")]
+struct PresentInFlight {
+    flag: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "graphics")]
+impl Drop for PresentInFlight {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(feature = "graphics")]
@@ -805,6 +825,7 @@ impl TimelineBlockingWait for WebGpuTimelineWait {
             Ok(_) => {
                 self.context.completed.fetch_max(self.value, Ordering::Release);
                 self.retired.fetch_max(self.value, Ordering::AcqRel);
+                self.context.signal_queue.push_boundary_crossed(self.value);
                 Ok(true)
             }
             Err(wgpu::PollError::Timeout) => Ok(false),
@@ -936,7 +957,12 @@ fn write_wgpu_pipeline_cache(path: &Path, cache: &wgpu::PipelineCache) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("new");
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+    let tmp = path.with_extension(format!(
+        "new-{}-{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     if std::fs::write(&tmp, &data).is_err() {
         return;
     }
@@ -1109,7 +1135,7 @@ impl WebGpuBackend {
             next_graphics_pipeline: 1,
             #[cfg(feature = "graphics")]
             next_render_target: 1,
-            last_frame_table: None,
+            render_frame_table: None,
             slang_compiler: None,
             gpu_api_validation: crate::validation_env::gpu_api_validation_enabled(),
         })
@@ -1162,8 +1188,73 @@ impl WebGpuBackend {
             .get_mut(&surface)
             .context("WebGPU: invalid surface handle")?;
         surface_state.acquired = None;
+        if surface_state.present_in_flight.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let config = Self::surface_config(surface_state);
         surface_state.surface.configure(&wgpu_device, &config);
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    fn apply_deferred_surface_ops(&mut self, surface: SurfaceHandle) -> Result<()> {
+        let Some(state) = self.surfaces.get(&surface) else {
+            return Ok(());
+        };
+        if state.present_in_flight.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if state.pending_destroy {
+            self.destroy_surface(surface);
+            return Ok(());
+        }
+        let (pending_width, pending_height, pending_mode) = {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            (
+                state.pending_width.take(),
+                state.pending_height.take(),
+                state.pending_present_mode.take(),
+            )
+        };
+        let mut reconfigure = false;
+        if let (Some(width), Some(height)) = (pending_width, pending_height) {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            if state.width != width || state.height != height {
+                state.width = width;
+                state.height = height;
+                reconfigure = true;
+            }
+        }
+        if let Some(mode) = pending_mode {
+            let state = self
+                .surfaces
+                .get_mut(&surface)
+                .context("WebGPU: invalid surface handle")?;
+            if state.present_mode != mode {
+                state.present_mode = mode;
+                reconfigure = true;
+            }
+        }
+        if reconfigure {
+            if pending_width.is_some() {
+                self.drop_surface_scratch(surface);
+            }
+            self.configure_surface(surface)?;
+            let path = self
+                .surfaces
+                .get(&surface)
+                .context("WebGPU: invalid surface handle")?
+                .present_path;
+            if pending_width.is_some() && path != WebGpuPresentPath::Direct {
+                self.ensure_surface_scratch(surface)?;
+            }
+        }
         Ok(())
     }
 
@@ -1482,6 +1573,22 @@ impl WebGpuBackend {
         self.free_slots.push(slot);
     }
 
+    fn evict_retained_graphs_using_buffer(&self, device: DeviceHandle, buffer: BufferHandle) {
+        let Some(resource) = self.buffers.get(&buffer) else {
+            return;
+        };
+        let raw = resource.buffer.clone();
+        let mut slots = Vec::new();
+        for other in self.buffers.values() {
+            if other.device == device && other.buffer == raw {
+                if let Some(slot) = other.slot {
+                    slots.push(slot);
+                }
+            }
+        }
+        self.evict_retained_graphs_using_slots(device, &slots);
+    }
+
     fn evict_retained_graphs_using_slots(&self, device: DeviceHandle, slots: &[u32]) {
         if slots.is_empty() {
             return;
@@ -1713,7 +1820,7 @@ impl WebGpuBackend {
             return Ok(Vec::new());
         }
         let table = self
-            .last_frame_table
+            .render_frame_table
             .as_ref()
             .context("WebGPU: graphics bind needs FrameTableStaging")?;
         let start = frame_table_base as usize;
@@ -2933,7 +3040,6 @@ impl WebGpuBackend {
                     }
                     GpuCommand::FrameTableStaging { data } => {
                         frame_table = Some(data.as_ref());
-                        self.last_frame_table = Some(Arc::clone(data));
                     }
                     GpuCommand::ResourceBarrier { .. } => {
                         // WebGPU tracks resource transitions within a submitted command buffer.
@@ -3184,9 +3290,15 @@ impl WebGpuBackend {
         let _tz = tracy_zone!("wgpu.submit_graph");
         let mut batch: Vec<GpuCommand> = Vec::new();
         let mut last_tv = self.gpu_progress(ctx);
+        let mut frame_table: Option<Arc<[u32]>> = None;
         for cmd in commands {
             match cmd {
-                GraphCommand::Compute(c) => batch.push(c.clone()),
+                GraphCommand::Compute(c) => {
+                    if let GpuCommand::FrameTableStaging { data } = c {
+                        frame_table = Some(Arc::clone(data));
+                    }
+                    batch.push(c.clone());
+                }
                 GraphCommand::Render {
                     target,
                     color_load,
@@ -3197,19 +3309,17 @@ impl WebGpuBackend {
                         if !batch.is_empty() {
                             {
                                 let _tz = tracy_zone!("wgpu.submit_graph.compute_batch");
-                                last_tv =
-                                    self.submit_standalone_prepared(ctx, &batch, sync, prepared.as_deref_mut())?;
-                            }
-                            {
-                                let _tz = tracy_zone!("wgpu.submit_graph.wait_until");
-                                self.wait_until(ctx, last_tv)?;
+                                self.submit_standalone_prepared(ctx, &batch, sync, prepared.as_deref_mut())?;
                             }
                             batch.clear();
                         }
                         {
                             let _tz = tracy_zone!("wgpu.submit_graph.render");
+                            self.render_frame_table = frame_table.clone();
                             let device = self.context_device(ctx);
-                            self.render_to_target(device, *target, *color_load, render_cmds)?;
+                            let result = self.render_to_target(device, *target, *color_load, render_cmds);
+                            self.render_frame_table = None;
+                            result?;
                         }
                         {
                             let _tz = tracy_zone!("wgpu.submit_graph.render_signal");
@@ -3338,6 +3448,7 @@ struct WebGpuPresentGpuWork {
     next_timeline: Arc<AtomicU64>,
     retired: Arc<AtomicU64>,
     device_last_submission: Arc<Mutex<Option<(crate::timeline::TimelineValue, wgpu::SubmissionIndex)>>>,
+    _present_in_flight: PresentInFlight,
 }
 
 #[cfg(feature = "graphics")]
@@ -3570,6 +3681,14 @@ impl GpuBackendPresentSplit for WebGpuBackend {
         };
         let gpu = self.device(surface_device)?;
         let context = Arc::clone(self.context(frame.context)?);
+        let present_in_flight = {
+            let state = self
+                .surfaces
+                .get(&frame.surface)
+                .context("WebGPU: invalid surface handle")?;
+            Arc::clone(&state.present_in_flight)
+        };
+        present_in_flight.store(true, Ordering::Release);
         Ok(Box::new(WebGpuPresentGpuWork {
             frame,
             acquired,
@@ -3586,6 +3705,9 @@ impl GpuBackendPresentSplit for WebGpuBackend {
             next_timeline: Arc::clone(&gpu.next_timeline),
             retired: Arc::clone(&gpu.retired),
             device_last_submission: Arc::clone(&gpu.last_submission),
+            _present_in_flight: PresentInFlight {
+                flag: present_in_flight,
+            },
         }))
     }
 
@@ -3608,6 +3730,7 @@ impl GpuBackendPresentSplit for WebGpuBackend {
             }
         }
         self.drop_surface_lease(surface);
+        self.apply_deferred_surface_ops(surface)?;
         if let Some(context) = self.contexts.get(&ctx) {
             pump_device(&context.wgpu_device);
             if finish.present_ok {
@@ -4112,6 +4235,7 @@ impl GpuBackend for WebGpuBackend {
         target.capacity = capacity;
         target.bind_epoch = target.bind_epoch.wrapping_add(1);
         self.invalidate_bind_groups_buffer(device, buffer);
+        self.evict_retained_graphs_using_buffer(device, buffer);
         Ok(())
     }
 
@@ -4640,7 +4764,6 @@ impl GpuBackend for WebGpuBackend {
             let _ = current_pipeline;
         }
         queue.submit([encoder.finish()]);
-        poll_device(&wgpu_device, wgpu::PollType::wait_indefinitely())?;
         Ok(())
     }
 
@@ -4880,6 +5003,11 @@ impl GpuBackend for WebGpuBackend {
                 lease: None,
                 acquired: None,
                 current_texture_handle: None,
+                present_in_flight: Arc::new(AtomicBool::new(false)),
+                pending_width: None,
+                pending_height: None,
+                pending_present_mode: None,
+                pending_destroy: false,
             },
         );
         self.configure_surface(handle)?;
@@ -4891,6 +5019,12 @@ impl GpuBackend for WebGpuBackend {
 
     #[cfg(feature = "graphics")]
     fn destroy_surface(&mut self, surface: SurfaceHandle) {
+        if let Some(state) = self.surfaces.get_mut(&surface) {
+            if state.present_in_flight.load(Ordering::Acquire) {
+                state.pending_destroy = true;
+                return;
+            }
+        }
         if let Some(mut state) = self.surfaces.remove(&surface) {
             state.acquired = None;
             if let Some(lease) = state.lease.take() {
@@ -4911,6 +5045,13 @@ impl GpuBackend for WebGpuBackend {
                 .get_mut(&surface)
                 .context("WebGPU: invalid surface handle")?;
             if state.width == width && state.height == height {
+                state.pending_width = None;
+                state.pending_height = None;
+                return Ok(());
+            }
+            if state.present_in_flight.load(Ordering::Acquire) {
+                state.pending_width = Some(width);
+                state.pending_height = Some(height);
                 return Ok(());
             }
             // wgpu panics if a SurfaceTexture is live across configure().
@@ -4957,6 +5098,9 @@ impl GpuBackend for WebGpuBackend {
             (state.present_mode, mapped)
         };
         if current == mapped {
+            if let Some(state) = self.surfaces.get_mut(&surface) {
+                state.pending_present_mode = None;
+            }
             return Ok(());
         }
         {
@@ -4964,6 +5108,10 @@ impl GpuBackend for WebGpuBackend {
                 .surfaces
                 .get_mut(&surface)
                 .context("WebGPU: invalid surface handle")?;
+            if state.present_in_flight.load(Ordering::Acquire) {
+                state.pending_present_mode = Some(mapped);
+                return Ok(());
+            }
             // wgpu panics if a SurfaceTexture is live across configure().
             state.acquired = None;
             state.present_mode = mapped;
@@ -5016,6 +5164,12 @@ impl GpuBackend for WebGpuBackend {
             }
         }
         retired.fetch_max(value, Ordering::AcqRel);
+        for context in self.contexts.values() {
+            if context.device == device {
+                context.completed.fetch_max(value, Ordering::Release);
+                context.signal_queue.push_boundary_crossed(value);
+            }
+        }
         if retired.load(Ordering::Acquire) < value {
             anyhow::bail!("WebGPU: timeline value {value} has not been submitted");
         }
@@ -5800,6 +5954,60 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         backend.wait_until(ctx, second)?;
         backend.evict_retained(ctx, KEY);
         assert!(backend.try_resubmit_retained(ctx, KEY, None)?.is_none());
+        backend.destroy_buffer(buffer);
+        Ok(())
+    }
+
+    #[test]
+    fn resize_buffer_evicts_retained_resubmit() -> Result<()> {
+        let mut backend = match WebGpuBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping WebGPU retain resize test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            DOUBLE_WGSL,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("double"))?;
+        let slot = backend.buffer_bindless_index(buffer).context("missing registry key")?;
+        let commands = [
+            GraphCommand::Compute(GpuCommand::SetPipeline(pipeline)),
+            GraphCommand::Compute(GpuCommand::BindResourcesRaw {
+                indices: vec![slot],
+                user: vec![],
+                frame_table_base: 0,
+            }),
+            GraphCommand::Compute(GpuCommand::Dispatch {
+                label: Some("double"),
+                workgroups_x: 4,
+                workgroups_y: 1,
+                workgroups_z: 1,
+            }),
+        ];
+        const KEY: u64 = 0xB0FF_E2ED;
+        backend.submit_graph_and_retain(ctx, &commands, KEY, None)?;
+        assert!(backend.try_resubmit_retained(ctx, KEY, None)?.is_some());
+        backend.resize_buffer(device, buffer, 32, true)?;
+        assert!(
+            backend.try_resubmit_retained(ctx, KEY, None)?.is_none(),
+            "resize must drop prepared retained dispatches bound to the buffer"
+        );
         backend.destroy_buffer(buffer);
         Ok(())
     }
