@@ -105,6 +105,34 @@ const DEFAULT_SURFACE_WIDTH: u32 = 800;
 #[cfg(feature = "graphics")]
 const DEFAULT_SURFACE_HEIGHT: u32 = 600;
 
+/// `ErrorScopeGuard::pop()` forces a device poll. Used for shader/PSO create in
+/// debug builds, and whenever `GOLDY_VALIDATION` enables GPU API validation
+/// (`api` / `all` / `1`). Dispatch-path bind groups poll only in the latter case.
+fn pop_validation_scope(
+    pop: impl std::future::Future<Output = Option<impl std::fmt::Display>>,
+    context: &'static str,
+) -> Result<()> {
+    if let Some(error) = pollster::block_on(pop) {
+        anyhow::bail!("{context}: {error}");
+    }
+    Ok(())
+}
+
+fn with_wgpu_error_scope<T>(
+    device: &wgpu::Device,
+    enabled: bool,
+    context: &'static str,
+    f: impl FnOnce() -> T,
+) -> Result<T> {
+    if !enabled {
+        return Ok(f());
+    }
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let value = f();
+    pop_validation_scope(error_scope.pop(), context)?;
+    Ok(value)
+}
+
 #[cfg(all(feature = "graphics", target_os = "macos"))]
 fn appkit_view_physical_size(window: &dyn raw_window_handle::HasWindowHandle) -> Option<(u32, u32)> {
     use raw_window_handle::RawWindowHandle;
@@ -593,6 +621,8 @@ pub(crate) struct WebGpuBackend {
     last_frame_table: Option<Arc<[u32]>>,
     /// `None` after [`GpuBackend::release_idle_shader_compiler`]; recreated on the next compile.
     slang_compiler: Option<crate::slang::SlangCompiler>,
+    /// Snapshotted at backend init (`GOLDY_VALIDATION` `api` / `all` / `1`).
+    gpu_api_validation: bool,
 }
 
 #[cfg(feature = "graphics")]
@@ -937,6 +967,7 @@ impl WebGpuBackend {
             next_render_target: 1,
             last_frame_table: None,
             slang_compiler: None,
+            gpu_api_validation: crate::validation_env::gpu_api_validation_enabled(),
         })
     }
 
@@ -1553,6 +1584,10 @@ impl WebGpuBackend {
         })
     }
 
+    fn pso_error_scopes(&self) -> bool {
+        cfg!(debug_assertions) || self.gpu_api_validation
+    }
+
     fn create_wgpu_compute_pipeline(
         &self,
         device: DeviceHandle,
@@ -1560,23 +1595,25 @@ impl WebGpuBackend {
         debug_name: Option<&str>,
     ) -> Result<wgpu::ComputePipeline> {
         let gpu = self.device(device)?;
-        let error_scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: debug_name,
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-        });
-        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: debug_name,
-            layout: None,
-            module: &module,
-            entry_point: Some("cs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
-        if let Some(error) = pollster::block_on(error_scope.pop()) {
-            anyhow::bail!("WebGPU shader/pipeline validation failed: {error}");
-        }
-        Ok(pipeline)
+        with_wgpu_error_scope(
+            &gpu.device,
+            self.pso_error_scopes(),
+            "WebGPU shader/pipeline validation failed",
+            || {
+                let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: debug_name,
+                    source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                });
+                gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: debug_name,
+                    layout: None,
+                    module: &module,
+                    entry_point: Some("cs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
+                })
+            },
+        )
     }
 
     fn packed_storage_bindings(
@@ -1774,15 +1811,20 @@ impl WebGpuBackend {
         }
         let bind_layout = bind_layout();
         let gpu = self.device(device)?;
-        let error_scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("goldy-webgpu-dispatch-bindings"),
-            layout: &bind_layout,
-            entries: &entries,
-        });
-        if let Some(error) = pollster::block_on(error_scope.pop()) {
-            anyhow::bail!("WebGPU bind group validation failed: {error}");
-        }
+        // Bind-group `pop()` polls the device every dispatch. Skip unless
+        // `GOLDY_VALIDATION` requested GPU API validation (debug PSO scopes stay on).
+        let bind_group = with_wgpu_error_scope(
+            &gpu.device,
+            self.gpu_api_validation,
+            "WebGPU bind group validation failed",
+            || {
+                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("goldy-webgpu-dispatch-bindings"),
+                    layout: &bind_layout,
+                    entries: &entries,
+                })
+            },
+        )?;
         Ok(Some(bind_group))
     }
 
@@ -3566,16 +3608,6 @@ impl GpuBackend for WebGpuBackend {
         };
 
         let gpu = self.device(device)?;
-        let error_scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let vs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("goldy-webgpu-vs"),
-            source: wgpu::ShaderSource::Wgsl(vs_wgsl.into()),
-        });
-        let fs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("goldy-webgpu-fs"),
-            source: wgpu::ShaderSource::Wgsl(fs_wgsl.into()),
-        });
-
         let attributes: Vec<wgpu::VertexAttribute> = vertex_layout
             .attributes
             .iter()
@@ -3606,38 +3638,51 @@ impl GpuBackend for WebGpuBackend {
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         });
-        let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("goldy-webgpu-graphics"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &vertex_buffers,
+        let pso_scopes = self.pso_error_scopes();
+        let pipeline = with_wgpu_error_scope(
+            &gpu.device,
+            pso_scopes,
+            "WebGPU graphics pipeline validation failed",
+            || {
+                let vs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("goldy-webgpu-vs"),
+                    source: wgpu::ShaderSource::Wgsl(vs_wgsl.into()),
+                });
+                let fs_module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("goldy-webgpu-fs"),
+                    source: wgpu::ShaderSource::Wgsl(fs_wgsl.into()),
+                });
+                gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("goldy-webgpu-graphics"),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &vs_module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &vertex_buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: map_topology(topology),
+                        strip_index_format,
+                        ..wgpu::PrimitiveState::default()
+                    },
+                    depth_stencil,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &fs_module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: map_texture_format(target_format),
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             },
-            primitive: wgpu::PrimitiveState {
-                topology: map_topology(topology),
-                strip_index_format,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: map_texture_format(target_format),
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        if let Some(error) = pollster::block_on(error_scope.pop()) {
-            anyhow::bail!("WebGPU graphics pipeline validation failed: {error}");
-        }
+        )?;
 
         let handle = self.next_graphics_pipeline;
         self.next_graphics_pipeline += 1;

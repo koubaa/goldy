@@ -42,6 +42,7 @@ enables backend-specific validation:
 | Vulkan | `VK_LAYER_KHRONOS_validation` + `VK_EXT_debug_utils` at instance creation |
 | Metal | Sets `MTL_SHADER_VALIDATION=1` (if not already set) before the first device is created |
 | DX12 | See [DX12 Debug Layer](#dx12-debug-layer) below |
+| WebGPU | wgpu validation error scopes on shader/PSO create (always in debug builds; in release when GPU API validation is on) and on bind-group create (GPU API validation only) |
 
 For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` contains
 `VK_LAYER_KHRONOS_validation` (the standard loader-driven workflow).

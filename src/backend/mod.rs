@@ -78,7 +78,8 @@ use std::sync::Arc;
 /// Vulkan enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation;
 /// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset;
 /// CUDA enables Driver diagnostics (PTX JIT logs, eager sync, launch-limit checks) and may set
-/// `CUDA_LAUNCH_BLOCKING=1` when unset.
+/// `CUDA_LAUNCH_BLOCKING=1` when unset;
+/// WebGPU enables wgpu validation error scopes (shader/PSO create, and bind groups) when this is set.
 ///
 /// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `api`, `all`, …).
 ///
