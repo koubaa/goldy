@@ -298,9 +298,8 @@ fn pick_swapchain_format(formats: &[wgpu::TextureFormat]) -> Result<wgpu::Textur
 
 #[cfg(feature = "graphics")]
 fn map_present_mode(requested: PresentMode, modes: &[wgpu::PresentMode]) -> Result<wgpu::PresentMode> {
-    let first_supported = |candidates: &[wgpu::PresentMode]| {
-        candidates.iter().copied().find(|mode| modes.contains(mode))
-    };
+    let first_supported =
+        |candidates: &[wgpu::PresentMode]| candidates.iter().copied().find(|mode| modes.contains(mode));
     let mapped = match requested {
         PresentMode::Fifo => first_supported(&[wgpu::PresentMode::Fifo]),
         PresentMode::Mailbox => first_supported(&[wgpu::PresentMode::Mailbox]),
@@ -312,9 +311,7 @@ fn map_present_mode(requested: PresentMode, modes: &[wgpu::PresentMode]) -> Resu
         ]),
         PresentMode::Auto => first_supported(&[wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo]),
     };
-    mapped.with_context(|| {
-        format!("WebGPU: present mode {requested:?} is not supported (available: {modes:?})")
-    })
+    mapped.with_context(|| format!("WebGPU: present mode {requested:?} is not supported (available: {modes:?})"))
 }
 
 #[cfg(feature = "graphics")]
@@ -4152,10 +4149,7 @@ impl GpuBackend for WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn surface_set_present_mode(&mut self, surface: SurfaceHandle, mode: PresentMode) -> Result<()> {
         let (current, mapped) = {
-            let state = self
-                .surfaces
-                .get(&surface)
-                .context("WebGPU: invalid surface handle")?;
+            let state = self.surfaces.get(&surface).context("WebGPU: invalid surface handle")?;
             let mapped = map_present_mode(mode, &state.supported_present_modes)?;
             (state.present_mode, mapped)
         };
