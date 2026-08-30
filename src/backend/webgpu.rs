@@ -4429,14 +4429,16 @@ impl GpuBackend for WebGpuBackend {
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         if let Some(sync) = sync {
+            // `SubmitSync::waits` are GPU queue-order dependencies. WebGPU has one
+            // `wgpu::Queue` per device, so prior submits are already ordered — a CPU
+            // `device_wait_until` here was turning present easement / upload→worker
+            // queue waits into host stalls. Only true host waits remain.
+            if !sync.cpu_waits.is_empty() || !sync.host_observed_waits.is_empty() {
             let _tz = tracy_zone!("wgpu.submit_standalone.sync_wait");
-            for epoch in sync
-                .waits
-                .iter()
-                .chain(sync.cpu_waits.iter())
-                .chain(sync.host_observed_waits.iter())
-            {
-                self.device_wait_until(self.context_device(ctx), epoch.value)?;
+                let device = self.context_device(ctx);
+                for epoch in sync.cpu_waits.iter().chain(sync.host_observed_waits.iter()) {
+                    self.device_wait_until(device, epoch.value)?;
+                }
             }
             for write in &sync.deferred_host_writes {
                 self.write_buffer(write.buffer, write.offset, &write.data)?;
