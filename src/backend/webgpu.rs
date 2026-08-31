@@ -1096,7 +1096,7 @@ struct WebGpuComputePipeline {
 
 impl WebGpuBackend {
     pub(crate) fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
         if adapters.is_empty() {
             anyhow::bail!("WebGPU: no compatible adapters found");
@@ -1472,7 +1472,7 @@ impl WebGpuBackend {
         });
         let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("goldy-webgpu-present-blit-layout"),
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1558,17 +1558,33 @@ impl WebGpuBackend {
             .surface
             .get_current_texture();
         match first {
-            Ok(texture) => Ok(texture),
-            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost | wgpu::SurfaceError::Timeout) => {
+            wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                Ok(texture)
+            }
+            wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Lost
+            | wgpu::CurrentSurfaceTexture::Timeout => {
                 self.configure_surface(surface)?;
-                self.surfaces
+                match self
+                    .surfaces
                     .get(&surface)
                     .context("WebGPU: invalid surface handle")?
                     .surface
                     .get_current_texture()
-                    .context("WebGPU: get_current_texture after reconfigure")
+                {
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Ok(texture),
+                    retry => Err(anyhow::anyhow!(
+                        "WebGPU: get_current_texture after reconfigure failed: {retry:?}"
+                    )),
+                }
             }
-            Err(error) => Err(anyhow::anyhow!("WebGPU: get_current_texture failed: {error}")),
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                Err(anyhow::anyhow!("WebGPU: surface is occluded"))
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                Err(anyhow::anyhow!("WebGPU: surface validation error"))
+            }
         }
     }
 
@@ -4453,8 +4469,8 @@ impl GpuBackend for WebGpuBackend {
         .then_some(wgpu::IndexFormat::Uint16);
         let depth_stencil = depth_stencil.map(|ds| wgpu::DepthStencilState {
             format: map_depth_format(ds.format),
-            depth_write_enabled: ds.depth_write_enabled,
-            depth_compare: map_compare(ds.depth_compare),
+            depth_write_enabled: Some(ds.depth_write_enabled),
+            depth_compare: Some(map_compare(ds.depth_compare)),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         });
@@ -5004,7 +5020,7 @@ impl GpuBackend for WebGpuBackend {
         let wgpu_surface = unsafe {
             self.instance
                 .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: display_handle.as_raw(),
+                    raw_display_handle: Some(display_handle.as_raw()),
                     raw_window_handle: window_handle.as_raw(),
                 })
         }
