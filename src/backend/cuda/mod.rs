@@ -673,9 +673,7 @@ impl CudaBackend {
             let minor = ctx
                 .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
                 .unwrap_or(0);
-            tracing::info!(
-                "  [{ordinal}] {name} (DiscreteGpu) - compute capability {major}.{minor}"
-            );
+            tracing::info!("  [{ordinal}] {name} (DiscreteGpu) - compute capability {major}.{minor}");
             adapter_info.push(AdapterInfo {
                 id: ordinal as u32,
                 name,
@@ -685,7 +683,12 @@ impl CudaBackend {
             });
         }
         tracing::info!("Found {count} CUDA device(s) (driver {driver_version})");
-        goldy_event!("backend.cuda.init", device_count = count, driver_version = driver_version, success = true);
+        goldy_event!(
+            "backend.cuda.init",
+            device_count = count,
+            driver_version = driver_version,
+            success = true
+        );
         Ok(Self {
             adapter_info,
             devices: HashMap::new(),
@@ -3218,9 +3221,7 @@ fn ensure_cuda_driver_at_least_13_1() -> Result<String> {
         anyhow::bail!("CUDA: cuDriverGetVersion failed: {r:?}");
     }
     let driver_version = cuda_driver_version_string(version);
-    tracing::info!(
-        "CUDA driver version: {driver_version} (encoding {version}; need >= {MIN_CUDA_DRIVER_VERSION})"
-    );
+    tracing::info!("CUDA driver version: {driver_version} (encoding {version}; need >= {MIN_CUDA_DRIVER_VERSION})");
     if version < MIN_CUDA_DRIVER_VERSION {
         anyhow::bail!(
             "CUDA: goldy requires CUDA driver 13.1+ for device-updatable graph nodes \

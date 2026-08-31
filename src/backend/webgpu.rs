@@ -30,11 +30,11 @@ use crate::frame_table::dispatch_table_base_word_index;
 use crate::slang::virtual_main::{CudaStorageTextureSpec, WgpuComputeLayout, WgpuComputeResourceKind};
 use crate::slang::OwnedLayoutCheck;
 use crate::tracy_zone;
-use crate::{goldy_event, goldy_span};
 use crate::types::{
     AddressMode, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType, FilterMode,
     IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
 };
+use crate::{goldy_event, goldy_span};
 use anyhow::{Context as _, Result};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1140,11 +1140,7 @@ impl WebGpuBackend {
                 }
             })
             .collect();
-        goldy_event!(
-            "backend.webgpu.init",
-            adapter_count = adapters.len(),
-            success = true
-        );
+        goldy_event!("backend.webgpu.init", adapter_count = adapters.len(), success = true);
         Ok(Self {
             instance,
             adapters,
@@ -1609,12 +1605,8 @@ impl WebGpuBackend {
                     )),
                 }
             }
-            wgpu::CurrentSurfaceTexture::Occluded => {
-                Err(anyhow::anyhow!("WebGPU: surface is occluded"))
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                Err(anyhow::anyhow!("WebGPU: surface validation error"))
-            }
+            wgpu::CurrentSurfaceTexture::Occluded => Err(anyhow::anyhow!("WebGPU: surface is occluded")),
+            wgpu::CurrentSurfaceTexture::Validation => Err(anyhow::anyhow!("WebGPU: surface validation error")),
         }
     }
 
