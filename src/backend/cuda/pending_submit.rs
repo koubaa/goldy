@@ -153,6 +153,8 @@ pub(super) enum CudaOp {
         node_slot: Arc<Mutex<CudaSlice<u64>>>,
         /// Diagnostic status word (0 = ok, -1 = oversized, else CUDA error).
         status_ptr: u64,
+        /// Retains the status allocation; only [`status_ptr`] is read after record.
+        #[allow(dead_code)]
         status_memory: Arc<Mutex<CudaSlice<i32>>>,
         updater: CudaFunction,
         updater_module: Arc<CudaModule>,
@@ -388,18 +390,6 @@ pub(super) fn coalesce_adjacent_stream_segments(segments: Vec<CudaOpSegment>) ->
 /// Number of graph islands in `segments`.
 pub(super) fn graph_island_count(segments: &[CudaOpSegment]) -> usize {
     segments.iter().filter(|s| s.is_graph()).count()
-}
-
-pub(super) fn segment_op_counts(segments: &[CudaOpSegment]) -> (usize, usize) {
-    let mut graph_ops = 0usize;
-    let mut stream_ops = 0usize;
-    for segment in segments {
-        match segment {
-            CudaOpSegment::Graph(ops) => graph_ops += ops.len(),
-            CudaOpSegment::Stream(ops) => stream_ops += ops.len(),
-        }
-    }
-    (graph_ops, stream_ops)
 }
 
 /// Mutable handle to the last stream segment (for DX12 fence injection). Creates an
