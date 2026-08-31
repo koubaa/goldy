@@ -308,6 +308,7 @@ fn transition(
 }
 
 fn compile_stage_dxil(
+    compiler: &crate::slang::SlangCompiler,
     shader: &CudaShader,
     stage: crate::slang::SlangStage,
 ) -> Result<(Vec<u8>, crate::slang::ShaderReflection)> {
@@ -316,7 +317,6 @@ fn compile_stage_dxil(
         crate::slang::SlangStage::Fragment => "fs_main",
         other => bail!("CUDA/DX12 raster: unsupported stage {other:?}"),
     };
-    let compiler = crate::slang::SlangCompiler::new().context("CUDA/DX12: initialize Slang")?;
     let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
     let mut defines: Vec<(&str, &str)> = vec![("__DX12__", "1")];
     for (k, v) in &shader.defines {
@@ -381,8 +381,9 @@ pub(super) fn create_pipeline(
         bail!("CUDA/DX12: fragment shader belongs to a different device");
     }
 
-    let (vs_dxil, _vs_refl) = compile_stage_dxil(vs, crate::slang::SlangStage::Vertex)?;
-    let (fs_dxil, fs_refl) = compile_stage_dxil(fs, crate::slang::SlangStage::Fragment)?;
+    let compiler = &backend.slang_compiler;
+    let (vs_dxil, _vs_refl) = compile_stage_dxil(compiler, vs, crate::slang::SlangStage::Vertex)?;
+    let (fs_dxil, fs_refl) = compile_stage_dxil(compiler, fs, crate::slang::SlangStage::Fragment)?;
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
     let push_constant_slot_kinds = fs_refl.push_constant_slot_kinds.clone();
     let binding_element_strides = fs_refl.binding_element_strides.clone();
