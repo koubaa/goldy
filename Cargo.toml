@@ -47,7 +47,7 @@ goldy_shader_ir = { version = "0.2.0", path = "shader_ir" }
 ash = { version = "0.38", optional = true }
 
 # Portable WebGPU backend
-wgpu = { version = "28", optional = true }
+wgpu = { version = "29.0.3", optional = true }
 pollster = { version = "0.4", optional = true }
 
 # CUDA Driver API backend (compute-only prototype)
@@ -64,7 +64,7 @@ libloading = "0.9"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "2.0"
+thiserror = "2.0.18"
 
 # Logging and instrumentation
 tracing = "0.1"
@@ -74,9 +74,9 @@ tracy-client = { version = "0.18", default-features = false, optional = true }
 # Utilities
 bitflags = "2.6"
 rustc-hash = "2"
-bytemuck = { version = "1.21", features = ["derive"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
 # Optional: `update-screenshots` binary only
-image = { version = "0.25", optional = true }
+image = { version = "0.25.10", optional = true }
 dirs = "6.0"
 scopeguard = "1.2"
 bincode = { version = "2", features = ["serde"] }
