@@ -566,6 +566,7 @@ pub(super) fn create(
 
     let pipeline_state: ID3D12PipelineState = {
         let _tz = crate::tracy_zone!("goldy.dx12.CreateComputePipelineState");
+        let _st = crate::shader_timing::scope("dx12.CreateComputePipelineState", shader_debug_name.as_str());
         loop {
             match unsafe { logical_device.device.CreateComputePipelineState(&pso_desc) } {
                 Ok(p) => break p,

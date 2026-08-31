@@ -37,6 +37,7 @@ pub mod texture;
 pub mod types;
 
 pub mod shader_cache;
+pub(crate) mod shader_timing;
 pub mod slang;
 pub mod validation_env;
 
@@ -73,6 +74,7 @@ pub use retained_pool::RetainedPool;
 pub use scheme::{Lease, ReplayStats, Scheme, Submission};
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, Transaction};
+pub use shader_timing::{dump_totals, reset_totals};
 #[cfg(feature = "graphics")]
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::ShaderResourceSlot;

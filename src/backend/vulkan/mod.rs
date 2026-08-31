@@ -1111,7 +1111,10 @@ impl GpuBackend for VulkanBackend {
         debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle> {
         // Compile shader on-demand
-        let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
+        let cs_module = {
+            let _st = crate::shader_timing::scope("vk.ensure_stage_compiled", debug_name.unwrap_or(""));
+            self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?
+        };
 
         let (cats, strides) = {
             let shaders = self.state.shaders.read().unwrap();

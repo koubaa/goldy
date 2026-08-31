@@ -662,6 +662,7 @@ pub(super) fn create(
         .layout(pipeline_layout)
         .push_next(&mut robustness);
 
+    let _st = crate::shader_timing::scope("vk.create_compute_pipelines", shader_debug_name.as_str());
     let pipelines = unsafe {
         logical_device
             .device

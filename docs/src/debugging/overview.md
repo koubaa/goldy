@@ -245,6 +245,7 @@ RUST_LOG=goldy::render=trace cargo run --example triangle
 | `GOLDY_DX12_DEBUG` | `1` | Force-enable D3D12 debug layer in release |
 | `GOLDY_DX12_NO_DEBUG` | `1` | Disable D3D12 debug layer |
 | `GOLDY_DX12_GBV` | `1` | Enable GPU-Based Validation |
+| `GOLDY_SHADER_TIMING` | `1` | Print Slang/PSO startup timings to stderr |
 | `RUST_LOG` | e.g. `goldy=debug` | Filter instrumentation output |
 
 ## Common Debugging Patterns
