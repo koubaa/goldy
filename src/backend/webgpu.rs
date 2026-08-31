@@ -30,6 +30,7 @@ use crate::frame_table::dispatch_table_base_word_index;
 use crate::slang::virtual_main::{CudaStorageTextureSpec, WgpuComputeLayout, WgpuComputeResourceKind};
 use crate::slang::OwnedLayoutCheck;
 use crate::tracy_zone;
+use crate::{goldy_event, goldy_span};
 use crate::types::{
     AddressMode, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType, FilterMode,
     IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
@@ -1096,11 +1097,35 @@ struct WebGpuComputePipeline {
 
 impl WebGpuBackend {
     pub(crate) fn new() -> Result<Self> {
+        let _span = goldy_span!("backend.webgpu.init").entered();
+        tracing::info!("Initializing WebGPU backend");
+        if let Ok(backend) = std::env::var("WGPU_BACKEND") {
+            tracing::info!("WGPU_BACKEND={backend}");
+        }
+        if std::env::var("WGPU_FORCE_FALLBACK_ADAPTER")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+        {
+            tracing::info!("WGPU_FORCE_FALLBACK_ADAPTER is set (software adapter preferred)");
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
         if adapters.is_empty() {
             anyhow::bail!("WebGPU: no compatible adapters found");
         }
+        for (id, adapter) in adapters.iter().enumerate() {
+            let info = adapter.get_info();
+            tracing::info!(
+                "  [{id}] {} ({:?}, {:?}) - vendor=0x{:04x}, driver={}, {}",
+                info.name,
+                info.device_type,
+                info.backend,
+                info.vendor,
+                info.driver,
+                info.driver_info
+            );
+        }
+        tracing::info!("Found {} WebGPU adapter(s)", adapters.len());
         let adapter_info = adapters
             .iter()
             .enumerate()
@@ -1115,6 +1140,11 @@ impl WebGpuBackend {
                 }
             })
             .collect();
+        goldy_event!(
+            "backend.webgpu.init",
+            adapter_count = adapters.len(),
+            success = true
+        );
         Ok(Self {
             instance,
             adapters,
@@ -3862,6 +3892,7 @@ impl GpuBackend for WebGpuBackend {
             .adapters
             .get(adapter_id as usize)
             .with_context(|| format!("WebGPU: invalid adapter id {adapter_id}"))?;
+        let adapter_info = adapter.get_info();
         let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgpu::Features::FLOAT32_FILTERABLE
             | wgpu::Features::BGRA8UNORM_STORAGE
@@ -3882,10 +3913,26 @@ impl GpuBackend for WebGpuBackend {
             eprintln!("WebGPU uncaptured error: {error}");
         }));
         let (pipeline_cache, pipeline_cache_path) = load_wgpu_pipeline_cache(&device, adapter);
-        let uniform_offset_align = device.limits().min_uniform_buffer_offset_alignment.max(16) as u64;
-        let storage_offset_align = device.limits().min_storage_buffer_offset_alignment.max(4) as u64;
+        let limits = device.limits();
+        let uniform_offset_align = limits.min_uniform_buffer_offset_alignment.max(16) as u64;
+        let storage_offset_align = limits.min_storage_buffer_offset_alignment.max(4) as u64;
         let handle = self.next_device;
         self.next_device += 1;
+        tracing::info!(
+            device = handle,
+            adapter_id,
+            adapter = %adapter_info.name,
+            wgpu_backend = ?adapter_info.backend,
+            features = ?required_features,
+            max_storage_buffers = limits.max_storage_buffers_per_shader_stage,
+            max_bind_groups = limits.max_bind_groups,
+            pipeline_cache = pipeline_cache_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "disabled".to_string()),
+            gpu_api_validation = self.gpu_api_validation,
+            "Created WebGPU device"
+        );
         self.devices.insert(
             handle,
             WebGpuDevice {

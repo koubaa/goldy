@@ -67,6 +67,7 @@ use crate::backend::submission_worker::{self, SubmissionWorker};
 use crate::frame_table::dispatch_table_base_word_index;
 use crate::slang::virtual_main::{CudaLaunchArgKind, CudaStorageTextureSpec};
 use crate::types::{BufferResizeCost, DeviceType};
+use crate::{goldy_event, goldy_span};
 use anyhow::{Context as _, Result};
 use cudarc::driver::{
     sys, CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig,
@@ -644,6 +645,8 @@ impl CudaBackend {
     }
 
     pub(crate) fn new() -> Result<Self> {
+        let _span = goldy_span!("backend.cuda.init").entered();
+        tracing::info!("Initializing CUDA backend");
         ensure_cuda_toolkit_on_path();
         // `CUDA_LAUNCH_BLOCKING` must be set before driver work begins. Use a
         // process-wide Once so parallel test threads do not race on `set_var`.
@@ -655,7 +658,7 @@ impl CudaBackend {
             }
         });
         cudarc::driver::result::init().context("CUDA: driver init failed")?;
-        ensure_cuda_driver_at_least_13_1()?;
+        let driver_version = ensure_cuda_driver_at_least_13_1()?;
         let count = CudaContext::device_count().context("CUDA: enumerate devices")?;
         if count <= 0 {
             anyhow::bail!("CUDA: no devices found");
@@ -664,6 +667,15 @@ impl CudaBackend {
         for ordinal in 0..count {
             let ctx = CudaContext::new(ordinal as usize).with_context(|| format!("CUDA: open device {ordinal}"))?;
             let name = ctx.name().unwrap_or_else(|_| format!("CUDA device {ordinal}"));
+            let major = ctx
+                .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+                .unwrap_or(0);
+            let minor = ctx
+                .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+                .unwrap_or(0);
+            tracing::info!(
+                "  [{ordinal}] {name} (DiscreteGpu) - compute capability {major}.{minor}"
+            );
             adapter_info.push(AdapterInfo {
                 id: ordinal as u32,
                 name,
@@ -672,6 +684,8 @@ impl CudaBackend {
                 device_type: DeviceType::DiscreteGpu,
             });
         }
+        tracing::info!("Found {count} CUDA device(s) (driver {driver_version})");
+        goldy_event!("backend.cuda.init", device_count = count, driver_version = driver_version, success = true);
         Ok(Self {
             adapter_info,
             devices: HashMap::new(),
@@ -3191,19 +3205,29 @@ fn ensure_cuda_toolkit_on_path() {
 /// CUDA 13.1 floor for device-updatable kernel nodes (`1000 * major + 10 * minor`).
 const MIN_CUDA_DRIVER_VERSION: i32 = 13010;
 
-fn ensure_cuda_driver_at_least_13_1() -> Result<()> {
+fn cuda_driver_version_string(encoding: i32) -> String {
+    let major = encoding / 1000;
+    let minor = (encoding % 1000) / 10;
+    format!("{major}.{minor}")
+}
+
+fn ensure_cuda_driver_at_least_13_1() -> Result<String> {
     let mut version = 0i32;
     let r = unsafe { cudarc::driver::sys::cuDriverGetVersion(&mut version) };
     if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
         anyhow::bail!("CUDA: cuDriverGetVersion failed: {r:?}");
     }
+    let driver_version = cuda_driver_version_string(version);
+    tracing::info!(
+        "CUDA driver version: {driver_version} (encoding {version}; need >= {MIN_CUDA_DRIVER_VERSION})"
+    );
     if version < MIN_CUDA_DRIVER_VERSION {
         anyhow::bail!(
             "CUDA: goldy requires CUDA driver 13.1+ for device-updatable graph nodes \
              (got driver version encoding {version}; need >= {MIN_CUDA_DRIVER_VERSION})"
         );
     }
-    Ok(())
+    Ok(driver_version)
 }
 
 fn query_device_limits(ctx: &CudaContext) -> Result<CudaDeviceLimits> {
@@ -3581,9 +3605,28 @@ impl GpuBackend for CudaBackend {
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             dx12: None,
         };
-        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-        surface::attach_companion(&mut gpu)
-            .with_context(|| format!("CUDA: attach DX12 presentation companion for adapter {adapter_id}"))?;
+        let dx12_companion = {
+            #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+            {
+                surface::attach_companion(&mut gpu)
+                    .with_context(|| format!("CUDA: attach DX12 presentation companion for adapter {adapter_id}"))?;
+                gpu.dx12.is_some()
+            }
+            #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
+            {
+                false
+            }
+        };
+        tracing::info!(
+            device = handle,
+            adapter_id,
+            cc = %format!("{major}.{minor}"),
+            max_grid = ?(limits.max_grid_dim_x, limits.max_grid_dim_y, limits.max_grid_dim_z),
+            max_threads_per_block = limits.max_threads_per_block,
+            max_shared_mem_per_block = limits.max_shared_memory_per_block,
+            dx12_companion,
+            "Created CUDA device"
+        );
         self.devices.insert(handle, gpu);
         Ok(handle)
     }
