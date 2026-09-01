@@ -1143,6 +1143,50 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
+            GpuCommand::CopyTextureRegion {
+                src,
+                dst,
+                src_x,
+                src_y,
+                dst_x,
+                dst_y,
+                width,
+                height,
+            } => {
+                ensure_blit_tex!(*src);
+                ensure_blit_tex!(*dst);
+                let src_state = state
+                    .textures
+                    .get(src)
+                    .context("CopyTextureRegion: src texture not found")?;
+                let dst_state = state
+                    .textures
+                    .get(dst)
+                    .context("CopyTextureRegion: dst texture not found")?;
+                guard.blit.unwrap().copy_from_texture(
+                    &src_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: *src_x as u64,
+                        y: *src_y as u64,
+                        z: 0,
+                    },
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &dst_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: *dst_x as u64,
+                        y: *dst_y as u64,
+                        z: 0,
+                    },
+                );
+            }
             GpuCommand::CopyBuffer {
                 src,
                 src_offset,
@@ -1441,6 +1485,7 @@ fn stage_uploads(
             GpuCommand::ClearBuffer { .. }
             | GpuCommand::CopyBuffer { .. }
             | GpuCommand::CopyTexture { .. }
+            | GpuCommand::CopyTextureRegion { .. }
             | GpuCommand::CopyTextureToReadback { .. }
             | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)

@@ -621,6 +621,20 @@ pub(crate) enum GpuCommand {
     /// Both textures must have compatible formats and identical dimensions.
     /// The backend inserts appropriate layout transitions and memory barriers.
     CopyTexture { src: TextureHandle, dst: TextureHandle },
+    /// Copy a rectangular texel region from `src` into `dst`.
+    ///
+    /// Formats must match. Regions must be non-empty and in-bounds. Same-texture
+    /// overlapping copies are rejected before this command is emitted.
+    CopyTextureRegion {
+        src: TextureHandle,
+        dst: TextureHandle,
+        src_x: u32,
+        src_y: u32,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    },
     /// Copy the color attachment of an offscreen render target into a texture.
     ///
     /// The source must have been rendered to earlier in the same submission (or

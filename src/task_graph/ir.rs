@@ -232,6 +232,22 @@ pub enum NodeKind {
         /// footprint only from scheme copy helpers (for client-side depadding after `wait()`).
         dst_buffer_layout: Option<crate::backend::TextureCopyFootprint>,
     },
+    /// Copy a rectangular texel region from one texture into another.
+    ///
+    /// Formats must match. Regions must be non-empty and in-bounds on both textures.
+    /// Same-texture overlapping copies are rejected at record time.
+    /// `src` needs [`crate::types::TextureFlags::COPY_SRC`]; `dst` needs
+    /// [`crate::types::TextureFlags::COPY_DST`].
+    CopyTextureRegion {
+        src: TextureHandle,
+        dst: TextureHandle,
+        src_x: u32,
+        src_y: u32,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    },
     /// Copy an offscreen [`crate::RenderTarget`] color buffer to a texture or swapchain output.
     ///
     /// The source render target must have been written by an earlier
