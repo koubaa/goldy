@@ -307,7 +307,8 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             NodeKind::CopyBufferToTexture { .. }
             | NodeKind::WriteTexture { .. }
             | NodeKind::WriteTextureRegion { .. }
-            | NodeKind::CopyTexture { .. } => {
+            | NodeKind::CopyTexture { .. }
+            | NodeKind::CopyTextureRegion { .. } => {
                 texture_upload_nodes.push(idx);
             }
             _ => {}
@@ -497,6 +498,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTexture { .. }
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
+        | NodeKind::CopyTextureRegion { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         // WithdrawRead participates in ordering edges but emits no GPU work in the IR.
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
@@ -797,6 +799,27 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         let dst = resolve_copy_destination(*dst, resolver);
                         commands.push(GpuCommand::CopyTexture { src: *src, dst });
                     }
+                }
+                NodeKind::CopyTextureRegion {
+                    src,
+                    dst,
+                    src_x,
+                    src_y,
+                    dst_x,
+                    dst_y,
+                    width,
+                    height,
+                } => {
+                    commands.push(GpuCommand::CopyTextureRegion {
+                        src: *src,
+                        dst: *dst,
+                        src_x: *src_x,
+                        src_y: *src_y,
+                        dst_x: *dst_x,
+                        dst_y: *dst_y,
+                        width: *width,
+                        height: *height,
+                    });
                 }
                 NodeKind::CopyRenderTarget { src, dst } => {
                     let dst = resolve_copy_destination(*dst, resolver);
@@ -1175,7 +1198,8 @@ pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 | NodeKind::WriteTexture { .. }
                 | NodeKind::WriteTextureRegion { .. }
                 | NodeKind::CopyBufferToTexture { src_row_pitch: 0, .. }
-                | NodeKind::CopyTexture { .. } => return false,
+                | NodeKind::CopyTexture { .. }
+                | NodeKind::CopyTextureRegion { .. } => return false,
                 // CopyRenderTarget → PresentLease is retainable via the slot-key
                 // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.
                 // CopyRenderTarget → Texture is also retainable: the texture handle
@@ -1536,6 +1560,27 @@ pub(crate) fn emit_graph_commands_for_waves(
                         let dst = resolve_copy_destination(*dst, resolver);
                         commands.push(GraphCommand::Compute(GpuCommand::CopyTexture { src: *src, dst }));
                     }
+                }
+                NodeKind::CopyTextureRegion {
+                    src,
+                    dst,
+                    src_x,
+                    src_y,
+                    dst_x,
+                    dst_y,
+                    width,
+                    height,
+                } => {
+                    commands.push(GraphCommand::Compute(GpuCommand::CopyTextureRegion {
+                        src: *src,
+                        dst: *dst,
+                        src_x: *src_x,
+                        src_y: *src_y,
+                        dst_x: *dst_x,
+                        dst_y: *dst_y,
+                        width: *width,
+                        height: *height,
+                    }));
                 }
                 NodeKind::CopyRenderTarget { src, dst } => {
                     let dst = resolve_copy_destination(*dst, resolver);

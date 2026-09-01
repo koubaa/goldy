@@ -3286,6 +3286,144 @@ mod imp {
         }
     }
 
+    // ─── copy_texture_region ───────────────────────────────────────────────────
+
+    fn scheme_copy_texture_region_offset_preserves_untouched(device: &Device) {
+        let ctx = submission_context(&device);
+
+        const SW: u32 = 4;
+        const SH: u32 = 4;
+        const DW: u32 = 8;
+        const DH: u32 = 8;
+        // Source: solid red.
+        let src_pixels: Vec<u8> = vec![255u8, 0, 0, 255].repeat((SW * SH) as usize);
+        let src = test_alloc_texture(
+            &device,
+            &src_pixels,
+            SW,
+            SH,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+        );
+        // Destination: solid black.
+        let dst = test_alloc_texture(
+            &device,
+            &vec![0u8; (DW * DH * 4) as usize],
+            DW,
+            DH,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        );
+
+        const DX: u32 = 2;
+        const DY: u32 = 3;
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .copy_texture_region(&src, 0, 0, &dst, DX, DY, SW, SH)
+            .expect("copy_texture_region");
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &dst)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+
+        for y in 0..DH as usize {
+            for x in 0..DW as usize {
+                let base = (y * DW as usize + x) * 4;
+                let pixel = &output[base..base + 4];
+                let in_region =
+                    x >= DX as usize && x < (DX + SW) as usize && y >= DY as usize && y < (DY + SH) as usize;
+                if in_region {
+                    assert_eq!(pixel, &[255, 0, 0, 255], "copied texel at ({x},{y})");
+                } else {
+                    assert_eq!(pixel, &[0, 0, 0, 0], "untouched texel at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    fn scheme_copy_texture_region_validation_failures(device: &Device) {
+        let ctx = submission_context(&device);
+        let a = test_alloc_texture(
+            &device,
+            &vec![0u8; 4 * 4 * 4],
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        );
+        let b = test_alloc_texture(
+            &device,
+            &vec![0u8; 4 * 4 * 4],
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        );
+        let mut scheme = Scheme::new(&ctx);
+        assert!(
+            scheme.copy_texture_region(&a, 0, 0, &b, 0, 0, 0, 4).is_err(),
+            "zero width must fail"
+        );
+        assert!(
+            scheme.copy_texture_region(&a, 2, 0, &b, 0, 0, 4, 4).is_err(),
+            "src OOB must fail"
+        );
+        assert!(
+            scheme.copy_texture_region(&a, 0, 0, &b, 2, 0, 4, 4).is_err(),
+            "dst OOB must fail"
+        );
+        assert!(
+            scheme.copy_texture_region(&a, 0, 0, &a, 1, 1, 2, 2).is_err(),
+            "overlapping same-texture copy must fail"
+        );
+    }
+
+    fn scheme_copy_texture_region_then_worker_read_orders(device: &Device) {
+        // Upload-scheme region copy then a second scheme withdraw must observe the written
+        // pixels (cross-scheme parcel ledger ordering).
+        let ctx = submission_context(&device);
+        const W: u32 = 4;
+        const H: u32 = 4;
+        let src_pixels: Vec<u8> = vec![10u8, 20, 30, 255].repeat((W * H) as usize);
+        let src = test_alloc_texture(
+            &device,
+            &src_pixels,
+            W,
+            H,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+        );
+        let dst = test_alloc_texture(
+            &device,
+            &vec![0u8; (W * H * 4) as usize],
+            W,
+            H,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        );
+
+        let mut upload = Scheme::new(&ctx);
+        upload
+            .copy_texture_region(&src, 0, 0, &dst, 0, 0, W, H)
+            .expect("upload copy");
+        upload.submit().expect("upload submit");
+
+        let mut worker = Scheme::new(&ctx);
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut worker, &dst)
+            .expect("withdraw");
+        let mut frame = worker.submit().expect("worker submit");
+        let output = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        assert_eq!(&output[..4], &[10, 20, 30, 255], "worker must see upload copy");
+    }
+
     // ─── copy_buffer_to_texture_parcel ───────────────────────────────────────────
 
     fn scheme_copy_buffer_to_texture_parcel_full_texture(device: &Device) {
@@ -4760,6 +4898,9 @@ mod imp {
         trial_tex!(scheme_write_texture_region_round_trip);
         trial_tex!(scheme_write_texture_region_oob_returns_error);
         trial_tex!(scheme_write_texture_region_multiple_non_overlapping);
+        trial_tex!(scheme_copy_texture_region_offset_preserves_untouched);
+        trial_tex!(scheme_copy_texture_region_validation_failures);
+        trial_tex!(scheme_copy_texture_region_then_worker_read_orders);
         trial_tex!(scheme_copy_buffer_to_texture_parcel_full_texture);
         trial_tex!(scheme_copy_buffer_to_texture_parcel_oob_returns_error);
         trial_tex!(scheme_copy_buffer_to_texture_parcel_rejects_texture_src);

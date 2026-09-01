@@ -604,6 +604,7 @@ impl CpuBackend {
                 GpuCommand::WriteTexture { .. }
                 | GpuCommand::WriteTextureRegion { .. }
                 | GpuCommand::CopyTexture { .. }
+                | GpuCommand::CopyTextureRegion { .. }
                 | GpuCommand::CopyRenderTarget { .. }
                 | GpuCommand::CopyBufferToTexture { .. }
                 | GpuCommand::CopyTextureToReadback { .. } => {

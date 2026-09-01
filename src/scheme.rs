@@ -2087,6 +2087,7 @@ impl Scheme {
     /// Full-texture GPU copy between two textures (same size and format).
     ///
     /// `src` needs [`TextureFlags::COPY_SRC`]; `dst` needs [`TextureFlags::COPY_DST`].
+    /// Convenience wrapper around [`Self::copy_texture_region`].
     pub fn copy_texture(&mut self, src: &crate::Texture, dst: &crate::Texture) -> Result<(), GoldyError> {
         if src.width() != dst.width() || src.height() != dst.height() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -2097,49 +2098,155 @@ impl Scheme {
                 dst.height()
             )));
         }
+        self.copy_texture_region(src, 0, 0, dst, 0, 0, src.width(), src.height())
+    }
+
+    /// Copy a rectangular texel region from `src` into `dst`.
+    ///
+    /// Formats must match. The region must be non-empty and in-bounds on both textures.
+    /// Same-texture overlapping copies are rejected. `src` needs [`TextureFlags::COPY_SRC`];
+    /// `dst` needs [`TextureFlags::COPY_DST`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_texture_region(
+        &mut self,
+        src: &crate::Texture,
+        src_x: u32,
+        src_y: u32,
+        dst: &crate::Texture,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GoldyError> {
+        if width == 0 || height == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture_region: extent must be non-zero (got {width}x{height})"
+            )));
+        }
         if src.format() != dst.format() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_texture: format mismatch {:?} → {:?}",
+                "copy_texture_region: format mismatch {:?} → {:?}",
                 src.format(),
                 dst.format()
             )));
         }
         if !src.flags().contains(TextureFlags::COPY_SRC) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_texture: source requires TextureFlags::COPY_SRC"
+                "copy_texture_region: source requires TextureFlags::COPY_SRC"
             )));
         }
         if !dst.flags().contains(TextureFlags::COPY_DST) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_texture: destination requires TextureFlags::COPY_DST"
+                "copy_texture_region: destination requires TextureFlags::COPY_DST"
             )));
+        }
+        let src_x_end = src_x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_texture_region: src x+width overflow")))?;
+        let src_y_end = src_y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_texture_region: src y+height overflow")))?;
+        let dst_x_end = dst_x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_texture_region: dst x+width overflow")))?;
+        let dst_y_end = dst_y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_texture_region: dst y+height overflow")))?;
+        if src_x_end > src.width() || src_y_end > src.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture_region: src region {}x{} at ({},{}) exceeds {}x{}",
+                width,
+                height,
+                src_x,
+                src_y,
+                src.width(),
+                src.height()
+            )));
+        }
+        if dst_x_end > dst.width() || dst_y_end > dst.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture_region: dst region {}x{} at ({},{}) exceeds {}x{}",
+                width,
+                height,
+                dst_x,
+                dst_y,
+                dst.width(),
+                dst.height()
+            )));
+        }
+        let src_h = src.gpu_handle();
+        let dst_h = dst.gpu_handle();
+        if src_h == dst_h {
+            let src_rect = (src_x, src_y, src_x_end, src_y_end);
+            let dst_rect = (dst_x, dst_y, dst_x_end, dst_y_end);
+            let overlap = src_rect.0 < dst_rect.2
+                && dst_rect.0 < src_rect.2
+                && src_rect.1 < dst_rect.3
+                && dst_rect.1 < src_rect.3;
+            if overlap {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "copy_texture_region: overlapping same-texture copies are not supported"
+                )));
+            }
         }
 
         self.dirty = true;
-        let src_h = src.gpu_handle();
-        let dst_h = dst.gpu_handle();
         self.submit_state
             .register_stamp_parts(ResourceId::Texture(src_h), src.whole().stamp_handle());
         self.submit_state
             .register_stamp_parts(ResourceId::Texture(dst_h), dst.whole().stamp_handle());
-        self.ir.nodes.push(TaskNode {
-            label: "copy_texture",
-            bindings: vec![
-                ResourceBinding {
-                    resource: ResourceId::Texture(src_h),
-                    access: NodeAccess::Read,
+        let full_dst = dst_x == 0 && dst_y == 0 && width == dst.width() && height == dst.height();
+        let dst_access = if full_dst {
+            NodeAccess::Overwrite
+        } else {
+            NodeAccess::Write
+        };
+        // Full-texture copies keep the compact `CopyTexture` node (and its present/readback
+        // variants). Partial copies use `CopyTextureRegion`.
+        if full_dst && src_x == 0 && src_y == 0 && width == src.width() && height == src.height() {
+            self.ir.nodes.push(TaskNode {
+                label: "copy_texture",
+                bindings: vec![
+                    ResourceBinding {
+                        resource: ResourceId::Texture(src_h),
+                        access: NodeAccess::Read,
+                    },
+                    ResourceBinding {
+                        resource: ResourceId::Texture(dst_h),
+                        access: NodeAccess::Overwrite,
+                    },
+                ],
+                kind: NodeKind::CopyTexture {
+                    src: src_h,
+                    dst: ResourceId::Texture(dst_h),
+                    dst_buffer_layout: None,
                 },
-                ResourceBinding {
-                    resource: ResourceId::Texture(dst_h),
-                    access: NodeAccess::Overwrite,
+            });
+        } else {
+            self.ir.nodes.push(TaskNode {
+                label: "copy_texture_region",
+                bindings: vec![
+                    ResourceBinding {
+                        resource: ResourceId::Texture(src_h),
+                        access: NodeAccess::Read,
+                    },
+                    ResourceBinding {
+                        resource: ResourceId::Texture(dst_h),
+                        access: dst_access,
+                    },
+                ],
+                kind: NodeKind::CopyTextureRegion {
+                    src: src_h,
+                    dst: dst_h,
+                    src_x,
+                    src_y,
+                    dst_x,
+                    dst_y,
+                    width,
+                    height,
                 },
-            ],
-            kind: NodeKind::CopyTexture {
-                src: src_h,
-                dst: ResourceId::Texture(dst_h),
-                dst_buffer_layout: None,
-            },
-        });
+            });
+        }
         Ok(())
     }
 

@@ -2256,6 +2256,41 @@ impl CudaBackend {
                     ops.push(CudaOp::CopyTexture {
                         src: Arc::clone(src_tex),
                         dst: Arc::clone(dst_tex),
+                        src_x: 0,
+                        src_y: 0,
+                        dst_x: 0,
+                        dst_y: 0,
+                        width: src_tex.width,
+                        height: src_tex.height,
+                    });
+                }
+                GpuCommand::CopyTextureRegion {
+                    src,
+                    dst,
+                    src_x,
+                    src_y,
+                    dst_x,
+                    dst_y,
+                    width,
+                    height,
+                } => {
+                    let src_tex = self
+                        .textures
+                        .get(src)
+                        .context("CUDA: invalid CopyTextureRegion source")?;
+                    let dst_tex = self
+                        .textures
+                        .get(dst)
+                        .context("CUDA: invalid CopyTextureRegion destination")?;
+                    ops.push(CudaOp::CopyTexture {
+                        src: Arc::clone(src_tex),
+                        dst: Arc::clone(dst_tex),
+                        src_x: *src_x,
+                        src_y: *src_y,
+                        dst_x: *dst_x,
+                        dst_y: *dst_y,
+                        width: *width,
+                        height: *height,
                     });
                 }
                 GpuCommand::CopyBufferToTexture {
@@ -2435,8 +2470,14 @@ impl CudaBackend {
                                 });
                             }
                             ops.push(CudaOp::CopyTexture {
-                                src: cuda_src,
+                                src: Arc::clone(&cuda_src),
                                 dst: cuda_dst,
+                                src_x: 0,
+                                src_y: 0,
+                                dst_x: 0,
+                                dst_y: 0,
+                                width: cuda_src.width,
+                                height: cuda_src.height,
                             });
                         }
                     }

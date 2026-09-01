@@ -2464,6 +2464,56 @@ impl WebGpuBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn record_copy_texture_region(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        src: TextureHandle,
+        dst: TextureHandle,
+        src_x: u32,
+        src_y: u32,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let src = self
+            .textures
+            .get(&src)
+            .context("WebGPU: invalid copy-texture-region source")?;
+        let dst = self
+            .textures
+            .get(&dst)
+            .context("WebGPU: invalid copy-texture-region destination")?;
+        anyhow::ensure!(
+            src.format == dst.format,
+            "WebGPU: CopyTextureRegion requires identical format"
+        );
+        anyhow::ensure!(
+            width > 0 && height > 0,
+            "WebGPU: CopyTextureRegion requires non-empty region"
+        );
+        anyhow::ensure!(
+            src_x.saturating_add(width) <= src.width && src_y.saturating_add(height) <= src.height,
+            "WebGPU: CopyTextureRegion src out of bounds"
+        );
+        anyhow::ensure!(
+            dst_x.saturating_add(width) <= dst.width && dst_y.saturating_add(height) <= dst.height,
+            "WebGPU: CopyTextureRegion dst out of bounds"
+        );
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        encoder.copy_texture_to_texture(
+            texel_copy(&src.texture, src_x, src_y),
+            texel_copy(&dst.texture, dst_x, dst_y),
+            size,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn record_copy_buffer_to_texture(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3256,6 +3306,29 @@ impl WebGpuBackend {
                     GpuCommand::CopyTexture { src, dst } => {
                         let _tz = tracy_zone!("wgpu.copy_texture");
                         self.record_copy_texture(&mut encoder, *src, *dst)?;
+                    }
+                    GpuCommand::CopyTextureRegion {
+                        src,
+                        dst,
+                        src_x,
+                        src_y,
+                        dst_x,
+                        dst_y,
+                        width,
+                        height,
+                    } => {
+                        let _tz = tracy_zone!("wgpu.copy_texture_region");
+                        self.record_copy_texture_region(
+                            &mut encoder,
+                            *src,
+                            *dst,
+                            *src_x,
+                            *src_y,
+                            *dst_x,
+                            *dst_y,
+                            *width,
+                            *height,
+                        )?;
                     }
                     GpuCommand::CopyRenderTarget { src, dst } => {
                         let _tz = tracy_zone!("wgpu.copy_render_target");

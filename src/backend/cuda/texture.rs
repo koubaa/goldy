@@ -697,6 +697,21 @@ pub(super) fn memcpy_array_to_array(
             dst.height
         );
     }
+    memcpy_array_region_to_array(stream, src, 0, 0, dst, 0, 0, src.width, src.height)
+}
+
+/// CUDA array → CUDA array rectangular region copy.
+pub(super) fn memcpy_array_region_to_array(
+    stream: &CudaStream,
+    src: &CudaTextureResource,
+    src_x: u32,
+    src_y: u32,
+    dst: &CudaTextureResource,
+    dst_x: u32,
+    dst_y: u32,
+    width: u32,
+    height: u32,
+) -> Result<()> {
     if src.format != dst.format {
         bail!(
             "CUDA: texture copy format mismatch ({:?} → {:?})",
@@ -704,8 +719,29 @@ pub(super) fn memcpy_array_to_array(
             dst.format
         );
     }
+    if width == 0 || height == 0 {
+        bail!("CUDA: texture region copy requires non-empty region");
+    }
+    if src_x.checked_add(width).map(|end| end > src.width).unwrap_or(true)
+        || src_y.checked_add(height).map(|end| end > src.height).unwrap_or(true)
+    {
+        bail!(
+            "CUDA: src region ({src_x},{src_y},{width}x{height}) exceeds texture {}x{}",
+            src.width,
+            src.height
+        );
+    }
+    if dst_x.checked_add(width).map(|end| end > dst.width).unwrap_or(true)
+        || dst_y.checked_add(height).map(|end| end > dst.height).unwrap_or(true)
+    {
+        bail!(
+            "CUDA: dst region ({dst_x},{dst_y},{width}x{height}) exceeds texture {}x{}",
+            dst.width,
+            dst.height
+        );
+    }
     let bpp = src.bytes_per_pixel();
-    let width_bytes = src.width as usize * bpp as usize;
+    let width_bytes = width as usize * bpp as usize;
     stream
         .context()
         .bind_to_thread()
@@ -713,13 +749,17 @@ pub(super) fn memcpy_array_to_array(
     let mut copy = empty_memcpy2d();
     copy.srcMemoryType = sys::CUmemorytype::CU_MEMORYTYPE_ARRAY;
     copy.srcArray = src.array();
+    copy.srcXInBytes = (src_x * bpp) as usize;
+    copy.srcY = src_y as usize;
     copy.dstMemoryType = sys::CUmemorytype::CU_MEMORYTYPE_ARRAY;
     copy.dstArray = dst.array();
+    copy.dstXInBytes = (dst_x * bpp) as usize;
+    copy.dstY = dst_y as usize;
     copy.WidthInBytes = width_bytes;
-    copy.Height = src.height as usize;
+    copy.Height = height as usize;
     check_cu(
         unsafe { sys::cuMemcpy2DAsync_v2(&copy, stream.cu_stream()) },
-        "cuMemcpy2DAsync (array→array)",
+        "cuMemcpy2DAsync (array→array region)",
     )
 }
 

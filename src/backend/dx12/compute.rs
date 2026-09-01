@@ -1575,6 +1575,139 @@ fn record_gpu_command(
                 }
             }
         }
+        GpuCommand::CopyTextureRegion {
+            src,
+            dst,
+            src_x,
+            src_y,
+            dst_x,
+            dst_y,
+            width,
+            height,
+        } => {
+            let _tz = tracy_zone!("dx12.copy_texture_region");
+            let (src_res, src_layout, src_is_storage) = {
+                let textures_read = scope.textures().read().unwrap();
+                let ts = textures_read
+                    .entries
+                    .get(src)
+                    .context("CopyTextureRegion: src texture not found")?;
+                (ts.resource.clone(), ts.last_layout, ts.is_storage)
+            };
+            let (dst_res, dst_layout, dst_is_storage) = {
+                let textures_read = scope.textures().read().unwrap();
+                let ts = textures_read
+                    .entries
+                    .get(dst)
+                    .context("CopyTextureRegion: dst texture not found")?;
+                (ts.resource.clone(), ts.last_layout, ts.is_storage)
+            };
+
+            let (src_sync_before, src_access_before, src_layout_before) =
+                texture_barrier_state_for_layout(src_layout, ctx.on_direct_queue);
+            let (dst_sync_before, dst_access_before, dst_layout_before) =
+                texture_barrier_state_for_layout(dst_layout, ctx.on_direct_queue);
+
+            let mut pre_barriers = vec![
+                barriers::texture_barrier_full(
+                    &src_res,
+                    src_sync_before,
+                    D3D12_BARRIER_SYNC_COPY,
+                    src_access_before,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    src_layout_before,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                ),
+                barriers::texture_barrier_full(
+                    &dst_res,
+                    dst_sync_before,
+                    D3D12_BARRIER_SYNC_COPY,
+                    dst_access_before,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    dst_layout_before,
+                    D3D12_BARRIER_LAYOUT_COPY_DEST,
+                ),
+            ];
+            unsafe { barriers::barrier_textures(cl7, &pre_barriers) };
+            unsafe { barriers::drop_texture_barriers(&mut pre_barriers) };
+
+            let src_location = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: unsafe { std::mem::transmute_copy(&src_res) },
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: unsafe { std::mem::transmute_copy(&dst_res) },
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let src_box = D3D12_BOX {
+                left: *src_x,
+                top: *src_y,
+                front: 0,
+                right: src_x.saturating_add(*width),
+                bottom: src_y.saturating_add(*height),
+                back: 1,
+            };
+            unsafe {
+                cl.CopyTextureRegion(&dst_location, *dst_x, *dst_y, 0, &src_location, Some(&src_box));
+            }
+
+            let src_post_state = if src_is_storage {
+                (
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    texture_post_copy_layout(true, ctx.on_direct_queue),
+                )
+            } else {
+                (
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                    texture_post_copy_layout(false, ctx.on_direct_queue),
+                )
+            };
+            let dst_post_state = if dst_is_storage {
+                (
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    texture_post_copy_layout(true, ctx.on_direct_queue),
+                )
+            } else {
+                (
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                    texture_post_copy_layout(false, ctx.on_direct_queue),
+                )
+            };
+            let mut post_barriers = vec![
+                barriers::texture_barrier_full(
+                    &src_res,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    src_post_state.0,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                    src_post_state.1,
+                ),
+                barriers::texture_barrier_full(
+                    &dst_res,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    dst_post_state.0,
+                    D3D12_BARRIER_LAYOUT_COPY_DEST,
+                    dst_post_state.1,
+                ),
+            ];
+            unsafe { barriers::barrier_textures(cl7, &post_barriers) };
+            unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+
+            {
+                let mut textures_write = scope.textures().write().unwrap();
+                if let Some(ts) = textures_write.entries.get_mut(src) {
+                    ts.last_layout = src_post_state.1;
+                }
+                if let Some(ts) = textures_write.entries.get_mut(dst) {
+                    ts.last_layout = dst_post_state.1;
+                }
+            }
+        }
         GpuCommand::CopyBuffer {
             src,
             src_offset,

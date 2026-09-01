@@ -229,6 +229,12 @@ pub(super) enum CudaOp {
     CopyTexture {
         src: Arc<super::texture::CudaTextureResource>,
         dst: Arc<super::texture::CudaTextureResource>,
+        src_x: u32,
+        src_y: u32,
+        dst_x: u32,
+        dst_y: u32,
+        width: u32,
+        height: u32,
     },
     /// Wait on a D3D12 fence imported as a CUDA external semaphore (raster → compute handoff).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -294,7 +300,7 @@ pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
         CudaOp::WriteTextureFromHost { texture, .. } | CudaOp::CopyBufferToTexture { texture, .. } => {
             !texture.is_imported()
         }
-        CudaOp::CopyTexture { src, dst } => !src.is_imported() && !dst.is_imported(),
+        CudaOp::CopyTexture { src, dst, .. } => !src.is_imported() && !dst.is_imported(),
         // Inline `Write`/`WriteTexture` own a `Vec<u8>` whose address is not a
         // stable pinned allocation. External fences are frame-varying.
         _ => false,
@@ -608,7 +614,7 @@ pub(super) fn collect_pins(
                 buffers.push(Arc::clone(src));
                 textures.push(Arc::clone(texture));
             }
-            CudaOp::CopyTexture { src, dst } => {
+            CudaOp::CopyTexture { src, dst, .. } => {
                 textures.push(Arc::clone(src));
                 textures.push(Arc::clone(dst));
             }
@@ -849,8 +855,19 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "CopyBufferToTexture")?;
                 }
             }
-            CudaOp::CopyTexture { src, dst } => {
-                super::texture::memcpy_array_to_array(stream, src, dst)?;
+            CudaOp::CopyTexture {
+                src,
+                dst,
+                src_x,
+                src_y,
+                dst_x,
+                dst_y,
+                width,
+                height,
+            } => {
+                super::texture::memcpy_array_region_to_array(
+                    stream, src, *src_x, *src_y, dst, *dst_x, *dst_y, *width, *height,
+                )?;
                 if validate {
                     maybe_validate_sync(stream, "CopyTexture")?;
                 }

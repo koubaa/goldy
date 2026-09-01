@@ -617,7 +617,9 @@ fn evict_retained_touching_scratch(
                     | GpuCommand::CopyRenderTarget { dst: texture, .. }
                     | GpuCommand::CopyBufferToTexture { dst: texture, .. }
                     | GpuCommand::CopyTextureToReadback { src: texture, .. } => handles.contains(texture),
-                    GpuCommand::CopyTexture { src, dst } => handles.contains(src) || handles.contains(dst),
+                    GpuCommand::CopyTexture { src, dst } | GpuCommand::CopyTextureRegion { src, dst, .. } => {
+                        handles.contains(src) || handles.contains(dst)
+                    }
                     GpuCommand::BindResourcesRaw { indices, .. } => indices.iter().any(|i| slots.contains(i)),
                     GpuCommand::FrameTableStaging { data } => data.iter().any(|word| slots.contains(word)),
                     GpuCommand::ResourceBarrier { textures, .. } => {
