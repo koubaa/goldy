@@ -1354,4 +1354,57 @@ mod tests {
             assert_eq!(out[i], (i as u32) * 2, "index {i}");
         }
     }
+
+    #[test]
+    fn cpu_backend_scheme_saxpy() {
+        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        let ctx = device.create_context().expect("ctx");
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let n = 256usize;
+        let a = 2.0f32;
+        let x_data: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let y_data: Vec<f32> = (0..n).map(|i| (i * 3) as f32).collect();
+        let expected: Vec<f32> = (0..n).map(|i| a * (i as f32) + (i * 3) as f32).collect();
+        let x = pool
+            .acquire_buffer_with_data(&x_data, BufferKind::Scattered)
+            .expect("x");
+        let y = pool
+            .acquire_buffer_with_data(&y_data, BufferKind::Scattered)
+            .expect("y");
+
+        let src = r#"
+            import goldy_exp;
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(BufRO<float> x, Scattered<float> y, float a, ThreadId id) {
+                if (id.x < goldy_buf_len(y)) {
+                    y[id.x] = a * x[id.x] + y[id.x];
+                }
+            }
+        "#;
+        let shader = ShaderModule::from_slang(&device, src).expect("compile");
+        let pipeline = crate::ComputePipeline::new(&device, &shader).expect("pipeline");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("saxpy", &pipeline)
+            .with_parcel(&x, NodeAccess::Read)
+            .with_parcel(&y, NodeAccess::ReadWrite)
+            .with_param(a.to_bits())
+            .dispatch((n as u32).div_ceil(64), 1, 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &y)
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let out: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+        assert_eq!(out.len(), n);
+        for i in 0..n {
+            assert!(
+                (out[i] - expected[i]).abs() < 1e-5,
+                "index {i}: {} vs {}",
+                out[i],
+                expected[i]
+            );
+        }
+    }
 }
