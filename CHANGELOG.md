@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compiles the same Slang compute kernels via `getEntryPointHostCallable` and runs them
   on host buffers (`goldy::cpu_shaders`). Opt-in; not a production backend. See
   [CPU host-callable shaders](docs/src/debugging/cpu-host-callable.md).
+- **CPU compute backend (`GOLDY_BACKEND=cpu`)** — compute-only device that JITs
+  `[goldy_compute]` kernels and executes scheme submits on host parcels. Textures,
+  samplers, and vertex/fragment shaders are rejected. Never a platform default.
 - Shared `KernelAbi` bridge for virtual-main: `try_kernel_def_from_source`,
   `emit_wrapper_from_kernel_def` so Rust and raw Slang paths share frame-table wrappers.
 - `goldy_buf_len` helper for portable buffer `.len()` lowering on SPIR-V/DX12.

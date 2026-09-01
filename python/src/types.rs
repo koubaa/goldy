@@ -57,6 +57,7 @@ pub enum PyBackendType {
     DX12 = 2,
     WEBGPU = 3,
     CUDA = 4,
+    CPU = 5,
 }
 
 impl From<goldy::BackendType> for PyBackendType {
@@ -67,6 +68,7 @@ impl From<goldy::BackendType> for PyBackendType {
             goldy::BackendType::Dx12 => PyBackendType::DX12,
             goldy::BackendType::WebGpu => PyBackendType::WEBGPU,
             goldy::BackendType::Cuda => PyBackendType::CUDA,
+            goldy::BackendType::Cpu => PyBackendType::CPU,
         }
     }
 }

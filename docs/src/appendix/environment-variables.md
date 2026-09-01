@@ -6,7 +6,7 @@ Goldy reads several environment variables at runtime for backend selection, vali
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `GOLDY_BACKEND` | `vulkan`, `vk`, `dx12`, `d3d12`, `directx`, `metal`, `mtl`, `cuda`, `webgpu`, `wgpu` | Platform default (macOS → Metal, Windows → DX12, Linux → Vulkan) | Override backend selection at runtime. Shipped: Vulkan, DX12, Metal. In progress: CUDA, WebGPU. |
+| `GOLDY_BACKEND` | `vulkan`, `vk`, `dx12`, `d3d12`, `directx`, `metal`, `mtl`, `cuda`, `webgpu`, `wgpu`, `cpu` | Platform default (macOS → Metal, Windows → DX12, Linux → Vulkan) | Override backend selection at runtime. Shipped: Vulkan, DX12, Metal. In progress: CUDA, WebGPU. `cpu` is a compute-only host-callable JIT path (never a platform default). |
 | `GOLDY_SLANG_PATH` | File path | *(not set)* | Override the path to the Slang shared library (`slang.dll` / `libslang.dylib` / `libslang.so`). Bypasses the default search order (vendored next to executable → extracted from embedded). |
 | `GOLDY_FFI_PATH` | File path | *(not set)* | Full path to the `goldy_ffi` shared library (`goldy_ffi.dll` / `libgoldy_ffi.so` / `libgoldy_ffi.dylib`). Used by `goldy-ffi-client` for runtime library loading. |
 
@@ -52,7 +52,7 @@ GOLDY_BACKEND=cuda GOLDY_VALIDATION=api cargo test --features cuda
 |----------|--------|---------|-------------|
 | `GOLDY_DUMP_SHADERS` | Directory path | *(not set)* | Dump compiled shaders to the specified directory at compile time. Vulkan: `{entry}_h{handle}_vulkan.spv`. DX12: `{entry}_h{handle}_dx12.dxil`. Metal: `{idx}_{entry}.metal`. CUDA: `{entry}_h{handle}_{spec}_cuda.cu` (Slang CUDA C++) and `.ptx` (NVRTC/Slang PTX loaded by the CUDA driver), plus `goldy_apply_dispatch_shape.{cu,ptx}` for the graph updater. |
 | `GOLDY_DUMP_RUST_KERNELS` | `1` / `true` / directory path | *(not set)* | Dump canonical `[goldy_compute]` Slang and structured ABI metadata produced by `#[goldy::compute]` during `Kernel::prepare`. `1`/`true` writes under the process temp dir (`goldy_rust_kernels/`). |
-| `GOLDY_CPU_SHADERS` | `1`, `true`, `yes` | *(not set)* | Documented gate for the debug CPU host-callable path (`goldy::cpu_shaders`, issue #292). GPU backends ignore this. The compile/dispatch APIs are opt-in even when the variable is unset. |
+| `GOLDY_CPU_SHADERS` | `1`, `true`, `yes` | *(not set)* | Documented gate for the standalone `goldy::cpu_shaders` APIs. GPU backends ignore this. Scheme submit uses `GOLDY_BACKEND=cpu` instead. |
 | `GOLDY_GPU_PROFILE` | Any non-empty value; optional `chrome[=path]` | *(not set)* | Enable GPU timestamp profiling logs. On Vulkan/DX12, records per-dispatch GPU durations. On Metal, records command-buffer GPU duration. `chrome` / `chrome=/path.json` also writes a Perfetto Chrome-trace JSON file. Disables retained CB reuse while active. |
 | `GOLDY_SHADER_TIMING` | `1` / any value other than `0` | *(not set)* | Print stderr wall-clock breakdown of Slang cache lookup, search-path hashing, and PSO create during shader compile |
 | `GOLDY_METAL_CAPTURE` | `1` / path / `path,skip=N,frames=M` | *(not set)* | **Metal only.** Opt-in programmatic `MTLCaptureManager` GPU capture for Xcode Metal Debugger. `1`/`true`/`yes` captures to Developer Tools; a path writes a `.gputrace`. Optional `skip=N` (default 60) skips warm-up submits; `frames=M` (default 1) captures M submits. Automatically sets `METAL_CAPTURE_ENABLED=1` if unset. Open the `.gputrace` in Xcode → Performance to inspect register pressure, occupancy, and per-line shader costs. |

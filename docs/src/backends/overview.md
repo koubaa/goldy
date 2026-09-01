@@ -11,6 +11,7 @@ backends are in active development; a Tenstorrent backend is planned.
 | Metal | Shipped | Tier 2+ | macOS | `metal` |
 | CUDA | In progress | CUDA Driver API | NVIDIA GPUs | `cudarc` |
 | WebGPU | In progress | WebGPU (via wgpu) | Cross-platform | `wgpu` |
+| CPU | In progress (compute-only) | Slang host-callable JIT | Host | — |
 | Tenstorrent | Planned | TT-Metalium / TT-MLIR | Tenstorrent accelerators | — |
 
 ## Native Implementations

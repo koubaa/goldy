@@ -663,6 +663,11 @@ pub enum BackendType {
     /// NVIDIA CUDA backend (compute + Windows DX12 presentation/raster when
     /// `cuda+graphics+dx12` are enabled).
     Cuda,
+    /// Host-callable CPU compute (Slang JIT). Never a platform default.
+    ///
+    /// Selected with `GOLDY_BACKEND=cpu`. Compute-only: no textures, samplers,
+    /// or vertex/fragment shaders.
+    Cpu,
 }
 
 /// A simple 2D vertex with position and color.

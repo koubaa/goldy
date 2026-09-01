@@ -5,8 +5,10 @@ on the host via Slang `SLANG_SHADER_HOST_CALLABLE` (`getEntryPointHostCallable`)
 This is an **opt-in debug path** so you can step a stage in a CPU debugger
 without maintaining a second handwritten Rust implementation.
 
-It is **not** a production CPU renderer, not a scheme/submit backend, and not a
-replacement for Vulkan / DX12 / Metal / CUDA.
+Standalone compile/dispatch on host slices is the original debug path. Scheme
+submit on a compute-only **CPU device** is available with `GOLDY_BACKEND=cpu`.
+That backend is **not** a CPU renderer and not a replacement for Vulkan / DX12 /
+Metal / CUDA / lavapipe / WARP.
 
 ## When to use it
 
@@ -62,7 +64,8 @@ start/end group IDs).
 | `DirectSpatial<T>` (storage images) | No software texture path |
 | `Filter` / samplers | Texture-only |
 | `[goldy_vertex]` / `[goldy_fragment]` | Compute only |
-| Goldy bindless frame table / parcels | Dispatch is on host slices, not scheme submit |
+| Goldy bindless frame table (native wrapper) | CPU uses the CUDA-shaped typed `uniform` preamble; scheme submit maps bindless indices onto host `{data, count}` views |
+| Broadcast / textures / graphics | Still unsupported on `GOLDY_BACKEND=cpu` |
 
 Fine rasterization stays GPU-only until textures work. `Interlocked` / groupshared
 behavior follows the Slang CPU prelude (typically mutex or sequential atomics)
