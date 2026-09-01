@@ -1944,4 +1944,8 @@ pub(super) struct VulkanState {
     /// `true` when `VK_EXT_debug_utils` was loaded (i.e. validation layers are
     /// active).  Guards `set_texture_debug_name` so we never call a null fp.
     pub enable_validation: bool,
+    /// Instance-level debug-utils loader (validation messenger).
+    pub debug_utils: Option<ash::ext::debug_utils::Instance>,
+    pub debug_messenger: vk::DebugUtilsMessengerEXT,
+    pub validation_sink: Option<std::sync::Arc<super::debug_utils::ValidationSink>>,
 }

@@ -14,7 +14,8 @@ Goldy reads several environment variables at runtime for backend selection, vali
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `GOLDY_VALIDATION` | Comma/semicolon/whitespace-separated list: `api`, `layout`, `layouts`, `host_access`, `all`; or `1` / `true` / `yes` | *(not set)* | Enable validation categories. `api` enables GPU API validation (Vulkan validation layers, Metal shader validation, CUDA Driver diagnostics: PTX JIT logs, eager stream sync, launch-limit checks; WebGPU/wgpu validation error scopes on shader/PSO create and bind groups). `layout` enables Rust/Slang struct layout and buffer stride checks. `host_access` page-protects CPU-visible GPU copies (CPU backend parcels; slower, not complete). `all` enables layout, api, timeline, scheme, and host_access. The shorthand `1` / `true` / `yes` enables **GPU API only** (layout stays opt-in). Deep CUDA memory/race checking is **not** covered — use external `compute-sanitizer`. |
+| `GOLDY_VALIDATION` | Comma/semicolon/whitespace-separated list: `api`, `layout`, `layouts`, `host_access`, `all`; or `1` / `true` / `yes` | *(not set)* | Enable validation categories. `api` enables GPU API validation (Vulkan validation layers + debug messenger, Metal shader validation, CUDA Driver diagnostics: PTX JIT logs, eager stream sync, launch-limit checks; WebGPU/wgpu validation error scopes on shader/PSO create and bind groups). `layout` enables Rust/Slang struct layout and buffer stride checks. `host_access` page-protects CPU-visible GPU copies (CPU backend parcels; slower, not complete). `all` enables layout, api, timeline, scheme, and host_access. The shorthand `1` / `true` / `yes` enables **GPU API only** (layout stays opt-in). Deep CUDA memory/race checking is **not** covered — use external `compute-sanitizer`. |
+| `GOLDY_VALIDATION_FATAL` | `1`, `true`, `yes` | *(not set)* | Separate from `GOLDY_VALIDATION`. When GPU API validation is on, treat Vulkan Khronos **ERROR** messages as hard failures (`Err` on later Goldy `Result` calls; panic on backend drop so `cargo test` fails). Without this, messages are logged (`goldy::validation`) and successful `vk*` calls still succeed. WebGPU validation scopes already return `Err` without this flag. |
 | `GOLDY_VALIDATE_LAYOUTS` | `1`, `true`, `yes` | *(not set)* | Legacy toggle for layout validation only. Equivalent to `GOLDY_VALIDATION=layout`. |
 
 ### Validation Examples
@@ -28,6 +29,10 @@ GOLDY_VALIDATION=layout cargo run --example triangle
 
 # Everything
 GOLDY_VALIDATION=all cargo run --example triangle
+
+# Fail Goldy calls / tests when Vulkan records an ERROR
+GOLDY_VALIDATION_FATAL=1 GOLDY_VALIDATION=all cargo test --features vulkan
+GOLDY_VALIDATION_FATAL=1 GOLDY_VALIDATION=api cargo test --features vulkan
 
 # Shorthand for GPU API only
 GOLDY_VALIDATION=1 cargo run --example triangle

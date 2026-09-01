@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (page-aligned, unshared mapping + guard page). Stray host pointers fault
   outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.
   First slice; native mapped staging can use the same allocator later.
+- **`GOLDY_VALIDATION_FATAL=1`** — Vulkan Khronos ERROR messages captured by a
+  debug-utils messenger fail Goldy `Result` calls and panic on backend drop.
+  Independent of `GOLDY_VALIDATION` (`all` does not imply it). Vulkan lavapipe
+  CI jobs set `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1` (and restore
+  `VK_LAYER_PATH`) so a Khronos ERROR fails the suite. Metal and DX12 jobs do
+  not set `GOLDY_VALIDATION_FATAL` (it is Vulkan-only).
 
 ### Fixed
 
@@ -23,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Game of Life render shader no longer uses `fwidth` (Slang Metal fragment target
   rejects derivative builtins). Restores screenshot tests and the Python headless example.
+- Python Game of Life examples pass `VertexBufferLayout.empty()` for the
+  `VertexId` fullscreen pass. The Python `RenderPipelineDesc` default is still
+  Vertex2D, which made `draw_fullscreen()` hit Khronos
+  `VUID-vkCmdDraw-None-04007` under `GOLDY_VALIDATION_FATAL=1`.
 
 - **Rust compute kernels (issue #78, initial design)** — `#[goldy::compute]` proc-macro
   lowers a restricted GPU dialect to canonical `[goldy_compute]` Slang plus structured

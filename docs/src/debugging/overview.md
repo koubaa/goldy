@@ -45,6 +45,8 @@ enables backend-specific validation:
 | DX12 | See [DX12 Debug Layer](#dx12-debug-layer) below |
 | WebGPU | wgpu validation error scopes on shader/PSO create (always in debug builds; in release when GPU API validation is on) and on bind-group create (GPU API validation only) |
 
+On Vulkan, `GOLDY_VALIDATION_FATAL=1` treats messenger ERROR records as hard failures (`Err` on later Goldy `Result` calls; panic on backend drop).
+
 For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` contains
 `VK_LAYER_KHRONOS_validation` (the standard loader-driven workflow).
 
@@ -241,6 +243,7 @@ RUST_LOG=goldy::render=trace cargo run --example triangle
 |----------|--------|--------|
 | `GOLDY_BACKEND` | `vulkan`/`vk`, `dx12`/`d3d12`/`directx`, `metal`/`mtl` | Override backend selection |
 | `GOLDY_VALIDATION` | `api`, `layout`, `host_access`, `all`, `1`/`true`/`yes` | Enable validation categories |
+| `GOLDY_VALIDATION_FATAL` | `1`, `true`, `yes` | Fail on Vulkan Khronos ERROR messages |
 | `GOLDY_VALIDATE_LAYOUTS` | `1`, `true`, `yes` | Enable layout validation (legacy; prefer `GOLDY_VALIDATION=layout`) |
 | `GOLDY_DX12_FORCE_WARP` | `1` | Use WARP software rasterizer |
 | `GOLDY_DX12_DEBUG` | `1` | Force-enable D3D12 debug layer in release |

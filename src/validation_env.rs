@@ -129,6 +129,15 @@ pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
 }
 
+/// When true, GPU API validation ERROR messages fail Goldy `Result` calls and panic on backend drop.
+///
+/// Set `GOLDY_VALIDATION_FATAL=1`/`true`/`yes`. Independent of `GOLDY_VALIDATION`
+/// (`all` does not imply fatal).
+#[must_use]
+pub fn validation_fatal_enabled() -> bool {
+    env_truthy("GOLDY_VALIDATION_FATAL")
+}
+
 /// Page-protect CPU-visible GPU copies so stray host pointers fault.
 ///
 /// First slice: CPU-backend parcel storage. Native mapped staging can grow into this later.
@@ -214,7 +223,10 @@ mod tests {
         assert!(p.gpu_api);
         assert!(p.timeline);
         assert!(p.scheme);
-        assert!(p.host_access);
+
+        let p = parse_validation_list("api,fatal");
+        assert!(p.gpu_api);
+        assert!(!p.host_access);
 
         let p = parse_validation_list("timeline");
         assert!(!p.layout);
@@ -250,7 +262,7 @@ mod tests {
 
     #[test]
     fn parse_unknown_tokens_do_not_enable_api() {
-        let p = parse_validation_list("gpu,vulkan,metal,shader");
+        let p = parse_validation_list("gpu,vulkan,metal,shader,fatal");
         assert!(!p.layout);
         assert!(!p.gpu_api);
     }

@@ -16,6 +16,7 @@ mod api_log;
 mod buffer;
 mod compute;
 mod context;
+mod debug_utils;
 mod device;
 mod frame_table;
 mod pending_submit;
@@ -99,6 +100,10 @@ impl Drop for VulkanBackend {
             "VulkanBackend drop"
         );
 
+        debug_utils::destroy_messenger(self.state.debug_utils.as_ref(), self.state.debug_messenger);
+        self.state.debug_messenger = vk::DebugUtilsMessengerEXT::null();
+        self.state.debug_utils = None;
+
         // Explicitly destroy the Vulkan instance before ash::Entry drops and unloads
         // the DLL. On device-lost, vkDestroyDevice may leave driver-internal background
         // state (TDR recovery threads) alive; vkDestroyInstance signals them to stop
@@ -118,6 +123,12 @@ impl Drop for VulkanBackend {
                 surfaces = self.state.surfaces.len(),
                 "skipped vkDestroyInstance with child devices/surfaces still live (cleanup order bug?)"
             );
+        }
+
+        if !std::thread::panicking() {
+            if let Err(e) = debug_utils::fail_if_validation_fatal(self.state.validation_sink.as_ref()) {
+                panic!("{e:#}");
+            }
         }
     }
 }
@@ -177,19 +188,46 @@ impl VulkanBackend {
             enabled_layers.push(layer);
         }
 
-        let create_info = vk::InstanceCreateInfo::default()
+        let validation_sink = enable_validation.then(|| {
+            Arc::new(debug_utils::ValidationSink::new(
+                crate::validation_env::validation_fatal_enabled(),
+            ))
+        });
+        let mut debug_ci = validation_sink
+            .as_ref()
+            .map(|sink| debug_utils::messenger_create_info(debug_utils::sink_user_data(sink)));
+
+        let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extensions)
             .enabled_layer_names(&enabled_layers);
+        if let Some(debug_ci) = debug_ci.as_mut() {
+            create_info = create_info.push_next(debug_ci);
+        }
 
         let instance = {
             let _guard = VK_INSTANCE_LOCK.lock().unwrap();
             unsafe { entry.create_instance(&create_info, None) }.context("Failed to create Vulkan instance")?
         };
 
-        if enable_validation {
-            tracing::info!("Vulkan instance created with validation layers");
-        }
+        let (debug_utils_loader, debug_messenger) = if let Some(debug_ci) = debug_ci.as_ref() {
+            let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
+            match unsafe { loader.create_debug_utils_messenger(debug_ci, None) } {
+                Ok(messenger) => {
+                    tracing::info!("Vulkan instance created with validation layers + debug messenger");
+                    (Some(loader), messenger)
+                }
+                Err(e) => {
+                    let _guard = VK_INSTANCE_LOCK.lock().unwrap();
+                    unsafe {
+                        instance.destroy_instance(None);
+                    }
+                    return Err(e).context("vkCreateDebugUtilsMessengerEXT");
+                }
+            }
+        } else {
+            (None, vk::DebugUtilsMessengerEXT::null())
+        };
 
         // Enumerate physical devices
         let physical_devices_raw =
@@ -273,9 +311,16 @@ impl VulkanBackend {
             compute_fence_pool: Arc::new(Mutex::new(HashMap::new())),
             device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             enable_validation,
+            debug_utils: debug_utils_loader,
+            debug_messenger,
+            validation_sink,
         };
 
         Ok(Self { state })
+    }
+
+    fn with_validation<T>(&self, result: Result<T>) -> Result<T> {
+        debug_utils::combine_validation(self.state.validation_sink.as_ref(), result)
     }
 
     /// Compile a shader for a specific stage on demand.
@@ -381,7 +426,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
-        Ok(())
+        self.with_validation(Ok(()))
     }
 }
 
@@ -422,7 +467,8 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
-        device::create(&mut self.state, adapter_id)
+        let r = device::create(&mut self.state, adapter_id);
+        debug_utils::combine_validation(self.state.validation_sink.as_ref(), r)
     }
 
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
@@ -452,11 +498,12 @@ impl GpuBackend for VulkanBackend {
             .context("Invalid device handle")?;
         ld.synchronized_device_wait_idle()
             .map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
-        Ok(())
+        self.with_validation(Ok(()))
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
-        context::create(&mut self.state, device)
+        let r = context::create(&mut self.state, device);
+        debug_utils::combine_validation(self.state.validation_sink.as_ref(), r)
     }
 
     fn detach_context_for_destroy(
@@ -1175,7 +1222,7 @@ impl GpuBackend for VulkanBackend {
             }
         }
         context::wait_until_device_seq_at_least(&self.state, device, value);
-        Ok(())
+        self.with_validation(Ok(()))
     }
 
     fn poll_signals(
@@ -1217,7 +1264,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&self.state, ctx, commands, sync)
+        self.with_validation(compute::submit(&self.state, ctx, commands, sync))
     }
 
     fn submit_graph(
@@ -1226,7 +1273,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&self.state, ctx, commands, sync)
+        self.with_validation(compute::submit_graph(&self.state, ctx, commands, sync))
     }
 
     fn submit_graph_and_retain(
@@ -1236,7 +1283,7 @@ impl GpuBackend for VulkanBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph_and_retain(&self.state, ctx, commands, key, sync)
+        self.with_validation(compute::submit_graph_and_retain(&self.state, ctx, commands, key, sync))
     }
 
     fn try_resubmit_retained(
@@ -1245,7 +1292,7 @@ impl GpuBackend for VulkanBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        compute::try_resubmit_retained(&self.state, ctx, key, sync)
+        self.with_validation(compute::try_resubmit_retained(&self.state, ctx, key, sync))
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
@@ -1253,7 +1300,8 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn submit_frame(&mut self, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
-        surface::submit_frame(&mut self.state, frame)
+        let r = surface::submit_frame(&mut self.state, frame);
+        debug_utils::combine_validation(self.state.validation_sink.as_ref(), r)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
@@ -1404,5 +1452,112 @@ impl crate::backend::GpuBackendSubmitSession for VulkanBackend {
     ) -> std::sync::Arc<dyn crate::backend::ContextSubmitSession> {
         submit_session::VulkanSubmitSession::clone_from_state(&self.state, ctx)
             .unwrap_or_else(|e| panic!("clone_context_submit_session({ctx}): {e:#}"))
+    }
+}
+
+#[cfg(test)]
+mod validation_fatal_tests {
+    use super::*;
+    use ash::vk;
+
+    /// True when this process would select Vulkan as the Goldy backend.
+    ///
+    /// Non-Vulkan CI jobs (Metal, DX12, WebGPU) compile `feature = "vulkan"` but
+    /// must not spawn a Khronos subprocess.
+    fn selected_backend_is_vulkan() -> bool {
+        if let Ok(s) = std::env::var("GOLDY_BACKEND") {
+            return matches!(s.to_ascii_lowercase().as_str(), "vulkan" | "vk");
+        }
+        // Match `create_default_backend()`: macOS→Metal, Windows→DX12, else Vulkan if compiled.
+        #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
+        {
+            false
+        }
+        #[cfg(all(
+            feature = "dx12",
+            target_os = "windows",
+            not(all(feature = "metal", any(target_os = "macos", target_os = "ios")))
+        ))]
+        {
+            false
+        }
+        #[cfg(not(any(
+            all(feature = "metal", any(target_os = "macos", target_os = "ios")),
+            all(feature = "dx12", target_os = "windows")
+        )))]
+        {
+            cfg!(feature = "vulkan")
+        }
+    }
+
+    #[test]
+    fn vk_validation_fatal_zero_size_buffer() {
+        if std::env::var("GOLDY_SUBPROC").is_err() {
+            if !selected_backend_is_vulkan() {
+                return;
+            }
+            let test_name = std::thread::current()
+                .name()
+                .expect("cargo test thread name")
+                .to_string();
+            let exe = std::env::current_exe().expect("current_exe");
+            let output = std::process::Command::new(exe)
+                .args([&test_name, "--exact", "--nocapture"])
+                .env("GOLDY_SUBPROC", "1")
+                .env("GOLDY_VALIDATION", "api")
+                .env("GOLDY_VALIDATION_FATAL", "1")
+                .env("GOLDY_BACKEND", "vk")
+                .env_remove("VK_LAYER_PATH")
+                .output()
+                .expect("spawn validation-fatal subprocess");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}");
+            if combined.contains("GOLDY_SKIP_VK_VALIDATION_FATAL") {
+                return;
+            }
+            assert!(
+                output.status.success(),
+                "subprocess failed (exit {:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status.code()
+            );
+            assert!(
+                combined.contains("GOLDY_VALIDATION_FATAL") || combined.contains("VUID"),
+                "expected validation fatal / VUID text\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            return;
+        }
+
+        let mut backend = match VulkanBackend::new() {
+            Ok(backend) => backend,
+            Err(e) => {
+                eprintln!("GOLDY_SKIP_VK_VALIDATION_FATAL: {e:#}");
+                return;
+            }
+        };
+        assert!(
+            backend.state.enable_validation,
+            "subprocess should have enabled the debug messenger"
+        );
+        let handle = device::create(&mut backend.state, 0).expect("create logical device");
+        let ash_dev = backend.state.devices.get(&handle).unwrap().device.clone();
+        let info = vk::BufferCreateInfo::default()
+            .size(0)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let created = unsafe { ash_dev.create_buffer(&info, None) };
+        eprintln!("vkCreateBuffer(size=0) => {created:?}");
+        if let Ok(buf) = created {
+            unsafe {
+                ash_dev.destroy_buffer(buf, None);
+            }
+        }
+        device::destroy(&mut backend.state, handle);
+        let err = backend
+            .with_validation(Ok(()))
+            .expect_err("zero-size VkBuffer should record a fatal validation ERROR");
+        let msg = format!("{err:#}");
+        println!("{msg}");
+        assert!(msg.contains("GOLDY_VALIDATION_FATAL") || msg.contains("VUID"), "{msg}");
     }
 }

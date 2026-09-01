@@ -27,6 +27,8 @@ impl PyRenderPipelineDesc {
     ///
     /// Args:
     ///     vertex_layout: Vertex buffer layout (default: Vertex2D layout).
+    ///         Fullscreen `VertexId` shaders must pass `VertexBufferLayout.empty()`
+    ///         so the pipeline does not require `vkCmdBindVertexBuffers`.
     ///     topology: Primitive topology (default: TRIANGLE_LIST).
     ///     target_format: Target texture format (default: RGBA8_UNORM).
     ///     depth_stencil: Optional depth/stencil state.
