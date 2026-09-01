@@ -6,6 +6,7 @@
 //! - DXIL (DirectX 12)
 //! - MSL (Metal)
 //! - CUDA PTX / CUDA C++ (`GOLDY_DUMP_SHADERS`)
+//! - Host-callable CPU JIT (`ShaderTarget::HostCallable`, debug only)
 //!
 //! # Example
 //!
@@ -52,7 +53,9 @@ pub use compiler::{
     StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;
-pub use virtual_main::{emit_wrapper_from_kernel_def, entry_def_from_kernel_def, try_kernel_def_from_source};
+pub use virtual_main::{
+    emit_wrapper_from_kernel_def, entry_def_from_kernel_def, transform_virtual_main_cpu, try_kernel_def_from_source,
+};
 
 /// Parse `[numthreads(x, y, z)]` from Slang shader source.
 ///

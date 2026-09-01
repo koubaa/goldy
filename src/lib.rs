@@ -36,6 +36,7 @@ pub mod task_graph;
 pub mod texture;
 pub mod types;
 
+pub mod cpu_shaders;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
 pub mod slang;
@@ -86,6 +87,7 @@ pub use vram_allocator::DeferredPayload;
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;
+pub use cpu_shaders::{CpuBinding, CpuComputeKernel};
 pub use device::{
     Adapter, AdapterInfo, BufferHeapStats, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
     RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,

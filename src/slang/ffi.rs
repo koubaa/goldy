@@ -198,6 +198,12 @@ pub type SlangCompileRequest = c_void;
 /// Opaque blob handle for output data
 pub type ISlangBlob = c_void;
 
+/// Opaque `ISlangSharedLibrary` (JIT / host-callable output).
+pub type ISlangSharedLibrary = c_void;
+
+/// `SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM` — required for host-callable JIT.
+pub const SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM: u32 = 1 << 8;
+
 // ============================================================================
 // Reflection API types
 // ============================================================================
@@ -438,6 +444,13 @@ pub type FnSpGetTargetCodeBlob = unsafe extern "C" fn(
     target_index: c_int,
     out_blob: *mut *mut ISlangBlob,
 ) -> SlangResult;
+pub type FnSpSetTargetFlags = unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, flags: u32);
+pub type FnSpGetEntryPointHostCallable = unsafe extern "C" fn(
+    request: *mut SlangCompileRequest,
+    entry_point_index: c_int,
+    target_index: c_int,
+    out_shared_library: *mut *mut ISlangSharedLibrary,
+) -> SlangResult;
 
 // New COM-style API function pointers
 pub type FnSlangCreateGlobalSession2 = unsafe extern "C" fn(
@@ -597,6 +610,37 @@ pub unsafe fn blob_release(blob: *mut ISlangBlob) {
     let vtable_ptr = *(blob as *const *const ISlangBlobVtable);
     let vtable = &*vtable_ptr;
     (vtable.release)(blob);
+}
+
+/// `ISlangSharedLibrary` vtable (ISlangUnknown + ISlangCastable + findSymbolAddressByName).
+#[repr(C)]
+pub struct ISlangSharedLibraryVtable {
+    pub query_interface: *const c_void,
+    pub add_ref: *const c_void,
+    pub release: unsafe extern "C" fn(this: *mut ISlangSharedLibrary) -> u32,
+    pub cast_as: *const c_void,
+    pub find_symbol_address_by_name:
+        unsafe extern "C" fn(this: *mut ISlangSharedLibrary, name: *const c_char) -> *mut c_void,
+}
+
+/// Look up a symbol in a host-callable shared library.
+///
+/// # Safety
+/// `lib` must be a live `ISlangSharedLibrary`.
+pub unsafe fn shared_library_find_symbol(lib: *mut ISlangSharedLibrary, name: *const c_char) -> *mut c_void {
+    let vtable_ptr = *(lib as *const *const ISlangSharedLibraryVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.find_symbol_address_by_name)(lib, name)
+}
+
+/// Release a host-callable shared library.
+///
+/// # Safety
+/// `lib` must be a live `ISlangSharedLibrary`.
+pub unsafe fn shared_library_release(lib: *mut ISlangSharedLibrary) -> u32 {
+    let vtable_ptr = *(lib as *const *const ISlangSharedLibraryVtable);
+    let vtable = &*vtable_ptr;
+    (vtable.release)(lib)
 }
 
 // ============================================================================

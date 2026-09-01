@@ -48,6 +48,7 @@
 # Debugging and Observability
 
 - [Debugging and Observability](./debugging/overview.md)
+- [CPU host-callable shaders](./debugging/cpu-host-callable.md)
 
 # Bindings
 

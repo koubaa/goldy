@@ -53,6 +53,7 @@ pub struct SlangLibrary {
     // Target configuration
     pub add_code_gen_target: FnSpAddCodeGenTarget,
     pub set_target_profile: FnSpSetTargetProfile,
+    pub set_target_flags: FnSpSetTargetFlags,
     pub set_target_floating_point_mode: FnSpSetTargetFloatingPointMode,
     pub find_profile: FnSpFindProfile,
     // Source input
@@ -68,6 +69,7 @@ pub struct SlangLibrary {
     // Output
     pub get_entry_point_code_blob: FnSpGetEntryPointCodeBlob,
     pub get_target_code_blob: FnSpGetTargetCodeBlob,
+    pub get_entry_point_host_callable: FnSpGetEntryPointHostCallable,
     // Reflection API
     pub get_reflection: FnSpGetReflection,
     pub reflection_find_type_by_name: FnSpReflectionFindTypeByName,
@@ -149,6 +151,9 @@ impl SlangLibrary {
             let set_target_profile: FnSpSetTargetProfile = *library
                 .get(b"spSetTargetProfile\0")
                 .context("Failed to load spSetTargetProfile")?;
+            let set_target_flags: FnSpSetTargetFlags = *library
+                .get(b"spSetTargetFlags\0")
+                .context("Failed to load spSetTargetFlags")?;
             let set_target_floating_point_mode: FnSpSetTargetFloatingPointMode = *library
                 .get(b"spSetTargetFloatingPointMode\0")
                 .context("Failed to load spSetTargetFloatingPointMode")?;
@@ -183,6 +188,9 @@ impl SlangLibrary {
             let get_target_code_blob: FnSpGetTargetCodeBlob = *library
                 .get(b"spGetTargetCodeBlob\0")
                 .context("Failed to load spGetTargetCodeBlob")?;
+            let get_entry_point_host_callable: FnSpGetEntryPointHostCallable = *library
+                .get(b"spGetEntryPointHostCallable\0")
+                .context("Failed to load spGetEntryPointHostCallable")?;
 
             goldy_event!("slang.ffi.core_symbols", loaded = true);
 
@@ -272,6 +280,7 @@ impl SlangLibrary {
                 destroy_compile_request,
                 add_code_gen_target,
                 set_target_profile,
+                set_target_flags,
                 set_target_floating_point_mode,
                 find_profile,
                 add_translation_unit,
@@ -284,6 +293,7 @@ impl SlangLibrary {
                 get_diagnostic_output,
                 get_entry_point_code_blob,
                 get_target_code_blob,
+                get_entry_point_host_callable,
                 // Reflection API
                 get_reflection,
                 reflection_find_type_by_name,

@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lowers a restricted GPU dialect to canonical `[goldy_compute]` Slang plus structured
   `KernelDef` / `KernelParam` ABI metadata (`goldy_shader_ir`). Host API:
   `Kernel::prepare` (lazy compile/cache) and typed `record(...).over_1d` / `.groups`.
+- **CPU host-callable shaders (issue #292, initial debug path)** — `ShaderTarget::HostCallable`
+  compiles the same Slang compute kernels via `getEntryPointHostCallable` and runs them
+  on host buffers (`goldy::cpu_shaders`). Opt-in; not a production backend. See
+  [CPU host-callable shaders](docs/src/debugging/cpu-host-callable.md).
 - Shared `KernelAbi` bridge for virtual-main: `try_kernel_def_from_source`,
   `emit_wrapper_from_kernel_def` so Rust and raw Slang paths share frame-table wrappers.
 - `goldy_buf_len` helper for portable buffer `.len()` lowering on SPIR-V/DX12.
