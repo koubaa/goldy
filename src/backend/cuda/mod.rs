@@ -179,6 +179,7 @@ pub(crate) struct CudaBackend {
     /// CUDA external-memory imports that must outlive [`Self::textures`] views.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     texture_imports: HashMap<TextureHandle, dx12_interop::CudaImportedTexture>,
+    slang_compiler: crate::slang::SlangCompiler,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -689,6 +690,7 @@ impl CudaBackend {
             driver_version = driver_version,
             success = true
         );
+        let slang_compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
         Ok(Self {
             adapter_info,
             devices: HashMap::new(),
@@ -715,6 +717,7 @@ impl CudaBackend {
             texture_dx12: HashMap::new(),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             texture_imports: HashMap::new(),
+            slang_compiler,
             next_device: 1,
             next_context: 1,
             next_buffer: 1,
@@ -866,7 +869,6 @@ impl CudaBackend {
         storage_specs: &[CudaStorageTextureSpec],
     ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
         ensure_cuda_toolkit_on_path();
-        let compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
         let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
         let defines: Vec<(&str, &str)> = shader
             .defines
@@ -891,7 +893,7 @@ impl CudaBackend {
             .map_err(|error| anyhow::anyhow!("CUDA shader specialization failed: {error}"))?
         };
         let workgroup_size = crate::slang::parse_numthreads(&shader.source).unwrap_or([1, 1, 1]);
-        let compiled = compiler.compile_bindless_with_reflection_and_defines(
+        let compiled = self.slang_compiler.compile_bindless_with_reflection_and_defines(
             &cuda_source,
             crate::slang::ShaderTarget::Ptx,
             &[("cs_main", crate::slang::SlangStage::Compute)],
@@ -909,7 +911,7 @@ impl CudaBackend {
             ptx.pop();
         }
         maybe_dump_cuda_shaders(
-            &compiler,
+            &self.slang_compiler,
             shader,
             shader_handle,
             storage_specs,

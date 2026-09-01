@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 
@@ -91,12 +92,7 @@ fn stage_tag(s: SlangStage) -> u8 {
     }
 }
 
-/// Hash all `*.slang` files in `search_paths` (sorted by filename) into `h`.
-///
-/// Imported modules on these paths; mixing this
-/// hash into [`compile_cache_key`] ensures edits there invalidate cached bytecode
-/// even when the entry-point translation unit is unchanged.
-fn hash_search_path_slang_sources(mut h: u64, search_paths: &[&str]) -> u64 {
+fn read_search_path_slang_files(search_paths: &[&str]) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     for path in search_paths {
         let Ok(entries) = std::fs::read_dir(path) else {
@@ -118,10 +114,43 @@ fn hash_search_path_slang_sources(mut h: u64, search_paths: &[&str]) -> u64 {
         }
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+type SearchPathSlangCache = HashMap<Vec<String>, Arc<Vec<(String, Vec<u8>)>>>;
+
+fn search_path_slang_files_cached(search_paths: &[&str]) -> Arc<Vec<(String, Vec<u8>)>> {
+    static CACHE: OnceLock<Mutex<SearchPathSlangCache>> = OnceLock::new();
+    if search_paths.is_empty() {
+        return Arc::new(Vec::new());
+    }
+    let key: Vec<String> = search_paths.iter().map(|s| (*s).to_string()).collect();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(hit) = guard.get(&key) {
+        return Arc::clone(hit);
+    }
+    let files = Arc::new(read_search_path_slang_files(search_paths));
+    guard.insert(key, Arc::clone(&files));
+    files
+}
+
+/// Hash all `*.slang` files in `search_paths` (sorted by filename) into `h`.
+///
+/// Imported modules on these paths; mixing this
+/// hash into [`compile_cache_key`] ensures edits there invalidate cached bytecode
+/// even when the entry-point translation unit is unchanged.
+///
+/// File bytes are snapshotted on the first lookup of a given path list in this
+/// process so `GoldyRenderer::new` does not re-read the same directory for every
+/// pipeline (goldy#175). In-process edits to those files are not observed until
+/// the process restarts.
+fn hash_search_path_slang_sources(mut h: u64, search_paths: &[&str]) -> u64 {
+    let files = search_path_slang_files_cached(search_paths);
     h = fnv_mix(h, &(files.len() as u64).to_le_bytes());
-    for (name, bytes) in files {
-        h = hash_string(h, &name);
-        h = fnv_mix(h, &bytes);
+    for (name, bytes) in files.iter() {
+        h = hash_string(h, name);
+        h = fnv_mix(h, bytes);
     }
     h
 }
@@ -170,7 +199,9 @@ pub(crate) fn compile_cache_key(
     // Mix in the goldy_exp library hash so that edits to access.slang, bindless.slang,
     // etc. produce different cache keys even when the user's shader source is unchanged.
     h = hash_string(h, GOLDY_EXP_HASH);
+    let t_sp = std::time::Instant::now();
     h = hash_search_path_slang_sources(h, search_paths);
+    crate::shader_timing::record("slang.hash_search_paths", "", t_sp.elapsed());
     h = fnv_mix(h, &[optimization_level as u8]);
     h
 }
@@ -853,6 +884,8 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
         std::fs::write(dir.join("helper.slang"), "struct Helper { uint x; };").unwrap();
         let with_helper = compile_cache_key(src, tgt, &eps, &[path.as_ref()], &defs, &layouts, opt);
         assert_ne!(empty, with_helper);
+        let again = compile_cache_key(src, tgt, &eps, &[path.as_ref()], &defs, &layouts, opt);
+        assert_eq!(with_helper, again);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

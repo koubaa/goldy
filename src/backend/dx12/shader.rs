@@ -103,6 +103,7 @@ pub(super) fn ensure_stage_compiled(
     // Compile Slang directly to DXIL (SM 6.6 bindless)
     let compile_result = {
         let _tz = crate::tracy_zone!("goldy.ensure_stage_compiled.slang_cache");
+        let _st = crate::shader_timing::scope("dx12.ensure_stage_compiled.slang", entry_point_name);
         state.slang_compiler.compile_with_reflection(
             &slang_source,
             crate::slang::ShaderTarget::Dxil,

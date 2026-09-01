@@ -673,7 +673,10 @@ impl SlangCompiler {
     ) -> Result<CompiledShaderWithReflection> {
         // Hash the same string Slang compiles (post virtual-main transform). This runs on cache
         // hits too; a micro-optimization could cache keys per `(Arc<str>, …)` if needed.
+        let t0 = std::time::Instant::now();
         let effective = effective_slang_source_for_compile(source);
+        crate::shader_timing::record("slang.transform", "", t0.elapsed());
+        let t1 = std::time::Instant::now();
         let cache_key = crate::shader_cache::compile_cache_key(
             effective.as_ref(),
             target,
@@ -683,14 +686,19 @@ impl SlangCompiler {
             layout_checks,
             optimization_level,
         );
+        crate::shader_timing::record("slang.compile_cache_key", "", t1.elapsed());
 
         {
+            let t2 = std::time::Instant::now();
             let mut disk = self.shader_disk_cache.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(hit) = disk.get(cache_key) {
+                crate::shader_timing::record("slang.disk_hit", "", t2.elapsed());
                 return hit.with_context(|| "decode shader disk cache");
             }
+            crate::shader_timing::record("slang.disk_miss_lookup", "", t2.elapsed());
         }
 
+        let t_compile = std::time::Instant::now();
         let binding_type_names = super::virtual_main::extract_binding_element_type_names(source);
         let binding_categories = super::virtual_main::extract_push_constant_categories(source);
 
@@ -735,6 +743,7 @@ impl SlangCompiler {
                 })
             },
         )?;
+        crate::shader_timing::record("slang.compile_miss", "", t_compile.elapsed());
 
         {
             let mut disk = self.shader_disk_cache.lock().unwrap_or_else(|p| p.into_inner());
