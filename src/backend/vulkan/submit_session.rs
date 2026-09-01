@@ -86,6 +86,7 @@ pub(crate) struct VulkanSubmitSession {
     textures: SharedTextureTable,
     compute_fence_pool: SharedComputeFencePool,
     device_owner_handle: Option<ContextHandle>,
+    validation_sink: Option<Arc<super::debug_utils::ValidationSink>>,
 }
 
 impl VulkanSubmitSession {
@@ -123,6 +124,7 @@ impl VulkanSubmitSession {
             textures: Arc::clone(&state.textures),
             compute_fence_pool: Arc::clone(&state.compute_fence_pool),
             device_owner_handle,
+            validation_sink: state.validation_sink.clone(),
         }))
     }
 
@@ -201,7 +203,10 @@ impl crate::backend::ContextSubmitSession for VulkanSubmitSession {
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
         let scope = self.dispatch_scope(ctx);
-        compute::submit_with_scope(&scope, scope.ctx, commands, sync)
+        super::debug_utils::combine_validation(
+            self.validation_sink.as_ref(),
+            compute::submit_with_scope(&scope, scope.ctx, commands, sync),
+        )
     }
 
     fn submit_graph(
@@ -211,7 +216,10 @@ impl crate::backend::ContextSubmitSession for VulkanSubmitSession {
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
         let scope = self.dispatch_scope(ctx);
-        compute::submit_graph_with_scope(&scope, scope.ctx, commands, None, sync)
+        super::debug_utils::combine_validation(
+            self.validation_sink.as_ref(),
+            compute::submit_graph_with_scope(&scope, scope.ctx, commands, None, sync),
+        )
     }
 
     fn submit_graph_and_retain(
@@ -223,7 +231,10 @@ impl crate::backend::ContextSubmitSession for VulkanSubmitSession {
     ) -> Result<TimelineValue> {
         let scope = self.dispatch_scope(ctx);
         compute::evict_retained_with_scope(&scope, scope.ctx, key);
-        compute::submit_graph_with_scope(&scope, scope.ctx, commands, Some(key), sync)
+        super::debug_utils::combine_validation(
+            self.validation_sink.as_ref(),
+            compute::submit_graph_with_scope(&scope, scope.ctx, commands, Some(key), sync),
+        )
     }
 
     fn try_resubmit_retained(
@@ -233,7 +244,10 @@ impl crate::backend::ContextSubmitSession for VulkanSubmitSession {
         sync: Option<&SubmitSync>,
     ) -> Result<Option<TimelineValue>> {
         let scope = self.dispatch_scope(ctx);
-        compute::try_resubmit_retained_with_scope(&scope, scope.ctx, key, sync)
+        super::debug_utils::combine_validation(
+            self.validation_sink.as_ref(),
+            compute::try_resubmit_retained_with_scope(&scope, scope.ctx, key, sync),
+        )
     }
 
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {

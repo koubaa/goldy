@@ -85,6 +85,15 @@ Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clea
 
 2. **Loader-only** — set `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` (and ensure the loader can find the layer). Goldy detects that substring and enables the same instance extensions and layer list as GPU API validation.
 
+Khronos messages are captured with a `VK_EXT_debug_utils` messenger (target `goldy::validation`). They do **not** fail tests or `Result` calls by themselves: `vk*` can still return success. To fail:
+
+```bash
+GOLDY_VALIDATION=api,fatal cargo test --features vulkan
+GOLDY_VALIDATION_FATAL=1 GOLDY_VALIDATION=all cargo test --features vulkan
+```
+
+ERROR-severity messages then surface as `Err` from submit/wait/create and panic on backend drop (so `cargo test` fails even if the last call returned `Ok`).
+
 ### Unified validation (`GOLDY_VALIDATION`)
 
 | Input | Effect |
@@ -93,7 +102,8 @@ Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clea
 | `GOLDY_VALIDATION=layout,api` or `layout api` or `layout;api` | Layout plus graphics API validation (separators: comma, semicolon, or whitespace). |
 | `GOLDY_VALIDATION=timeline` | WSI timeline invariants: post-wait semaphore counter check in Vulkan `acquire()`. |
 | `GOLDY_VALIDATION=scheme` or `readback` | Retained-scheme grant readback invariants (frame/grant pairing, staging pool checks). |
-| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme (same as `layout,api,timeline,scheme`). |
+| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme + host_access (same as listing those tokens). Does **not** enable `fatal`. |
+| `GOLDY_VALIDATION=fatal` / `GOLDY_VALIDATION_FATAL=1` | With `api` (or `all`), Vulkan ERROR messages fail Goldy `Result` calls and panic on backend drop. |
 | `GOLDY_VALIDATION=1` / `true` / `yes` | **GPU API only** — does **not** enable layout checks (keeps dispatch-time layout work off unless you opt in). |
 
 The **`api`** token selects Goldy’s graphics-API validation path (Vulkan validation layer + `VK_EXT_debug_utils` where built; Metal `MTL_SHADER_VALIDATION` when applicable). For Vulkan you can still set **`VK_INSTANCE_LAYERS`**, **`VK_LAYER_PATH`**, etc. yourself if you prefer the loader directly. **`GOLDY_VALIDATE_LAYOUTS=1`** still works unchanged and is equivalent to enabling the layout family only.

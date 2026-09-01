@@ -16,7 +16,8 @@ or whitespace-separated list of categories:
 | `api` | Enable backend GPU API validation (see below) |
 | `layout` | Enable Rust ↔ Slang struct layout checks and buffer stride checks |
 | `host_access` | Page-protect CPU-visible GPU copies (CPU backend parcels; stray host pointers fault) |
-| `all` | Enable `api`, `layout`, timeline, scheme, and `host_access` |
+| `fatal` | With `api`, Vulkan Khronos ERROR messages fail Goldy calls / `cargo test` (also `GOLDY_VALIDATION_FATAL=1`). Not included in `all`. |
+| `all` | Enable `api`, `layout`, timeline, scheme, and `host_access` (not `fatal`) |
 | `1`, `true`, `yes` | GPU API validation only (legacy shorthand; does **not** enable layout checks) |
 
 Categories can be combined:
@@ -40,7 +41,7 @@ enables backend-specific validation:
 
 | Backend | What Gets Enabled |
 |---------|-------------------|
-| Vulkan | `VK_LAYER_KHRONOS_validation` + `VK_EXT_debug_utils` at instance creation |
+| Vulkan | `VK_LAYER_KHRONOS_validation` + `VK_EXT_debug_utils` messenger at instance creation. ERROR messages are logged; they fail Goldy calls only with `fatal` / `GOLDY_VALIDATION_FATAL`. |
 | Metal | Sets `MTL_SHADER_VALIDATION=1` (if not already set) before the first device is created |
 | DX12 | See [DX12 Debug Layer](#dx12-debug-layer) below |
 | WebGPU | wgpu validation error scopes on shader/PSO create (always in debug builds; in release when GPU API validation is on) and on bind-group create (GPU API validation only) |
@@ -240,7 +241,8 @@ RUST_LOG=goldy::render=trace cargo run --example triangle
 | Variable | Values | Effect |
 |----------|--------|--------|
 | `GOLDY_BACKEND` | `vulkan`/`vk`, `dx12`/`d3d12`/`directx`, `metal`/`mtl` | Override backend selection |
-| `GOLDY_VALIDATION` | `api`, `layout`, `host_access`, `all`, `1`/`true`/`yes` | Enable validation categories |
+| `GOLDY_VALIDATION` | `api`, `layout`, `host_access`, `fatal`, `all`, `1`/`true`/`yes` | Enable validation categories (`fatal` is opt-in; not part of `all`) |
+| `GOLDY_VALIDATION_FATAL` | `1`, `true`, `yes` | Fail on Vulkan Khronos ERROR messages |
 | `GOLDY_VALIDATE_LAYOUTS` | `1`, `true`, `yes` | Enable layout validation (legacy; prefer `GOLDY_VALIDATION=layout`) |
 | `GOLDY_DX12_FORCE_WARP` | `1` | Use WARP software rasterizer |
 | `GOLDY_DX12_DEBUG` | `1` | Force-enable D3D12 debug layer in release |
