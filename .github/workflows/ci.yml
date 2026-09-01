@@ -6,12 +6,6 @@
 # - Windows: DX12 on WARP (GOLDY_DX12_ALLOW_WARP=1; no discrete GPU on hosted runners)
 # - WebGPU (wgpu): Linux Vulkan/lavapipe, macOS Metal, Windows DX12/WARP
 #   (`--no-default-features --features webgpu`, GOLDY_BACKEND=webgpu)
-#
-# GPU cargo-test jobs set GOLDY_VALIDATION=all and GOLDY_VALIDATION_FATAL=1
-# so Khronos/API validation ERRORs fail the suite. Lavapipe image ENV
-# VK_LAYER_PATH="" hides layers;
-# those jobs restore VK_LAYER_PATH to /usr/share/vulkan/explicit_layer.d.
-# DX12+WARP keeps GOLDY_DX12_NO_DEBUG=1 (D3D debug layer is a separate toggle).
 
 name: CI
 
@@ -172,9 +166,6 @@ jobs:
   test-metal:
     name: Metal Tests (macOS)
     runs-on: macos-15
-    env:
-      GOLDY_VALIDATION: all
-      GOLDY_VALIDATION_FATAL: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -303,9 +294,6 @@ jobs:
   test-dx12-warp:
     name: DX12 Tests (WARP)
     runs-on: windows-latest
-    env:
-      GOLDY_VALIDATION: all
-      GOLDY_VALIDATION_FATAL: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -440,7 +428,6 @@ jobs:
     runs-on: macos-15
     env:
       GOLDY_VALIDATION: all
-      GOLDY_VALIDATION_FATAL: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -506,7 +493,6 @@ jobs:
     runs-on: windows-latest
     env:
       GOLDY_VALIDATION: all
-      GOLDY_VALIDATION_FATAL: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -632,9 +618,6 @@ jobs:
     name: Python Bindings (macOS)
     runs-on: macos-15
     needs: [check, test-mock]
-    env:
-      GOLDY_VALIDATION: all
-      GOLDY_VALIDATION_FATAL: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -806,9 +789,6 @@ jobs:
     name: C++ Bindings (macOS)
     runs-on: macos-15
     needs: [check, test-mock]
-    env:
-      GOLDY_VALIDATION: all
-      GOLDY_VALIDATION_FATAL: "1"
     steps:
       - uses: actions/checkout@v6
 

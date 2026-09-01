@@ -27,7 +27,7 @@ GOLDY_VALIDATION=api cargo run --example triangle
 # Layout + stride checks only
 GOLDY_VALIDATION=layout cargo run --example triangle
 
-# Everything (still does not fail the process on Khronos ERROR messages)
+# Everything
 GOLDY_VALIDATION=all cargo run --example triangle
 
 # Fail Goldy calls / tests when Vulkan records an ERROR

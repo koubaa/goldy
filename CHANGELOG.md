@@ -15,9 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   First slice; native mapped staging can use the same allocator later.
 - **`GOLDY_VALIDATION_FATAL=1`** — Vulkan Khronos ERROR messages captured by a
   debug-utils messenger fail Goldy `Result` calls and panic on backend drop.
-  Independent of `GOLDY_VALIDATION` (`all` does not imply it). CI GPU jobs set
-  `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1` (and restore
-  `VK_LAYER_PATH` on lavapipe) so a validation ERROR fails the suite.
+  Independent of `GOLDY_VALIDATION` (`all` does not imply it). Vulkan lavapipe
+  CI jobs set `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1` (and restore
+  `VK_LAYER_PATH`) so a Khronos ERROR fails the suite. Metal and DX12 jobs do
+  not set `GOLDY_VALIDATION_FATAL` (it is Vulkan-only).
 
 ### Fixed
 

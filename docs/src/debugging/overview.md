@@ -40,10 +40,12 @@ enables backend-specific validation:
 
 | Backend | What Gets Enabled |
 |---------|-------------------|
-| Vulkan | `VK_LAYER_KHRONOS_validation` + `VK_EXT_debug_utils` messenger at instance creation. ERROR messages are logged; they fail Goldy calls only with `GOLDY_VALIDATION_FATAL=1`. |
+| Vulkan | `VK_LAYER_KHRONOS_validation` + `VK_EXT_debug_utils` at instance creation |
 | Metal | Sets `MTL_SHADER_VALIDATION=1` (if not already set) before the first device is created |
 | DX12 | See [DX12 Debug Layer](#dx12-debug-layer) below |
 | WebGPU | wgpu validation error scopes on shader/PSO create (always in debug builds; in release when GPU API validation is on) and on bind-group create (GPU API validation only) |
+
+On Vulkan, `GOLDY_VALIDATION_FATAL=1` treats messenger ERROR records as hard failures (`Err` on later Goldy `Result` calls; panic on backend drop).
 
 For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` contains
 `VK_LAYER_KHRONOS_validation` (the standard loader-driven workflow).

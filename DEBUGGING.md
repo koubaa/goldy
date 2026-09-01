@@ -73,7 +73,7 @@ Python buffers automatically detect stride from numpy dtype. If using raw bytes,
 
 ### GPU validation (Khronos validation layer)
 
-Vulkan API misuse is easiest to catch with the Khronos validation layer. CI GPU jobs set `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1`, and restore `VK_LAYER_PATH` on lavapipe so ERROR messages fail the suite. Locally:
+Vulkan API misuse is easiest to catch with the Khronos validation layer. Enable validation in either of these ways:
 
 1. **`GOLDY_VALIDATION`** — short form **`1`/`true`/`yes`** turns on **GPU API validation only** (Khronos layer + `VK_EXT_debug_utils` here; Metal shader validation on macOS). Token lists are also supported (see [Unified validation](#unified-validation-goldy_validation) below). Requires validation layers on the machine (e.g. [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), or on Debian/Ubuntu often `vulkan-validationlayers`).
 
@@ -85,7 +85,9 @@ Vulkan API misuse is easiest to catch with the Khronos validation layer. CI GPU 
 
 2. **Loader-only** — set `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` (and ensure the loader can find the layer). Goldy detects that substring and enables the same instance extensions and layer list as GPU API validation.
 
-Khronos messages are captured with a `VK_EXT_debug_utils` messenger (target `goldy::validation`). They do **not** fail tests or `Result` calls by themselves: `vk*` can still return success. To fail:
+Khronos messages are captured with a `VK_EXT_debug_utils` messenger (target `goldy::validation`).
+
+To fail Goldy calls / tests on ERROR:
 
 ```bash
 GOLDY_VALIDATION_FATAL=1 GOLDY_VALIDATION=api cargo test --features vulkan
