@@ -36,7 +36,9 @@ future `Device` debug option). The compile APIs above are already opt-in; GPU
 paths ignore the variable.
 
 Host-callable JIT uses vendored `slang-llvm` next to `libslang`. No extra C++
-toolchain is required when that library is present.
+toolchain is required when that library is present. Do **not** set Slang
+`SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM` with the current vendored Slang:
+`getEntryPointHostCallable` SIGSEGVs. Goldy omits that flag.
 
 ## What lowers
 

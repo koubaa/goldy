@@ -588,12 +588,6 @@ impl SlangCompiler {
             anyhow::bail!("Failed to add code generation target");
         }
 
-        if target == ShaderTarget::HostCallable {
-            unsafe {
-                (self.library.set_target_flags)(request, target_index, SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM);
-            }
-        }
-
         if target == ShaderTarget::Dxil {
             let profile_name = CString::new("sm_6_6").unwrap();
             let profile_id = unsafe { global_session_find_profile(self.global_session, profile_name.as_ptr()) };

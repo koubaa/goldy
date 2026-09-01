@@ -53,6 +53,7 @@ pub struct SlangLibrary {
     // Target configuration
     pub add_code_gen_target: FnSpAddCodeGenTarget,
     pub set_target_profile: FnSpSetTargetProfile,
+    #[allow(dead_code)]
     pub set_target_flags: FnSpSetTargetFlags,
     pub set_target_floating_point_mode: FnSpSetTargetFloatingPointMode,
     pub find_profile: FnSpFindProfile,

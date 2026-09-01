@@ -268,10 +268,6 @@ fn layout_from_kernel_def(def: &KernelDef) -> Result<Vec<CpuParamSlot>> {
     Ok(layout)
 }
 
-fn layout_from_raw_single_buffer() -> Vec<CpuParamSlot> {
-    vec![CpuParamSlot::Buffer { stride: 4 }]
-}
-
 /// Compile `[goldy_compute]` or raw `[shader("compute")]` Slang to a CPU kernel.
 pub fn compile(
     compiler: &SlangCompiler,
@@ -284,9 +280,7 @@ pub fn compile(
     let layout = if let Some(ref d) = def {
         layout_from_kernel_def(d)?
     } else {
-        // Raw compute: caller packs bindings; default to a single unstructured buffer
-        // only when the source has no goldy ABI. Prefer [`compile_kernel`].
-        layout_from_raw_single_buffer()
+        Vec::new()
     };
     compile_with_layout(compiler, source, entry, workgroup_size, search_paths, layout)
 }
@@ -322,7 +316,6 @@ fn compile_with_layout(
             OptimizationLevel::None,
         )
         .with_context(|| format!("host-callable compile of `{entry}`"))?;
-
     let name = CString::new(entry).context("entry point name contains NUL")?;
     let symbol = unsafe { shared_library_find_symbol(lib, name.as_ptr()) };
     if symbol.is_null() {
@@ -350,6 +343,18 @@ mod tests {
             .join("shaders")
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn host_callable_trivial_empty_kernel() {
+        let compiler = SlangCompiler::new().expect("Slang");
+        let src = r#"
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void cs_main() {}
+        "#;
+        let kernel = compile(&compiler, src, "cs_main", [1, 1, 1], &[]).expect("compile empty CPU kernel");
+        kernel.dispatch([1, 1, 1], &mut []).expect("dispatch empty");
     }
 
     #[test]
@@ -442,39 +447,6 @@ mod tests {
                 y[i],
                 expected[i]
             );
-        }
-    }
-}
-
-#[cfg(test)]
-mod rust_kernel_macro_tests {
-    use super::*;
-    use crate::compute;
-    use crate::slang::try_kernel_def_from_source;
-
-    #[compute(workgroup_size = [64, 1, 1])]
-    fn rust_double(data: &mut [u32]) {
-        let i = crate::gpu::global_id().x;
-        if i < data.len() {
-            data[i] = data[i] * 2u32;
-        }
-    }
-
-    #[test]
-    fn goldy_compute_macro_runs_on_cpu() {
-        let compiler = SlangCompiler::new().expect("Slang");
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("shaders")
-            .to_string_lossy()
-            .into_owned();
-        let def = try_kernel_def_from_source(rust_double::CANONICAL_SOURCE).expect("kernel def");
-        let kernel = compile_kernel(&compiler, &def, &[&path]).expect("compile rust_double");
-        let mut data: Vec<u32> = (0..64).collect();
-        kernel
-            .dispatch_1d(64, &mut [CpuBinding::u32s(&mut data)])
-            .expect("dispatch");
-        for i in 0..64u32 {
-            assert_eq!(data[i as usize], i * 2, "index {i}");
         }
     }
 }

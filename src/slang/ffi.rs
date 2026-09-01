@@ -201,7 +201,9 @@ pub type ISlangBlob = c_void;
 /// Opaque `ISlangSharedLibrary` (JIT / host-callable output).
 pub type ISlangSharedLibrary = c_void;
 
-/// `SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM` — required for host-callable JIT.
+/// `SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM`. Not passed for host-callable JIT:
+/// this Slang build SIGSEGVs in `getEntryPointHostCallable` when the flag is set.
+#[allow(dead_code)]
 pub const SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM: u32 = 1 << 8;
 
 // ============================================================================
