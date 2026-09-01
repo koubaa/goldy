@@ -207,7 +207,7 @@ fn slot_usage_to_vk_stage(usage: &SlotUsageSet, on_graphics_queue: bool) -> vk::
         flags |= vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::DRAW_INDIRECT;
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
-        flags |= vk::PipelineStageFlags2::TRANSFER;
+        flags |= vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR;
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
         if on_graphics_queue {
@@ -317,9 +317,9 @@ fn slot_usage_to_vk_access(usage: &SlotUsageSet, for_buffer: bool, on_graphics_q
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         if usage.access == NodeAccessUnion::Write {
-            flags |= vk::AccessFlags2::TRANSFER_WRITE;
+            flags |= vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR;
         } else {
-            flags |= vk::AccessFlags2::TRANSFER_READ;
+            flags |= vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR;
         }
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {

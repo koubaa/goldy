@@ -2316,4 +2316,45 @@ mod rt_mesh_compile_tests {
             out.reflection.parameter_blocks
         );
     }
+
+    #[test]
+    fn compile_goldy_compute_accel_spirv() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let path = {
+            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            manifest_dir.join("shaders").to_string_lossy().into_owned()
+        };
+        let source = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
+{
+    RayDesc ray;
+    ray.Origin = float3(0.0, 0.0, -2.0);
+    ray.TMin = 0.001;
+    ray.Direction = float3(0.0, 0.0, 1.0);
+    ray.TMax = 100.0;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, ray);
+    q.Proceed();
+    hits[id.x] = q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 1 : 0;
+}
+"#;
+        let out = compiler
+            .compile_bindless_with_reflection_and_defines(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("GOLDY_RAY_QUERY", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("goldy_compute Accel SPIR-V compile failed");
+        assert!(!out.shader.data.is_empty());
+        let words = out.shader.as_spirv().expect("SPIR-V");
+        assert_eq!(words[0], 0x07230203);
+    }
 }

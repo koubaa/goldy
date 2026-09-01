@@ -246,6 +246,17 @@ pub(super) fn record_build_list(
     let cl4: ID3D12GraphicsCommandList4 = cl.cast().context("BuildRaytracingAccelerationStructure needs CL4")?;
     let buffers = scope.buffers().read().unwrap();
     let accels = scope.accels().read().unwrap();
+    // Geometry / instance uploads and a prior BLAS write must be visible to
+    // `BUILD_RAYTRACING` (graph TRANSFER maps to COPY, which is not enough).
+    let pre = D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncAfter: D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+        AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+    };
+    unsafe {
+        barriers::barrier_globals(cl7, std::slice::from_ref(&pre));
+    }
     match build {
         AccelBuildCommand::BlasTriangles {
             dest,
@@ -298,7 +309,9 @@ pub(super) fn record_build_list(
                 let mut d = D3D12_RAYTRACING_INSTANCE_DESC::default();
                 d.Transform = inst.transform;
                 d._bitfield1 = (inst.custom_index & 0x00ff_ffff) | (u32::from(inst.mask) << 24);
-                d._bitfield2 = 0;
+                // High 8 bits are instance flags; disable facing cull so a +Z ray
+                // from -Z still hits a CCW triangle in the XY plane.
+                d._bitfield2 = (D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE.0 as u32) << 24;
                 d.AccelerationStructure = blas.gpu_va;
                 packed.push(d);
             }
@@ -344,7 +357,9 @@ pub(super) fn record_build_list(
     }
     let barrier = D3D12_GLOBAL_BARRIER {
         SyncBefore: D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
-        SyncAfter: D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+        SyncAfter: D3D12_BARRIER_SYNC(
+            D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0 | D3D12_BARRIER_SYNC_COMPUTE_SHADING.0,
+        ),
         AccessBefore: D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
         AccessAfter: D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
     };

@@ -24,6 +24,7 @@
 //                         img[int2(x,y)], img.GetDimensions(w,h)
 //     ByteAddress       = ByteAddressView     .Load/.Store/.Interlocked*
 //     Filter            = SamplerState        tex.Sample(samp, uv)
+//     Accel             = RaytracingAccelerationStructure  (GOLDY_RAY_QUERY)
 //
 //   Broadcast (constant buffer): declare the struct type directly as a parameter.
 //   The codegen recognises any non-resource, non-SV struct as a constant-buffer
@@ -357,12 +358,14 @@ public SamplerState goldy_filter(uint slot)
     return *handle;
 }
 
+#if defined(GOLDY_RAY_QUERY)
 public RaytracingAccelerationStructure goldy_accel(uint slot)
 {
     DescriptorHandle<RaytracingAccelerationStructure> handle;
     handle = DescriptorHandle<RaytracingAccelerationStructure>(uint2(slot, 0));
     return *handle;
 }
+#endif
 
 // =============================================================================
 // Metal Implementation (Bindless via Argument Buffers Tier 2)
@@ -471,8 +474,10 @@ public typealias ByteAddress = ByteAddressView;
 /// Pass directly to texture `.Sample(filter, uv)` calls.
 public typealias Filter = SamplerState;
 
+#if defined(GOLDY_RAY_QUERY)
 /// Top-level acceleration structure for inline `RayQuery`.
 public typealias Accel = RaytracingAccelerationStructure;
+#endif
 
 /// Element count for a structured buffer (`buf.len()` in the Rust GPU dialect).
 ///

@@ -272,10 +272,11 @@ pub(super) fn record_build(
                 let blas = accels.entries.get(&inst.blas).context("invalid instance BLAS")?;
                 let mut transform = vk::TransformMatrixKHR { matrix: [0.0; 12] };
                 transform.matrix.copy_from_slice(&inst.transform);
+                let cull_disable = vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8;
                 vk_instances.push(vk::AccelerationStructureInstanceKHR {
                     transform,
                     instance_custom_index_and_mask: vk::Packed24_8::new(inst.custom_index, inst.mask),
-                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, 0),
+                    instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, cull_disable),
                     acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
                         device_handle: blas.device_address,
                     },
@@ -369,6 +370,31 @@ fn record_build_inner(
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
     )?;
     let scratch_addr = buffer_device_address(&ld.device, scratch);
+    // Host-visible instance buffers and vertex uploads must be visible to the
+    // AS-build stage (not just TRANSFER / COMPUTE).
+    let pre = vk::MemoryBarrier2::default()
+        .src_stage_mask(
+            vk::PipelineStageFlags2::HOST
+                | vk::PipelineStageFlags2::TRANSFER
+                | vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR,
+        )
+        .src_access_mask(
+            vk::AccessFlags2::HOST_WRITE
+                | vk::AccessFlags2::TRANSFER_WRITE
+                | vk::AccessFlags2::SHADER_WRITE
+                | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR,
+        )
+        .dst_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
+        .dst_access_mask(
+            vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
+                | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR
+                | vk::AccessFlags2::SHADER_READ,
+        );
+    let pre_dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&pre));
+    unsafe {
+        ld.device.cmd_pipeline_barrier2(cmd, &pre_dep);
+    }
     let geoms = [geom];
     let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
         .ty(ty)
@@ -388,8 +414,12 @@ fn record_build_inner(
     let barrier = vk::MemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
         .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
-        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-        .dst_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR);
+        .dst_stage_mask(
+            vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR | vk::PipelineStageFlags2::COMPUTE_SHADER,
+        )
+        .dst_access_mask(
+            vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags2::SHADER_READ,
+        );
     let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
     unsafe {
         ld.device.cmd_pipeline_barrier2(cmd, &dep);

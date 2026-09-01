@@ -164,9 +164,10 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool, on_direct_que
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         // A non-storage upload buffer can only ever be a copy *source*, but the
-        // sync stage (COPY) is identical either way.
+        // sync stage (COPY) is identical either way. AS builds also consume
+        // vertex/index buffers classified as TRANSFER in GraphIR.
         let _ = is_storage;
-        sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
+        sync.0 |= D3D12_BARRIER_SYNC_COPY.0 | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0;
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
         if on_direct_queue {
@@ -214,6 +215,10 @@ fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, is_storage: bool) 
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         if usage.access == NodeAccessUnion::Write && is_storage {
             access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
+        } else if is_storage {
+            // Geometry buffers fed to AS builds are storage (UAV) heaps; DXR
+            // reads them as SRVs, not copy sources.
+            access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
         } else {
             // Non-storage upload buffers can only ever be a copy source.
             access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0;

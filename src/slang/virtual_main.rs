@@ -3326,6 +3326,27 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     }
 
     #[test]
+    fn compute_accel_transform() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Accel scene, Scattered<uint> hits, ThreadId id) {
+    hits[id.x] = 0;
+}
+"#;
+        let result = transform_virtual_main(src);
+        assert!(
+            result.contains("goldy_accel(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"),
+            "Missing goldy_accel init, got:\n{result}"
+        );
+        assert!(
+            result.contains("goldy_scattered<uint>(goldy_frame_table_index(_rs0, 1u, _rs1, _rs2))"),
+            "Missing scattered init after Accel"
+        );
+    }
+
+    #[test]
     fn compute_scalar_resource_slot() {
         let src = r#"import goldy_exp;
 
@@ -3662,16 +3683,18 @@ void cs_main(
     Interpolated<float4> tex,
     DirectSpatial<float4> img,
     Filter sampler,
+    Accel scene,
     ThreadId id
 ) {}
 "#;
         let cats = extract_push_constant_categories(source);
-        assert_eq!(cats.len(), 5);
+        assert_eq!(cats.len(), 6);
         assert_eq!(cats[0], Some(ResourceCategory::Scattered));
         assert_eq!(cats[1], Some(ResourceCategory::Scattered));
         assert_eq!(cats[2], Some(ResourceCategory::Texture));
         assert_eq!(cats[3], Some(ResourceCategory::StorageImage));
         assert_eq!(cats[4], Some(ResourceCategory::Sampler));
+        assert_eq!(cats[5], Some(ResourceCategory::Accel));
     }
 
     #[cfg(all(test, feature = "dx12", target_os = "windows"))]
