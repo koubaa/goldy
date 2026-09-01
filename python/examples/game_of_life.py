@@ -187,6 +187,7 @@ def main() -> int:
         render_shader,
         render_shader,
         goldy.RenderPipelineDesc(
+            vertex_layout=goldy.VertexBufferLayout.empty(),
             target_format=surface.format,
             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
         ),
@@ -219,6 +220,7 @@ def main() -> int:
                         render_shader,
                         render_shader,
                         goldy.RenderPipelineDesc(
+                            vertex_layout=goldy.VertexBufferLayout.empty(),
                             target_format=surface.format,
                             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
                         ),

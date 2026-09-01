@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Game of Life render shader no longer uses `fwidth` (Slang Metal fragment target
   rejects derivative builtins). Restores screenshot tests and the Python headless example.
+- Python Game of Life examples pass `VertexBufferLayout.empty()` for the
+  `VertexId` fullscreen pass. The Python `RenderPipelineDesc` default is still
+  Vertex2D, which made `draw_fullscreen()` hit Khronos
+  `VUID-vkCmdDraw-None-04007` under `GOLDY_VALIDATION_FATAL=1`.
 
 - **Rust compute kernels (issue #78, initial design)** — `#[goldy::compute]` proc-macro
   lowers a restricted GPU dialect to canonical `[goldy_compute]` Slang plus structured

@@ -63,6 +63,8 @@ def main() -> int:
         render_shader,
         render_shader,
         goldy.RenderPipelineDesc(
+            # VertexId fullscreen triangle — do not default to Vertex2D bindings.
+            vertex_layout=goldy.VertexBufferLayout.empty(),
             target_format=goldy.TextureFormat.RGBA8_UNORM,
             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
         ),
