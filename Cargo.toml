@@ -283,7 +283,3 @@ harness = false
 name = "cross_submit_gpu"
 harness = false
 
-[[test]]
-name = "cpu_backend"
-harness = false
-

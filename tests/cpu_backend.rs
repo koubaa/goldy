@@ -1,6 +1,6 @@
 //! Compute-only CPU backend via `GOLDY_BACKEND=cpu` (issue #292).
 //!
-//! Isolated test binary so the env override cannot race other GPU tests.
+//! Isolated crate so the env override cannot race other GPU tests.
 
 use goldy::{
     BufferKind, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RetainedPool, Scheme,
@@ -8,7 +8,8 @@ use goldy::{
 };
 use std::sync::Arc;
 
-fn main() {
+#[test]
+fn scheme_double_u32() {
     // SAFETY: this integration test is its own process.
     unsafe { std::env::set_var("GOLDY_BACKEND", "cpu") };
 
@@ -56,5 +57,4 @@ fn main() {
     for i in 0..n {
         assert_eq!(out[i], (i as u32) * 2, "index {i}");
     }
-    println!("cpu_backend scheme double_u32: ok");
 }
