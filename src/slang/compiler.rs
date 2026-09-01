@@ -58,6 +58,8 @@ pub enum ResourceKind {
     ParameterBlock,
     /// Other/unknown
     Other,
+    /// A ray-tracing acceleration structure (`RaytracingAccelerationStructure`)
+    AccelerationStructure,
 }
 
 /// Layout information for a single field within a ParameterBlock
@@ -1232,8 +1234,20 @@ impl SlangCompiler {
                 continue;
             }
 
-            // Determine resource kind
-            let resource_kind = self.determine_resource_kind(field_type_layout);
+            // Get type name
+            let field_type = unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
+            let type_name = if !field_type.is_null() {
+                let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
+                if !type_name_ptr.is_null() {
+                    unsafe { CStr::from_ptr(type_name_ptr) }.to_string_lossy().into_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            let resource_kind = self.determine_resource_kind(field_type_layout, &type_name);
 
             // For Metal argument buffers (ParameterBlock context), try MetalArgumentBufferElement
             // category first. This handles buffers, textures, and other resources correctly.
@@ -1271,19 +1285,6 @@ impl SlangCompiler {
                 resource_kind
             );
 
-            // Get type name
-            let field_type = unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
-            let type_name = if !field_type.is_null() {
-                let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
-                if !type_name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(type_name_ptr) }.to_string_lossy().into_owned()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-
             fields.push(FieldLayout {
                 name,
                 offset,
@@ -1297,7 +1298,7 @@ impl SlangCompiler {
     }
 
     /// Determine the resource kind from a type layout.
-    fn determine_resource_kind(&self, type_layout: *mut SlangReflectionTypeLayout) -> ResourceKind {
+    fn determine_resource_kind(&self, type_layout: *mut SlangReflectionTypeLayout, type_name: &str) -> ResourceKind {
         let type_ptr = unsafe { (self.library.reflection_type_layout_get_type)(type_layout) };
         if type_ptr.is_null() {
             return ResourceKind::Other;
@@ -1306,19 +1307,18 @@ impl SlangCompiler {
         let type_kind = unsafe { (self.library.reflection_type_get_kind)(type_ptr) };
         let binding_type = unsafe { (self.library.reflection_type_layout_get_binding_type)(type_layout) };
 
-        // Debug logging for type detection
         tracing::trace!(
-            "determine_resource_kind: type_kind={}, binding_type={}",
+            "determine_resource_kind: type_kind={}, binding_type={}, type_name={}",
             type_kind,
-            binding_type
+            binding_type,
+            type_name
         );
 
-        match type_kind {
+        let kind = match type_kind {
             k if k == SlangTypeKind::SamplerState as i32 => ResourceKind::Sampler,
             k if k == SlangTypeKind::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
             k if k == SlangTypeKind::ParameterBlock as i32 => ResourceKind::ParameterBlock,
             k if k == SlangTypeKind::Resource as i32 => {
-                // Check binding type to distinguish buffer vs texture, mutable vs immutable
                 match binding_type {
                     b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
                     b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
@@ -1326,25 +1326,32 @@ impl SlangCompiler {
                     b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
                     b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
                     b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                    b if b == SlangBindingType::RayTracingAccelerationStructure as i32 => {
+                        ResourceKind::AccelerationStructure
+                    }
                     _ => ResourceKind::Other,
                 }
             }
             k if k == SlangTypeKind::ShaderStorageBuffer as i32 => ResourceKind::MutableBuffer,
-            _ => {
-                // Try to infer from binding type if type_kind doesn't match expected values
-                // This helps with StructuredBuffer which may have different type_kind
-                match binding_type {
-                    b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
-                    b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
-                    b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
-                    _ => ResourceKind::Other,
+            _ => match binding_type {
+                b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
+                b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
+                b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
+                b if b == SlangBindingType::RayTracingAccelerationStructure as i32 => {
+                    ResourceKind::AccelerationStructure
                 }
-            }
+                _ => ResourceKind::Other,
+            },
+        };
+        if kind == ResourceKind::Other && type_name.contains("AccelerationStructure") {
+            ResourceKind::AccelerationStructure
+        } else {
+            kind
         }
     }
 }
@@ -2204,5 +2211,108 @@ mod cuda_direct_spatial_rgba8_view_tests {
             .expect("CUDA PTX compilation failed for DirectSpatial<float4, uint8_t4> subscript");
         let ptx = output.shader.as_str().expect("PTX text");
         assert!(!ptx.is_empty(), "PTX output is empty");
+    }
+}
+
+#[cfg(test)]
+mod rt_mesh_compile_tests {
+    use super::*;
+
+    #[test]
+    fn compile_raygen_spirv() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let source = r#"
+            [shader("raygeneration")]
+            void rgen_main() {}
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("rgen_main", SlangStage::RayGeneration)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("raygeneration SPIR-V compile failed");
+        assert!(!out.shader.data.is_empty());
+    }
+
+    #[test]
+    fn compile_mesh_spirv() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let source = r#"
+            struct MeshOutput {
+                float4 pos : SV_Position;
+            };
+            [shader("mesh")]
+            [numthreads(1, 1, 1)]
+            [outputtopology("triangle")]
+            void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
+                SetMeshOutputCounts(3, 1);
+                verts[0].pos = float4(-1, -1, 0, 1);
+                verts[1].pos = float4(3, -1, 0, 1);
+                verts[2].pos = float4(-1, 3, 0, 1);
+                tris[0] = uint3(0, 1, 2);
+            }
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("mesh_main", SlangStage::Mesh)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("mesh SPIR-V compile failed");
+        assert!(!out.shader.data.is_empty());
+    }
+
+    #[test]
+    fn reflect_acceleration_structure_parameter_block() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let source = r#"
+            struct Scene {
+                RaytracingAccelerationStructure tlas;
+            };
+            ParameterBlock<Scene> gScene;
+
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void cs_main(uint3 tid : SV_DispatchThreadID) {
+                RayDesc ray;
+                ray.Origin = float3(0, 0, 0);
+                ray.Direction = float3(0, 0, 1);
+                ray.TMin = 0;
+                ray.TMax = 1;
+                RayQuery<RAY_FLAG_NONE> q;
+                q.TraceRayInline(gScene.tlas, RAY_FLAG_NONE, 0xff, ray);
+            }
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("acceleration-structure compute compile failed");
+        let kinds: Vec<_> = out
+            .reflection
+            .parameter_blocks
+            .iter()
+            .flat_map(|pb| pb.fields.iter().map(|f| f.resource_kind))
+            .collect();
+        assert!(
+            kinds.contains(&ResourceKind::AccelerationStructure),
+            "expected AccelerationStructure in reflection, got {kinds:?} blocks={:?}",
+            out.reflection.parameter_blocks
+        );
     }
 }

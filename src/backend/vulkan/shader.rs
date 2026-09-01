@@ -32,6 +32,7 @@ pub(super) fn create(
             vertex_module: None,
             fragment_module: None,
             compute_module: None,
+            extra_modules: HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
         },
@@ -59,6 +60,9 @@ pub(super) fn destroy(
                 if let Some(module) = shader.compute_module {
                     device.device.destroy_shader_module(module, None);
                 }
+                for module in shader.extra_modules.into_values() {
+                    device.device.destroy_shader_module(module, None);
+                }
             }
         }
     }
@@ -82,20 +86,23 @@ pub(super) fn ensure_stage_compiled(
             crate::slang::SlangStage::Vertex => shader.vertex_module,
             crate::slang::SlangStage::Fragment => shader.fragment_module,
             crate::slang::SlangStage::Compute => shader.compute_module,
-            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
+            crate::slang::SlangStage::RayGeneration
+            | crate::slang::SlangStage::Intersection
+            | crate::slang::SlangStage::AnyHit
+            | crate::slang::SlangStage::ClosestHit
+            | crate::slang::SlangStage::Miss
+            | crate::slang::SlangStage::Callable
+            | crate::slang::SlangStage::Mesh
+            | crate::slang::SlangStage::Amplification => shader.extra_modules.get(&stage).copied(),
+            other => anyhow::bail!("Unsupported shader stage: {:?}", other),
         };
         if let Some(module) = cached_module {
             return Ok(module);
         }
     }
 
-    // Get the entry point name based on stage
-    let entry_point_name = match stage {
-        crate::slang::SlangStage::Vertex => "vs_main",
-        crate::slang::SlangStage::Fragment => "fs_main",
-        crate::slang::SlangStage::Compute => "cs_main",
-        _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-    };
+    let entry_point_name = crate::slang::canonical_entry_point(stage)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
 
     let (slang_source, search_paths, extra_defines, device_handle, optimization_level, layout_checks_snapshot) = {
         let shaders_read = shaders.read().unwrap();
@@ -170,6 +177,16 @@ pub(super) fn ensure_stage_compiled(
             crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
             crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
             crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
+            crate::slang::SlangStage::RayGeneration
+            | crate::slang::SlangStage::Intersection
+            | crate::slang::SlangStage::AnyHit
+            | crate::slang::SlangStage::ClosestHit
+            | crate::slang::SlangStage::Miss
+            | crate::slang::SlangStage::Callable
+            | crate::slang::SlangStage::Mesh
+            | crate::slang::SlangStage::Amplification => {
+                shader.extra_modules.insert(stage, module);
+            }
             _ => {} // Already validated above, shouldn't reach here
         }
 

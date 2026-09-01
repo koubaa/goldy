@@ -540,6 +540,14 @@ pub(crate) struct DxgiAdapterInfo {
     pub adapter_id: u32,
     /// From `D3D12_FEATURE_DATA_D3D12_OPTIONS::TiledResourcesTier` at enumeration.
     pub supports_reserved_buffers: bool,
+    /// DXR tier 1.1 (`D3D12_RAYTRACING_TIER_1_1`) — inline ray query.
+    pub ray_query: bool,
+    /// DXR tier 1.0+ — ray-tracing pipelines.
+    pub ray_tracing_pipelines: bool,
+    /// `D3D12_MESH_SHADER_TIER_1`.
+    pub mesh_shaders: bool,
+    /// Amplification shaders ship with mesh-shader tier 1.
+    pub amplification_shaders: bool,
 }
 
 /// A slot in the compute command allocator pool.
@@ -1424,6 +1432,8 @@ pub(crate) struct ShaderState {
     pub fragment_bytecode: Option<Vec<u8>>,
     /// Cached compiled compute shader bytecode
     pub compute_bytecode: Option<Vec<u8>>,
+    /// Cached bytecode for ray-tracing / mesh / amplification stages.
+    pub extra_bytecode: HashMap<crate::slang::SlangStage, Vec<u8>>,
     /// Reflection data for bindless rendering (ParameterBlock layouts)
     pub reflection: Option<crate::slang::ShaderReflection>,
     /// Pending struct layout validation on first stage compile; cleared after success.

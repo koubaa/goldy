@@ -46,6 +46,65 @@ pub(super) fn enumerate(physical_devices: &[PhysicalDeviceInfo]) -> Vec<AdapterI
         .collect()
 }
 
+/// Hardware RT / mesh flags queried from device extensions + `VkPhysicalDeviceFeatures2`.
+#[derive(Clone, Copy, Default)]
+pub(super) struct RtMeshFeatures {
+    pub ray_query: bool,
+    pub ray_tracing_pipelines: bool,
+    pub mesh_shaders: bool,
+    pub amplification_shaders: bool,
+}
+
+/// Probe RT and mesh-shader support without creating a logical device.
+pub(super) fn query_rt_mesh_features(instance: &ash::Instance, handle: vk::PhysicalDevice) -> RtMeshFeatures {
+    let ext_names: std::collections::HashSet<String> = unsafe { instance.enumerate_device_extension_properties(handle) }
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ext| {
+            unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    let has_as = ext_names.contains("VK_KHR_acceleration_structure");
+    let has_rq = ext_names.contains("VK_KHR_ray_query");
+    let has_rtp = ext_names.contains("VK_KHR_ray_tracing_pipeline");
+    let has_mesh = ext_names.contains("VK_EXT_mesh_shader");
+    if !has_as && !has_rq && !has_rtp && !has_mesh {
+        return RtMeshFeatures::default();
+    }
+
+    let mut as_feat = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+    let mut rq_feat = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+    let mut rtp_feat = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
+    let mut mesh_feat = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default();
+    if has_as {
+        features2 = features2.push_next(&mut as_feat);
+    }
+    if has_rq {
+        features2 = features2.push_next(&mut rq_feat);
+    }
+    if has_rtp {
+        features2 = features2.push_next(&mut rtp_feat);
+    }
+    if has_mesh {
+        features2 = features2.push_next(&mut mesh_feat);
+    }
+    unsafe {
+        instance.get_physical_device_features2(handle, &mut features2);
+    }
+
+    let accel = has_as && as_feat.acceleration_structure == vk::TRUE;
+    RtMeshFeatures {
+        ray_query: accel && has_rq && rq_feat.ray_query == vk::TRUE,
+        ray_tracing_pipelines: accel && has_rtp && rtp_feat.ray_tracing_pipeline == vk::TRUE,
+        mesh_shaders: has_mesh && mesh_feat.mesh_shader == vk::TRUE,
+        amplification_shaders: has_mesh && mesh_feat.task_shader == vk::TRUE,
+    }
+}
+
 /// Build the public capability snapshot for a physical adapter.
 pub(super) fn adapter_capabilities(
     physical_devices: &[PhysicalDeviceInfo],
@@ -55,15 +114,18 @@ pub(super) fn adapter_capabilities(
         host_sidecar_on_submit_worker: true,
         ..Default::default()
     };
-    if physical_devices
-        .iter()
-        .find(|d| d.adapter_id == adapter_id)
-        .is_some_and(|d| d.supports_sparse_buffer)
-    {
+    let Some(dev) = physical_devices.iter().find(|d| d.adapter_id == adapter_id) else {
+        return caps;
+    };
+    if dev.supports_sparse_buffer {
         caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
         caps.buffer_page_size = 64 * 1024; // 64 KiB — universal sparse granularity; asserted in device::create
         caps.buffer_decommit_supported = true;
     }
+    caps.ray_query = dev.ray_query;
+    caps.ray_tracing_pipelines = dev.ray_tracing_pipelines;
+    caps.mesh_shaders = dev.mesh_shaders;
+    caps.amplification_shaders = dev.amplification_shaders;
     caps
 }
 

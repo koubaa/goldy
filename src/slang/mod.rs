@@ -57,6 +57,26 @@ pub use virtual_main::{
     emit_wrapper_from_kernel_def, entry_def_from_kernel_def, transform_virtual_main_cpu, try_kernel_def_from_source,
 };
 
+/// Canonical Goldy entry-point name for a compiled stage (`vs_main`, `cs_main`, `rgen_main`, …).
+///
+/// Returns `None` for stages Goldy does not compile (hull / domain / geometry / none).
+pub fn canonical_entry_point(stage: SlangStage) -> Option<&'static str> {
+    match stage {
+        SlangStage::Vertex => Some("vs_main"),
+        SlangStage::Fragment => Some("fs_main"),
+        SlangStage::Compute => Some("cs_main"),
+        SlangStage::RayGeneration => Some("rgen_main"),
+        SlangStage::Intersection => Some("rint_main"),
+        SlangStage::AnyHit => Some("rahit_main"),
+        SlangStage::ClosestHit => Some("rchit_main"),
+        SlangStage::Miss => Some("rmiss_main"),
+        SlangStage::Callable => Some("rcall_main"),
+        SlangStage::Mesh => Some("mesh_main"),
+        SlangStage::Amplification => Some("amp_main"),
+        SlangStage::None | SlangStage::Hull | SlangStage::Domain | SlangStage::Geometry => None,
+    }
+}
+
 /// Parse `[numthreads(x, y, z)]` from Slang shader source.
 ///
 /// The input may be the full source string or just the inner content of the
@@ -84,4 +104,28 @@ pub fn parse_numthreads(source: &str) -> Option<[u32; 3]> {
     let y: u32 = parts[1].parse().ok()?;
     let z: u32 = parts[2].parse().ok()?;
     Some([x, y, z])
+}
+
+#[cfg(test)]
+mod canonical_entry_point_tests {
+    use super::{canonical_entry_point, SlangStage};
+
+    #[test]
+    fn maps_graphics_compute_rt_and_mesh() {
+        assert_eq!(canonical_entry_point(SlangStage::Vertex), Some("vs_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Fragment), Some("fs_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Compute), Some("cs_main"));
+        assert_eq!(canonical_entry_point(SlangStage::RayGeneration), Some("rgen_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Intersection), Some("rint_main"));
+        assert_eq!(canonical_entry_point(SlangStage::AnyHit), Some("rahit_main"));
+        assert_eq!(canonical_entry_point(SlangStage::ClosestHit), Some("rchit_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Miss), Some("rmiss_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Callable), Some("rcall_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Mesh), Some("mesh_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Amplification), Some("amp_main"));
+        assert_eq!(canonical_entry_point(SlangStage::Hull), None);
+        assert_eq!(canonical_entry_point(SlangStage::Domain), None);
+        assert_eq!(canonical_entry_point(SlangStage::Geometry), None);
+        assert_eq!(canonical_entry_point(SlangStage::None), None);
+    }
 }

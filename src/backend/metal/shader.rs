@@ -428,7 +428,19 @@ pub(super) fn ensure_stage_compiled(
             SlangStage::Vertex => ("vs_main", shader.vertex_library.is_none()),
             SlangStage::Fragment => ("fs_main", shader.fragment_library.is_none()),
             SlangStage::Compute => ("cs_main", shader.compute_library.is_none()),
-            _ => anyhow::bail!("Metal backend only supports Vertex, Fragment, and Compute stages"),
+            SlangStage::RayGeneration
+            | SlangStage::Intersection
+            | SlangStage::AnyHit
+            | SlangStage::ClosestHit
+            | SlangStage::Miss
+            | SlangStage::Callable
+            | SlangStage::Mesh
+            | SlangStage::Amplification => {
+                let name = crate::slang::canonical_entry_point(stage)
+                    .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
+                (name, !shader.extra_libraries.contains_key(&stage))
+            }
+            other => anyhow::bail!("Unsupported shader stage: {:?}", other),
         };
         if !need_compile {
             None
@@ -479,6 +491,16 @@ pub(super) fn ensure_stage_compiled(
         SlangStage::Vertex => shader.vertex_library = Some(library),
         SlangStage::Fragment => shader.fragment_library = Some(library),
         SlangStage::Compute => shader.compute_library = Some(library),
+        SlangStage::RayGeneration
+        | SlangStage::Intersection
+        | SlangStage::AnyHit
+        | SlangStage::ClosestHit
+        | SlangStage::Miss
+        | SlangStage::Callable
+        | SlangStage::Mesh
+        | SlangStage::Amplification => {
+            shader.extra_libraries.insert(stage, library);
+        }
         _ => unreachable!("stage already validated"),
     }
 
@@ -527,6 +549,7 @@ pub(super) fn create(
             vertex_library: None,
             fragment_library: None,
             compute_library: None,
+            extra_libraries: HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
         },

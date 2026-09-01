@@ -24,7 +24,9 @@ pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 ///
 /// v5: `CompiledShaderWithReflection` gained `extra_entry_points`. Old v4 blobs
 /// cannot decode, so keys must miss rather than fail the compile.
-const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v5";
+///
+/// v6: `ResourceKind::AccelerationStructure` — AS fields were previously `Other`.
+const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v6";
 
 /// Content hash of the `shaders/goldy_exp/*.slang` library sources, baked in at
 /// build time by `build.rs`.  Changes when any library file is edited, so compiled
@@ -866,10 +868,10 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
 
     /// Reflection schema constant is present and matches the expected version.
     #[test]
-    fn reflection_stride_schema_is_v5() {
+    fn reflection_stride_schema_is_v6() {
         assert_eq!(
-            REFLECTION_STRIDE_SCHEMA, "bind-stride-v5",
-            "schema must be v5 after extra_entry_points decode invalidation"
+            REFLECTION_STRIDE_SCHEMA, "bind-stride-v6",
+            "schema must be v6 after AccelerationStructure resource-kind classification"
         );
     }
 

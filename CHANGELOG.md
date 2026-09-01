@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DeviceCapabilities` RT / mesh bits** — `ray_query`, `ray_tracing_pipelines`,
+  `mesh_shaders`, and `amplification_shaders` report adapter hardware (Vulkan
+  extensions + features, DXR / mesh tiers, Metal `supportsRaytracing` / GPU
+  family). Slang compile plumbing accepts RT and mesh stages (`rgen_main`,
+  `mesh_main`, …); reflection maps `RaytracingAccelerationStructure` to
+  `ResourceKind::AccelerationStructure`.
+
 - **`GOLDY_VALIDATION=host_access`** — page-protect CPU-backend parcel storage
   (page-aligned, unshared mapping + guard page). Stray host pointers fault
   outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.

@@ -6306,6 +6306,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 .any(|f| matches!(f, TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb)),
             "CUDA must not advertise BGRA render-target formats"
         );
+        assert!(
+            !caps.ray_query && !caps.ray_tracing_pipelines && !caps.mesh_shaders && !caps.amplification_shaders,
+            "CUDA does not advertise RT or mesh shaders"
+        );
         Ok(())
     }
 

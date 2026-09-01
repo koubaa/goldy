@@ -68,6 +68,21 @@ Goldy's hardware floor is defined by a set of architectural capabilities, not sp
 
 GPUs from roughly 2018 onward universally support these features. The specific API version requirements (Vulkan 1.4, DX12 Enhanced Barriers, Metal Tier 2) are the mechanism by which Goldy enforces this floor.
 
+## Optional: ray tracing and mesh shaders
+
+Bindless, dynamic rendering, and buffer device addresses are **required**. Hardware ray tracing and mesh shaders are **not** — GTX 16-series, RDNA1, and many iGPUs meet Goldy's floor without RT cores or mesh shaders.
+
+Query them on `Adapter::capabilities()` / `Device::capabilities()` (`DeviceCapabilities`):
+
+| Flag | Meaning |
+|------|---------|
+| `ray_query` | Inline ray queries (Vulkan `VK_KHR_ray_query`, DXR 1.1, Metal `supportsRaytracing`) |
+| `ray_tracing_pipelines` | RT pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`, DXR 1.0+, Metal RT) |
+| `mesh_shaders` | Mesh shaders (Vulkan `VK_EXT_mesh_shader`, DX12 mesh tier 1, Metal Apple7 / Mac2 / Metal3) |
+| `amplification_shaders` | Task / amplification / object shaders with mesh |
+
+These bits report **adapter hardware**. Goldy does not yet record ray queries, RT pipelines, or mesh draws; they exist so callers can feature-detect before those APIs land.
+
 ## Additional Backends
 
 | Backend | Status | Notes |

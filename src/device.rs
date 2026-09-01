@@ -438,6 +438,29 @@ pub struct DeviceCapabilities {
     /// `MTLCommandBuffer` (blit encoder → compute encoder). Disabled elsewhere:
     /// upload and compute partitions remain separate submissions.
     pub fuse_upload_with_compute_partitions: bool,
+
+    /// Adapter exposes inline ray queries (Vulkan `VK_KHR_ray_query` + acceleration
+    /// structures, DXR tier 1.1, Metal `supportsRaytracing`).
+    ///
+    /// Hardware only — Goldy does not yet record ray-query work.
+    pub ray_query: bool,
+
+    /// Adapter exposes ray-tracing pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`,
+    /// DXR tier 1.0+, Metal ray tracing).
+    ///
+    /// Hardware only — Goldy does not yet create RT pipelines or SBTs.
+    pub ray_tracing_pipelines: bool,
+
+    /// Adapter exposes mesh shaders (Vulkan `VK_EXT_mesh_shader`, DX12 mesh-shader
+    /// tier 1, Metal Apple7 / Mac2 / Metal3).
+    ///
+    /// Hardware only — Goldy does not yet create mesh pipelines.
+    pub mesh_shaders: bool,
+
+    /// Adapter exposes amplification / task / object shaders with mesh shaders.
+    ///
+    /// Hardware only — Goldy does not yet create amplification pipelines.
+    pub amplification_shaders: bool,
 }
 
 impl Default for DeviceCapabilities {
@@ -461,6 +484,10 @@ impl Default for DeviceCapabilities {
             host_sidecar_on_submit_worker: false,
             split_compute_partitions_on_barrier_cost: true,
             fuse_upload_with_compute_partitions: false,
+            ray_query: false,
+            ray_tracing_pipelines: false,
+            mesh_shaders: false,
+            amplification_shaders: false,
         }
     }
 }

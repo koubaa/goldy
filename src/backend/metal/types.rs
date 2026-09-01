@@ -1386,6 +1386,8 @@ pub(crate) struct ShaderState {
     pub fragment_library: Option<Library>,
     /// Compiled compute shader library
     pub compute_library: Option<Library>,
+    /// Compiled libraries for ray-tracing / mesh / amplification stages.
+    pub extra_libraries: HashMap<crate::slang::SlangStage, Library>,
     /// Reflection data for bindless rendering (ParameterBlock layouts)
     pub reflection: Option<crate::slang::ShaderReflection>,
     /// Pending struct layout validation on first stage compile; cleared after success.

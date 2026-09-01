@@ -50,8 +50,11 @@ pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
 }
 
 /// Build the public capability snapshot for a physical adapter.
-pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCapabilities {
-    crate::device::DeviceCapabilities {
+pub(super) fn adapter_capabilities(
+    adapters: &[MetalAdapterInfo],
+    adapter_id: u32,
+) -> crate::device::DeviceCapabilities {
+    let mut caps = crate::device::DeviceCapabilities {
         has_zero_copy_storage_readback: true,
         buffer_resize_cost: crate::types::BufferResizeCost::Constant,
         buffer_page_size: 16 * 1024,
@@ -65,7 +68,19 @@ pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCap
         // Classic's single-CB structure and avoids an extra commit + event wait.
         fuse_upload_with_compute_partitions: true,
         ..crate::device::DeviceCapabilities::default()
+    };
+    if let Some(entry) = adapters.iter().find(|a| a.adapter_id == adapter_id) {
+        let device = &entry.device;
+        let rt = device.supports_raytracing();
+        caps.ray_query = rt;
+        caps.ray_tracing_pipelines = rt;
+        let mesh = device.supports_family(mtl::MTLGPUFamily::Apple7)
+            || device.supports_family(mtl::MTLGPUFamily::Mac2)
+            || device.supports_family(mtl::MTLGPUFamily::Metal3);
+        caps.mesh_shaders = mesh;
+        caps.amplification_shaders = mesh;
     }
+    caps
 }
 
 /// Create a logical device from an adapter ID.

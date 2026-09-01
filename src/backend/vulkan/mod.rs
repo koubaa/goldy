@@ -250,13 +250,18 @@ impl VulkanBackend {
                     let pdev_features = unsafe { instance.get_physical_device_features(handle) };
                     let supports_sparse =
                         pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
+                    let rt_mesh = device::query_rt_mesh_features(&instance, handle);
                     tracing::info!(
-                        "  [{}] {} ({:?}) - Vulkan {}.{}",
+                        "  [{}] {} ({:?}) - Vulkan {}.{}; ray_query={} rt_pipe={} mesh={} task={}",
                         id,
                         name.to_string_lossy(),
                         properties.device_type,
                         major,
-                        minor
+                        minor,
+                        rt_mesh.ray_query,
+                        rt_mesh.ray_tracing_pipelines,
+                        rt_mesh.mesh_shaders,
+                        rt_mesh.amplification_shaders
                     );
                     Some(PhysicalDeviceInfo {
                         handle,
@@ -265,6 +270,10 @@ impl VulkanBackend {
                         supports_sparse_buffer: supports_sparse,
                         vk_timestamp_compute_and_graphics: properties.limits.timestamp_compute_and_graphics != 0,
                         vk_timestamp_period_ns: properties.limits.timestamp_period,
+                        ray_query: rt_mesh.ray_query,
+                        ray_tracing_pipelines: rt_mesh.ray_tracing_pipelines,
+                        mesh_shaders: rt_mesh.mesh_shaders,
+                        amplification_shaders: rt_mesh.amplification_shaders,
                     })
                 } else {
                     rejected.push(format!("{}: {}.{}", name.to_string_lossy(), major, minor));

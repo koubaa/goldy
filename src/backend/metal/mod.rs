@@ -346,7 +346,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
-        device::adapter_capabilities(adapter_id)
+        device::adapter_capabilities(&self.state.adapters, adapter_id)
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {

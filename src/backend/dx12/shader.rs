@@ -30,6 +30,7 @@ pub(super) fn create_with_checks(
             vertex_bytecode: None,
             fragment_bytecode: None,
             compute_bytecode: None,
+            extra_bytecode: std::collections::HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
         },
@@ -61,20 +62,23 @@ pub(super) fn ensure_stage_compiled(
             crate::slang::SlangStage::Vertex => shader.vertex_bytecode.clone(),
             crate::slang::SlangStage::Fragment => shader.fragment_bytecode.clone(),
             crate::slang::SlangStage::Compute => shader.compute_bytecode.clone(),
-            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
+            crate::slang::SlangStage::RayGeneration
+            | crate::slang::SlangStage::Intersection
+            | crate::slang::SlangStage::AnyHit
+            | crate::slang::SlangStage::ClosestHit
+            | crate::slang::SlangStage::Miss
+            | crate::slang::SlangStage::Callable
+            | crate::slang::SlangStage::Mesh
+            | crate::slang::SlangStage::Amplification => shader.extra_bytecode.get(&stage).cloned(),
+            other => anyhow::bail!("Unsupported shader stage: {:?}", other),
         };
         if let Some(bytecode) = cached_bytecode {
             return Ok(bytecode);
         }
     }
 
-    // Get the entry point name based on stage
-    let entry_point_name = match stage {
-        crate::slang::SlangStage::Vertex => "vs_main",
-        crate::slang::SlangStage::Fragment => "fs_main",
-        crate::slang::SlangStage::Compute => "cs_main",
-        _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-    };
+    let entry_point_name = crate::slang::canonical_entry_point(stage)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
 
     let (slang_source, search_paths, optimization_level, extra_defines, layout_checks_snapshot) = {
         let shaders_read = state.shaders.read().unwrap();
@@ -151,6 +155,16 @@ pub(super) fn ensure_stage_compiled(
             crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
             crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
             crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
+            crate::slang::SlangStage::RayGeneration
+            | crate::slang::SlangStage::Intersection
+            | crate::slang::SlangStage::AnyHit
+            | crate::slang::SlangStage::ClosestHit
+            | crate::slang::SlangStage::Miss
+            | crate::slang::SlangStage::Callable
+            | crate::slang::SlangStage::Mesh
+            | crate::slang::SlangStage::Amplification => {
+                shader.extra_bytecode.insert(stage, bytecode.clone());
+            }
             _ => {} // Already validated above
         }
 

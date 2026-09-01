@@ -778,6 +778,14 @@ pub(crate) struct PhysicalDeviceInfo {
     /// From [`vk::PhysicalDeviceLimits::timestamp_compute_and_graphics`].
     pub vk_timestamp_compute_and_graphics: bool,
     pub vk_timestamp_period_ns: f32,
+    /// `VK_KHR_ray_query` + acceleration structures with feature bits enabled.
+    pub ray_query: bool,
+    /// `VK_KHR_ray_tracing_pipeline` + acceleration structures with feature bits enabled.
+    pub ray_tracing_pipelines: bool,
+    /// `VK_EXT_mesh_shader` `meshShader` feature.
+    pub mesh_shaders: bool,
+    /// `VK_EXT_mesh_shader` `taskShader` feature.
+    pub amplification_shaders: bool,
 }
 
 /// Per-context async submission stream (timeline, poller, command pool).
@@ -1202,6 +1210,8 @@ pub(crate) struct ShaderState {
     pub fragment_module: Option<vk::ShaderModule>,
     /// Cached compiled compute shader module
     pub compute_module: Option<vk::ShaderModule>,
+    /// Cached modules for ray-tracing / mesh / amplification stages.
+    pub extra_modules: HashMap<crate::slang::SlangStage, vk::ShaderModule>,
     /// Reflection data for bindless rendering (ParameterBlock layouts)
     pub reflection: Option<crate::slang::ShaderReflection>,
     /// Pending struct layout validation on first stage compile; cleared after success.
