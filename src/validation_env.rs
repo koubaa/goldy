@@ -16,9 +16,7 @@
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
 //!   - `scheme` / `readback` — retained-scheme withdraw staging invariants (staging pool, frame pairing)
 //!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
-//!   - `fatal` — treat GPU API validation ERROR messages as hard failures (does not enable
-//!     `api` by itself; combine with `api` / `all`). Also `GOLDY_VALIDATION_FATAL=1`.
-//!   - `all` — layout, GPU API, timeline, scheme, and host_access (`fatal` stays opt-in)
+//!   - `all` — layout, GPU API, timeline, scheme, and host_access
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
@@ -36,8 +34,6 @@ struct ParsedValidation {
     timeline: bool,
     scheme: bool,
     host_access: bool,
-    /// Treat GPU API validation ERROR messages as hard failures (Vulkan debug messenger).
-    fatal: bool,
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -84,7 +80,6 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                 "timeline" => out.timeline = true,
                 "scheme" | "readback" => out.scheme = true,
                 "host_access" | "host-access" => out.host_access = true,
-                "fatal" => out.fatal = true,
                 _ => {}
             }
         }
@@ -136,11 +131,11 @@ pub(crate) fn scheme_validation_enabled() -> bool {
 
 /// When true, GPU API validation ERROR messages fail Goldy `Result` calls and panic on backend drop.
 ///
-/// Set `GOLDY_VALIDATION_FATAL=1`/`true`/`yes`, or include the `fatal` token in `GOLDY_VALIDATION`.
-/// `GOLDY_VALIDATION=all` does **not** imply fatal (reporting stays non-fatal unless opted in).
+/// Set `GOLDY_VALIDATION_FATAL=1`/`true`/`yes`. Independent of `GOLDY_VALIDATION`
+/// (`all` does not imply fatal).
 #[must_use]
 pub fn validation_fatal_enabled() -> bool {
-    env_truthy("GOLDY_VALIDATION_FATAL") || from_goldy_validation_var().fatal
+    env_truthy("GOLDY_VALIDATION_FATAL")
 }
 
 /// Page-protect CPU-visible GPU copies so stray host pointers fault.
@@ -228,11 +223,9 @@ mod tests {
         assert!(p.gpu_api);
         assert!(p.timeline);
         assert!(p.scheme);
-        assert!(!p.fatal);
 
         let p = parse_validation_list("api,fatal");
         assert!(p.gpu_api);
-        assert!(p.fatal);
         assert!(!p.host_access);
 
         let p = parse_validation_list("timeline");
@@ -269,7 +262,7 @@ mod tests {
 
     #[test]
     fn parse_unknown_tokens_do_not_enable_api() {
-        let p = parse_validation_list("gpu,vulkan,metal,shader");
+        let p = parse_validation_list("gpu,vulkan,metal,shader,fatal");
         assert!(!p.layout);
         assert!(!p.gpu_api);
     }

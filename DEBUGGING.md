@@ -73,7 +73,7 @@ Python buffers automatically detect stride from numpy dtype. If using raw bytes,
 
 ### GPU validation (Khronos validation layer)
 
-Vulkan API misuse is easiest to catch with the Khronos validation layer. CI GPU jobs set `GOLDY_VALIDATION=all,fatal` and restore `VK_LAYER_PATH` on lavapipe so ERROR messages fail the suite. Locally:
+Vulkan API misuse is easiest to catch with the Khronos validation layer. CI GPU jobs set `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1`, and restore `VK_LAYER_PATH` on lavapipe so ERROR messages fail the suite. Locally:
 
 1. **`GOLDY_VALIDATION`** — short form **`1`/`true`/`yes`** turns on **GPU API validation only** (Khronos layer + `VK_EXT_debug_utils` here; Metal shader validation on macOS). Token lists are also supported (see [Unified validation](#unified-validation-goldy_validation) below). Requires validation layers on the machine (e.g. [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), or on Debian/Ubuntu often `vulkan-validationlayers`).
 
@@ -88,7 +88,7 @@ Vulkan API misuse is easiest to catch with the Khronos validation layer. CI GPU 
 Khronos messages are captured with a `VK_EXT_debug_utils` messenger (target `goldy::validation`). They do **not** fail tests or `Result` calls by themselves: `vk*` can still return success. To fail:
 
 ```bash
-GOLDY_VALIDATION=api,fatal cargo test --features vulkan
+GOLDY_VALIDATION_FATAL=1 GOLDY_VALIDATION=api cargo test --features vulkan
 GOLDY_VALIDATION_FATAL=1 GOLDY_VALIDATION=all cargo test --features vulkan
 ```
 
@@ -102,8 +102,8 @@ ERROR-severity messages then surface as `Err` from submit/wait/create and panic 
 | `GOLDY_VALIDATION=layout,api` or `layout api` or `layout;api` | Layout plus graphics API validation (separators: comma, semicolon, or whitespace). |
 | `GOLDY_VALIDATION=timeline` | WSI timeline invariants: post-wait semaphore counter check in Vulkan `acquire()`. |
 | `GOLDY_VALIDATION=scheme` or `readback` | Retained-scheme grant readback invariants (frame/grant pairing, staging pool checks). |
-| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme + host_access (same as listing those tokens). Does **not** enable `fatal`. |
-| `GOLDY_VALIDATION=fatal` / `GOLDY_VALIDATION_FATAL=1` | With `api` (or `all`), Vulkan ERROR messages fail Goldy `Result` calls and panic on backend drop. |
+| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme + host_access (same as listing those tokens). |
+| `GOLDY_VALIDATION_FATAL=1` | Separate switch: with GPU API validation on, Vulkan ERROR messages fail Goldy `Result` calls and panic on backend drop. |
 | `GOLDY_VALIDATION=1` / `true` / `yes` | **GPU API only** — does **not** enable layout checks (keeps dispatch-time layout work off unless you opt in). |
 
 The **`api`** token selects Goldy’s graphics-API validation path (Vulkan validation layer + `VK_EXT_debug_utils` where built; Metal `MTL_SHADER_VALIDATION` when applicable). For Vulkan you can still set **`VK_INSTANCE_LAYERS`**, **`VK_LAYER_PATH`**, etc. yourself if you prefer the loader directly. **`GOLDY_VALIDATE_LAYOUTS=1`** still works unchanged and is equivalent to enabling the layout family only.

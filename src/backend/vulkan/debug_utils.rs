@@ -2,10 +2,9 @@
 //!
 //! Enabling GPU API validation turns on the Khronos layer and this messenger.
 //! Messages are logged with `tracing`. They do **not** fail Goldy calls by
-//! default (`vk*` still returns success). Set `GOLDY_VALIDATION_FATAL=1` or
-//! include the `fatal` token in `GOLDY_VALIDATION` to treat ERROR-severity
-//! messages as `Err` on subsequent backend `Result` calls and panic on
-//! backend drop (so `cargo test` fails).
+//! default (`vk*` still returns success). Set `GOLDY_VALIDATION_FATAL=1` to
+//! treat ERROR-severity messages as `Err` on subsequent backend `Result` calls
+//! and panic on backend drop (so `cargo test` fails).
 
 use anyhow::Result;
 use ash::vk;
@@ -111,7 +110,7 @@ fn fail_if_sink_fatal(sink: &ValidationSink) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "GPU API validation error(s) (GOLDY_VALIDATION_FATAL / GOLDY_VALIDATION=fatal):\n{}",
+        "GPU API validation error(s) (GOLDY_VALIDATION_FATAL):\n{}",
         errors.join("\n---\n")
     )
 }

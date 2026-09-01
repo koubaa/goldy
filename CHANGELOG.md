@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (page-aligned, unshared mapping + guard page). Stray host pointers fault
   outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.
   First slice; native mapped staging can use the same allocator later.
-- **`GOLDY_VALIDATION_FATAL` / `GOLDY_VALIDATION=fatal`** — Vulkan Khronos ERROR
-  messages captured by a debug-utils messenger fail Goldy `Result` calls and panic
-  on backend drop. `all` still only reports unless `fatal` is also set.
-  CI GPU jobs set `GOLDY_VALIDATION=all,fatal` (and restore `VK_LAYER_PATH` on
-  lavapipe) so a validation ERROR fails the suite.
+- **`GOLDY_VALIDATION_FATAL=1`** — Vulkan Khronos ERROR messages captured by a
+  debug-utils messenger fail Goldy `Result` calls and panic on backend drop.
+  Independent of `GOLDY_VALIDATION` (`all` does not imply it). CI GPU jobs set
+  `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1` (and restore
+  `VK_LAYER_PATH` on lavapipe) so a validation ERROR fails the suite.
 
 ### Fixed
 
