@@ -1460,9 +1460,42 @@ mod validation_fatal_tests {
     use super::*;
     use ash::vk;
 
+    /// True when this process would select Vulkan as the Goldy backend.
+    ///
+    /// Non-Vulkan CI jobs (Metal, DX12, WebGPU) compile `feature = "vulkan"` but
+    /// must not spawn a Khronos subprocess.
+    fn selected_backend_is_vulkan() -> bool {
+        if let Ok(s) = std::env::var("GOLDY_BACKEND") {
+            return matches!(s.to_ascii_lowercase().as_str(), "vulkan" | "vk");
+        }
+        // Match `create_default_backend()`: macOS→Metal, Windows→DX12, else Vulkan if compiled.
+        #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
+        {
+            false
+        }
+        #[cfg(all(
+            feature = "dx12",
+            target_os = "windows",
+            not(all(feature = "metal", any(target_os = "macos", target_os = "ios")))
+        ))]
+        {
+            false
+        }
+        #[cfg(not(any(
+            all(feature = "metal", any(target_os = "macos", target_os = "ios")),
+            all(feature = "dx12", target_os = "windows")
+        )))]
+        {
+            cfg!(feature = "vulkan")
+        }
+    }
+
     #[test]
     fn vk_validation_fatal_zero_size_buffer() {
         if std::env::var("GOLDY_SUBPROC").is_err() {
+            if !selected_backend_is_vulkan() {
+                return;
+            }
             let test_name = std::thread::current()
                 .name()
                 .expect("cargo test thread name")
