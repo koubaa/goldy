@@ -29,6 +29,9 @@ pub(crate) mod dx12;
 // Mock backend for testing (always available)
 pub(crate) mod mock;
 
+// Host-callable CPU compute backend (always available; `GOLDY_BACKEND=cpu`)
+pub(crate) mod cpu;
+
 // Metal backend for macOS / iOS (native Metal, not MoltenVK)
 #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
 pub(crate) mod metal;
@@ -1700,7 +1703,7 @@ pub(crate) trait GpuBackend:
 /// Create the default backend for the current platform.
 ///
 /// The backend can be overridden at runtime by setting the `GOLDY_BACKEND`
-/// environment variable to one of: `vulkan`, `dx12`, `metal`, `webgpu`, `cuda`.
+/// environment variable to one of: `vulkan`, `dx12`, `metal`, `webgpu`, `cuda`, `cpu`.
 ///
 /// Without the override, the platform default is used when a native backend is
 /// compiled in:
@@ -1708,11 +1711,11 @@ pub(crate) trait GpuBackend:
 /// - Windows: DX12
 /// - Linux: Vulkan
 ///
-/// CUDA and WebGPU are **not** platform defaults. They are selected automatically
-/// only when the build enables `cuda` or `webgpu` **and** no native backend
-/// (`vulkan`, `dx12`, `metal`) is compiled in — e.g.
+/// CUDA, WebGPU, and CPU are **not** platform defaults. They are selected
+/// automatically only when the build enables `cuda` or `webgpu` **and** no native
+/// backend (`vulkan`, `dx12`, `metal`) is compiled in — e.g.
 /// `--no-default-features --features cuda`. In a normal default build, use
-/// `GOLDY_BACKEND=cuda` or `GOLDY_BACKEND=webgpu` to opt in.
+/// `GOLDY_BACKEND=cuda`, `GOLDY_BACKEND=webgpu`, or `GOLDY_BACKEND=cpu` to opt in.
 pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     // Check for runtime override via environment variable
     if let Ok(backend_str) = std::env::var("GOLDY_BACKEND") {
@@ -1722,8 +1725,9 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
             "metal" | "mtl" => BackendType::Metal,
             "webgpu" | "wgpu" => BackendType::WebGpu,
             "cuda" => BackendType::Cuda,
+            "cpu" => BackendType::Cpu,
             other => anyhow::bail!(
-                "Unknown GOLDY_BACKEND value '{}'. Valid options: vulkan, dx12, metal, webgpu, cuda",
+                "Unknown GOLDY_BACKEND value '{}'. Valid options: vulkan, dx12, metal, webgpu, cuda, cpu",
                 other
             ),
         };
@@ -1846,6 +1850,10 @@ pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBac
         BackendType::Cuda => {
             tracing::info!("Creating CUDA backend");
             Ok(Box::new(cuda::CudaBackend::new()?))
+        }
+        BackendType::Cpu => {
+            tracing::info!("Creating CPU host-callable backend");
+            Ok(Box::new(cpu::CpuBackend::new()?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }

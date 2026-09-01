@@ -8,6 +8,9 @@ runtime compiler, or CUDA `<<<>>>` syntax. Slang remains the runtime backend
 compiler; the proc-macro is an AOT frontend that produces structured
 `KernelDef` metadata and typed `record` helpers.
 
+To **step the same kernel on the CPU** without a handwritten Rust twin, see
+[CPU host-callable shaders](../debugging/cpu-host-callable.md) (issue #292).
+
 ## Quick example
 
 ```rust

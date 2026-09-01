@@ -48,6 +48,7 @@ pub enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_DX12 = 2,
     GOLDY_BACKEND_TYPE_WEB_GPU = 3,
     GOLDY_BACKEND_TYPE_CUDA = 4,
+    GOLDY_BACKEND_TYPE_CPU = 5,
 }
 
 #[repr(C)]

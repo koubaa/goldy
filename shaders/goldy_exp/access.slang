@@ -241,8 +241,9 @@ static const uint GOLDY_FRAME_TABLE_ROW_STRIDE = 512;
 /// occur when multiple command buffers are in flight simultaneously.
 public uint goldy_frame_table_index(uint dispatch_base, uint slot_k, uint selector_slot, uint table_slot)
 {
-#if defined(__WGSL__) || defined(__CUDA__)
-    // WebGPU / CUDA PoC use direct parameter bindings and do not call this function.
+#if defined(__WGSL__) || defined(__CUDA__) || defined(__CPU__)
+    // WebGPU / CUDA PoC / CPU host-callable use direct parameter bindings
+    // and do not call this function.
     return 0;
 #elif defined(__METAL__)
     return goldy_scattered<uint>(table_slot)[dispatch_base + slot_k];
@@ -453,9 +454,9 @@ public typealias Filter = SamplerState;
 
 /// Element count for a structured buffer (`buf.len()` in the Rust GPU dialect).
 ///
-/// Implemented via `GetDimensions` on SPIR-V / DX12. Metal / CUDA / WebGPU
-/// prototypes do not expose a portable length on pointer descriptors — pass an
-/// explicit `u32` count scalar on those backends for now.
+/// Implemented via `GetDimensions` on SPIR-V / DX12 / CPU host-callable.
+/// Metal / CUDA / WebGPU prototypes do not expose a portable length on pointer
+/// descriptors — pass an explicit `u32` count scalar on those backends for now.
 public uint goldy_buf_len<T>(Scattered<T> buf)
 {
 #if defined(__METAL__) || defined(__CUDA__) || defined(__WGSL__)
