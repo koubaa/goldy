@@ -44,6 +44,7 @@ struct GoldyBindlessResources {
 
     // Slot 4: FILTER_CONFIG - sampler states for texture filtering
     Array<SamplerState, GOLDY_MAX_RESOURCES> samplers;
+    Array<RaytracingAccelerationStructure, GOLDY_MAX_RESOURCES> accelerationStructures;
 };
 
 // Global bindless resource block — bound at buffer slot 0 by the Metal backend

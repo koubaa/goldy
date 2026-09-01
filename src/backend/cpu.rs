@@ -601,6 +601,9 @@ impl CpuBackend {
                     self.execute_copy_buffer(*src, *src_offset, *dst, *dst_offset, *size)?;
                 }
                 GpuCommand::ResourceBarrier { .. } => {}
+                GpuCommand::BuildAccelerationStructure(_) => {
+                    anyhow::bail!("CPU backend does not support acceleration structures");
+                }
                 GpuCommand::WriteTexture { .. }
                 | GpuCommand::WriteTextureRegion { .. }
                 | GpuCommand::CopyTexture { .. }
@@ -1415,7 +1418,7 @@ impl GpuBackend for CpuBackend {
             .iter()
             .map(|category| {
                 category.map(|category| match category {
-                    ResourceCategory::Broadcast | ResourceCategory::Texture | ResourceCategory::Sampler => {
+                    ResourceCategory::Broadcast | ResourceCategory::Texture | ResourceCategory::Sampler | ResourceCategory::Accel => {
                         ResourceAccess::Read
                     }
                     ResourceCategory::Scattered | ResourceCategory::StorageImage => ResourceAccess::ReadWrite,

@@ -358,6 +358,8 @@ pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types
                     Some(ResourceCategory::StorageImage)
                 } else if ty == "Filter" {
                     Some(ResourceCategory::Sampler)
+                } else if ty == "Accel" {
+                    Some(ResourceCategory::Accel)
                 } else {
                     None
                 }
@@ -449,7 +451,7 @@ pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate
                 let ty = param.ty.trim();
                 if ty.starts_with("Scattered<") || ty == "ByteAddress" {
                     Some(BindlessSlotKind::StorageUav)
-                } else if ty.starts_with("BufRO<") {
+                } else if ty.starts_with("BufRO<") || ty == "Accel" {
                     Some(BindlessSlotKind::ReadOnlySrv)
                 } else {
                     None
@@ -715,6 +717,8 @@ pub enum WgpuComputeResourceKind {
     StorageTexture,
     /// `Filter` → sampler.
     Sampler,
+    /// `Accel` → acceleration structure (experimental ray query).
+    AccelerationStructure,
 }
 
 impl WgpuComputeResourceKind {
@@ -722,7 +726,7 @@ impl WgpuComputeResourceKind {
     pub fn default_access(self) -> crate::types::ResourceAccess {
         match self {
             Self::StorageReadWrite | Self::StorageTexture => crate::types::ResourceAccess::ReadWrite,
-            Self::StorageRead | Self::Uniform | Self::SampledTexture | Self::Sampler => {
+            Self::StorageRead | Self::Uniform | Self::SampledTexture | Self::Sampler | Self::AccelerationStructure => {
                 crate::types::ResourceAccess::Read
             }
         }
@@ -786,6 +790,8 @@ pub fn extract_webgpu_compute_layout(source: &str, defines: &[(&str, &str)]) -> 
             Ok(WgpuComputeResourceKind::StorageTexture)
         } else if ty == "Filter" {
             Ok(WgpuComputeResourceKind::Sampler)
+        } else if ty == "Accel" {
+            Ok(WgpuComputeResourceKind::AccelerationStructure)
         } else if matches!(param.kind, ParamKind::Broadcast) {
             Ok(WgpuComputeResourceKind::Uniform)
         } else {
@@ -853,6 +859,8 @@ pub fn extract_webgpu_graphics_layout(source: &str) -> Result<WgpuComputeLayout,
             Ok(WgpuComputeResourceKind::StorageTexture)
         } else if ty == "Filter" {
             Ok(WgpuComputeResourceKind::Sampler)
+        } else if ty == "Accel" {
+            Ok(WgpuComputeResourceKind::AccelerationStructure)
         } else if matches!(param.kind, ParamKind::Broadcast) {
             Ok(WgpuComputeResourceKind::Uniform)
         } else {
@@ -937,6 +945,8 @@ pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &st
             (format!("RWTexture2D<{logical_elem}>"), 'u')
         } else if ty == "Filter" {
             (ty.to_string(), 's')
+        } else if ty == "Accel" {
+            ("RaytracingAccelerationStructure".to_string(), 't')
         } else if matches!(param.kind, ParamKind::Broadcast) {
             (format!("ConstantBuffer<{ty}>"), 'b')
         } else {
@@ -1473,6 +1483,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
             || ty.starts_with("Interpolated<")
             || ty.starts_with("DirectSpatial<")
             || ty == "Filter"
+            || ty == "Accel"
         {
             Ok(ty.to_string())
         } else if matches!(param.kind, ParamKind::Broadcast) {
@@ -2383,6 +2394,9 @@ fn resource_init_expr(ty: &str, slot_var: &str) -> String {
     if ty == "Filter" {
         return format!("goldy_filter({})", slot_var);
     }
+    if ty == "Accel" {
+        return format!("goldy_accel({})", slot_var);
+    }
     // Unrecognised resource type: fall back to calling __init(slot).
     format!("{}({})", ty, slot_var)
 }
@@ -2468,6 +2482,9 @@ fn classify_type(ty: &str) -> ParamKind {
         return ParamKind::Resource;
     }
     if ty == "Filter" {
+        return ParamKind::Resource;
+    }
+    if ty == "Accel" {
         return ParamKind::Resource;
     }
 

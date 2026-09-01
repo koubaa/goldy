@@ -121,7 +121,14 @@ pub(super) fn ensure_stage_compiled(
     };
 
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
-    let extra_define_refs: Vec<(&str, &str)> = extra_defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut extra_define_refs: Vec<(&str, &str)> = extra_defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    if devices
+        .get(&device_handle)
+        .is_some_and(|ld| ld.ray_query)
+        && extra_define_refs.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY")
+    {
+        extra_define_refs.push(("GOLDY_RAY_QUERY", "1"));
+    }
 
     // Compile shader with reflection data for resource binding
     let result = slang_compiler

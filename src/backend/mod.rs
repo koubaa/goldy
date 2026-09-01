@@ -46,8 +46,8 @@ pub(crate) mod cuda;
 
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
-    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RenderTargetHandle, SamplerHandle, ShaderHandle, TextureHandle,
 };
 #[cfg(feature = "graphics")]
 pub(crate) use crate::handles::{SurfaceHandle, SwapchainImageHandle};
@@ -703,6 +703,49 @@ pub(crate) enum GpuCommand {
     ResourceBarrier {
         buffers: Vec<(BufferHandle, crate::task_graph::BarrierUsage)>,
         textures: Vec<(TextureHandle, crate::task_graph::BarrierUsage)>,
+    },
+    /// GPU build of a BLAS or TLAS. The backend inserts an AS-build → shader-read barrier.
+    BuildAccelerationStructure(AccelBuildCommand),
+}
+
+/// Create-time sizing for [`GpuBackend::create_acceleration_structure`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum GpuAccelCreate {
+    BlasTriangles {
+        max_triangles: u32,
+        max_vertices: u32,
+        vertex_stride: u32,
+    },
+    Tlas {
+        max_instances: u32,
+    },
+}
+
+/// Recorded TLAS instance (backend-resolved BLAS addresses at encode time).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AccelInstanceRecord {
+    pub blas: AccelerationStructureHandle,
+    pub transform: [f32; 12],
+    pub mask: u8,
+    pub custom_index: u32,
+}
+
+/// GPU build recorded from [`crate::Scheme::build_blas`] / [`crate::Scheme::build_tlas`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AccelBuildCommand {
+    BlasTriangles {
+        dest: AccelerationStructureHandle,
+        vertex_buffer: BufferHandle,
+        vertex_offset: u64,
+        vertex_count: u32,
+        vertex_stride: u32,
+        index_buffer: Option<BufferHandle>,
+        index_offset: u64,
+        index_count: u32,
+    },
+    Tlas {
+        dest: AccelerationStructureHandle,
+        instances: std::sync::Arc<[AccelInstanceRecord]>,
     },
 }
 
@@ -1402,6 +1445,25 @@ pub(crate) trait GpuBackend:
     /// Get the sampler's index in the global bindless descriptor set.
     /// Returns None if the sampler is not registered.
     fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32>;
+
+    /// Allocate a BLAS or TLAS. Default: unsupported on this backend.
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        let _ = (device, desc);
+        anyhow::bail!("acceleration structures are not supported on this backend")
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        let _ = accel;
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        let _ = accel;
+        None
+    }
 
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.

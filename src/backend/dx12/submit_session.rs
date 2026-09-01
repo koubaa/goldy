@@ -31,6 +31,7 @@ pub(crate) struct Dx12RecordState<'a> {
     pub textures: &'a SharedTextureTable,
     #[allow(dead_code)]
     pub samplers: &'a SharedSamplerTable,
+    pub accels: &'a super::types::SharedAccelTable,
 }
 
 /// Cloned handles for one partition submit — no global backend lock required.
@@ -100,6 +101,10 @@ impl<'a> Dx12SubmitScope<'a> {
     pub fn samplers(&self) -> &'a SharedSamplerTable {
         self.record.samplers
     }
+
+    pub fn accels(&self) -> &'a super::types::SharedAccelTable {
+        self.record.accels
+    }
 }
 
 pub(crate) fn record_state_from_backend<'a>(
@@ -133,6 +138,7 @@ pub(crate) fn record_state_from_backend<'a>(
         render_targets: &state.render_targets,
         textures: &state.textures,
         samplers: &state.samplers,
+        accels: &state.accels,
     })
 }
 
@@ -156,6 +162,7 @@ pub(crate) fn record_state_for_legacy_render<'a>(
         render_targets: &state.render_targets,
         textures: &state.textures,
         samplers: &state.samplers,
+        accels: &state.accels,
     })
 }
 
@@ -176,6 +183,7 @@ pub(crate) struct Dx12SubmitSession {
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
+    accels: super::types::SharedAccelTable,
     device_owner_handle: Option<ContextHandle>,
     ctx_fence: ID3D12Fence,
 }
@@ -230,6 +238,7 @@ impl Dx12SubmitSession {
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
+            accels: Arc::clone(&state.accels),
             device_owner_handle,
             ctx_fence,
         }))
@@ -252,6 +261,7 @@ impl Dx12SubmitSession {
                 render_targets: &self.render_targets,
                 textures: &self.textures,
                 samplers: &self.samplers,
+                accels: &self.accels,
             },
             context_fences: &self.context_fences,
             ctx_fence: self.ctx_fence.clone(),

@@ -1864,6 +1864,9 @@ fn record_gpu_command(
                 }
             }
         }
+        GpuCommand::BuildAccelerationStructure(build) => {
+            super::accel::record_build_list(scope, cl, cl7, build)?;
+        }
     }
     Ok(())
 }

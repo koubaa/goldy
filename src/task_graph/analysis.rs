@@ -113,6 +113,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         #[cfg(feature = "graphics")]
         (ResourceId::PresentLease(a), ResourceId::PresentLease(b)) => a == b,
         (ResourceId::Deposit(a), ResourceId::Deposit(b)) => a == b,
+        (ResourceId::Accel(a), ResourceId::Accel(b)) => a == b,
         _ => false,
     }
 }
@@ -235,6 +236,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         #[cfg(feature = "graphics")]
         PresentLease(u32),
         Deposit(u32),
+        Accel(u64),
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -251,6 +253,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             #[cfg(feature = "graphics")]
             ResourceId::PresentLease(id) => GroupKey::PresentLease(id),
             ResourceId::Deposit(id) => GroupKey::Deposit(id),
+            ResourceId::Accel(h) => GroupKey::Accel(h),
         }
     }
 
@@ -502,6 +505,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         // WithdrawRead participates in ordering edges but emits no GPU work in the IR.
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
+        NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
     }
 }
 
@@ -525,6 +529,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
             | ResourceId::Deposit(_)
+            | ResourceId::Accel(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE
@@ -605,6 +610,7 @@ fn compute_barriers(
                                     barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
                                 );
                             }
+                            ResourceId::Accel(_) => {}
                             _ => {
                                 // Collapse sub-range to parent for backend barrier commands.
                                 if let Some(h) = bi.resource.canonical_buffer_handle() {
@@ -824,6 +830,9 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 NodeKind::CopyRenderTarget { src, dst } => {
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
+                }
+                NodeKind::BuildAccelerationStructure(build) => {
+                    commands.push(GpuCommand::BuildAccelerationStructure(build.clone()));
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::WithdrawRead { .. } => {}
             }
@@ -1585,6 +1594,9 @@ pub(crate) fn emit_graph_commands_for_waves(
                 NodeKind::CopyRenderTarget { src, dst } => {
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
+                }
+                NodeKind::BuildAccelerationStructure(build) => {
+                    commands.push(GraphCommand::Compute(GpuCommand::BuildAccelerationStructure(build.clone())));
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::WithdrawRead { .. } => {}
             }

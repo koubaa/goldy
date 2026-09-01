@@ -39,6 +39,7 @@ mod context;
 mod diagnostic;
 mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
+mod accel;
 mod device;
 mod frame_table;
 mod host_wait;
@@ -235,6 +236,7 @@ impl Dx12Backend {
             next_surface_handle: 1,
             textures: std::sync::Arc::new(std::sync::RwLock::new(types::TextureTable::new())),
             samplers: std::sync::Arc::new(std::sync::RwLock::new(types::SamplerTable::new())),
+            accels: std::sync::Arc::new(std::sync::RwLock::new(types::AccelTable::new())),
             next_rtv_offset: 0,
             free_rtv_offsets: Vec::new(),
             next_dsv_offset: 0,
@@ -1199,6 +1201,22 @@ impl GpuBackend for Dx12Backend {
 
     fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
         sampler::bindless_index(&self.state, sampler_handle)
+    }
+
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        accel::create(&mut self.state, device, desc)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        accel::destroy(&self.state, accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        accel::bindless_index(&self.state, accel)
     }
 
     fn create_compute_pipeline(

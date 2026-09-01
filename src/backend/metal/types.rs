@@ -11,8 +11,8 @@
 //! - Shaders access resources by index into the argument buffer
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle,
-    SurfaceHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::backend::BufferKind;
 use crate::timeline::TimelineValue;
@@ -32,7 +32,7 @@ use mtl::{
 /// 5 categories × 4096 slots × 8 bytes per resource ID = 163840 bytes.
 /// Categories: storageBuffers(0..4K), uniformBuffers(4K..8K), textures(8K..12K),
 ///             storageImages(12K..16K), samplers(16K..20K).
-pub const ARGUMENT_BUFFER_SIZE: u64 = 20 * 1024 * 8; // 5 × MAX_RESOURCES_PER_CATEGORY × 8
+pub const ARGUMENT_BUFFER_SIZE: u64 = 24 * 1024 * 8; // 6 × MAX_RESOURCES_PER_CATEGORY × 8
 
 /// Buffer slot for resource binding indices in shaders.
 /// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
@@ -653,6 +653,7 @@ pub(crate) enum MetalSlotKey {
     UniformBuffer(u32),
     Texture(u32),
     StorageImage(u32),
+    Accel(u32),
 }
 
 impl MetalSlotKey {
@@ -706,6 +707,8 @@ pub(crate) struct LogicalDevice {
     /// Its `encoded_length()` is the authoritative per-slot stride for the sampler
     /// category; never hardcode 8 when encoding sampler offsets.
     pub sampler_encoder: ArgumentEncoder,
+    /// Encoder for writing instance/primitive acceleration structures.
+    pub accel_encoder: ArgumentEncoder,
     /// Frame-table selector + device table (arg slots 0–1) and N-frame ring guard.
     pub frame_table: Mutex<super::frame_table::MetalFrameTable>,
     /// Registry tracking resource indices in the argument buffer
@@ -796,6 +799,7 @@ pub(crate) struct ResourceRegistry {
     texture: SlotAllocator,
     storage_image: SlotAllocator,
     sampler: SlotAllocator,
+    accel: SlotAllocator,
     /// Slots released while at least one GPU command buffer was in-flight.
     ///
     /// Metal's argument buffer is **just CPU-writable memory**: the descriptor
@@ -830,6 +834,7 @@ pub(crate) struct ResourceRegistry {
     pub buffer_indices: HashMap<BufferHandle, (u32, BufferKind)>,
     pub texture_indices: HashMap<TextureHandle, u32>,
     pub sampler_indices: HashMap<SamplerHandle, u32>,
+    pub accel_indices: HashMap<AccelerationStructureHandle, u32>,
 }
 
 impl ResourceRegistry {
@@ -989,6 +994,22 @@ impl ResourceRegistry {
         local_index + 4 * MAX_RESOURCES_PER_CATEGORY
     }
 
+    pub fn register_accel(&mut self, handle: AccelerationStructureHandle) -> u32 {
+        let local_index = self.accel.alloc();
+        self.accel_indices.insert(handle, local_index);
+        local_index
+    }
+
+    pub fn accel_global_index(local_index: u32) -> u32 {
+        local_index + 5 * MAX_RESOURCES_PER_CATEGORY
+    }
+
+    pub fn unregister_accel(&mut self, handle: AccelerationStructureHandle) {
+        if let Some(index) = self.accel_indices.remove(&handle) {
+            self.accel.free(index);
+        }
+    }
+
     /// Remove a buffer handle from the registry and return its LOCAL slot
     /// to the appropriate free list so subsequent `register_*_buffer` calls
     /// reuse it. Without this, per-frame buffer churn exhausts the
@@ -1053,6 +1074,7 @@ impl ResourceRegistry {
             MetalSlotKey::UniformBuffer(i) => self.uniform_buffer.free(i),
             MetalSlotKey::Texture(i) => self.texture.free(i),
             MetalSlotKey::StorageImage(i) => self.storage_image.free(i),
+            MetalSlotKey::Accel(i) => self.accel.free(i),
         }
     }
 
@@ -1127,6 +1149,7 @@ impl ResourceRegistry {
             crate::types::ResourceCategory::Texture => &self.texture,
             crate::types::ResourceCategory::StorageImage => &self.storage_image,
             crate::types::ResourceCategory::Sampler => &self.sampler,
+            crate::types::ResourceCategory::Accel => &self.accel,
         };
         MAX_RESOURCES_PER_CATEGORY.saturating_sub(allocator.live_count())
     }
@@ -1474,6 +1497,17 @@ pub(crate) struct SamplerState_ {
     pub arg_buffer_index: u32,
 }
 
+pub(crate) struct AccelState {
+    pub device_handle: DeviceHandle,
+    pub is_tlas: bool,
+    pub accel: mtl::AccelerationStructure,
+    pub scratch: MTLBuffer,
+    pub max_primitives: u32,
+    pub max_vertices: u32,
+    pub vertex_stride: u32,
+    pub arg_buffer_index: u32,
+}
+
 /// Maximum number of frames that can be in-flight at once.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -1567,6 +1601,8 @@ pub(super) struct MetalState {
     pub next_texture_handle: TextureHandle,
     pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
     pub next_sampler_handle: SamplerHandle,
+    pub accels: std::collections::HashMap<AccelerationStructureHandle, AccelState>,
+    pub next_accel_handle: AccelerationStructureHandle,
     /// `None` after release via [`crate::device::Device::release_idle_shader_compiler`].
     /// Re-created automatically on demand when a shader must be lazily compiled.
     pub slang_compiler: Option<crate::slang::SlangCompiler>,

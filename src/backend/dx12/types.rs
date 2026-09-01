@@ -11,8 +11,8 @@
 //! - Shaders access resources by indexing into the descriptor heaps
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::timeline::SmallContextMap;
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
@@ -77,6 +77,7 @@ pub(crate) struct ResourceRegistry {
     /// Maps texture handle to UAV offset (for storage textures / TextureKind::Direct)
     pub texture_uav_offsets: HashMap<TextureHandle, u32>,
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
+    pub accel_offsets: HashMap<AccelerationStructureHandle, u32>,
 }
 
 #[allow(dead_code)]
@@ -127,6 +128,16 @@ impl ResourceRegistry {
         let offset = self.sampler.alloc();
         self.sampler_offsets.insert(handle, offset);
         offset
+    }
+
+    pub fn register_accel(&mut self, handle: AccelerationStructureHandle) -> u32 {
+        let offset = self.cbv_srv_uav.alloc();
+        self.accel_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn extract_accel_slots(&mut self, handle: AccelerationStructureHandle) -> Vec<u32> {
+        self.accel_offsets.remove(&handle).into_iter().collect()
     }
 
     /// Reserve the low bindless indices for runtime protocol (frame table).
@@ -1547,6 +1558,20 @@ pub(crate) struct SamplerState {
     pub bindless_offset: Option<u32>,
 }
 
+/// BLAS or TLAS plus bindless raytracing-acceleration-structure SRV.
+pub(crate) struct AccelState {
+    pub device_handle: DeviceHandle,
+    pub is_tlas: bool,
+    pub resource: Direct3D12::ID3D12Resource,
+    pub gpu_va: u64,
+    pub bindless_offset: Option<u32>,
+    pub scratch: Direct3D12::ID3D12Resource,
+    pub scratch_va: u64,
+    pub max_primitives: u32,
+    pub max_vertices: u32,
+    pub vertex_stride: u32,
+}
+
 /// Maximum number of frames that can be in-flight at once.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -1648,6 +1673,7 @@ handle_table!(
 );
 handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
 handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
+handle_table!(AccelTable, SharedAccelTable, AccelerationStructureHandle, AccelState);
 
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
@@ -1682,6 +1708,7 @@ pub(super) struct Dx12State {
     pub next_surface_handle: SurfaceHandle,
     pub textures: SharedTextureTable,
     pub samplers: SharedSamplerTable,
+    pub accels: SharedAccelTable,
     /// Next RTV descriptor offset (high-water mark; prefer free_rtv_offsets first)
     pub next_rtv_offset: u32,
     /// Recycled RTV descriptor slots available for reuse

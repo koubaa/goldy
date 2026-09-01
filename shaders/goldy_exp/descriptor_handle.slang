@@ -55,6 +55,11 @@ __DynamicResource<__DynamicResourceKind.General> g_GoldyStorageImageHeap[];
 [[vk::binding(4, 0)]]
 __DynamicResource<__DynamicResourceKind.Sampler> g_GoldySamplerHeap[];
 
+#if defined(GOLDY_RAY_QUERY)
+[[vk::binding(5, 0)]]
+__DynamicResource<__DynamicResourceKind.General> g_GoldyAccelHeap[];
+#endif
+
 // Custom getDescriptorFromHandle for SPIRV that routes to Goldy's binding layout
 export T getDescriptorFromHandle<T>(DescriptorHandle<T> handle) where T : IOpaqueDescriptor
 {

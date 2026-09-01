@@ -13,6 +13,7 @@
 #![allow(clippy::unnecessary_cast)]
 
 mod api_log;
+mod accel;
 mod buffer;
 mod compute;
 mod context;
@@ -316,6 +317,7 @@ impl VulkanBackend {
             next_surface_handle: 1,
             textures: Arc::new(RwLock::new(TextureTable::new())),
             samplers: Arc::new(RwLock::new(SamplerTable::new())),
+            accels: Arc::new(RwLock::new(AccelTable::new())),
             slang_compiler,
             compute_fence_pool: Arc::new(Mutex::new(HashMap::new())),
             device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1158,6 +1160,22 @@ impl GpuBackend for VulkanBackend {
 
     fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
         sampler::bindless_index(&self.state.samplers, sampler_handle)
+    }
+
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        accel::create(&mut self.state, device, desc)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        accel::destroy(&self.state, accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        accel::bindless_index(&self.state, accel)
     }
 
     fn create_compute_pipeline(

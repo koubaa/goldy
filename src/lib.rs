@@ -13,6 +13,7 @@
 //! ```
 
 pub(crate) mod backend;
+pub mod accel;
 pub mod buffer;
 pub mod compute;
 pub mod context;
@@ -85,6 +86,7 @@ pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
+pub use accel::{AccelInstance, AccelKind, AccelerationStructure};
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;

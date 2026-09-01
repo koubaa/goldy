@@ -31,8 +31,8 @@ use crate::slang::virtual_main::{CudaStorageTextureSpec, WgpuComputeLayout, Wgpu
 use crate::slang::OwnedLayoutCheck;
 use crate::tracy_zone;
 use crate::types::{
-    AddressMode, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType, FilterMode,
-    IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
+    AddressMode, BufferFlags, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType,
+    FilterMode, IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
 };
 use crate::{goldy_event, goldy_span};
 use anyhow::{Context as _, Result};
@@ -598,6 +598,8 @@ pub(crate) struct WebGpuBackend {
     texture_slots: HashMap<u32, TextureHandle>,
     samplers: HashMap<SamplerHandle, WebGpuSampler>,
     sampler_slots: HashMap<u32, SamplerHandle>,
+    accels: HashMap<AccelerationStructureHandle, WebGpuAccel>,
+    accel_slots: HashMap<u32, AccelerationStructureHandle>,
     shaders: HashMap<ShaderHandle, WebGpuShader>,
     compute_pipelines: HashMap<ComputePipelineHandle, WebGpuComputePipeline>,
     #[cfg(feature = "graphics")]
@@ -607,6 +609,7 @@ pub(crate) struct WebGpuBackend {
     next_buffer: BufferHandle,
     next_texture: TextureHandle,
     next_sampler: SamplerHandle,
+    next_accel: AccelerationStructureHandle,
     #[cfg(feature = "graphics")]
     next_surface: SurfaceHandle,
     next_slot: u32,
@@ -916,6 +919,9 @@ enum BindGroupResourceKey {
     Sampler {
         handle: SamplerHandle,
     },
+    Accel {
+        handle: AccelerationStructureHandle,
+    },
 }
 
 /// Pipelines are created with `layout: None`, so `get_bind_group_layout` is
@@ -1002,6 +1008,21 @@ struct WebGpuTexture {
 struct WebGpuSampler {
     device: DeviceHandle,
     sampler: wgpu::Sampler,
+    slot: u32,
+}
+
+enum WebGpuAccelKind {
+    Blas {
+        blas: wgpu::Blas,
+        size: wgpu::BlasTriangleGeometrySizeDescriptor,
+        vertex_stride: u32,
+    },
+    Tlas(wgpu::Tlas),
+}
+
+struct WebGpuAccel {
+    device: DeviceHandle,
+    kind: WebGpuAccelKind,
     slot: u32,
 }
 
@@ -1153,6 +1174,8 @@ impl WebGpuBackend {
             texture_slots: HashMap::new(),
             samplers: HashMap::new(),
             sampler_slots: HashMap::new(),
+            accels: HashMap::new(),
+            accel_slots: HashMap::new(),
             shaders: HashMap::new(),
             compute_pipelines: HashMap::new(),
             #[cfg(feature = "graphics")]
@@ -1162,6 +1185,7 @@ impl WebGpuBackend {
             next_buffer: 1,
             next_texture: 1,
             next_sampler: 1,
+            next_accel: 1,
             #[cfg(feature = "graphics")]
             next_surface: 1,
             next_slot: 0,
@@ -1696,6 +1720,7 @@ impl WebGpuBackend {
         logical_size: u64,
         capacity: u64,
         uniform: bool,
+        flags: BufferFlags,
     ) -> Result<BufferHandle> {
         let min_capacity = if uniform { 16 } else { 4 };
         let capacity = if uniform {
@@ -1707,16 +1732,20 @@ impl WebGpuBackend {
             )
         };
         let gpu = self.device(device)?;
+        let mut usage = wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::INDEX;
+        if flags.contains(BufferFlags::ACCEL_INPUT) {
+            usage |= wgpu::BufferUsages::BLAS_INPUT;
+        }
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("goldy-webgpu-buffer"),
             size: capacity,
-            usage: wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::INDIRECT
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::INDEX,
+            usage,
             mapped_at_creation: false,
         });
         let handle = self.next_buffer;
@@ -1769,11 +1798,19 @@ impl WebGpuBackend {
         }
 
         let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
-        let defines: Vec<(&str, &str)> = shader
+        let mut defines: Vec<(&str, &str)> = shader
             .defines
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
+        if self
+            .devices
+            .get(&shader.device)
+            .is_some_and(|gpu| gpu.features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY))
+            && defines.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY")
+        {
+            defines.push(("GOLDY_RAY_QUERY", "1"));
+        }
         let layout = crate::slang::virtual_main::extract_webgpu_compute_layout(&shader.source, &defines)
             .map_err(|error| anyhow::anyhow!("WebGPU shader layout failed: {error}"))?;
         let webgpu_source = crate::slang::virtual_main::transform_virtual_main_webgpu_compute(&shader.source, &defines)
@@ -2124,6 +2161,103 @@ impl WebGpuBackend {
             .with_context(|| format!("WebGPU: registry key {index} references a destroyed sampler"))
     }
 
+    fn lookup_registry_accel(&self, index: u32) -> Result<&WebGpuAccel> {
+        let handle = self
+            .accel_slots
+            .get(&index)
+            .with_context(|| format!("WebGPU: unknown accel registry key {index}"))?;
+        self.accels
+            .get(handle)
+            .with_context(|| format!("WebGPU: registry key {index} references a destroyed acceleration structure"))
+    }
+
+    fn record_accel_build(&mut self, encoder: &mut wgpu::CommandEncoder, build: &crate::backend::AccelBuildCommand) -> Result<()> {
+        match build {
+            crate::backend::AccelBuildCommand::BlasTriangles {
+                dest,
+                vertex_buffer,
+                vertex_offset,
+                vertex_count,
+                vertex_stride,
+                index_buffer,
+                ..
+            } => {
+                anyhow::ensure!(
+                    index_buffer.is_none(),
+                    "WebGPU experimental ray query: indexed BLAS builds are not wired yet"
+                );
+                let (size, stored_stride) = match &self.accels.get(dest).context("WebGPU: invalid BLAS")?.kind {
+                    WebGpuAccelKind::Blas { size, vertex_stride, .. } => (size.clone(), *vertex_stride),
+                    WebGpuAccelKind::Tlas(_) => anyhow::bail!("WebGPU: build_blas destination is a TLAS"),
+                };
+                anyhow::ensure!(
+                    *vertex_stride == stored_stride,
+                    "WebGPU: BLAS vertex_stride does not match create-time stride"
+                );
+                anyhow::ensure!(
+                    *vertex_offset % u64::from(stored_stride) == 0,
+                    "WebGPU: BLAS vertex_offset must be a multiple of vertex_stride"
+                );
+                let first_vertex = (*vertex_offset / u64::from(stored_stride)) as u32;
+                let vertex = self.buffers.get(vertex_buffer).context("WebGPU: invalid BLAS vertex buffer")?;
+                let geom = wgpu::BlasTriangleGeometry {
+                    size: &size,
+                    vertex_buffer: &vertex.buffer,
+                    first_vertex,
+                    vertex_stride: u64::from(stored_stride),
+                    index_buffer: None,
+                    first_index: None,
+                    transform_buffer: None,
+                    transform_buffer_offset: None,
+                };
+                let blas = match &self.accels.get(dest).unwrap().kind {
+                    WebGpuAccelKind::Blas { blas, .. } => blas,
+                    WebGpuAccelKind::Tlas(_) => unreachable!(),
+                };
+                let entry = wgpu::BlasBuildEntry {
+                    blas,
+                    geometry: wgpu::BlasGeometries::TriangleGeometries(vec![geom]),
+                };
+                encoder.build_acceleration_structures(std::iter::once(&entry), std::iter::empty::<&wgpu::Tlas>());
+                let _ = vertex_count;
+                Ok(())
+            }
+            crate::backend::AccelBuildCommand::Tlas { dest, instances } => {
+                let mut packed = Vec::new();
+                for inst in instances.iter() {
+                    let blas = match &self.accels.get(&inst.blas).context("WebGPU: invalid instance BLAS")?.kind {
+                        WebGpuAccelKind::Blas { blas, .. } => blas,
+                        WebGpuAccelKind::Tlas(_) => anyhow::bail!("WebGPU: TLAS instance must be a BLAS"),
+                    };
+                    packed.push(wgpu::TlasInstance::new(
+                        blas,
+                        inst.transform,
+                        inst.custom_index,
+                        inst.mask,
+                    ));
+                }
+                {
+                    let tlas = match &mut self.accels.get_mut(dest).context("WebGPU: invalid TLAS")?.kind {
+                        WebGpuAccelKind::Tlas(tlas) => tlas,
+                        WebGpuAccelKind::Blas { .. } => anyhow::bail!("WebGPU: build_tlas destination is a BLAS"),
+                    };
+                    for (i, inst) in packed.into_iter().enumerate() {
+                        tlas[i] = Some(inst);
+                    }
+                }
+                let tlas = match &self.accels.get(dest).unwrap().kind {
+                    WebGpuAccelKind::Tlas(tlas) => tlas,
+                    WebGpuAccelKind::Blas { .. } => unreachable!(),
+                };
+                encoder.build_acceleration_structures(
+                    std::iter::empty::<&wgpu::BlasBuildEntry<'_>>(),
+                    std::iter::once(tlas),
+                );
+                Ok(())
+            }
+        }
+    }
+
     fn bind_group_cache_key(
         &self,
         device: DeviceHandle,
@@ -2173,6 +2307,13 @@ impl WebGpuBackend {
                                 .get(&index)
                                 .with_context(|| format!("WebGPU: unknown sampler registry key {index}"))?;
                             resources.push(BindGroupResourceKey::Sampler { handle });
+                        }
+                        WgpuComputeResourceKind::AccelerationStructure => {
+                            let handle = *self
+                                .accel_slots
+                                .get(&index)
+                                .with_context(|| format!("WebGPU: unknown accel registry key {index}"))?;
+                            resources.push(BindGroupResourceKey::Accel { handle });
                         }
                     }
                 }
@@ -2313,6 +2454,19 @@ impl WebGpuBackend {
                             entries.push(wgpu::BindGroupEntry {
                                 binding: binding as u32,
                                 resource: wgpu::BindingResource::Sampler(&sampler.sampler),
+                            });
+                        }
+                        WgpuComputeResourceKind::AccelerationStructure => {
+                            let accel = self.lookup_registry_accel(index)?;
+                            let tlas = match &accel.kind {
+                                WebGpuAccelKind::Tlas(tlas) => tlas,
+                                WebGpuAccelKind::Blas { .. } => {
+                                    anyhow::bail!("WebGPU: Accel shader parameter must be a TLAS")
+                                }
+                            };
+                            entries.push(wgpu::BindGroupEntry {
+                                binding: binding as u32,
+                                resource: wgpu::BindingResource::AccelerationStructure(tlas),
                             });
                         }
                     }
@@ -3391,6 +3545,9 @@ impl WebGpuBackend {
                         let _tz = tracy_zone!("wgpu.copy_texture_to_readback");
                         self.record_copy_texture_to_readback(&mut encoder, *src, *dst, *layout)?;
                     }
+                    GpuCommand::BuildAccelerationStructure(build) => {
+                        self.record_accel_build(&mut encoder, build)?;
+                    }
                 }
             }
         }
@@ -3922,7 +4079,11 @@ impl GpuBackend for WebGpuBackend {
         self.adapter_info.clone()
     }
 
-    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+        let ray_query = self
+            .adapters
+            .get(adapter_id as usize)
+            .is_some_and(|adapter| adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY));
         crate::device::DeviceCapabilities {
             preferred_surface_format: TextureFormat::Bgra8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
@@ -3948,6 +4109,7 @@ impl GpuBackend for WebGpuBackend {
             host_sidecar_on_submit_worker: true,
             split_compute_partitions_on_barrier_cost: false,
             fuse_upload_with_compute_partitions: true,
+            ray_query,
             ..crate::device::DeviceCapabilities::default()
         }
     }
@@ -3958,17 +4120,32 @@ impl GpuBackend for WebGpuBackend {
             .get(adapter_id as usize)
             .with_context(|| format!("WebGPU: invalid adapter id {adapter_id}"))?;
         let adapter_info = adapter.get_info();
-        let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+        let adapter_features = adapter.features();
+        let ray_query = adapter_features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let mut wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgpu::Features::FLOAT32_FILTERABLE
             | wgpu::Features::BGRA8UNORM_STORAGE
             | wgpu::Features::VERTEX_WRITABLE_STORAGE
             | wgpu::Features::PIPELINE_CACHE;
-        let required_features = adapter.features() & wanted;
+        if ray_query {
+            wanted |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
+        let required_features = adapter_features & wanted;
+        let mut limits = adapter.limits();
+        if ray_query {
+            limits = limits.using_acceleration_structure_values(adapter.limits());
+        }
+        let experimental_features = if ray_query {
+            // wgpu experimental ray query is still UB-adjacent; opt in so Goldy can try the same Accel API.
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("goldy-webgpu-device"),
             required_features,
-            required_limits: adapter.limits(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            required_limits: limits,
+            experimental_features,
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,
         }))
@@ -4115,11 +4292,11 @@ impl GpuBackend for WebGpuBackend {
         size: u64,
         access: BufferKind,
         _element_stride: Option<u32>,
-        _flags: BufferFlags,
+        flags: BufferFlags,
     ) -> Result<BufferHandle> {
         let uniform = matches!(access, BufferKind::Broadcast);
         let capacity = if uniform { align_up(size.max(16), 16) } else { size };
-        self.create_storage_buffer(device, size, capacity, uniform)
+        self.create_storage_buffer(device, size, capacity, uniform, flags)
     }
 
     fn create_buffer_with_capacity(
@@ -4129,7 +4306,7 @@ impl GpuBackend for WebGpuBackend {
         capacity: u64,
         access: BufferKind,
         _element_stride: Option<u32>,
-        _flags: BufferFlags,
+        flags: BufferFlags,
     ) -> Result<(BufferHandle, u64)> {
         let uniform = matches!(access, BufferKind::Broadcast);
         let capacity = if uniform {
@@ -4138,7 +4315,7 @@ impl GpuBackend for WebGpuBackend {
             capacity.max(initial_size)
         };
         Ok((
-            self.create_storage_buffer(device, initial_size, capacity, uniform)?,
+            self.create_storage_buffer(device, initial_size, capacity, uniform, flags)?,
             capacity,
         ))
     }
@@ -5108,6 +5285,78 @@ impl GpuBackend for WebGpuBackend {
         self.samplers.get(&sampler).map(|sampler| sampler.slot)
     }
 
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        let gpu_device = {
+            let gpu = self.device(device)?;
+            anyhow::ensure!(
+                gpu.features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+                "WebGPU adapter has no experimental ray query"
+            );
+            gpu.device.clone()
+        };
+        let slot = self.alloc_registry_slot()?;
+        let handle = self.next_accel;
+        self.next_accel += 1;
+        let kind = match *desc {
+            crate::backend::GpuAccelCreate::BlasTriangles {
+                max_triangles,
+                max_vertices,
+                vertex_stride,
+            } => {
+                let size = wgpu::BlasTriangleGeometrySizeDescriptor {
+                    vertex_format: wgpu::VertexFormat::Float32x3,
+                    vertex_count: max_vertices,
+                    index_format: None,
+                    index_count: None,
+                    flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+                };
+                let blas = gpu_device.create_blas(
+                    &wgpu::CreateBlasDescriptor {
+                        label: Some("goldy-webgpu-blas"),
+                        flags: wgpu::AccelerationStructureFlags::empty(),
+                        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                    },
+                    wgpu::BlasGeometrySizeDescriptors::Triangles {
+                        descriptors: vec![size.clone()],
+                    },
+                );
+                let _ = max_triangles;
+                WebGpuAccelKind::Blas {
+                    blas,
+                    size,
+                    vertex_stride,
+                }
+            }
+            crate::backend::GpuAccelCreate::Tlas { max_instances } => {
+                let tlas = gpu_device.create_tlas(&wgpu::CreateTlasDescriptor {
+                    label: Some("goldy-webgpu-tlas"),
+                    max_instances,
+                    flags: wgpu::AccelerationStructureFlags::empty(),
+                    update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                });
+                WebGpuAccelKind::Tlas(tlas)
+            }
+        };
+        self.accel_slots.insert(slot, handle);
+        self.accels.insert(handle, WebGpuAccel { device, kind, slot });
+        Ok(handle)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        if let Some(resource) = self.accels.remove(&accel) {
+            self.accel_slots.remove(&resource.slot);
+            self.recycle_registry_slot(resource.slot);
+        }
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        self.accels.get(&accel).map(|accel| accel.slot)
+    }
+
     #[cfg(feature = "graphics")]
     fn create_surface(
         &mut self,
@@ -5613,6 +5862,11 @@ impl GpuBackend for WebGpuBackend {
                 .samplers
                 .values()
                 .filter(|sampler| sampler.device == device)
+                .count() as u32,
+            ResourceCategory::Accel => self
+                .accels
+                .values()
+                .filter(|accel| accel.device == device)
                 .count() as u32,
         };
         self.max_bindless_slots_per_category(device, category)

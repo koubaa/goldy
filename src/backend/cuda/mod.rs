@@ -926,7 +926,9 @@ impl CudaBackend {
                 category.map(|category| match category {
                     crate::types::ResourceCategory::Broadcast
                     | crate::types::ResourceCategory::Texture
-                    | crate::types::ResourceCategory::Sampler => ResourceAccess::Read,
+                    | crate::types::ResourceCategory::Sampler | crate::types::ResourceCategory::Accel => {
+                        ResourceAccess::Read
+                    }
                     crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
                         ResourceAccess::ReadWrite
                     }
@@ -2184,6 +2186,9 @@ impl CudaBackend {
                     frame_table = Some(Arc::clone(data));
                 }
                 GpuCommand::ResourceBarrier { .. } => {}
+                GpuCommand::BuildAccelerationStructure(_) => {
+                    anyhow::bail!("CUDA backend does not support acceleration structures");
+                }
                 GpuCommand::DispatchBatch { label, arg_data, count } => {
                     let pipeline_handle = current_pipeline.context("CUDA: DispatchBatch without a compute pipeline")?;
                     let batch_ops = self.materialize_dispatch_batch(
@@ -2486,6 +2491,9 @@ impl CudaBackend {
                         let _ = (src, dst);
                         anyhow::bail!("CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows");
                     }
+                }
+                GpuCommand::BuildAccelerationStructure(_) => {
+                    anyhow::bail!("CUDA backend does not support acceleration structures");
                 }
             }
         }
@@ -5343,7 +5351,7 @@ impl GpuBackend for CudaBackend {
             | crate::types::ResourceCategory::Broadcast
             | crate::types::ResourceCategory::Texture
             | crate::types::ResourceCategory::StorageImage
-            | crate::types::ResourceCategory::Sampler => 4096,
+            | crate::types::ResourceCategory::Sampler | crate::types::ResourceCategory::Accel => 4096,
         }
     }
 
@@ -5370,6 +5378,7 @@ impl GpuBackend for CudaBackend {
                 .values()
                 .filter(|sampler| sampler.device == device)
                 .count() as u32,
+            crate::types::ResourceCategory::Accel => 0,
         };
         self.max_bindless_slots_per_category(device, category)
             .saturating_sub(used)

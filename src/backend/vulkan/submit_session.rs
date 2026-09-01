@@ -5,9 +5,9 @@
 
 use super::compute;
 use super::types::{
-    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextFrameTable, SharedContextMap,
-    SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext, SharedTextureTable,
-    VulkanState,
+    SharedAccelTable, SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextFrameTable,
+    SharedContextMap, SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext,
+    SharedTextureTable, VulkanState,
 };
 use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
 use crate::timeline::TimelineValue;
@@ -25,6 +25,7 @@ pub(crate) struct VulkanSubmitView<'a> {
     pub compute_pipelines: &'a SharedComputePipelineTable,
     pub render_targets: &'a SharedRenderTargetTable,
     pub textures: &'a SharedTextureTable,
+    pub accels: &'a SharedAccelTable,
     pub compute_fence_pool: &'a SharedComputeFencePool,
 }
 
@@ -39,6 +40,7 @@ impl VulkanState {
             compute_pipelines: &self.compute_pipelines,
             render_targets: &self.render_targets,
             textures: &self.textures,
+            accels: &self.accels,
             compute_fence_pool: &self.compute_fence_pool,
         }
     }
@@ -84,6 +86,7 @@ pub(crate) struct VulkanSubmitSession {
     compute_pipelines: SharedComputePipelineTable,
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
+    accels: SharedAccelTable,
     compute_fence_pool: SharedComputeFencePool,
     device_owner_handle: Option<ContextHandle>,
     validation_sink: Option<Arc<super::debug_utils::ValidationSink>>,
@@ -122,6 +125,7 @@ impl VulkanSubmitSession {
             compute_pipelines: Arc::clone(&state.compute_pipelines),
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
+            accels: Arc::clone(&state.accels),
             compute_fence_pool: Arc::clone(&state.compute_fence_pool),
             device_owner_handle,
             validation_sink: state.validation_sink.clone(),
@@ -142,6 +146,7 @@ impl VulkanSubmitSession {
                 compute_pipelines: &self.compute_pipelines,
                 render_targets: &self.render_targets,
                 textures: &self.textures,
+                accels: &self.accels,
                 compute_fence_pool: &self.compute_fence_pool,
             },
             frame_table: Arc::clone(&self.frame_table),

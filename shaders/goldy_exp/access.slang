@@ -295,6 +295,13 @@ public SamplerState goldy_filter(uint slot)
     return g_GoldySamplerHeap[slot].asOpaqueDescriptor<SamplerState>();
 }
 
+#if defined(GOLDY_RAY_QUERY)
+public RaytracingAccelerationStructure goldy_accel(uint slot)
+{
+    return g_GoldyAccelHeap[slot].asOpaqueDescriptor<RaytracingAccelerationStructure>();
+}
+#endif
+
 // =============================================================================
 // DX12 Implementation
 // Uses DescriptorHandle<T> which Slang maps to ResourceDescriptorHeap
@@ -350,6 +357,13 @@ public SamplerState goldy_filter(uint slot)
     return *handle;
 }
 
+public RaytracingAccelerationStructure goldy_accel(uint slot)
+{
+    DescriptorHandle<RaytracingAccelerationStructure> handle;
+    handle = DescriptorHandle<RaytracingAccelerationStructure>(uint2(slot, 0));
+    return *handle;
+}
+
 // =============================================================================
 // Metal Implementation (Bindless via Argument Buffers Tier 2)
 // Uses ParameterBlock with device pointers
@@ -399,6 +413,11 @@ public DirectSpatial<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 public SamplerState goldy_filter(uint slot)
 {
     return gGoldy.samplers[slot];
+}
+
+public RaytracingAccelerationStructure goldy_accel(uint slot)
+{
+    return gGoldy.accelerationStructures[slot];
 }
 
 // =============================================================================
@@ -451,6 +470,9 @@ public typealias ByteAddress = ByteAddressView;
 /// Sampler state (= SamplerState).
 /// Pass directly to texture `.Sample(filter, uv)` calls.
 public typealias Filter = SamplerState;
+
+/// Top-level acceleration structure for inline `RayQuery`.
+public typealias Accel = RaytracingAccelerationStructure;
 
 /// Element count for a structured buffer (`buf.len()` in the Rust GPU dialect).
 ///

@@ -470,6 +470,15 @@ pub(super) fn ensure_stage_compiled(
 
     let search_path_refs: Vec<&str> = scratch.search_paths.iter().map(|s| s.as_str()).collect();
     let extra_defines: Vec<(&str, &str)> = scratch.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut extra_defines = extra_defines;
+    if extra_defines.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY")
+        && state
+            .devices
+            .get(&scratch.device_handle)
+            .is_some_and(|ld| ld.device.supports_raytracing())
+    {
+        extra_defines.push(("GOLDY_RAY_QUERY", "1"));
+    }
     let compile_desc = ShaderStageCompileDesc {
         slang_source: &scratch.slang_source,
         search_paths: &search_path_refs,

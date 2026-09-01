@@ -29,6 +29,7 @@ fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Op
         ResourceCategory::Texture => Some(SlotKey::SampledTexture(index)),
         ResourceCategory::StorageImage => Some(SlotKey::StorageImage(index)),
         ResourceCategory::Sampler => Some(SlotKey::Sampler(index)),
+        ResourceCategory::Accel => Some(SlotKey::Accel(index)),
     }
 }
 
@@ -1177,6 +1178,9 @@ pub(super) fn submit_with_scope(
                     }
                     vk_dispatch_idx += 1;
                 }
+                GpuCommand::BuildAccelerationStructure(build) => {
+                    super::accel::record_build(view, cmd, device_handle, build)?;
+                }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
                     textures: tex_entries,
@@ -2192,6 +2196,9 @@ pub(super) fn submit_graph_with_scope(
                         }
                     }
                     vk_dispatch_idx += 1;
+                }
+                GpuCommand::BuildAccelerationStructure(build) => {
+                    super::accel::record_build(view, cmd, device_handle, build)?;
                 }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,

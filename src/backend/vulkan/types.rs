@@ -11,8 +11,8 @@
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle,
-    SurfaceHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
@@ -32,6 +32,7 @@ pub(crate) enum SlotKey {
     SampledTexture(u32),
     StorageImage(u32),
     Sampler(u32),
+    Accel(u32),
 }
 
 /// One deferred descriptor-slot reclamation.
@@ -300,6 +301,9 @@ pub mod bindless_bindings {
     /// Maps to: VK_DESCRIPTOR_TYPE_SAMPLER
     /// Slang: SamplerState
     pub const FILTER_CONFIG: u32 = 4;
+    /// Acceleration structures (ray query).
+    /// Maps to: VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
+    pub const ACCEL: u32 = 5;
 
     // Legacy aliases for legitibility to graphics programmers
     pub const STORAGE_BUFFERS: u32 = SCATTERED;
@@ -328,11 +332,13 @@ pub(crate) struct ResourceRegistry {
     sampled_texture: SlotAllocator,
     storage_image: SlotAllocator,
     sampler: SlotAllocator,
+    accel: SlotAllocator,
     /// Map BufferHandle -> (bindless_index, is_storage)
     pub buffer_indices: HashMap<BufferHandle, (u32, bool)>,
     /// Map TextureHandle -> (bindless_index, is_storage_image)
     pub texture_indices: HashMap<TextureHandle, (u32, bool)>,
     pub sampler_indices: HashMap<SamplerHandle, u32>,
+    pub accel_indices: HashMap<AccelerationStructureHandle, u32>,
 }
 
 impl ResourceRegistry {
@@ -369,6 +375,18 @@ impl ResourceRegistry {
         let index = self.sampler.alloc();
         self.sampler_indices.insert(handle, index);
         index
+    }
+
+    pub fn register_accel(&mut self, handle: AccelerationStructureHandle) -> u32 {
+        let index = self.accel.alloc();
+        self.accel_indices.insert(handle, index);
+        index
+    }
+
+    pub fn unregister_accel(&mut self, handle: AccelerationStructureHandle) {
+        if let Some(index) = self.accel_indices.remove(&handle) {
+            self.accel.free(index);
+        }
     }
 
     /// Bindless slot keys for `handle` without removing the registry entry.
@@ -432,6 +450,7 @@ impl ResourceRegistry {
             SlotKey::SampledTexture(i) => self.sampled_texture.free(i),
             SlotKey::StorageImage(i) => self.storage_image.free(i),
             SlotKey::Sampler(i) => self.sampler.free(i),
+            SlotKey::Accel(i) => self.accel.free(i),
         }
     }
 
@@ -459,6 +478,7 @@ impl ResourceRegistry {
             crate::types::ResourceCategory::Texture => &self.sampled_texture,
             crate::types::ResourceCategory::StorageImage => &self.storage_image,
             crate::types::ResourceCategory::Sampler => &self.sampler,
+            crate::types::ResourceCategory::Accel => &self.accel,
         };
         MAX_BINDLESS_RESOURCES.saturating_sub(allocator.live_count())
     }
@@ -893,6 +913,11 @@ pub(crate) struct LogicalDevice {
 
     // Vulkan 1.4 core via KHR extension loaders (ash 0.38 doesn't have core 1.4 wrappers yet)
     pub map_memory2: ash::khr::map_memory2::Device,
+    /// Inline ray query + acceleration structures (optional).
+    pub ray_query: bool,
+    pub accel_khr: Option<ash::khr::acceleration_structure::Device>,
+    /// Scratch / instance upload buffers freed at device destroy (MVP).
+    pub accel_transient_buffers: Mutex<Vec<(vk::Buffer, vk::DeviceMemory)>>,
 
     // Bindless infrastructure
     /// Global descriptor pool for bindless resources
@@ -1335,6 +1360,19 @@ pub(crate) struct SamplerState {
     pub sampler: vk::Sampler,
     /// Index in the global bindless descriptor set (if bindless enabled)
     pub bindless_index: Option<u32>,
+}
+
+/// GPU acceleration structure (BLAS or TLAS).
+pub(crate) struct AccelState {
+    pub device_handle: DeviceHandle,
+    pub kind: vk::AccelerationStructureTypeKHR,
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+    pub as_handle: vk::AccelerationStructureKHR,
+    pub device_address: u64,
+    pub bindless_index: Option<u32>,
+    pub scratch_size: u64,
+    pub max_primitives: u32,
 }
 
 /// Maximum number of frames that can be in-flight at once.
@@ -1921,6 +1959,12 @@ handle_table!(
 );
 handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
 handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
+handle_table!(
+    AccelTable,
+    SharedAccelTable,
+    AccelerationStructureHandle,
+    AccelState
+);
 
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
@@ -1943,6 +1987,7 @@ pub(super) struct VulkanState {
     pub next_surface_handle: SurfaceHandle,
     pub textures: SharedTextureTable,
     pub samplers: SharedSamplerTable,
+    pub accels: SharedAccelTable,
     /// Per-backend Slang compiler instance (avoids global state issues in tests)
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).

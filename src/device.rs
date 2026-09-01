@@ -442,7 +442,8 @@ pub struct DeviceCapabilities {
     /// Adapter exposes inline ray queries (Vulkan `VK_KHR_ray_query` + acceleration
     /// structures, DXR tier 1.1, Metal `supportsRaytracing`).
     ///
-    /// Hardware only — Goldy does not yet record ray-query work.
+    /// When `true`, [`crate::AccelerationStructure`] create/build and `Accel` shader
+    /// parameters are available.
     pub ray_query: bool,
 
     /// Adapter exposes ray-tracing pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`,

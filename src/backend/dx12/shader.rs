@@ -103,6 +103,20 @@ pub(super) fn ensure_stage_compiled(
     for (k, v) in &extra_defines {
         defines.push((k.as_str(), v.as_str()));
     }
+    if extra_defines.iter().all(|(k, _)| k.as_str() != "GOLDY_RAY_QUERY") {
+        if let Some(shader) = state.shaders.read().unwrap().entries.get(&shader_handle) {
+            if let Some(ld) = state.devices.get(&shader.device_handle) {
+                if state
+                    .adapters
+                    .iter()
+                    .find(|a| a.adapter_id == ld.adapter_id)
+                    .is_some_and(|a| a.ray_query)
+                {
+                    defines.push(("GOLDY_RAY_QUERY", "1"));
+                }
+            }
+        }
+    }
 
     // Compile Slang directly to DXIL (SM 6.6 bindless)
     let compile_result = {

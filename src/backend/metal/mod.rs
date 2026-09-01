@@ -14,6 +14,7 @@
 pub(super) mod api_log;
 mod buffer;
 mod compute;
+mod accel;
 mod context;
 mod device;
 mod frame_table;
@@ -207,6 +208,8 @@ impl MetalBackend {
                 next_texture_handle: 1,
                 samplers: std::collections::HashMap::new(),
                 next_sampler_handle: 1,
+                accels: std::collections::HashMap::new(),
+                next_accel_handle: 1,
                 slang_compiler: Some(slang_compiler),
             },
         })
@@ -721,6 +724,22 @@ impl GpuBackend for MetalBackend {
         sampler::bindless_index(&self.state, sampler)
     }
 
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        accel::create(&mut self.state, device, desc)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        accel::destroy(&mut self.state, accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        accel::bindless_index(&self.state, accel)
+    }
+
     fn create_surface(
         &mut self,
         device: DeviceHandle,
@@ -1171,7 +1190,7 @@ mod tests {
         use ::metal::Device as MTLDevice;
 
         let device = MTLDevice::system_default().expect("No Metal device available");
-        let (buf_enc, tex_enc, si_enc, smp_enc) = create_argument_encoders(&device);
+        let (buf_enc, tex_enc, si_enc, smp_enc, accel_enc) = create_argument_encoders(&device);
 
         // All four encoders must report the same 8-byte stride.
         assert_eq!(
@@ -1195,8 +1214,13 @@ mod tests {
             smp_enc.encoded_length(),
             "storage-image and sampler encoder strides differ"
         );
+        assert_eq!(
+            accel_enc.encoded_length(),
+            smp_enc.encoded_length(),
+            "accel and sampler encoder strides differ"
+        );
 
-        // The stride must evenly divide ARGUMENT_BUFFER_SIZE so that all 5
+        // The stride must evenly divide ARGUMENT_BUFFER_SIZE so that all 6
         // resource categories fit without overflow.
         assert_eq!(
             ARGUMENT_BUFFER_SIZE % smp_enc.encoded_length(),

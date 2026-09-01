@@ -116,7 +116,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     let heap_size = INITIAL_HEAP_SIZE;
     let (heap_allocator, texture_heap) = create_heaps(&device, heap_size);
 
-    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) = create_argument_encoders(&device);
+    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder, accel_encoder) =
+        create_argument_encoders(&device);
 
     let frame_table =
         super::frame_table::MetalFrameTable::init(device.as_ref(), argument_buffer.as_ref(), argument_encoder.as_ref());
@@ -141,6 +142,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         texture_encoder,
         storage_image_encoder,
         sampler_encoder,
+        accel_encoder,
         frame_table: Mutex::new(frame_table),
         descriptors: Arc::new(Mutex::new(DescriptorRegistry::new())),
         timeline_next: Arc::new(AtomicU64::new(1)),
@@ -214,6 +216,7 @@ pub(super) fn create_argument_encoders(
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
+    mtl::ArgumentEncoder,
 ) {
     // Encoder for raw buffer pointers (RWStructuredBuffer / StructuredBuffer).
     let buffer_arg_desc = mtl::ArgumentDescriptor::new();
@@ -262,6 +265,16 @@ pub(super) fn create_argument_encoders(
     let sampler_stride = sampler_encoder.encoded_length();
     tracing::info!("Created sampler ArgumentEncoder (encoded_length={})", sampler_stride);
 
+    let accel_arg_desc = mtl::ArgumentDescriptor::new();
+    accel_arg_desc.set_index(0);
+    accel_arg_desc.set_data_type(mtl::MTLDataType::InstanceAccelerationStructure);
+    accel_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
+    let accel_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[accel_arg_desc]));
+    tracing::info!(
+        "Created accel ArgumentEncoder (encoded_length={})",
+        accel_encoder.encoded_length()
+    );
+
     // Every resource category in the argument buffer is laid out as
     // MAX_RESOURCES_PER_CATEGORY × 8 bytes.  ARGUMENT_BUFFER_SIZE is derived
     // from that assumption.  Fail loudly at device creation if this GPU returns
@@ -279,6 +292,7 @@ pub(super) fn create_argument_encoders(
         texture_encoder,
         storage_image_encoder,
         sampler_encoder,
+        accel_encoder,
     )
 }
 

@@ -245,6 +245,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         // Required for SPIR-V Int8 capability (enabled alongside float16 in Vulkan 1.2).
         .shader_int8(true);
 
+    let enable_ray_query = physical_device.ray_query;
+    if enable_ray_query {
+        vulkan_12_features = vulkan_12_features.buffer_device_address(true);
+    }
+
     // Vulkan 1.1 features: shaderDrawParameters is needed for SV_InstanceID
     // (SPIR-V DrawParameters capability) in vertex shaders.
     let mut vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
@@ -261,6 +266,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     // Texture sampling in compute shaders requires Slang to emit SPV_KHR_compute_shader_derivatives.
     let mut compute_derivatives_features =
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default().compute_derivative_group_quads(true);
+
+    let mut accel_structure_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+        .acceleration_structure(true)
+        .descriptor_binding_acceleration_structure_update_after_bind(true);
+    let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
     // Mali-G715 (and many mobile GPUs) lack vertex-stage image/buffer stores.
     // Requesting an unavailable VkPhysicalDeviceFeatures bit fails vkCreateDevice
@@ -293,6 +303,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     if supports_compute_derivative_quads {
         features2 = features2.push_next(&mut compute_derivatives_features);
+    }
+    if enable_ray_query {
+        features2 = features2
+            .push_next(&mut accel_structure_features)
+            .push_next(&mut ray_query_features);
     }
 
     // Per-context compute queue pool (see types::MAX_CONTEXT_COMPUTE_QUEUES).
@@ -365,6 +380,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     if supports_compute_derivative_quads && has_nv_compute_derivatives {
         device_extensions.push(NV_COMPUTE_DERIVATIVES.as_ptr());
     }
+    if enable_ray_query {
+        device_extensions.push(khr::deferred_host_operations::NAME.as_ptr());
+        device_extensions.push(khr::acceleration_structure::NAME.as_ptr());
+        device_extensions.push(khr::ray_query::NAME.as_ptr());
+    }
 
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
@@ -435,49 +455,56 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let (bindless_descriptor_pool, bindless_descriptor_set_layout, bindless_descriptor_set, bindless_pipeline_layout) = {
         // Create descriptor set layout with update-after-bind flag
         // Bindings organized by ACCESS PATTERN (see types.rs::bindless_bindings)
-        let binding_flags = [
+        let mut binding_flags = vec![
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
         ];
+        if enable_ray_query {
+            binding_flags.push(vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND);
+        }
 
         let mut binding_flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
 
-        let bindings = [
-            // Binding 0: Scattered buffer access (read/write)
+        let mut bindings = vec![
             vk::DescriptorSetLayoutBinding::default()
                 .binding(types::bindless_bindings::STORAGE_BUFFERS)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                 .stage_flags(vk::ShaderStageFlags::ALL),
-            // Binding 1: Broadcast buffer access (read-only uniforms)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(types::bindless_bindings::UNIFORM_BUFFERS)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                 .stage_flags(vk::ShaderStageFlags::ALL),
-            // Binding 2: Filtered image reads
             vk::DescriptorSetLayoutBinding::default()
                 .binding(types::bindless_bindings::SAMPLED_IMAGES)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                 .stage_flags(vk::ShaderStageFlags::ALL),
-            // Binding 3: Unfiltered image access (read/write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(types::bindless_bindings::STORAGE_IMAGES)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                 .stage_flags(vk::ShaderStageFlags::ALL),
-            // Binding 4: Filter configuration
             vk::DescriptorSetLayoutBinding::default()
                 .binding(types::bindless_bindings::SAMPLERS)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                 .stage_flags(vk::ShaderStageFlags::ALL),
         ];
+        if enable_ray_query {
+            bindings.push(
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(types::bindless_bindings::ACCEL)
+                    .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                    .descriptor_count(types::MAX_BINDLESS_RESOURCES)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
+            );
+        }
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
             .bindings(&bindings)
@@ -488,7 +515,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             .context("Failed to create bindless descriptor set layout")?;
 
         // Create descriptor pool with update-after-bind flag
-        let pool_sizes = [
+        let mut pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: types::MAX_BINDLESS_RESOURCES,
@@ -510,6 +537,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                 descriptor_count: types::MAX_BINDLESS_RESOURCES,
             },
         ];
+        if enable_ray_query {
+            pool_sizes.push(vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: types::MAX_BINDLESS_RESOURCES,
+            });
+        }
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
@@ -573,6 +606,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
+    let accel_khr = if enable_ray_query {
+        Some(ash::khr::acceleration_structure::Device::new(&state.instance, &device))
+    } else {
+        None
+    };
+
     state.devices.insert(
         handle,
         Arc::new(types::LogicalDevice {
@@ -593,6 +632,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             sparse_memory_type_index,
             sparse_page_pool: Mutex::new(sparse_page_pool),
             map_memory2: map_memory2_loader,
+            ray_query: enable_ray_query,
+            accel_khr,
+            accel_transient_buffers: Mutex::new(Vec::new()),
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
             bindless_descriptor_set,

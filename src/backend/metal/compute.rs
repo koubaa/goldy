@@ -41,6 +41,7 @@ fn metal_slot_key_from_category(cat: ResourceCategory, index: u32) -> Option<Met
         ResourceCategory::Texture => Some(MetalSlotKey::Texture(index)),
         ResourceCategory::StorageImage => Some(MetalSlotKey::StorageImage(index)),
         ResourceCategory::Sampler => None,
+        ResourceCategory::Accel => Some(MetalSlotKey::Accel(index)),
     }
 }
 
@@ -1270,6 +1271,12 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
+            GpuCommand::BuildAccelerationStructure(build) => {
+                end_compute!();
+                end_blit!();
+                super::accel::encode_build(state, command_buffer, build)?;
+                has_recorded_gpu_work = true;
+            }
             GpuCommand::ResourceBarrier {
                 buffers: buf_entries,
                 textures: tex_entries,
@@ -1497,6 +1504,9 @@ fn stage_uploads(
             }
             GpuCommand::FrameTableStaging { .. } => {}
             GpuCommand::ResourceBarrier { .. } => {}
+            GpuCommand::BuildAccelerationStructure(_) => {
+                would_have_gpu_work = true;
+            }
         }
     }
 

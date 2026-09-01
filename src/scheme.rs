@@ -768,6 +768,16 @@ pub struct Scheme {
     present_transactions: Vec<PresentTransactionInfo>,
 }
 
+fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
+    match parcel.resource_id() {
+        ResourceId::Buffer(h) => Ok((h, 0)),
+        ResourceId::BufferRange { parent, offset, .. } => Ok((parent, offset)),
+        _ => Err(GoldyError::Backend(anyhow::anyhow!(
+            "acceleration-structure geometry requires a buffer parcel"
+        ))),
+    }
+}
+
 impl Scheme {
     /// Create a scheme bound to `ctx`.
     pub fn new(ctx: &Context) -> Self {
@@ -879,7 +889,105 @@ impl Scheme {
         Ok(())
     }
 
-    /// Register a destination-bound buffer deposit (called by [`crate::MemoryExchange`]).
+    /// GPU-build a triangle BLAS from a vertex (and optional index) parcel.
+    ///
+    /// Vertex data is tightly packed `float3` (or a larger stride). Index buffer is 32-bit.
+    /// Geometry parcels should be created with [`crate::types::BufferFlags::ACCEL_INPUT`].
+    pub fn build_blas(
+        &mut self,
+        dest: &crate::AccelerationStructure,
+        vertices: &Parcel,
+        vertex_count: u32,
+        vertex_stride: u32,
+        indices: Option<(&Parcel, u32)>,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        if dest.kind != crate::accel::AccelKind::Blas {
+            return Err(GoldyError::Backend(anyhow::anyhow!("build_blas requires a BLAS")));
+        }
+        let (vertex_buffer, vertex_offset) = parcel_gpu_buffer(vertices)?;
+        self.submit_state.register_parcel_stamp(vertices);
+        let mut bindings = vec![
+            ResourceBinding {
+                resource: vertices.resource_id(),
+                access: NodeAccess::Read,
+            },
+            ResourceBinding {
+                resource: dest.resource_id(),
+                access: NodeAccess::Overwrite,
+            },
+        ];
+        let (index_buffer, index_offset, index_count) = if let Some((idx, count)) = indices {
+            self.submit_state.register_parcel_stamp(idx);
+            bindings.push(ResourceBinding {
+                resource: idx.resource_id(),
+                access: NodeAccess::Read,
+            });
+            let (h, off) = parcel_gpu_buffer(idx)?;
+            (Some(h), off, count)
+        } else {
+            (None, 0, 0)
+        };
+        self.ir.nodes.push(TaskNode {
+            label: "build_blas",
+            bindings,
+            kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
+                dest: dest.handle,
+                vertex_buffer,
+                vertex_offset,
+                vertex_count,
+                vertex_stride,
+                index_buffer,
+                index_offset,
+                index_count,
+            }),
+        });
+        Ok(())
+    }
+
+    /// GPU-build a TLAS from BLAS instances.
+    pub fn build_tlas(
+        &mut self,
+        dest: &crate::AccelerationStructure,
+        instances: &[crate::AccelInstance<'_>],
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        if dest.kind != crate::accel::AccelKind::Tlas {
+            return Err(GoldyError::Backend(anyhow::anyhow!("build_tlas requires a TLAS")));
+        }
+        if instances.is_empty() {
+            return Err(GoldyError::Backend(anyhow::anyhow!("build_tlas requires at least one instance")));
+        }
+        let mut bindings = vec![ResourceBinding {
+            resource: dest.resource_id(),
+            access: NodeAccess::Overwrite,
+        }];
+        let mut rec = Vec::with_capacity(instances.len());
+        for inst in instances {
+            if inst.blas.kind != crate::accel::AccelKind::Blas {
+                return Err(GoldyError::Backend(anyhow::anyhow!("TLAS instance must reference a BLAS")));
+            }
+            bindings.push(ResourceBinding {
+                resource: inst.blas.resource_id(),
+                access: NodeAccess::Read,
+            });
+            rec.push(crate::backend::AccelInstanceRecord {
+                blas: inst.blas.handle,
+                transform: inst.transform,
+                mask: inst.mask,
+                custom_index: inst.custom_index,
+            });
+        }
+        self.ir.nodes.push(TaskNode {
+            label: "build_tlas",
+            bindings,
+            kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::Tlas {
+                dest: dest.handle,
+                instances: rec.into(),
+            }),
+        });
+        Ok(())
+    }
     ///
     /// `dst_offset` is relative to the start of `destination` (added to any buffer-range base).
     /// The recorded copy size is `capacity.min(destination.byte_size().saturating_sub(dst_offset))`.
@@ -2710,6 +2818,16 @@ impl SchemeBindable for crate::Sampler {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
+    }
+}
+
+impl SchemeBindable for crate::AccelerationStructure {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+        let _ = access;
+        (
+            Some((self.resource_id(), None)),
+            self.resource_index(crate::types::ResourceAccess::Read),
+        )
     }
 }
 

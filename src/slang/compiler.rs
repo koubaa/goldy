@@ -892,6 +892,7 @@ impl SlangCompiler {
             Some(ResourceCategory::Scattered)
             | Some(ResourceCategory::Texture)
             | Some(ResourceCategory::Sampler)
+            | Some(ResourceCategory::Accel)
             | None => SlangParameterCategory::ShaderResource,
             Some(ResourceCategory::Broadcast) => unreachable!("handled above"),
         };

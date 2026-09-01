@@ -6,6 +6,9 @@ pub type TextureHandle = u64;
 /// Opaque handle for a GPU sampler object.
 pub type SamplerHandle = u64;
 
+/// Opaque handle for a ray-tracing acceleration structure (BLAS or TLAS).
+pub type AccelerationStructureHandle = u64;
+
 pub(crate) type DeviceHandle = u64;
 pub(crate) type ContextHandle = u64;
 pub(crate) type BufferHandle = u64;
