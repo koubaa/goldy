@@ -2084,6 +2084,65 @@ impl Scheme {
         });
     }
 
+    /// Full-texture GPU copy between two textures (same size and format).
+    ///
+    /// `src` needs [`TextureFlags::COPY_SRC`]; `dst` needs [`TextureFlags::COPY_DST`].
+    pub fn copy_texture(&mut self, src: &crate::Texture, dst: &crate::Texture) -> Result<(), GoldyError> {
+        if src.width() != dst.width() || src.height() != dst.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture: size mismatch {}x{} → {}x{}",
+                src.width(),
+                src.height(),
+                dst.width(),
+                dst.height()
+            )));
+        }
+        if src.format() != dst.format() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture: format mismatch {:?} → {:?}",
+                src.format(),
+                dst.format()
+            )));
+        }
+        if !src.flags().contains(TextureFlags::COPY_SRC) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture: source requires TextureFlags::COPY_SRC"
+            )));
+        }
+        if !dst.flags().contains(TextureFlags::COPY_DST) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture: destination requires TextureFlags::COPY_DST"
+            )));
+        }
+
+        self.dirty = true;
+        let src_h = src.gpu_handle();
+        let dst_h = dst.gpu_handle();
+        self.submit_state
+            .register_stamp_parts(ResourceId::Texture(src_h), src.whole().stamp_handle());
+        self.submit_state
+            .register_stamp_parts(ResourceId::Texture(dst_h), dst.whole().stamp_handle());
+        self.ir.nodes.push(TaskNode {
+            label: "copy_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Texture(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Texture(dst_h),
+                    access: NodeAccess::Overwrite,
+                },
+            ],
+            kind: NodeKind::CopyTexture {
+                src: src_h,
+                dst: ResourceId::Texture(dst_h),
+                dst_buffer_layout: None,
+            },
+        });
+        Ok(())
+    }
+
     /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
     /// [`crate::MemoryExchange::bind_withdraw`]).
     ///
