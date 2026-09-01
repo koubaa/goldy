@@ -73,7 +73,7 @@ Python buffers automatically detect stride from numpy dtype. If using raw bytes,
 
 ### GPU validation (Khronos validation layer)
 
-Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clears `VK_LAYER_PATH` for speed and stability; locally, enable validation in either of these ways:
+Vulkan API misuse is easiest to catch with the Khronos validation layer. CI GPU jobs set `GOLDY_VALIDATION=all,fatal` and restore `VK_LAYER_PATH` on lavapipe so ERROR messages fail the suite. Locally:
 
 1. **`GOLDY_VALIDATION`** — short form **`1`/`true`/`yes`** turns on **GPU API validation only** (Khronos layer + `VK_EXT_debug_utils` here; Metal shader validation on macOS). Token lists are also supported (see [Unified validation](#unified-validation-goldy_validation) below). Requires validation layers on the machine (e.g. [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), or on Debian/Ubuntu often `vulkan-validationlayers`).
 
