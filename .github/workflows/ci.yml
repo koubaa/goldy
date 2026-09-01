@@ -6,10 +6,6 @@
 # - Windows: DX12 on WARP (GOLDY_DX12_ALLOW_WARP=1; no discrete GPU on hosted runners)
 # - WebGPU (wgpu): Linux Vulkan/lavapipe, macOS Metal, Windows DX12/WARP
 #   (`--no-default-features --features webgpu`, GOLDY_BACKEND=webgpu)
-#
-# Issue #110 measurement: GPU cargo-test jobs set GOLDY_VALIDATION=all.
-# Lavapipe image ENV VK_LAYER_PATH="" hides Khronos layers; those jobs restore
-# VK_LAYER_PATH to /usr/share/vulkan/explicit_layer.d so API validation actually runs.
 
 name: CI
 
@@ -101,9 +97,6 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/koubaa/goldy/lavapipe-ci:latest
-    env:
-      GOLDY_VALIDATION: all
-      VK_LAYER_PATH: /usr/share/vulkan/explicit_layer.d
     steps:
       - uses: actions/checkout@v6
 
@@ -133,12 +126,6 @@ jobs:
 
       - name: Verify lavapipe
         run: DISPLAY= vulkaninfo --summary | head -30
-
-      - name: Show GOLDY_VALIDATION / Vulkan layer path
-        run: |
-          echo "GOLDY_VALIDATION=${GOLDY_VALIDATION:-<unset>}"
-          echo "VK_LAYER_PATH=${VK_LAYER_PATH:-<unset>}"
-          ls -la /usr/share/vulkan/explicit_layer.d || true
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -175,8 +162,6 @@ jobs:
   test-metal:
     name: Metal Tests (macOS)
     runs-on: macos-15
-    env:
-      GOLDY_VALIDATION: all
     steps:
       - uses: actions/checkout@v6
 
@@ -305,8 +290,6 @@ jobs:
   test-dx12-warp:
     name: DX12 Tests (WARP)
     runs-on: windows-latest
-    env:
-      GOLDY_VALIDATION: all
     steps:
       - uses: actions/checkout@v6
 
@@ -365,9 +348,6 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/koubaa/goldy/lavapipe-ci:latest
-    env:
-      GOLDY_VALIDATION: all
-      VK_LAYER_PATH: /usr/share/vulkan/explicit_layer.d
     steps:
       - uses: actions/checkout@v6
 
@@ -438,8 +418,6 @@ jobs:
   test-webgpu-macos:
     name: WebGPU Tests (macOS / Metal)
     runs-on: macos-15
-    env:
-      GOLDY_VALIDATION: all
     steps:
       - uses: actions/checkout@v6
 
@@ -503,8 +481,6 @@ jobs:
   test-webgpu-windows:
     name: WebGPU Tests (Windows / DX12 WARP)
     runs-on: windows-latest
-    env:
-      GOLDY_VALIDATION: all
     steps:
       - uses: actions/checkout@v6
 
