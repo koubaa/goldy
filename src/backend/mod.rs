@@ -1725,7 +1725,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
             "metal" | "mtl" => BackendType::Metal,
             "webgpu" | "wgpu" => BackendType::WebGpu,
             "cuda" => BackendType::Cuda,
-            "cpu" | "host" | "host-callable" => BackendType::Cpu,
+            "cpu" => BackendType::Cpu,
             other => anyhow::bail!(
                 "Unknown GOLDY_BACKEND value '{}'. Valid options: vulkan, dx12, metal, webgpu, cuda, cpu",
                 other
