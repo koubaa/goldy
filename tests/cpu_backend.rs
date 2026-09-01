@@ -8,11 +8,7 @@ use goldy::{
 };
 use std::sync::Arc;
 
-#[test]
-fn scheme_double_u32() {
-    // SAFETY: this integration test is its own process.
-    unsafe { std::env::set_var("GOLDY_BACKEND", "cpu") };
-
+fn run_scheme_double_u32() {
     let instance = Instance::new().expect("instance");
     assert_eq!(instance.backend_type(), goldy::BackendType::Cpu);
     let device = instance
@@ -57,4 +53,19 @@ fn scheme_double_u32() {
     for i in 0..n {
         assert_eq!(out[i], (i as u32) * 2, "index {i}");
     }
+}
+
+#[test]
+fn scheme_double_u32() {
+    // SAFETY: this integration test is its own process.
+    unsafe { std::env::set_var("GOLDY_BACKEND", "cpu") };
+    run_scheme_double_u32();
+}
+
+#[test]
+fn scheme_double_u32_host_access() {
+    // SAFETY: this integration test is its own process.
+    unsafe { std::env::set_var("GOLDY_BACKEND", "cpu") };
+    let _protect = goldy::test_support::HostAccessOverride::force_enabled();
+    run_scheme_double_u32();
 }

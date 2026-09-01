@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- CI coverage for the WebGPU (`wgpu`) backend on Linux (Vulkan/lavapipe), macOS (Metal),
-  and Windows (DX12/WARP), plus clippy for `--features webgpu`.
+- **`GOLDY_VALIDATION=host_access`** — page-protect CPU-backend parcel storage
+  (page-aligned, unshared mapping + guard page). Stray host pointers fault
+  outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.
+  First slice; native mapped staging can use the same allocator later.
 
 ### Fixed
 

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::cpu_shaders::{compile_shader, CpuComputeKernel, CpuHostBufferView, CpuParamSlot};
+use crate::host_access::GuardedPages;
 use crate::slang::compiler::SlangCompiler;
 use crate::types::{BufferFlags, BufferKind, DeviceType, ResourceAccess, ResourceCategory};
 use anyhow::{Context, Result};
@@ -64,11 +65,67 @@ impl crate::backend::ContextGpuProgress for CpuContextGpuProgress {
     }
 }
 
+enum HostStorage {
+    Heap(Vec<u8>),
+    Guarded(GuardedPages),
+}
+
+impl HostStorage {
+    fn with_len(len: usize, guarded: bool) -> Result<Self> {
+        if guarded {
+            Ok(Self::Guarded(GuardedPages::new(len)?))
+        } else {
+            Ok(Self::Heap(vec![0u8; len]))
+        }
+    }
+
+    fn grant(&self) -> Result<()> {
+        if let Self::Guarded(g) = self {
+            g.grant()?;
+        }
+        Ok(())
+    }
+
+    fn revoke(&self) {
+        if let Self::Guarded(g) = self {
+            g.revoke();
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Heap(v) => v.as_slice(),
+            Self::Guarded(g) => g.as_slice(),
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Heap(v) => v.as_mut_slice(),
+            Self::Guarded(g) => g.as_mut_slice(),
+        }
+    }
+
+    fn resize(&mut self, new_len: usize, preserve: bool) -> Result<()> {
+        match self {
+            Self::Heap(v) => {
+                if preserve {
+                    v.resize(new_len, 0);
+                } else {
+                    *v = vec![0u8; new_len];
+                }
+                Ok(())
+            }
+            Self::Guarded(g) => g.resize(new_len, preserve),
+        }
+    }
+}
+
 struct CpuBuffer {
     device_handle: DeviceHandle,
     size: u64,
     alloc_size: u64,
-    data: Option<Vec<u8>>,
+    data: Option<HostStorage>,
     parent: Option<(BufferHandle, u64)>,
     bindless_index: u32,
     is_withdraw_staging: bool,
@@ -106,6 +163,7 @@ pub(crate) struct CpuBackend {
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     slang: SlangCompiler,
+    protect_host: bool,
 }
 
 impl CpuBackend {
@@ -133,6 +191,7 @@ impl CpuBackend {
             device_retired_floor: HashMap::new(),
             retained_graphs: HashMap::new(),
             slang: SlangCompiler::new().context("CPU backend: failed to load Slang")?,
+            protect_host: crate::validation_env::host_access_validation_enabled(),
         })
     }
 
@@ -234,6 +293,49 @@ impl CpuBackend {
         }
     }
 
+    fn grant_storage(&self, handle: BufferHandle) -> Result<()> {
+        let (root, _, _) = self.resolve_root(handle)?;
+        if let Some(buf) = self.buffers.get(&root) {
+            if let Some(data) = buf.data.as_ref() {
+                data.grant()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn revoke_storage(&self, handle: BufferHandle) {
+        if let Ok((root, _, _)) = self.resolve_root(handle) {
+            if let Some(buf) = self.buffers.get(&root) {
+                if let Some(data) = buf.data.as_ref() {
+                    data.revoke();
+                }
+            }
+        }
+    }
+
+    fn with_cpu_access<R>(&mut self, handles: &[BufferHandle], f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        let mut roots = Vec::new();
+        for &h in handles {
+            let (root, _, _) = self.resolve_root(h)?;
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        for (i, &root) in roots.iter().enumerate() {
+            if let Err(e) = self.grant_storage(root) {
+                for &prev in &roots[..i] {
+                    self.revoke_storage(prev);
+                }
+                return Err(e);
+            }
+        }
+        let result = f(self);
+        for &root in &roots {
+            self.revoke_storage(root);
+        }
+        result
+    }
+
     fn bytes_mut(&mut self, handle: BufferHandle) -> Result<&mut [u8]> {
         let (root, offset, size) = self.resolve_root(handle)?;
         let buf = self
@@ -246,10 +348,11 @@ impl CpuBackend {
             .ok_or_else(|| anyhow::anyhow!("CPU: buffer view has no owned storage"))?;
         let start = offset as usize;
         let end = start + size as usize;
-        if end > data.len() {
+        let slice = data.as_mut_slice();
+        if end > slice.len() {
             anyhow::bail!("CPU: buffer range exceeds allocation");
         }
-        Ok(&mut data[start..end])
+        Ok(&mut slice[start..end])
     }
 
     fn bytes(&self, handle: BufferHandle) -> Result<&[u8]> {
@@ -264,7 +367,7 @@ impl CpuBackend {
             .ok_or_else(|| anyhow::anyhow!("CPU: buffer view has no owned storage"))?;
         let start = offset as usize;
         let end = start + size as usize;
-        Ok(&data[start..end])
+        Ok(&data.as_slice()[start..end])
     }
 
     fn host_view_for_bindless(&mut self, index: u32, stride: u32) -> Result<CpuHostBufferView> {
@@ -308,7 +411,7 @@ impl CpuBackend {
                 device_handle: device,
                 size,
                 alloc_size: cap,
-                data: Some(vec![0u8; cap as usize]),
+                data: Some(HostStorage::with_len(cap as usize, self.protect_host)?),
                 parent: None,
                 bindless_index,
                 is_withdraw_staging,
@@ -325,25 +428,52 @@ impl CpuBackend {
         dst_offset: u64,
         size: u64,
     ) -> Result<()> {
-        let copy_len = size as usize;
-        let src_data = {
-            let src_bytes = self.bytes(src)?;
-            if src_offset.saturating_add(copy_len as u64) > src_bytes.len() as u64 {
-                anyhow::bail!("CPU CopyBuffer: size exceeds src bounds");
+        self.with_cpu_access(&[src, dst], |this| {
+            let copy_len = size as usize;
+            let src_data = {
+                let src_bytes = this.bytes(src)?;
+                if src_offset.saturating_add(copy_len as u64) > src_bytes.len() as u64 {
+                    anyhow::bail!("CPU CopyBuffer: size exceeds src bounds");
+                }
+                let start = src_offset as usize;
+                src_bytes[start..start + copy_len].to_vec()
+            };
+            let dst_bytes = this.bytes_mut(dst)?;
+            if dst_offset.saturating_add(copy_len as u64) > dst_bytes.len() as u64 {
+                anyhow::bail!("CPU CopyBuffer: size exceeds dst bounds");
             }
-            let start = src_offset as usize;
-            src_bytes[start..start + copy_len].to_vec()
-        };
-        let dst_bytes = self.bytes_mut(dst)?;
-        if dst_offset.saturating_add(copy_len as u64) > dst_bytes.len() as u64 {
-            anyhow::bail!("CPU CopyBuffer: size exceeds dst bounds");
-        }
-        let dst_start = dst_offset as usize;
-        dst_bytes[dst_start..dst_start + copy_len].copy_from_slice(&src_data);
-        Ok(())
+            let dst_start = dst_offset as usize;
+            dst_bytes[dst_start..dst_start + copy_len].copy_from_slice(&src_data);
+            Ok(())
+        })
+    }
+
+    fn bindless_handles(&self, indices: &[u32]) -> Result<Vec<BufferHandle>> {
+        indices
+            .iter()
+            .map(|index| {
+                self.bindless_to_buffer
+                    .get(index)
+                    .copied()
+                    .with_context(|| format!("CPU: unknown bindless index {index}"))
+            })
+            .collect()
     }
 
     fn dispatch_kernel(
+        &mut self,
+        pipeline: ComputePipelineHandle,
+        indices: &[u32],
+        user: &[u32],
+        groups: [u32; 3],
+    ) -> Result<()> {
+        let handles = self.bindless_handles(indices)?;
+        self.with_cpu_access(&handles, |this| {
+            this.dispatch_kernel_unguarded(pipeline, indices, user, groups)
+        })
+    }
+
+    fn dispatch_kernel_unguarded(
         &mut self,
         pipeline: ComputePipelineHandle,
         indices: &[u32],
@@ -432,15 +562,19 @@ impl CpuBackend {
                 }
                 GpuCommand::DispatchIndirect { buffer, offset, .. } => {
                     let pipeline = current_pipeline.context("CPU: DispatchIndirect without a compute pipeline")?;
-                    let bytes = self.bytes(*buffer)?;
-                    let start = *offset as usize;
-                    if start + 12 > bytes.len() {
-                        anyhow::bail!("CPU: DispatchIndirect reads past buffer end");
-                    }
-                    let wg_x = u32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap());
-                    let wg_y = u32::from_ne_bytes(bytes[start + 4..start + 8].try_into().unwrap());
-                    let wg_z = u32::from_ne_bytes(bytes[start + 8..start + 12].try_into().unwrap());
-                    self.dispatch_kernel(pipeline, &current_indices, &current_user, [wg_x, wg_y, wg_z])?;
+                    let mut access = vec![*buffer];
+                    access.extend(self.bindless_handles(&current_indices)?);
+                    self.with_cpu_access(&access, |this| {
+                        let bytes = this.bytes(*buffer)?;
+                        let start = *offset as usize;
+                        if start + 12 > bytes.len() {
+                            anyhow::bail!("CPU: DispatchIndirect reads past buffer end");
+                        }
+                        let wg_x = u32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap());
+                        let wg_y = u32::from_ne_bytes(bytes[start + 4..start + 8].try_into().unwrap());
+                        let wg_z = u32::from_ne_bytes(bytes[start + 8..start + 12].try_into().unwrap());
+                        this.dispatch_kernel_unguarded(pipeline, &current_indices, &current_user, [wg_x, wg_y, wg_z])
+                    })?;
                 }
                 GpuCommand::DispatchBatch { arg_data, count, .. } => {
                     let pipeline = current_pipeline.context("CPU: DispatchBatch without a compute pipeline")?;
@@ -777,14 +911,16 @@ impl GpuBackend for CpuBackend {
     }
 
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
-        let bytes = self.bytes_mut(buffer)?;
-        let start = offset as usize;
-        let end = start + data.len();
-        if end > bytes.len() {
-            anyhow::bail!("Write exceeds buffer size");
-        }
-        bytes[start..end].copy_from_slice(data);
-        Ok(())
+        self.with_cpu_access(&[buffer], |this| {
+            let bytes = this.bytes_mut(buffer)?;
+            let start = offset as usize;
+            let end = start + data.len();
+            if end > bytes.len() {
+                anyhow::bail!("Write exceeds buffer size");
+            }
+            bytes[start..end].copy_from_slice(data);
+            Ok(())
+        })
     }
 
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
@@ -799,10 +935,15 @@ impl GpuBackend for CpuBackend {
         if !buf.is_withdraw_staging {
             anyhow::bail!("read_readback_buffer requires a withdraw staging buffer");
         }
-        let src = self.bytes(buffer)?;
-        let len = output.len().min(src.len());
-        output[..len].copy_from_slice(&src[..len]);
-        Ok(())
+        self.grant_storage(buffer)?;
+        let result = (|| {
+            let src = self.bytes(buffer)?;
+            let len = output.len().min(src.len());
+            output[..len].copy_from_slice(&src[..len]);
+            Ok(())
+        })();
+        self.revoke_storage(buffer);
+        result
     }
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
@@ -841,16 +982,18 @@ impl GpuBackend for CpuBackend {
     }
 
     fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
-        let bytes = self.bytes_mut(buffer)?;
-        let clear_size = if size == 0 {
-            bytes.len().saturating_sub(offset as usize)
-        } else {
-            size as usize
-        };
-        let start = offset as usize;
-        let end = (start + clear_size).min(bytes.len());
-        bytes[start..end].fill(0);
-        Ok(())
+        self.with_cpu_access(&[buffer], |this| {
+            let bytes = this.bytes_mut(buffer)?;
+            let clear_size = if size == 0 {
+                bytes.len().saturating_sub(offset as usize)
+            } else {
+                size as usize
+            };
+            let start = offset as usize;
+            let end = (start + clear_size).min(bytes.len());
+            bytes[start..end].fill(0);
+            Ok(())
+        })
     }
 
     fn buffer_size(&self, buffer: BufferHandle) -> u64 {
@@ -940,11 +1083,7 @@ impl GpuBackend for CpuBackend {
         }
         let new_len = new_size as usize;
         let data = buf.data.as_mut().context("CPU: missing owned storage")?;
-        if preserve_contents {
-            data.resize(new_len, 0);
-        } else {
-            *data = vec![0u8; new_len];
-        }
+        data.resize(new_len, preserve_contents)?;
         buf.size = new_size;
         buf.alloc_size = new_size;
         Ok(())
@@ -1314,10 +1453,7 @@ mod tests {
     use crate::{BufferKind, MemoryExchange, NodeAccess, RetainedPool, Scheme, ShaderModule};
     use std::sync::Arc;
 
-    #[test]
-    fn cpu_backend_scheme_double_u32() {
-        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
-        assert_eq!(device.backend_type(), BackendType::Cpu);
+    fn run_double(device: &Device) {
         let ctx = device.create_context().expect("ctx");
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let n = 64usize;
@@ -1336,8 +1472,8 @@ mod tests {
                 }
             }
         "#;
-        let shader = ShaderModule::from_slang(&device, src).expect("compile");
-        let pipeline = crate::ComputePipeline::new(&device, &shader).expect("pipeline");
+        let shader = ShaderModule::from_slang(device, src).expect("compile");
+        let pipeline = crate::ComputePipeline::new(device, &shader).expect("pipeline");
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("double", &pipeline)
@@ -1353,6 +1489,20 @@ mod tests {
         for i in 0..n {
             assert_eq!(out[i], (i as u32) * 2, "index {i}");
         }
+    }
+
+    #[test]
+    fn cpu_backend_scheme_double_u32() {
+        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        assert_eq!(device.backend_type(), BackendType::Cpu);
+        run_double(&device);
+    }
+
+    #[test]
+    fn cpu_backend_scheme_double_u32_host_access() {
+        let _guard = crate::test_support::HostAccessOverride::force_enabled();
+        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        run_double(&device);
     }
 
     #[test]

@@ -15,7 +15,8 @@
 //!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
 //!   - `scheme` / `readback` — retained-scheme withdraw staging invariants (staging pool, frame pairing)
-//!   - `all` — layout, GPU API, timeline, and scheme
+//!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
+//!   - `all` — layout, GPU API, timeline, scheme, and host_access
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
@@ -32,6 +33,7 @@ struct ParsedValidation {
     gpu_api: bool,
     timeline: bool,
     scheme: bool,
+    host_access: bool,
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -71,11 +73,13 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                     out.gpu_api = true;
                     out.timeline = true;
                     out.scheme = true;
+                    out.host_access = true;
                 }
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
                 "timeline" => out.timeline = true,
                 "scheme" | "readback" => out.scheme = true,
+                "host_access" | "host-access" => out.host_access = true,
                 _ => {}
             }
         }
@@ -125,6 +129,17 @@ pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
 }
 
+/// Page-protect CPU-visible GPU copies so stray host pointers fault.
+///
+/// First slice: CPU-backend parcel storage. Native mapped staging can grow into this later.
+#[must_use]
+pub(crate) fn host_access_validation_enabled() -> bool {
+    if let Some(v) = TEST_HOST_ACCESS_OVERRIDE.with(|c| c.get()) {
+        return v;
+    }
+    from_goldy_validation_var().host_access
+}
+
 use std::cell::Cell;
 
 // Thread-local override for `retained_cb_reuse_disabled`. When `Some`, takes precedence
@@ -133,6 +148,7 @@ use std::cell::Cell;
 // via [`crate::test_support::CbReuseOverride`].
 thread_local! {
     static TEST_CB_REUSE_DISABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_HOST_ACCESS_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 /// Install a thread-local override for CB reuse (see [`retained_cb_reuse_disabled`]).
@@ -147,6 +163,18 @@ pub fn set_cb_reuse_override(disabled: bool) {
 #[doc(hidden)]
 pub fn clear_cb_reuse_override() {
     TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.set(None));
+}
+
+/// Install a thread-local override for [`host_access_validation_enabled`].
+#[doc(hidden)]
+pub fn set_host_access_override(enabled: bool) {
+    TEST_HOST_ACCESS_OVERRIDE.with(|c| c.set(Some(enabled)));
+}
+
+/// Clear the override installed by [`set_host_access_override`].
+#[doc(hidden)]
+pub fn clear_host_access_override() {
+    TEST_HOST_ACCESS_OVERRIDE.with(|c| c.set(None));
 }
 
 /// When true, disable the CB-retention facility entirely (not merely skip resubmit hits).
@@ -186,6 +214,7 @@ mod tests {
         assert!(p.gpu_api);
         assert!(p.timeline);
         assert!(p.scheme);
+        assert!(p.host_access);
 
         let p = parse_validation_list("timeline");
         assert!(!p.layout);
@@ -199,8 +228,9 @@ mod tests {
         assert!(!p.timeline);
         assert!(p.scheme);
 
-        let p = parse_validation_list("readback");
-        assert!(p.scheme);
+        let p = parse_validation_list("host_access");
+        assert!(p.host_access);
+        assert!(!p.gpu_api);
 
         let p = parse_validation_list("api; api");
         assert!(!p.layout);

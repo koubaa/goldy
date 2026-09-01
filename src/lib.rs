@@ -37,6 +37,7 @@ pub mod texture;
 pub mod types;
 
 pub mod cpu_shaders;
+pub(crate) mod host_access;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
 pub mod slang;
@@ -518,6 +519,24 @@ pub mod test_support {
     impl Drop for CbReuseOverride {
         fn drop(&mut self) {
             crate::validation_env::clear_cb_reuse_override();
+        }
+    }
+
+    /// Thread-local pin for `GOLDY_VALIDATION=host_access`.
+    pub struct HostAccessOverride {
+        _private: (),
+    }
+
+    impl HostAccessOverride {
+        pub fn force_enabled() -> Self {
+            crate::validation_env::set_host_access_override(true);
+            Self { _private: () }
+        }
+    }
+
+    impl Drop for HostAccessOverride {
+        fn drop(&mut self) {
+            crate::validation_env::clear_host_access_override();
         }
     }
 }
