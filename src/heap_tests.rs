@@ -340,6 +340,69 @@ mod heap_tests {
         );
     }
 
+    /// Overflow created by a live burst must compact all the way to zero once those
+    /// buffers are dropped and subsequent frames fit the primary heap.
+    ///
+    /// [`steady_state_overflow_stays_bounded`] only asserts overflow does not grow;
+    /// this test forces overflow first so compact-to-zero is actually exercised.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn steady_state_overflow_compacts_to_zero() {
+        let device = make_device();
+        let ctx = submission_context(&device);
+        let primary = device.buffer_heap_stats().unwrap().primary_heap_bytes;
+
+        let burst_size = 32 * 1024 * 1024u64;
+        let burst: Vec<Allocation> = (0..3)
+            .map(|_| {
+                device
+                    .alloc_buffer(burst_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    .expect("burst alloc to force overflow")
+            })
+            .collect();
+        let overflow_during = device.buffer_heap_stats().unwrap().overflow_count;
+        assert!(
+            overflow_during > 0,
+            "3×32MiB live buffers should overflow primary heap ({primary} bytes)"
+        );
+        drop(burst);
+
+        let tv = scheme_submit_pipelined(&ctx);
+        ctx.wait_until(tv).unwrap();
+        ctx.flush_deferred_deletions();
+        device.compact_overflow_heaps();
+
+        let steady_size = 1024 * 1024u64;
+        assert!(
+            steady_size * 3 < primary,
+            "steady frame footprint must fit the primary heap"
+        );
+        for frame in 0..20 {
+            let buffers: Vec<Allocation> = (0..3)
+                .map(|_| {
+                    device
+                        .alloc_buffer(steady_size, BufferKind::Scattered, None, BufferFlags::empty())
+                        .unwrap_or_else(|e| panic!("steady frame {frame}: {e}"))
+                })
+                .collect();
+            let tv = scheme_submit_pipelined(&ctx);
+            let mut payload = crate::DeferredPayload::new();
+            for b in buffers {
+                payload.push(b);
+            }
+            ctx.defer_release(tv, payload);
+            ctx.wait_until(tv).unwrap();
+            ctx.flush_deferred_deletions();
+            device.compact_overflow_heaps();
+        }
+
+        let overflow_after = device.buffer_heap_stats().unwrap().overflow_count;
+        assert_eq!(
+            overflow_after, 0,
+            "empty overflow heaps must compact to zero after steady-state reclaim"
+        );
+    }
+
     // ===========================================================================
     // Texture heap self-regulation
     // ===========================================================================
@@ -662,7 +725,6 @@ mod heap_tests {
     }
 
     #[test]
-    #[ignore = "archive reclamation at dispatch boundaries not wired correctly (gpu_progress stale)"]
     fn rapid_submit_large_buffers_50_frames() {
         let device = make_device();
         let ctx = submission_context(&device);
