@@ -53,8 +53,8 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
             eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
             return;
         }
-        if device.backend_type() == BackendType::WebGpu {
-            eprintln!("skip: WebGPU has no ray-tracing pipeline / SBT recording");
+        if matches!(device.backend_type(), BackendType::WebGpu | BackendType::Metal) {
+            eprintln!("skip: ray-tracing pipelines / SBT recording are Vulkan and DX12 only");
             return;
         }
         let ctx = submission_context(&device);

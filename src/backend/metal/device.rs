@@ -73,7 +73,8 @@ pub(super) fn adapter_capabilities(
         let device = &entry.device;
         let rt = device.supports_raytracing();
         caps.ray_query = rt;
-        caps.ray_tracing_pipelines = rt;
+        // Metal has no SBT / TraceRays; inline RayQuery is the RT path.
+        caps.ray_tracing_pipelines = false;
         let mesh = device.supports_family(mtl::MTLGPUFamily::Apple7)
             || device.supports_family(mtl::MTLGPUFamily::Mac2)
             || device.supports_family(mtl::MTLGPUFamily::Metal3);

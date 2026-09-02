@@ -447,7 +447,7 @@ pub struct DeviceCapabilities {
     pub ray_query: bool,
 
     /// Adapter exposes ray-tracing pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`,
-    /// DXR tier 1.0+, Metal ray tracing).
+    /// DXR tier 1.0+). Metal reports this as `false` (use [`Self::ray_query`] instead).
     ///
     /// When `true`, [`crate::RayTracingPipeline`] and [`crate::Scheme::trace_rays`] are available.
     pub ray_tracing_pipelines: bool,
@@ -456,7 +456,7 @@ pub struct DeviceCapabilities {
     /// tier 1, Metal Apple7 / Mac2 / Metal3).
     ///
     /// When `true`, [`crate::MeshPipeline`] and [`crate::SchemeRenderPassBuilder::dispatch_mesh`]
-    /// are available on Vulkan and DX12.
+    /// are available on Vulkan, DX12, and Metal.
     pub mesh_shaders: bool,
 
     /// Adapter exposes amplification / task / object shaders with mesh shaders.

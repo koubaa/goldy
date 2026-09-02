@@ -1429,6 +1429,12 @@ pub(crate) struct PipelineState {
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
+    /// Mesh (+ optional object) pipeline created from [`MTLMeshRenderPipelineDescriptor`].
+    pub is_mesh: bool,
+    /// `threadsPerObjectThreadgroup` for [`draw_mesh_threadgroups`] (`0,0,0` if no object shader).
+    pub object_threadgroup: mtl::MTLSize,
+    /// `threadsPerMeshThreadgroup` from `[numthreads]` on the mesh entry.
+    pub mesh_threadgroup: mtl::MTLSize,
 }
 
 /// Compute pipeline state.

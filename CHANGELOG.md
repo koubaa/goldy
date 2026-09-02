@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`MeshPipeline` / `dispatch_mesh`** — mesh (+ optional amplification) graphics
-  pipelines on Vulkan (`VK_EXT_mesh_shader`) and DX12 (mesh tier 1). Record with
+  pipelines on Vulkan (`VK_EXT_mesh_shader`), DX12 (mesh tier 1), and Metal
+  (`MTLMeshRenderPipelineDescriptor` / `drawMeshThreadgroups`). Record with
   `SchemeRenderPassBuilder::set_mesh_pipeline` and `dispatch_mesh`. Skip when
-  `DeviceCapabilities::mesh_shaders` is false. Metal / WebGPU / CUDA are not wired yet.
+  `DeviceCapabilities::mesh_shaders` is false. WebGPU / CUDA are not wired.
 
 - **`DeviceCapabilities` RT / mesh bits** — `ray_query`, `ray_tracing_pipelines`,
   `mesh_shaders`, and `amplification_shaders` report adapter hardware (Vulkan
@@ -25,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closest-hit group with a backend-owned shader-binding table. Vulkan
   `vkCmdTraceRaysKHR` and DX12 `DispatchRays` (DIRECT queue). Bind raygen
   resources like compute (`Accel`, `Scattered`, `DispatchRaysIndex`). Skip when
-  `DeviceCapabilities::ray_tracing_pipelines` is false.
+  `DeviceCapabilities::ray_tracing_pipelines` is false. Metal exposes
+  `ray_query` only (no SBT / `TraceRays`).
 
 - **`GOLDY_VALIDATION=host_access`** — page-protect CPU-backend parcel storage
   (page-aligned, unshared mapping + guard page). Stray host pointers fault

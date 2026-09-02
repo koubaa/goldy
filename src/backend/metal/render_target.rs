@@ -111,33 +111,14 @@ pub(super) fn render_to(
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(render_pass);
 
-    let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-    logical_device
-        .heap_allocator
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    logical_device
-        .texture_heap
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == render_target.device_handle {
-            encoder.use_resource_at(
-                &buf_state.buffer,
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-                render_stages,
-            );
-        }
-    }
-    {
-        let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
-    }
-
-    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
-    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
+    let is_mesh = super::render_commands::commands_use_mesh(commands);
+    super::render_commands::declare_pass_resources(
+        encoder,
+        logical_device,
+        &state.buffers,
+        render_target.device_handle,
+        is_mesh,
+    );
 
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,

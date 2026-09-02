@@ -77,11 +77,11 @@ Query them on `Adapter::capabilities()` / `Device::capabilities()` (`DeviceCapab
 | Flag | Meaning |
 |------|---------|
 | `ray_query` | Inline ray queries (Vulkan `VK_KHR_ray_query`, DXR 1.1, Metal `supportsRaytracing`) |
-| `ray_tracing_pipelines` | RT pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`, DXR 1.0+, Metal RT) |
+| `ray_tracing_pipelines` | RT pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`, DXR 1.0+). Metal reports false — use `ray_query`. |
 | `mesh_shaders` | Mesh shaders (Vulkan `VK_EXT_mesh_shader`, DX12 mesh tier 1, Metal Apple7 / Mac2 / Metal3) |
 | `amplification_shaders` | Task / amplification / object shaders with mesh |
 
-These bits report **adapter hardware**. Inline `RayQuery` (`[goldy_compute]`), ray-tracing pipelines (`RayTracingPipeline` + `Scheme::trace_rays`), and mesh draws (`MeshPipeline` + `dispatch_mesh`) record on Vulkan and DX12 when the matching bit is set.
+These bits report **adapter hardware**. Inline `RayQuery` (`[goldy_compute]`) records on Vulkan, DX12, and Metal when `ray_query` is set. Ray-tracing pipelines (`RayTracingPipeline` + `Scheme::trace_rays`) record on Vulkan and DX12. Mesh draws (`MeshPipeline` + `dispatch_mesh`) record on Vulkan, DX12, and Metal when `mesh_shaders` is set.
 
 ## Additional Backends
 

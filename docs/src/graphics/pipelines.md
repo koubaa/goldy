@@ -183,7 +183,7 @@ impl Renderer {
 
 `MeshPipeline` replaces the vertex stage with a mesh shader (`[goldy_mesh]` / `mesh_main`) and a fragment shader. Amplification / task shaders are optional (`[goldy_amplification]` / `amp_main`) when `DeviceCapabilities::amplification_shaders` is set.
 
-Create the pipeline only when `device.capabilities().mesh_shaders` is true. Record with `set_mesh_pipeline` and `dispatch_mesh` instead of `draw`. Vulkan and DX12 implement this; Metal is not wired yet.
+Create the pipeline only when `device.capabilities().mesh_shaders` is true. Record with `set_mesh_pipeline` and `dispatch_mesh` instead of `draw`. Vulkan, DX12, and Metal implement this.
 
 ```rust
 let pipeline = MeshPipeline::new(&device, &MeshPipelineDesc {

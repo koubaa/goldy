@@ -66,9 +66,9 @@ float4 fs_main(FsIn input) : SV_Target {
             return;
         }
         match device.backend_type() {
-            BackendType::Vulkan | BackendType::Dx12 => {}
+            BackendType::Vulkan | BackendType::Dx12 | BackendType::Metal => {}
             other => {
-                eprintln!("skip: mesh pipelines are Vulkan/DX12 only (backend={other:?})");
+                eprintln!("skip: mesh pipelines are Vulkan/DX12/Metal only (backend={other:?})");
                 return;
             }
         }

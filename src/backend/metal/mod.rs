@@ -647,6 +647,29 @@ impl GpuBackend for MetalBackend {
         pipeline::destroy(&mut self.state, pipeline);
     }
 
+    fn create_mesh_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("mesh_pipeline#{}", desc.mesh));
+        pipeline::create_mesh(
+            &mut self.state,
+            device,
+            desc.mesh,
+            desc.fragment,
+            desc.amplification,
+            raster,
+            depth_stencil,
+            shader_debug_name,
+        )
+    }
+
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
