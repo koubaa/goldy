@@ -1043,6 +1043,46 @@ impl GpuBackend for VulkanBackend {
         Ok(handle)
     }
 
+    fn create_mesh_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        let mesh_module = self.ensure_shader_stage_compiled(desc.mesh, crate::slang::SlangStage::Mesh)?;
+        let fs_module = self.ensure_shader_stage_compiled(desc.fragment, crate::slang::SlangStage::Fragment)?;
+        let task_module = match desc.amplification {
+            Some(h) => Some(self.ensure_shader_stage_compiled(h, crate::slang::SlangStage::Amplification)?),
+            None => None,
+        };
+        let (cats, strides) = render_reflection_data(
+            &self.state.shaders.read().unwrap().entries,
+            desc.mesh,
+            desc.fragment,
+        );
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("mesh_pipeline#{}", desc.mesh));
+        let handle = pipeline::create_mesh(
+            &self.state.devices,
+            &self.state.pipelines,
+            device_handle,
+            mesh_module,
+            fs_module,
+            task_module,
+            raster,
+            depth_stencil,
+            shader_debug_name,
+        )?;
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
+        }
+        Ok(handle)
+    }
+
     fn create_render_target_with_depth(
         &mut self,
         device_handle: DeviceHandle,

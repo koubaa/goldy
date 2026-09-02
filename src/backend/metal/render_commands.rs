@@ -138,6 +138,9 @@ pub(super) fn record(
                     }
                 }
             }
+            RenderCommand::DispatchMesh { .. } => {
+                anyhow::bail!("mesh shaders are not supported on the Metal backend yet");
+            }
         }
     }
     Ok(())

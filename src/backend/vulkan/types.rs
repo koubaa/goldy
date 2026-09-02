@@ -919,6 +919,8 @@ pub(crate) struct LogicalDevice {
     pub ray_tracing_pipelines: bool,
     pub accel_khr: Option<ash::khr::acceleration_structure::Device>,
     pub rtp_khr: Option<ash::khr::ray_tracing_pipeline::Device>,
+    pub mesh_shaders: bool,
+    pub mesh_ext: Option<ash::ext::mesh_shader::Device>,
     pub rt_shader_group_handle_size: u32,
     pub rt_shader_group_handle_alignment: u32,
     pub rt_shader_group_base_alignment: u32,
@@ -1265,6 +1267,8 @@ pub(crate) struct PipelineState {
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
     pub shader_debug_name: String,
+    /// True when this PSO is mesh (+ optional task) rather than vertex/fragment.
+    pub is_mesh: bool,
 }
 
 /// Compute pipeline state.

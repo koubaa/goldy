@@ -455,12 +455,13 @@ pub struct DeviceCapabilities {
     /// Adapter exposes mesh shaders (Vulkan `VK_EXT_mesh_shader`, DX12 mesh-shader
     /// tier 1, Metal Apple7 / Mac2 / Metal3).
     ///
-    /// Hardware only — Goldy does not yet create mesh pipelines.
+    /// When `true`, [`crate::MeshPipeline`] and [`crate::SchemeRenderPassBuilder::dispatch_mesh`]
+    /// are available on Vulkan and DX12.
     pub mesh_shaders: bool,
 
     /// Adapter exposes amplification / task / object shaders with mesh shaders.
     ///
-    /// Hardware only — Goldy does not yet create amplification pipelines.
+    /// When `true`, [`crate::MeshPipelineDesc::amplification`] may be set.
     pub amplification_shaders: bool,
 }
 

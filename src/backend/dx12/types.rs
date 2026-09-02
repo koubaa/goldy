@@ -1471,6 +1471,8 @@ pub(crate) struct PipelineState {
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
+    /// True when this PSO is mesh (+ optional amplification) rather than VS/PS.
+    pub is_mesh: bool,
 }
 
 /// Compute pipeline state.

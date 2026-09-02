@@ -647,6 +647,8 @@ impl GpuBackend for MockBackend {
         crate::device::DeviceCapabilities {
             host_sidecar_on_submit_worker: true,
             fuse_upload_with_compute_partitions: self.fuse_upload_with_compute_partitions,
+            mesh_shaders: true,
+            amplification_shaders: true,
             ..crate::device::DeviceCapabilities::default()
         }
     }
@@ -1189,6 +1191,25 @@ impl GpuBackend for MockBackend {
             vertex_layout,
             topology,
             target_format,
+        )
+    }
+
+    #[cfg(feature = "graphics")]
+    fn create_mesh_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        _depth_stencil: Option<&DepthStencilState>,
+        _debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        self.create_pipeline(
+            device,
+            desc.mesh,
+            desc.fragment,
+            raster.vertex_layout,
+            raster.topology,
+            raster.target_format,
         )
     }
 

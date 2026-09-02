@@ -68,6 +68,9 @@ pass.set_index_buffer(&indices, IndexFormat::Uint16);
 pass.draw(0..3, 0..1);              // non-indexed: vertex range, instance range
 pass.draw_indexed(0..6, 0..1);      // indexed: index range, instance range
 pass.draw_fullscreen();             // shorthand for draw(0..3, 0..1)
+
+pass.set_mesh_pipeline(&mesh_pipeline);
+pass.dispatch_mesh(1, 1, 1);        // mesh workgroups (Vulkan / DX12)
 ```
 
 `set_pipeline` binds a [`RenderPipeline`](pipelines.md) and, if any parcels were declared with `with_parcel` beforehand, resolves and binds their bindless handles for that pipeline's typed shader parameters. Calling `set_pipeline` again mid-pass starts a new binding scope for subsequent draws — declare each draw's parcels right before the `set_pipeline` call that will consume them.

@@ -7,6 +7,7 @@ use super::super::shared;
 use super::types::{self, PushLayout};
 use super::utils::index_format_to_vk;
 use super::{BufferHandle, PipelineHandle, RenderCommand};
+use anyhow::Context;
 use ash::vk;
 
 /// Record render commands into a command buffer.
@@ -140,6 +141,13 @@ pub(super) fn record(
                     *first_instance,
                 );
             },
+            RenderCommand::DispatchMesh { x, y, z } => {
+                let mesh = logical_device
+                    .mesh_ext
+                    .as_ref()
+                    .context("DispatchMesh: VK_EXT_mesh_shader was not enabled")?;
+                unsafe { mesh.cmd_draw_mesh_tasks(cmd, *x, *y, *z) };
+            }
         }
     }
     Ok(())

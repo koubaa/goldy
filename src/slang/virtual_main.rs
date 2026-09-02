@@ -69,6 +69,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
                 name: p.name.clone(),
                 ty,
                 kind,
+                qualifier: String::new(),
+                array_suffix: String::new(),
             })
         })
         .collect();
@@ -78,6 +80,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
             name: "_goldy_gid".into(),
             ty: "ThreadId".into(),
             kind: ParamKind::SystemValue(SvKind::DispatchThreadId),
+            qualifier: String::new(),
+            array_suffix: String::new(),
         }));
     }
     if def.builtins.local_id {
@@ -85,6 +89,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
             name: "_goldy_lid".into(),
             ty: "GroupThreadId".into(),
             kind: ParamKind::SystemValue(SvKind::GroupThreadId),
+            qualifier: String::new(),
+            array_suffix: String::new(),
         }));
     }
     if def.builtins.workgroup_id {
@@ -92,6 +98,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
             name: "_goldy_wid".into(),
             ty: "GroupId".into(),
             kind: ParamKind::SystemValue(SvKind::GroupId),
+            qualifier: String::new(),
+            array_suffix: String::new(),
         }));
     }
 
@@ -103,8 +111,10 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
         return_semantic: None,
         params,
         numthreads: Some((x, y, z)),
+        outputtopology: None,
         goldy_attr_range: 0..0,
         numthreads_attr_range: None,
+        outputtopology_attr_range: None,
         fn_name_range: 0..0,
         return_semantic_range: None,
     }
@@ -566,8 +576,11 @@ pub fn transform_virtual_main_cpu(source: &str) -> Result<String, String> {
     let has_rt = source.contains("[goldy_raygen]")
         || source.contains("[goldy_miss]")
         || source.contains("[goldy_closesthit]");
-    if has_graphics || has_rt {
-        return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt)".into());
+    let has_mesh = source.contains("[goldy_mesh]") || source.contains("[goldy_amplification]");
+    if has_graphics || has_rt || has_mesh {
+        return Err(
+            "CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt/mesh)".into(),
+        );
     }
     if !has_compute {
         return Ok(source.to_string());
@@ -1855,8 +1868,9 @@ fn fn_param_list_contains_offset(source: &str, fn_start: usize, offset: usize) -
 /// Slang translation-unit source after the optional virtual-main rewrite.
 ///
 /// This matches the compiler gate: [`transform_virtual_main`] runs only when `source`
-/// contains `[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]`, or RT `[goldy_ray*]`
-/// as substrings (the same [`str::contains`] checks previously used before calling Slang).
+/// contains `[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]`, RT `[goldy_ray*]`,
+/// or mesh `[goldy_mesh]` / `[goldy_amplification]` as substrings (the same
+/// [`str::contains`] checks previously used before calling Slang).
 ///
 /// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
 /// use this so the hashed text matches the compiled text.
@@ -1871,7 +1885,8 @@ pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
         || source.contains("[goldy_closesthit]")
         || source.contains("[goldy_anyhit]")
         || source.contains("[goldy_intersection]");
-    if has_compute || has_graphics_stage || has_rt {
+    let has_mesh = source.contains("[goldy_mesh]") || source.contains("[goldy_amplification]");
+    if has_compute || has_graphics_stage || has_rt || has_mesh {
         Cow::Owned(transform_virtual_main(source))
     } else {
         Cow::Borrowed(source)
@@ -1893,6 +1908,8 @@ pub enum Stage {
     ClosestHit,
     AnyHit,
     Intersection,
+    Mesh,
+    Amplification,
 }
 
 impl Stage {
@@ -1906,11 +1923,16 @@ impl Stage {
             Stage::ClosestHit => r#"[shader("closesthit")]"#,
             Stage::AnyHit => r#"[shader("anyhit")]"#,
             Stage::Intersection => r#"[shader("intersection")]"#,
+            Stage::Mesh => r#"[shader("mesh")]"#,
+            Stage::Amplification => r#"[shader("amplification")]"#,
         }
     }
 
     fn bindless_like_compute(self) -> bool {
-        matches!(self, Stage::Compute | Stage::RayGeneration)
+        matches!(
+            self,
+            Stage::Compute | Stage::RayGeneration | Stage::Mesh | Stage::Amplification
+        )
     }
 
     fn payload_inout(self) -> bool {
@@ -2004,6 +2026,10 @@ pub struct Param {
     pub ty: String,
     /// Classified kind.
     pub kind: ParamKind,
+    /// `in` / `out` / `inout` qualifier, when present (mesh `out vertices` / `in payload`).
+    pub qualifier: String,
+    /// Array declarator on the name, e.g. `"[3]"` in `verts[3]`.
+    pub array_suffix: String,
 }
 
 /// A parameter item in a `[goldy_*]` entry-point signature.
@@ -2035,14 +2061,18 @@ pub struct EntryDef {
     /// Return semantic (e.g., `"SV_Target"`) — fragment only.
     pub return_semantic: Option<String>,
     pub params: Vec<ParamItem>,
-    /// `[numthreads(X, Y, Z)]` if present (compute only).
+    /// `[numthreads(X, Y, Z)]` if present (compute / mesh / amplification).
     pub numthreads: Option<(u32, u32, u32)>,
+    /// `[outputtopology("triangle")]` payload, if present (mesh).
+    pub outputtopology: Option<String>,
 
     // Byte ranges in the *original* source for the apply_transforms step.
     /// The `[goldy_*]` attribute span (including brackets).
     pub goldy_attr_range: Range<usize>,
     /// The `[numthreads(...)]` span, if found adjacent to the entry.
     pub numthreads_attr_range: Option<Range<usize>>,
+    /// The `[outputtopology(...)]` span, if found adjacent to the entry.
+    pub outputtopology_attr_range: Option<Range<usize>>,
     /// The span of just the function name (e.g., `"cs_main"`).
     pub fn_name_range: Range<usize>,
     /// The `: SV_Target` span in the user function declaration (fragment only).
@@ -2064,6 +2094,8 @@ const GOLDY_STAGES: &[(&str, Stage)] = &[
     ("goldy_closesthit", Stage::ClosestHit),
     ("goldy_anyhit", Stage::AnyHit),
     ("goldy_intersection", Stage::Intersection),
+    ("goldy_mesh", Stage::Mesh),
+    ("goldy_amplification", Stage::Amplification),
 ];
 
 /// Find all `[goldy_*]` entry points in `source`, sorted by position.
@@ -2125,6 +2157,8 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
     let mut pos = attr_end;
     let mut numthreads_attr_range: Option<Range<usize>> = None;
     let mut numthreads: Option<(u32, u32, u32)> = None;
+    let mut outputtopology_attr_range: Option<Range<usize>> = None;
+    let mut outputtopology: Option<String> = None;
 
     // Scan forward through any attributes that follow [goldy_*].
     loop {
@@ -2140,6 +2174,12 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
                     numthreads_attr_range = Some(pos..bracket_end);
                 }
             }
+            if trimmed.starts_with("outputtopology") {
+                if let Some(topo) = parse_outputtopology(trimmed) {
+                    outputtopology = Some(topo);
+                    outputtopology_attr_range = Some(pos..bracket_end);
+                }
+            }
             // Skip [shader("...")] — it will be replaced by our generated one.
             pos = bracket_end;
         } else {
@@ -2152,6 +2192,12 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
         if let Some((nt, nt_range)) = find_numthreads_in_range(source, group_start, attr_start) {
             numthreads = Some(nt);
             numthreads_attr_range = Some(nt_range);
+        }
+    }
+    if outputtopology.is_none() {
+        if let Some((topo, range)) = find_outputtopology_in_range(source, group_start, attr_start) {
+            outputtopology = Some(topo);
+            outputtopology_attr_range = Some(range);
         }
     }
 
@@ -2206,8 +2252,10 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
         return_semantic,
         params,
         numthreads,
+        outputtopology,
         goldy_attr_range: attr_start..attr_end,
         numthreads_attr_range,
+        outputtopology_attr_range,
         fn_name_range: fn_name_start..fn_name_end,
         return_semantic_range,
     })
@@ -2370,21 +2418,21 @@ fn parse_single_param(s: &str) -> Option<Param> {
     }
 
     // Skip `uniform` / `inout` / `in` / `out` keywords.
-    let s = if let Some(rest) = s.strip_prefix("uniform") {
-        rest.trim_start()
-    } else if let Some(rest) = s.strip_prefix("inout") {
-        rest.trim_start()
+    let (qualifier, s) = if let Some(rest) = s.strip_prefix("inout") {
+        ("inout", rest.trim_start())
     } else if let Some(rest) = s.strip_prefix("out") {
-        rest.trim_start()
+        ("out", rest.trim_start())
     } else if let Some(rest) = s.strip_prefix("in") {
         // Avoid stripping `int` / `Interpolated`.
         if rest.starts_with(|c: char| c.is_whitespace()) {
-            rest.trim_start()
+            ("in", rest.trim_start())
         } else {
-            s
+            ("", s)
         }
+    } else if let Some(rest) = s.strip_prefix("uniform") {
+        ("", rest.trim_start())
     } else {
-        s
+        ("", s)
     };
 
     // Find the split point between type and name: the last "whitespace gap"
@@ -2403,7 +2451,7 @@ fn parse_single_param(s: &str) -> Option<Param> {
         }
     }
 
-    let (ty_str, name) = if let Some(sp) = last_space {
+    let (ty_str, raw_name) = if let Some(sp) = last_space {
         let ty = s[..sp].trim();
         let name = s[sp + 1..].trim();
         // If name contains spaces it likely has a : SV_ annotation (old-style param).
@@ -2415,8 +2463,24 @@ fn parse_single_param(s: &str) -> Option<Param> {
         (s.to_string(), String::new())
     };
 
+    let (name, array_suffix) = split_array_suffix(&raw_name);
+
     let kind = classify_type(&ty_str);
-    Some(Param { name, ty: ty_str, kind })
+    Some(Param {
+        name,
+        ty: ty_str,
+        kind,
+        qualifier: qualifier.to_string(),
+        array_suffix,
+    })
+}
+
+fn split_array_suffix(name: &str) -> (String, String) {
+    if let Some(i) = name.find('[') {
+        (name[..i].to_string(), name[i..].to_string())
+    } else {
+        (name.to_string(), String::new())
+    }
 }
 
 /// Build the RHS initialiser expression for a resource parameter.
@@ -2496,12 +2560,14 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
                 None
             }
         }
-        Stage::Compute | Stage::RayGeneration => None,
+        Stage::Compute | Stage::RayGeneration | Stage::Mesh | Stage::Amplification => None,
     };
 
     for (i, item) in params.iter_mut().enumerate() {
         match item {
-            ParamItem::Single(p) if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx => {
+            ParamItem::Single(p)
+                if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx && !is_mesh_io_type(&p.ty) =>
+            {
                 p.kind = ParamKind::Broadcast;
             }
             ParamItem::Conditional {
@@ -2511,7 +2577,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
             } => {
                 // Conditional blocks never contain stage inputs — all PassThrough → Broadcast.
                 for p in then_params.iter_mut().chain(else_params.iter_mut()) {
-                    if p.kind == ParamKind::PassThrough {
+                    if p.kind == ParamKind::PassThrough && !is_mesh_io_type(&p.ty) {
                         p.kind = ParamKind::Broadcast;
                     }
                 }
@@ -2548,6 +2614,9 @@ fn classify_type(ty: &str) -> ParamKind {
     }
     if ty == "Accel" {
         return ParamKind::Resource;
+    }
+    if is_mesh_io_type(ty) {
+        return ParamKind::PassThrough;
     }
 
     // System-value types.
@@ -2726,14 +2795,25 @@ impl WrapperBuilder {
                 self.push_call(&param.name);
             }
             ParamKind::PassThrough => {
-                let gn = format!("_pt{}", *pt_idx);
-                *pt_idx += 1;
-                if self.payload_inout {
-                    self.push_sig(&format!("inout {} {}", param.ty, gn));
+                if is_mesh_io_type(&param.ty) {
+                    let qual = if param.qualifier.is_empty() {
+                        "out"
+                    } else {
+                        param.qualifier.as_str()
+                    };
+                    let decl = format!("{}{}", param.name, param.array_suffix);
+                    self.push_sig(&format!("{} {} {}", qual, param.ty, decl));
+                    self.push_call(&param.name);
                 } else {
-                    self.push_sig(&format!("{} {}", param.ty, gn));
+                    let gn = format!("_pt{}", *pt_idx);
+                    *pt_idx += 1;
+                    if self.payload_inout {
+                        self.push_sig(&format!("inout {} {}", param.ty, gn));
+                    } else {
+                        self.push_sig(&format!("{} {}", param.ty, gn));
+                    }
+                    self.push_call(&gn);
                 }
-                self.push_call(&gn);
             }
         }
     }
@@ -2848,12 +2928,15 @@ fn emit_wrapper(entry: &EntryDef) -> String {
     out.push_str(entry.stage.shader_attr());
     out.push('\n');
 
-    // Transfer [numthreads] for compute.
+    // Transfer [numthreads] for compute / mesh / amplification.
     if let Some((x, y, z)) = entry.numthreads {
         out.push_str(&format!("[numthreads({}, {}, {})]\n", x, y, z));
     }
+    if let Some(ref topo) = entry.outputtopology {
+        out.push_str(&format!("[outputtopology(\"{topo}\")]\n"));
+    }
 
-    let user_fn_name = format!("_goldy_user_{}", entry.fn_name);
+    let user_fn_name = goldy_callee_name(entry);
 
     let mut bindless_idx = 0u32;
     let mut user_idx = 0u32;
@@ -2929,6 +3012,14 @@ fn emit_wrapper(entry: &EntryDef) -> String {
     out
 }
 
+fn goldy_callee_name(entry: &EntryDef) -> String {
+    match entry.stage {
+        Stage::Mesh => "goldy_mesh".into(),
+        Stage::Amplification => "goldy_amplification".into(),
+        _ => format!("_goldy_user_{}", entry.fn_name),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source modification
 // ---------------------------------------------------------------------------
@@ -2945,7 +3036,7 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
     }
 
     // 2. Rename the function name.
-    let new_fn_name = format!("_goldy_user_{}", entry.fn_name);
+    let new_fn_name = goldy_callee_name(entry);
     replacements.push((
         entry.fn_name_range.start,
         entry.fn_name_range.end,
@@ -2953,18 +3044,29 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
         Box::leak(new_fn_name.into_boxed_str()),
     ));
 
-    // 3. Remove [numthreads(...)] from the user function (compute only).
-    //    It lives on the generated wrapper, not the user helper function.
+    // 3. Remove [numthreads(...)] / [outputtopology] from the helper.
+    //    They live on the generated wrapper, not the user function.
     if let Some(ref nr) = entry.numthreads_attr_range {
         // Include any trailing whitespace/newline.
         let end = skip_whitespace_in_source(source, nr.end);
         replacements.push((nr.start, end, ""));
     }
+    if let Some(ref or) = entry.outputtopology_attr_range {
+        let end = skip_whitespace_in_source(source, or.end);
+        replacements.push((or.start, end, ""));
+    }
 
-    // 4. Remove the [goldy_*] attribute.
+    // 4. Remove the [goldy_*] attribute. Mesh/amplification helpers get
+    //    [ForceInline] so DXC sees SV_Position writes in the [shader("mesh")]
+    //    entry after inlining `goldy_mesh(...)`.
     {
         let end = skip_whitespace_in_source(source, entry.goldy_attr_range.end);
-        replacements.push((entry.goldy_attr_range.start, end, ""));
+        let replacement = if matches!(entry.stage, Stage::Mesh | Stage::Amplification) {
+            "[ForceInline]\n"
+        } else {
+            ""
+        };
+        replacements.push((entry.goldy_attr_range.start, end, replacement));
     }
 
     // Sort by start position descending, apply.
@@ -3180,6 +3282,33 @@ fn find_numthreads_in_range(source: &str, start: usize, end: usize) -> Option<((
     Some((nt, bracket_pos..close_pos))
 }
 
+fn is_mesh_io_type(ty: &str) -> bool {
+    let ty = ty.trim();
+    ty.starts_with("vertices ")
+        || ty.starts_with("indices ")
+        || ty.starts_with("primitives ")
+        || ty.starts_with("payload ")
+}
+
+/// Find a `[outputtopology("...")]` attribute in `source[start..end]`.
+fn find_outputtopology_in_range(source: &str, start: usize, end: usize) -> Option<(String, Range<usize>)> {
+    let slice = &source[start..end];
+    let needle = "outputtopology";
+    let rel_pos = slice.find(needle)?;
+    let bracket_pos = source[start..start + rel_pos].rfind('[').map(|i| start + i)?;
+    let (inner, close_pos) = scan_bracket_block(source, bracket_pos)?;
+    let topo = parse_outputtopology(inner.trim())?;
+    Some((topo, bracket_pos..close_pos))
+}
+
+/// Parse `outputtopology("triangle")` from the inner content of `[outputtopology(...)]`.
+fn parse_outputtopology(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("outputtopology")?.trim_start().strip_prefix('(')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 /// Parse `numthreads(X, Y, Z)` from the inner content of `[numthreads(...)]`.
 fn parse_numthreads(s: &str) -> Option<(u32, u32, u32)> {
     let [x, y, z] = super::parse_numthreads(s)?;
@@ -3274,6 +3403,39 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
         assert!(out.contains("inout HitPayload"), "{out}");
         assert!(out.contains("BuiltInTriangleIntersectionAttributes"), "{out}");
         assert!(!out.contains("[goldy_raygen]"), "{out}");
+    }
+
+    #[test]
+    fn goldy_mesh_wrapper_keeps_vertices_indices() {
+        let src = r#"
+import goldy_exp;
+struct MeshOutput { float4 pos : SV_Position; float4 color : COLOR; };
+
+[goldy_mesh]
+[numthreads(1, 1, 1)]
+[outputtopology("triangle")]
+void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
+    SetMeshOutputCounts(3, 1);
+    verts[0].pos = float4(-1, -1, 0, 1);
+    verts[1].pos = float4(3, -1, 0, 1);
+    verts[2].pos = float4(-1, 3, 0, 1);
+    tris[0] = uint3(0, 1, 2);
+}
+
+[goldy_fragment]
+float4 fs_main() : SV_Target { return float4(1, 0, 0, 1); }
+"#;
+        let out = transform_virtual_main(src);
+        assert!(out.contains(r#"[shader("mesh")]"#), "{out}");
+        assert!(out.contains(r#"[outputtopology("triangle")]"#), "{out}");
+        assert!(out.contains("out vertices MeshOutput verts[3]"), "{out}");
+        assert!(out.contains("out indices uint3 tris[1]"), "{out}");
+        assert!(out.contains("void mesh_main("), "{out}");
+        assert!(out.contains("goldy_mesh(verts, tris)"), "{out}");
+        assert!(out.contains("void goldy_mesh("), "{out}");
+        assert!(out.contains("[ForceInline]"), "{out}");
+        assert!(out.contains("[numthreads(1, 1, 1)]"), "{out}");
+        assert!(!out.contains("[goldy_mesh]"), "{out}");
     }
 
     #[test]

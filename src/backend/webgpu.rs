@@ -5124,6 +5124,9 @@ impl GpuBackend for WebGpuBackend {
                             *first_instance..first_instance + instance_count,
                         );
                     }
+                    RenderCommand::DispatchMesh { .. } => {
+                        anyhow::bail!("mesh shaders are not supported on the WebGPU backend");
+                    }
                 }
             }
             let _ = bind_group_keep;

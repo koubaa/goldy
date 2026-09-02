@@ -455,6 +455,8 @@ pub(crate) enum RenderCommand {
         base_vertex: i32,
         first_instance: u32,
     },
+    /// Mesh-shader workgroups (`vkCmdDrawMeshTasksEXT` / `DispatchMesh`).
+    DispatchMesh { x: u32, y: u32, z: u32 },
 }
 
 /// CPU-side write deferred to the submission worker, after [`SubmitSync::host_observed_waits`]
@@ -765,6 +767,14 @@ pub(crate) struct GpuRayTracingPipelineDesc {
     pub raygen: ShaderHandle,
     pub miss: ShaderHandle,
     pub closest_hit: ShaderHandle,
+}
+
+/// Mesh (+ optional amplification) graphics pipeline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuMeshPipelineDesc {
+    pub mesh: ShaderHandle,
+    pub fragment: ShaderHandle,
+    pub amplification: Option<ShaderHandle>,
 }
 
 /// Mixed compute + offscreen render commands from [`crate::Scheme`].
@@ -1727,6 +1737,20 @@ pub(crate) trait GpuBackend:
         _pipeline: RayTracingPipelineHandle,
     ) -> Vec<Option<ResourceAccess>> {
         Vec::new()
+    }
+
+    /// Create a mesh (+ optional amplification) graphics pipeline.
+    #[cfg(feature = "graphics")]
+    fn create_mesh_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        let _ = (device, desc, raster, depth_stencil, debug_name);
+        anyhow::bail!("mesh pipelines are not supported on this backend")
     }
 
     /// Like [`Self::compute_pipeline_slot_access`] but for a graphics pipeline.

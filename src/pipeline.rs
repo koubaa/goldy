@@ -125,6 +125,88 @@ impl Drop for RenderPipeline {
     }
 }
 
+/// Mesh (+ optional amplification) graphics pipeline.
+///
+/// Replaces the vertex stage with a mesh shader. Record draws with
+/// [`crate::SchemeRenderPassBuilder::set_mesh_pipeline`] and
+/// [`crate::SchemeRenderPassBuilder::dispatch_mesh`].
+pub struct MeshPipeline {
+    _device: Device,
+    backend: Arc<Mutex<Box<dyn GpuBackend>>>,
+    pub(crate) handle: PipelineHandle,
+    pub(crate) slot_access: Vec<Option<crate::types::ResourceAccess>>,
+}
+
+/// Shader modules and raster state for [`MeshPipeline::new`].
+pub struct MeshPipelineDesc<'a> {
+    /// `[goldy_mesh]` / `mesh_main` module.
+    pub mesh: &'a ShaderModule,
+    /// `[goldy_fragment]` / `fs_main` module.
+    pub fragment: &'a ShaderModule,
+    /// Optional `[goldy_amplification]` / `amp_main` module.
+    pub amplification: Option<&'a ShaderModule>,
+    /// Pixel format of the render target — must match the leased target.
+    pub target_format: TextureFormat,
+    /// Depth/stencil state (optional, None = no depth testing).
+    pub depth_stencil: Option<DepthStencilState>,
+}
+
+impl MeshPipeline {
+    /// Create a mesh pipeline when [`crate::DeviceCapabilities::mesh_shaders`] is set.
+    pub fn new(device: &Device, desc: &MeshPipelineDesc<'_>) -> Result<Self> {
+        Self::new_with_label(device, desc, None)
+    }
+
+    /// [`Self::new`] with an optional GPU-debugger label.
+    pub fn new_with_label(device: &Device, desc: &MeshPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
+        anyhow::ensure!(
+            device.capabilities().mesh_shaders,
+            "this adapter does not support mesh shaders (DeviceCapabilities::mesh_shaders)"
+        );
+        if desc.amplification.is_some() {
+            anyhow::ensure!(
+                device.capabilities().amplification_shaders,
+                "this adapter does not support amplification/task shaders (DeviceCapabilities::amplification_shaders)"
+            );
+        }
+        tracing::debug!(?label, "Creating mesh pipeline");
+        let vertex_layout = crate::types::VertexBufferLayout::default();
+        let raster = crate::backend::shared::PipelineDesc::new(
+            &vertex_layout,
+            crate::types::PrimitiveTopology::TriangleList,
+            desc.target_format,
+        );
+        let mut backend = device.inner.backend.lock().unwrap();
+        let handle = backend.create_mesh_pipeline(
+            device.inner.handle,
+            crate::backend::GpuMeshPipelineDesc {
+                mesh: desc.mesh.handle,
+                fragment: desc.fragment.handle,
+                amplification: desc.amplification.map(|s| s.handle),
+            },
+            &raster,
+            desc.depth_stencil.as_ref(),
+            label,
+        )?;
+        let slot_access = backend.render_pipeline_slot_access(handle);
+        Ok(Self {
+            _device: device.clone(),
+            backend: Arc::clone(&device.inner.backend),
+            handle,
+            slot_access,
+        })
+    }
+}
+
+impl Drop for MeshPipeline {
+    fn drop(&mut self) {
+        tracing::trace!("Destroying mesh pipeline");
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_pipeline(self.handle);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +382,23 @@ mod tests {
 
         // Pipelines should have different handles
         assert_ne!(pipeline1.handle, pipeline2.handle);
+    }
+
+    #[test]
+    fn test_mesh_pipeline_creation() {
+        let device = create_test_device();
+        let shader = create_test_shader(&device);
+        let pipeline = MeshPipeline::new(
+            &device,
+            &MeshPipelineDesc {
+                mesh: &shader,
+                fragment: &shader,
+                amplification: None,
+                target_format: TextureFormat::Rgba8Unorm,
+                depth_stencil: None,
+            },
+        )
+        .unwrap();
+        assert!(pipeline.handle > 0);
     }
 }

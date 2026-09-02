@@ -12,6 +12,9 @@ Goldy's **virtual entry points** let you write shader entry points with clean, t
 | `[goldy_raygen]` | Ray generation | `[shader("raygeneration")]` |
 | `[goldy_miss]` | Miss | `[shader("miss")]` |
 | `[goldy_closesthit]` | Closest hit | `[shader("closesthit")]` |
+| `[goldy_mesh]` | Mesh | `[shader("mesh")]` |
+| `[goldy_amplification]` | Amplification / task | `[shader("amplification")]` |
+
 
 A minimal example:
 
@@ -103,9 +106,9 @@ float4 fs_main(MyUniforms cfg, FullscreenVarying input) : SV_Target {
 
 The transform (implemented in `slang/virtual_main.rs`) runs before Slang compilation and performs three operations:
 
-1. **Generates a wrapper function** with the real `[shader("...")]` attribute and a fixed 16-word push-constant signature.
-2. **Renames the user function** from `cs_main` to `_goldy_user_cs_main` so both can coexist.
-3. **Removes the `[goldy_*]` attribute** and `[numthreads]` from the renamed user function (they live on the generated wrapper).
+1. **Generates a wrapper function** with the real `[shader("...")]` attribute and a fixed 16-word push-constant signature (mesh wrappers also declare `out vertices` / `out indices`).
+2. **Renames the user function** to `_goldy_user_<name>` (or `goldy_mesh` / `goldy_amplification` for those stages) so both can coexist.
+3. **Removes the `[goldy_*]` attribute** and `[numthreads]` / `[outputtopology]` from the renamed helper (they live on the generated wrapper).
 
 ### Push Constant Layout
 

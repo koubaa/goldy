@@ -919,6 +919,26 @@ impl GpuBackend for Dx12Backend {
         pipeline::destroy(&mut self.state, pipeline_handle);
     }
 
+    fn create_mesh_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        pipeline::create_mesh(
+            &mut self.state,
+            device_handle,
+            desc.mesh,
+            desc.fragment,
+            desc.amplification,
+            raster,
+            depth_stencil,
+            debug_name,
+        )
+    }
+
     fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,

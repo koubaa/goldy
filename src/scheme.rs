@@ -3277,6 +3277,27 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self.draw(0..3, 0..1)
     }
 
+    /// Bind a [`crate::MeshPipeline`] and typed push-constant resources, like [`Self::set_pipeline`].
+    pub fn set_mesh_pipeline(&mut self, pipeline: &crate::MeshPipeline) -> &mut Self {
+        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.pending_push_constants.is_empty() {
+            let handles: Vec<ResourceHandle> = self
+                .pending_push_constants
+                .iter()
+                .enumerate()
+                .map(|(i, pending)| pending.resolve(&pipeline.slot_access, i))
+                .collect();
+            self.commands.push(RenderCommand::BindResourcesTyped { handles });
+        }
+        self
+    }
+
+    /// Dispatch mesh workgroups (`vkCmdDrawMeshTasksEXT` / `DispatchMesh`).
+    pub fn dispatch_mesh(&mut self, x: u32, y: u32, z: u32) -> &mut Self {
+        self.commands.push(RenderCommand::DispatchMesh { x, y, z });
+        self
+    }
+
     pub fn finish(self) {
         let SchemeRenderPassBuilder {
             scheme,

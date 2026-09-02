@@ -178,6 +178,11 @@ fn raster_fingerprint(
                 base_vertex.hash(&mut hash);
                 first_instance.hash(&mut hash);
             }
+            RenderCommand::DispatchMesh { x, y, z } => {
+                x.hash(&mut hash);
+                y.hash(&mut hash);
+                z.hash(&mut hash);
+            }
             RenderCommand::BindResources { buffers } => {
                 for h in buffers {
                     h.hash(&mut hash);
@@ -1245,6 +1250,9 @@ pub(super) fn render_to_target(
                         *first_instance,
                     );
                 }
+            }
+            RenderCommand::DispatchMesh { .. } => {
+                anyhow::bail!("mesh shaders are not supported on the CUDA/DX12 raster path");
             }
         }
     }

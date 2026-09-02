@@ -247,6 +247,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     let enable_ray_query = physical_device.ray_query;
     let enable_rtp = physical_device.ray_tracing_pipelines;
+    let enable_mesh = physical_device.mesh_shaders;
+    let enable_amp = physical_device.amplification_shaders;
     let enable_accel = enable_ray_query || enable_rtp;
     if enable_accel {
         vulkan_12_features = vulkan_12_features.buffer_device_address(true);
@@ -275,6 +277,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
     let mut ray_tracing_pipeline_features =
         vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
+    let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+        .mesh_shader(true)
+        .task_shader(enable_amp);
 
     // Mali-G715 (and many mobile GPUs) lack vertex-stage image/buffer stores.
     // Requesting an unavailable VkPhysicalDeviceFeatures bit fails vkCreateDevice
@@ -316,6 +321,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     }
     if enable_rtp {
         features2 = features2.push_next(&mut ray_tracing_pipeline_features);
+    }
+    if enable_mesh {
+        features2 = features2.push_next(&mut mesh_shader_features);
     }
 
     // Per-context compute queue pool (see types::MAX_CONTEXT_COMPUTE_QUEUES).
@@ -397,6 +405,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     }
     if enable_rtp {
         device_extensions.push(khr::ray_tracing_pipeline::NAME.as_ptr());
+    }
+    if enable_mesh {
+        device_extensions.push(ext::mesh_shader::NAME.as_ptr());
     }
 
     let device_create_info = vk::DeviceCreateInfo::default()
@@ -629,6 +640,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     } else {
         None
     };
+    let mesh_ext = if enable_mesh {
+        Some(ash::ext::mesh_shader::Device::new(&state.instance, &device))
+    } else {
+        None
+    };
     let (rt_shader_group_handle_size, rt_shader_group_handle_alignment, rt_shader_group_base_alignment) = if enable_rtp
     {
         let mut rtp_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
@@ -671,6 +687,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             ray_tracing_pipelines: enable_rtp,
             accel_khr,
             rtp_khr,
+            mesh_shaders: enable_mesh,
+            mesh_ext,
             rt_shader_group_handle_size,
             rt_shader_group_handle_alignment,
             rt_shader_group_base_alignment,

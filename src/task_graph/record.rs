@@ -210,6 +210,25 @@ impl RenderPassRecord {
         self.draw(0, 3, 0, 1)
     }
 
+    pub fn set_mesh_pipeline(&mut self, pipeline: &crate::MeshPipeline) -> &mut Self {
+        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.pending_push_constants.is_empty() {
+            let handles: Vec<ResourceHandle> = self
+                .pending_push_constants
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| slot.resolve(&pipeline.slot_access, i))
+                .collect();
+            self.commands.push(RenderCommand::BindResourcesTyped { handles });
+        }
+        self
+    }
+
+    pub fn dispatch_mesh(&mut self, x: u32, y: u32, z: u32) -> &mut Self {
+        self.commands.push(RenderCommand::DispatchMesh { x, y, z });
+        self
+    }
+
     pub fn draw_quads(&mut self, count: u32) -> &mut Self {
         self.draw(0, 6, 0, count)
     }

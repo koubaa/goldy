@@ -106,7 +106,7 @@ pub use kernel::{
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
 #[cfg(feature = "graphics")]
-pub use pipeline::{RenderPipeline, RenderPipelineDesc};
+pub use pipeline::{MeshPipeline, MeshPipelineDesc, RenderPipeline, RenderPipelineDesc};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
