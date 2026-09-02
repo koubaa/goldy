@@ -174,7 +174,7 @@ pub struct CrossSubmitSync {
 
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
-        NodeKind::Dispatch { .. } => UsageKindFlags::COMPUTE,
+        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } => UsageKindFlags::COMPUTE,
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }

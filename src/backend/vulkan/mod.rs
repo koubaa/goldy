@@ -25,6 +25,7 @@ mod pipeline;
 mod present_split;
 mod render_commands;
 mod render_target;
+mod rt_pipeline;
 mod sampler;
 mod shader;
 mod sparse;
@@ -312,6 +313,7 @@ impl VulkanBackend {
             shaders: Arc::new(RwLock::new(ShaderTable::new())),
             pipelines: Arc::new(RwLock::new(PipelineTable::new())),
             compute_pipelines: Arc::new(RwLock::new(ComputePipelineTable::new())),
+            rt_pipelines: Arc::new(RwLock::new(RayTracingPipelineTable::new())),
             render_targets: Arc::new(RwLock::new(RenderTargetTable::new())),
             surfaces: HashMap::new(),
             next_surface_handle: 1,
@@ -1221,6 +1223,69 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
         compute::destroy(&self.state.devices, &self.state.compute_pipelines, pipeline_handle);
+    }
+
+    fn create_ray_tracing_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuRayTracingPipelineDesc,
+        debug_name: Option<&str>,
+    ) -> Result<RayTracingPipelineHandle> {
+        let rgen = self.ensure_shader_stage_compiled(desc.raygen, crate::slang::SlangStage::RayGeneration)?;
+        let rmiss = self.ensure_shader_stage_compiled(desc.miss, crate::slang::SlangStage::Miss)?;
+        let rchit = self.ensure_shader_stage_compiled(desc.closest_hit, crate::slang::SlangStage::ClosestHit)?;
+        let (cats, strides) = {
+            let shaders = self.state.shaders.read().unwrap();
+            shaders
+                .entries
+                .get(&desc.raygen)
+                .and_then(|s| s.reflection.as_ref())
+                .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+                .unwrap_or_default()
+        };
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("rt_pipeline#{}", desc.raygen));
+        let handle = rt_pipeline::create(
+            &self.state.instance,
+            &self.state.devices,
+            &self.state.rt_pipelines,
+            device_handle,
+            rgen,
+            rmiss,
+            rchit,
+            shader_debug_name,
+        )?;
+        if let Some(ps) = self.state.rt_pipelines.write().unwrap().entries.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
+        }
+        Ok(handle)
+    }
+
+    fn destroy_ray_tracing_pipeline(&mut self, pipeline_handle: RayTracingPipelineHandle) {
+        rt_pipeline::destroy(&self.state.devices, &self.state.rt_pipelines, pipeline_handle);
+    }
+
+    fn ray_tracing_pipeline_slot_access(
+        &self,
+        pipeline: RayTracingPipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        let read = self.state.rt_pipelines.read().unwrap();
+        let Some(ps) = read.entries.get(&pipeline) else {
+            return Vec::new();
+        };
+        ps.push_constant_categories
+            .iter()
+            .map(|cat| {
+                cat.map(|c| match c {
+                    crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
+                        crate::types::ResourceAccess::ReadWrite
+                    }
+                    _ => crate::types::ResourceAccess::Read,
+                })
+            })
+            .collect()
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {

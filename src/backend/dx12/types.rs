@@ -12,7 +12,7 @@
 
 use super::super::{
     AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
-    RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::timeline::SmallContextMap;
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
@@ -1491,6 +1491,27 @@ pub(crate) struct ComputePipelineState {
     pub shader_debug_name: String,
 }
 
+/// DXR state object + GPU shader-binding table.
+#[allow(dead_code)] // `sbt` / `device_handle` keep COM objects and identity; GPU uses VAs
+pub(crate) struct RayTracingPipelineState {
+    pub device_handle: DeviceHandle,
+    pub state_object: Direct3D12::ID3D12StateObject,
+    pub root_signature: Direct3D12::ID3D12RootSignature,
+    pub sbt: Direct3D12::ID3D12Resource,
+    pub raygen_va: u64,
+    pub raygen_size: u64,
+    pub miss_va: u64,
+    pub miss_size: u64,
+    pub miss_stride: u64,
+    pub hit_va: u64,
+    pub hit_size: u64,
+    pub hit_stride: u64,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    pub push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
+    pub binding_element_strides: Vec<Option<u32>>,
+    pub shader_debug_name: String,
+}
+
 /// GPU render target state.
 #[allow(dead_code)]
 pub(crate) struct RenderTargetState {
@@ -1674,6 +1695,12 @@ handle_table!(
 handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
 handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
 handle_table!(AccelTable, SharedAccelTable, AccelerationStructureHandle, AccelState);
+handle_table!(
+    RayTracingPipelineTable,
+    SharedRayTracingPipelineTable,
+    RayTracingPipelineHandle,
+    RayTracingPipelineState
+);
 
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
@@ -1703,6 +1730,7 @@ pub(super) struct Dx12State {
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,
     pub compute_pipelines: SharedComputePipelineTable,
+    pub rt_pipelines: SharedRayTracingPipelineTable,
     pub render_targets: SharedRenderTargetTable,
     pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,

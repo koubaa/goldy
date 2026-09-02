@@ -492,7 +492,7 @@ pub fn schedule_waves(ir: &GraphIR, edges: &[(usize, usize)]) -> CompiledSchedul
 /// Map a node's kind to the Koubaa pipeline category it belongs to.
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
-        NodeKind::Dispatch { .. } => UsageKindFlags::COMPUTE,
+        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } => UsageKindFlags::COMPUTE,
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
@@ -834,7 +834,10 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 NodeKind::BuildAccelerationStructure(build) => {
                     commands.push(GpuCommand::BuildAccelerationStructure(build.clone()));
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::WithdrawRead { .. } => {}
+                NodeKind::TraceRays { .. }
+                | NodeKind::Dispatch { .. }
+                | NodeKind::RenderPass { .. }
+                | NodeKind::WithdrawRead { .. } => {}
             }
         }
 
@@ -969,6 +972,32 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 }
 
                 i += run_end;
+            }
+        }
+
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            if let NodeKind::TraceRays {
+                pipeline,
+                resource_slots,
+                user_slots,
+                width,
+                height,
+                depth,
+            } = &node.kind
+            {
+                let slots = match resolver {
+                    Some(r) => r.resolve_slots(resource_slots, &node.bindings),
+                    None => resource_slots.clone(),
+                };
+                commands.push(GpuCommand::SetRayTracingPipeline(*pipeline));
+                push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
+                commands.push(GpuCommand::TraceRays {
+                    label: Some(node.label),
+                    width: *width,
+                    height: *height,
+                    depth: *depth,
+                });
             }
         }
 
@@ -1598,7 +1627,10 @@ pub(crate) fn emit_graph_commands_for_waves(
                 NodeKind::BuildAccelerationStructure(build) => {
                     commands.push(GraphCommand::Compute(GpuCommand::BuildAccelerationStructure(build.clone())));
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::WithdrawRead { .. } => {}
+                NodeKind::Dispatch { .. }
+                | NodeKind::TraceRays { .. }
+                | NodeKind::RenderPass { .. }
+                | NodeKind::WithdrawRead { .. } => {}
             }
         }
 
@@ -1639,6 +1671,31 @@ pub(crate) fn emit_graph_commands_for_waves(
                             }));
                         }
                     }
+                }
+                NodeKind::TraceRays {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    width,
+                    height,
+                    depth,
+                } => {
+                    let slots = match resolver {
+                        Some(r) => r.resolve_slots(resource_slots, &node.bindings),
+                        None => resource_slots.clone(),
+                    };
+                    commands.push(GraphCommand::Compute(GpuCommand::SetRayTracingPipeline(*pipeline)));
+                    let mut bind_cmds = Vec::new();
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
+                    for cmd in bind_cmds {
+                        commands.push(GraphCommand::Compute(cmd));
+                    }
+                    commands.push(GraphCommand::Compute(GpuCommand::TraceRays {
+                        label: Some(node.label),
+                        width: *width,
+                        height: *height,
+                        depth: *depth,
+                    }));
                 }
                 NodeKind::RenderPass {
                     target,

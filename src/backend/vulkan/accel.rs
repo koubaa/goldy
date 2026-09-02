@@ -74,7 +74,7 @@ pub(super) fn create(
     desc: &GpuAccelCreate,
 ) -> Result<AccelerationStructureHandle> {
     let ld = state.devices.get(&device_handle).context("Invalid device handle")?.clone();
-    anyhow::ensure!(ld.ray_query && ld.accel_khr.is_some(), "Vulkan device has no ray query");
+    anyhow::ensure!(ld.accel_khr.is_some(), "Vulkan device has no acceleration structures");
     let accel_khr = ld.accel_khr.as_ref().unwrap();
 
     let (ty, geom, max_primitives) = match *desc {

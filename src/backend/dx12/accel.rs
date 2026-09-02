@@ -131,8 +131,8 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
             .adapters
             .iter()
             .find(|a| a.adapter_id == ld.adapter_id)
-            .is_some_and(|a| a.ray_query),
-        "DX12 adapter has no DXR 1.1 ray query"
+            .is_some_and(|a| a.ray_query || a.ray_tracing_pipelines),
+        "DX12 adapter has no DXR acceleration structures"
     );
 
     let (is_tlas, sizes, max_primitives, max_vertices, vertex_stride) = match *desc {

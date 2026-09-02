@@ -9,6 +9,9 @@ Goldy's **virtual entry points** let you write shader entry points with clean, t
 | `[goldy_compute]` | Compute | `[shader("compute")]` |
 | `[goldy_vertex]` | Vertex | `[shader("vertex")]` |
 | `[goldy_fragment]` | Fragment | `[shader("fragment")]` |
+| `[goldy_raygen]` | Ray generation | `[shader("raygeneration")]` |
+| `[goldy_miss]` | Miss | `[shader("miss")]` |
+| `[goldy_closesthit]` | Closest hit | `[shader("closesthit")]` |
 
 A minimal example:
 
@@ -38,7 +41,7 @@ Each resource parameter occupies one **bindless slot** (a 16-bit index packed in
 | `DirectSpatial<T>` | `goldy_direct_spatial<T>(slot)` | Read/write 2D texture |
 | `ByteAddress` | `goldy_byte_address(slot)` | Raw byte-address buffer |
 | `Filter` | `goldy_filter(slot)` | Sampler state |
-| `Accel` | `goldy_accel(slot)` | Top-level acceleration structure (`RayQuery`, when the device sets `GOLDY_RAY_QUERY`) |
+| `Accel` | `goldy_accel(slot)` | Top-level acceleration structure (`RayQuery` / `TraceRay`, when the device sets `GOLDY_RAY_QUERY`) |
 
 ### Broadcast Parameters
 
@@ -68,6 +71,8 @@ System-value wrapper types are mapped to `SV_*` semantics. The generated entry p
 | `VertexId` | `SV_VertexID` | `.value` |
 | `InstanceId` | `SV_InstanceID` | `.value` |
 | `IsFrontFace` | `SV_IsFrontFace` | `.value` |
+| `DispatchRaysIndex` | `SV_DispatchRaysIndex` | `.x`, `.y`, `.z` (raygen) |
+| `DispatchRaysDimensions` | `SV_DispatchRaysDimensions` | `.x`, `.y`, `.z` (raygen) |
 
 ### Scalar Parameters
 

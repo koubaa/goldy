@@ -449,7 +449,7 @@ pub struct DeviceCapabilities {
     /// Adapter exposes ray-tracing pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`,
     /// DXR tier 1.0+, Metal ray tracing).
     ///
-    /// Hardware only — Goldy does not yet create RT pipelines or SBTs.
+    /// When `true`, [`crate::RayTracingPipeline`] and [`crate::Scheme::trace_rays`] are available.
     pub ray_tracing_pipelines: bool,
 
     /// Adapter exposes mesh shaders (Vulkan `VK_EXT_mesh_shader`, DX12 mesh-shader

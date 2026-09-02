@@ -1445,6 +1445,30 @@ impl Scheme {
             scheme: self,
             label,
             pipeline: pipeline.handle,
+            rt_pipeline: None,
+            bindings: Vec::new(),
+            resource_slots: Vec::new(),
+            user_slots: Vec::new(),
+            slot_access: pipeline.slot_access.clone(),
+        }
+    }
+
+    /// Declare a ray-tracing dispatch (`TraceRays` / `DispatchRays`).
+    ///
+    /// Bind raygen resource parameters with [`SchemeNodeBuilder::with_parcel`], then
+    /// [`SchemeNodeBuilder::dispatch`] with ray counts `(width, height, depth)` — not
+    /// compute workgroups.
+    pub fn trace_rays<'a>(
+        &'a mut self,
+        label: &'static str,
+        pipeline: &crate::rt_pipeline::RayTracingPipeline,
+    ) -> SchemeNodeBuilder<'a> {
+        self.dirty = true;
+        SchemeNodeBuilder {
+            scheme: self,
+            label,
+            pipeline: 0,
+            rt_pipeline: Some(pipeline.handle),
             bindings: Vec::new(),
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
@@ -2855,6 +2879,7 @@ pub struct SchemeNodeBuilder<'a> {
     scheme: &'a mut Scheme,
     label: &'static str,
     pipeline: crate::backend::ComputePipelineHandle,
+    rt_pipeline: Option<crate::backend::RayTracingPipelineHandle>,
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
     user_slots: Vec<u32>,
@@ -2980,6 +3005,11 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// The shape parcel's ordering dependency is registered automatically and is not a shader
     /// resource slot. Fixed workgroup counts use [`Self::dispatch`] instead.
     pub fn dispatch_shape_parcel(self, parcel: &Parcel) -> Result<(), GoldyError> {
+        if self.rt_pipeline.is_some() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "trace_rays does not support indirect DispatchShape parcels; use dispatch(width, height, depth)"
+            )));
+        }
         let offset = validate_dispatch_shape_parcel(parcel)?;
         let resource = parcel.resource_id();
         self.scheme
@@ -3031,11 +3061,28 @@ impl<'a> SchemeNodeBuilder<'a> {
         self.scheme.ir.nodes.push(TaskNode {
             label: self.label,
             bindings: self.bindings,
-            kind: NodeKind::Dispatch {
-                pipeline: self.pipeline,
-                resource_slots: self.resource_slots,
-                user_slots: self.user_slots,
-                dispatch,
+            kind: if let Some(rt) = self.rt_pipeline {
+                let (width, height, depth) = match dispatch {
+                    DispatchDim::Direct { x, y, z } => (x, y, z),
+                    DispatchDim::Indirect { .. } => {
+                        panic!("trace_rays does not support indirect dispatch")
+                    }
+                };
+                NodeKind::TraceRays {
+                    pipeline: rt,
+                    resource_slots: self.resource_slots,
+                    user_slots: self.user_slots,
+                    width,
+                    height,
+                    depth,
+                }
+            } else {
+                NodeKind::Dispatch {
+                    pipeline: self.pipeline,
+                    resource_slots: self.resource_slots,
+                    user_slots: self.user_slots,
+                    dispatch,
+                }
             },
         });
     }

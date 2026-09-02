@@ -604,6 +604,9 @@ impl CpuBackend {
                 GpuCommand::BuildAccelerationStructure(_) => {
                     anyhow::bail!("CPU backend does not support acceleration structures");
                 }
+                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                    anyhow::bail!("CPU backend does not support ray tracing pipelines");
+                }
                 GpuCommand::WriteTexture { .. }
                 | GpuCommand::WriteTextureRegion { .. }
                 | GpuCommand::CopyTexture { .. }

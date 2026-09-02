@@ -81,7 +81,7 @@ Query them on `Adapter::capabilities()` / `Device::capabilities()` (`DeviceCapab
 | `mesh_shaders` | Mesh shaders (Vulkan `VK_EXT_mesh_shader`, DX12 mesh tier 1, Metal Apple7 / Mac2 / Metal3) |
 | `amplification_shaders` | Task / amplification / object shaders with mesh |
 
-These bits report **adapter hardware**. Goldy does not yet record ray queries, RT pipelines, or mesh draws; they exist so callers can feature-detect before those APIs land.
+These bits report **adapter hardware**. Inline `RayQuery` (`[goldy_compute]`) and ray-tracing pipelines (`RayTracingPipeline` + `Scheme::trace_rays`) record on Vulkan and DX12 when the matching bit is set. Mesh draws are not recorded yet.
 
 ## Additional Backends
 

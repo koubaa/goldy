@@ -47,6 +47,7 @@ pub(crate) mod cuda;
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
     AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RayTracingPipelineHandle,
     RenderTargetHandle, SamplerHandle, ShaderHandle, TextureHandle,
 };
 #[cfg(feature = "graphics")]
@@ -706,6 +707,15 @@ pub(crate) enum GpuCommand {
     },
     /// GPU build of a BLAS or TLAS. The backend inserts an AS-build → shader-read barrier.
     BuildAccelerationStructure(AccelBuildCommand),
+    /// Bind a ray-tracing pipeline (SBT is owned by the pipeline).
+    SetRayTracingPipeline(RayTracingPipelineHandle),
+    /// `vkCmdTraceRaysKHR` / `DispatchRays` with dimensions in rays (not workgroups).
+    TraceRays {
+        label: Option<&'static str>,
+        width: u32,
+        height: u32,
+        depth: u32,
+    },
 }
 
 /// Create-time sizing for [`GpuBackend::create_acceleration_structure`].
@@ -747,6 +757,14 @@ pub(crate) enum AccelBuildCommand {
         dest: AccelerationStructureHandle,
         instances: std::sync::Arc<[AccelInstanceRecord]>,
     },
+}
+
+/// Shader modules for a triangle-hit RT pipeline (one raygen, one miss, one closest-hit).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuRayTracingPipelineDesc {
+    pub raygen: ShaderHandle,
+    pub miss: ShaderHandle,
+    pub closest_hit: ShaderHandle,
 }
 
 /// Mixed compute + offscreen render commands from [`crate::Scheme`].
@@ -1686,6 +1704,28 @@ pub(crate) trait GpuBackend:
     /// available"; backends where the read/write descriptor split is irrelevant
     /// (e.g. Metal argument buffers) can leave it unimplemented.
     fn compute_pipeline_slot_access(&self, _pipeline: ComputePipelineHandle) -> Vec<Option<ResourceAccess>> {
+        Vec::new()
+    }
+
+    /// Create a ray-tracing pipeline and an internal shader-binding table (one raygen, miss, hit).
+    fn create_ray_tracing_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: GpuRayTracingPipelineDesc,
+        debug_name: Option<&str>,
+    ) -> Result<RayTracingPipelineHandle> {
+        let _ = (device, desc, debug_name);
+        anyhow::bail!("ray tracing pipelines are not supported on this backend")
+    }
+
+    fn destroy_ray_tracing_pipeline(&mut self, pipeline: RayTracingPipelineHandle) {
+        let _ = pipeline;
+    }
+
+    fn ray_tracing_pipeline_slot_access(
+        &self,
+        _pipeline: RayTracingPipelineHandle,
+    ) -> Vec<Option<ResourceAccess>> {
         Vec::new()
     }
 

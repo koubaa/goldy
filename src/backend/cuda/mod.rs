@@ -2189,6 +2189,9 @@ impl CudaBackend {
                 GpuCommand::BuildAccelerationStructure(_) => {
                     anyhow::bail!("CUDA backend does not support acceleration structures");
                 }
+                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                    anyhow::bail!("CUDA backend does not support ray tracing pipelines");
+                }
                 GpuCommand::DispatchBatch { label, arg_data, count } => {
                     let pipeline_handle = current_pipeline.context("CUDA: DispatchBatch without a compute pipeline")?;
                     let batch_ops = self.materialize_dispatch_batch(
@@ -2494,6 +2497,9 @@ impl CudaBackend {
                 }
                 GpuCommand::BuildAccelerationStructure(_) => {
                     anyhow::bail!("CUDA backend does not support acceleration structures");
+                }
+                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                    anyhow::bail!("CUDA backend does not support ray tracing pipelines");
                 }
             }
         }

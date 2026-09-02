@@ -322,7 +322,7 @@ pub fn extract_binding_element_type_names(source: &str) -> Vec<Option<String>> {
         if !names.is_empty() {
             if entry.stage == Stage::Fragment {
                 fragment_names = Some(names);
-            } else if fallback_names.is_none() || entry.stage == Stage::Compute {
+            } else if fallback_names.is_none() || entry.stage.bindless_like_compute() {
                 fallback_names = Some(names);
             }
         }
@@ -424,7 +424,7 @@ pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types
         if !cats.is_empty() {
             if entry.stage == Stage::Fragment {
                 fragment_cats = Some(cats);
-            } else if fallback_cats.is_none() || entry.stage == Stage::Compute {
+            } else if fallback_cats.is_none() || entry.stage.bindless_like_compute() {
                 fallback_cats = Some(cats);
             }
         }
@@ -516,7 +516,7 @@ pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate
         if !kinds.is_empty() {
             if entry.stage == Stage::Fragment {
                 fragment_kinds = Some(kinds);
-            } else if fallback_kinds.is_none() || entry.stage == Stage::Compute {
+            } else if fallback_kinds.is_none() || entry.stage.bindless_like_compute() {
                 fallback_kinds = Some(kinds);
             }
         }
@@ -563,8 +563,11 @@ pub fn transform_virtual_main(source: &str) -> String {
 pub fn transform_virtual_main_cpu(source: &str) -> Result<String, String> {
     let has_compute = source.contains("[goldy_compute]");
     let has_graphics = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
-    if has_graphics {
-        return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment)".into());
+    let has_rt = source.contains("[goldy_raygen]")
+        || source.contains("[goldy_miss]")
+        || source.contains("[goldy_closesthit]");
+    if has_graphics || has_rt {
+        return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt)".into());
     }
     if !has_compute {
         return Ok(source.to_string());
@@ -1852,8 +1855,8 @@ fn fn_param_list_contains_offset(source: &str, fn_start: usize, offset: usize) -
 /// Slang translation-unit source after the optional virtual-main rewrite.
 ///
 /// This matches the compiler gate: [`transform_virtual_main`] runs only when `source`
-/// contains `[goldy_compute]`, `[goldy_vertex]`, or `[goldy_fragment]` as substrings
-/// (the same [`str::contains`] checks previously used before calling Slang).
+/// contains `[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]`, or RT `[goldy_ray*]`
+/// as substrings (the same [`str::contains`] checks previously used before calling Slang).
 ///
 /// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
 /// use this so the hashed text matches the compiled text.
@@ -1863,7 +1866,12 @@ pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
     let has_graphics_stage = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
     #[cfg(not(feature = "graphics"))]
     let has_graphics_stage = false;
-    if has_compute || has_graphics_stage {
+    let has_rt = source.contains("[goldy_raygen]")
+        || source.contains("[goldy_miss]")
+        || source.contains("[goldy_closesthit]")
+        || source.contains("[goldy_anyhit]")
+        || source.contains("[goldy_intersection]");
+    if has_compute || has_graphics_stage || has_rt {
         Cow::Owned(transform_virtual_main(source))
     } else {
         Cow::Borrowed(source)
@@ -1880,6 +1888,11 @@ pub enum Stage {
     Compute,
     Vertex,
     Fragment,
+    RayGeneration,
+    Miss,
+    ClosestHit,
+    AnyHit,
+    Intersection,
 }
 
 impl Stage {
@@ -1888,7 +1901,23 @@ impl Stage {
             Stage::Compute => r#"[shader("compute")]"#,
             Stage::Vertex => r#"[shader("vertex")]"#,
             Stage::Fragment => r#"[shader("fragment")]"#,
+            Stage::RayGeneration => r#"[shader("raygeneration")]"#,
+            Stage::Miss => r#"[shader("miss")]"#,
+            Stage::ClosestHit => r#"[shader("closesthit")]"#,
+            Stage::AnyHit => r#"[shader("anyhit")]"#,
+            Stage::Intersection => r#"[shader("intersection")]"#,
         }
+    }
+
+    fn bindless_like_compute(self) -> bool {
+        matches!(self, Stage::Compute | Stage::RayGeneration)
+    }
+
+    fn payload_inout(self) -> bool {
+        matches!(
+            self,
+            Stage::Miss | Stage::ClosestHit | Stage::AnyHit | Stage::Intersection
+        )
     }
 }
 
@@ -1924,6 +1953,8 @@ pub enum SvKind {
     VertexId,         // SV_VertexID          uint
     InstanceId,       // SV_InstanceID        uint
     IsFrontFace,      // SV_IsFrontFace       bool
+    DispatchRaysIndex, // SV_DispatchRaysIndex uint3
+    DispatchRaysDimensions, // SV_DispatchRaysDimensions uint3
 }
 
 impl SvKind {
@@ -1936,13 +1967,28 @@ impl SvKind {
             SvKind::VertexId => "SV_VertexID",
             SvKind::InstanceId => "SV_InstanceID",
             SvKind::IsFrontFace => "SV_IsFrontFace",
+            SvKind::DispatchRaysIndex => "SV_DispatchRaysIndex",
+            SvKind::DispatchRaysDimensions => "SV_DispatchRaysDimensions",
+        }
+    }
+
+    /// Slang ray-dispatch builtins are functions, not DXIL parameter semantics.
+    fn goldy_intrinsic(self) -> Option<&'static str> {
+        match self {
+            SvKind::DispatchRaysIndex => Some("goldy_dispatch_rays_index()"),
+            SvKind::DispatchRaysDimensions => Some("goldy_dispatch_rays_dimensions()"),
+            _ => None,
         }
     }
 
     /// The primitive type for the generated SV parameter.
     fn primitive(self) -> &'static str {
         match self {
-            SvKind::DispatchThreadId | SvKind::GroupThreadId | SvKind::GroupId => "uint3",
+            SvKind::DispatchThreadId
+            | SvKind::GroupThreadId
+            | SvKind::GroupId
+            | SvKind::DispatchRaysIndex
+            | SvKind::DispatchRaysDimensions => "uint3",
             SvKind::VertexId | SvKind::InstanceId => "uint",
             SvKind::IsFrontFace => "bool",
         }
@@ -2013,6 +2059,11 @@ const GOLDY_STAGES: &[(&str, Stage)] = &[
     ("goldy_vertex", Stage::Vertex),
     #[cfg(feature = "graphics")]
     ("goldy_fragment", Stage::Fragment),
+    ("goldy_raygen", Stage::RayGeneration),
+    ("goldy_miss", Stage::Miss),
+    ("goldy_closesthit", Stage::ClosestHit),
+    ("goldy_anyhit", Stage::AnyHit),
+    ("goldy_intersection", Stage::Intersection),
 ];
 
 /// Find all `[goldy_*]` entry points in `source`, sorted by position.
@@ -2318,9 +2369,20 @@ fn parse_single_param(s: &str) -> Option<Param> {
         return None;
     }
 
-    // Skip `uniform` keyword if present (old-style params in shaders that mix styles).
+    // Skip `uniform` / `inout` / `in` / `out` keywords.
     let s = if let Some(rest) = s.strip_prefix("uniform") {
         rest.trim_start()
+    } else if let Some(rest) = s.strip_prefix("inout") {
+        rest.trim_start()
+    } else if let Some(rest) = s.strip_prefix("out") {
+        rest.trim_start()
+    } else if let Some(rest) = s.strip_prefix("in") {
+        // Avoid stripping `int` / `Interpolated`.
+        if rest.starts_with(|c: char| c.is_whitespace()) {
+            rest.trim_start()
+        } else {
+            s
+        }
     } else {
         s
     };
@@ -2417,7 +2479,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
     // InstanceId, etc.) follow the last PassThrough, there is no stage-input struct
     // and all PassThroughs are broadcasts.
     let preserve_idx: Option<usize> = match stage {
-        Stage::Vertex | Stage::Fragment => {
+        Stage::Vertex | Stage::Fragment | Stage::Miss | Stage::ClosestHit | Stage::AnyHit | Stage::Intersection => {
             let last_pt = params
                 .iter()
                 .rposition(|item| matches!(item, ParamItem::Single(p) if p.kind == ParamKind::PassThrough));
@@ -2434,7 +2496,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
                 None
             }
         }
-        Stage::Compute => None,
+        Stage::Compute | Stage::RayGeneration => None,
     };
 
     for (i, item) in params.iter_mut().enumerate() {
@@ -2507,6 +2569,12 @@ fn classify_type(ty: &str) -> ParamKind {
     if ty == "IsFrontFace" {
         return ParamKind::SystemValue(SvKind::IsFrontFace);
     }
+    if ty == "DispatchRaysIndex" {
+        return ParamKind::SystemValue(SvKind::DispatchRaysIndex);
+    }
+    if ty == "DispatchRaysDimensions" {
+        return ParamKind::SystemValue(SvKind::DispatchRaysDimensions);
+    }
 
     // Plain scalars → uniform entry-point parameters.
     if matches!(
@@ -2562,6 +2630,7 @@ struct WrapperBuilder {
     call: String,
     sig_sep: bool,
     call_sep: bool,
+    payload_inout: bool,
 }
 
 impl WrapperBuilder {
@@ -2572,6 +2641,7 @@ impl WrapperBuilder {
             call: String::new(),
             sig_sep: false,
             call_sep: false,
+            payload_inout: false,
         }
     }
 
@@ -2616,11 +2686,19 @@ impl WrapperBuilder {
                 self.push_call(&param.name);
             }
             ParamKind::SystemValue(sv) => {
-                let gn = format!("_sv{}", *sv_idx);
-                *sv_idx += 1;
-                self.push_sig(&format!("{} {} : {}", sv.primitive(), gn, sv.semantic()));
-                self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, gn));
-                self.push_call(&param.name);
+                if let Some(helper) = sv.goldy_intrinsic() {
+                    self.push_body_stmt(&format!(
+                        "    {} {} = {}({});",
+                        param.ty, param.name, param.ty, helper
+                    ));
+                    self.push_call(&param.name);
+                } else {
+                    let gn = format!("_sv{}", *sv_idx);
+                    *sv_idx += 1;
+                    self.push_sig(&format!("{} {} : {}", sv.primitive(), gn, sv.semantic()));
+                    self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, gn));
+                    self.push_call(&param.name);
+                }
             }
             ParamKind::Broadcast => {
                 let k = *bindless_idx;
@@ -2650,7 +2728,11 @@ impl WrapperBuilder {
             ParamKind::PassThrough => {
                 let gn = format!("_pt{}", *pt_idx);
                 *pt_idx += 1;
-                self.push_sig(&format!("{} {}", param.ty, gn));
+                if self.payload_inout {
+                    self.push_sig(&format!("inout {} {}", param.ty, gn));
+                } else {
+                    self.push_sig(&format!("{} {}", param.ty, gn));
+                }
                 self.push_call(&gn);
             }
         }
@@ -2683,6 +2765,7 @@ impl WrapperBuilder {
         let mut t_sv = start_sv;
         let mut t_pt = start_pt;
         let mut then_b = WrapperBuilder::new();
+        then_b.payload_inout = self.payload_inout;
         for p in then_params {
             then_b.process_param(p, &mut t_bindless, &mut t_user, &mut t_sv, &mut t_pt);
         }
@@ -2693,6 +2776,7 @@ impl WrapperBuilder {
         let mut e_sv = start_sv;
         let mut e_pt = start_pt;
         let mut else_b = WrapperBuilder::new();
+        else_b.payload_inout = self.payload_inout;
         for p in else_params {
             else_b.process_param(p, &mut e_bindless, &mut e_user, &mut e_sv, &mut e_pt);
         }
@@ -2776,6 +2860,7 @@ fn emit_wrapper(entry: &EntryDef) -> String {
     let mut sv_idx = 0u32;
     let mut pt_idx = 0u32;
     let mut wb = WrapperBuilder::new();
+    wb.payload_inout = entry.stage.payload_inout();
 
     // Always emit all 8 bindless words (_bw0.._bw7), 8 user words (_uw0.._uw7),
     // frame-table dispatch base (_rs0 = PushLayout._reserved[0]), and the
@@ -2810,6 +2895,10 @@ fn emit_wrapper(entry: &EntryDef) -> String {
                 wb.process_conditional(condition, then_params, else_params, &mut idx);
             }
         }
+    }
+
+    if matches!(entry.stage, Stage::ClosestHit | Stage::AnyHit) {
+        wb.push_sig("BuiltInTriangleIntersectionAttributes _goldy_hit_attr");
     }
 
     // --- Function signature ---
@@ -3146,6 +3235,45 @@ mod tests {
             classify_type("IsFrontFace"),
             ParamKind::SystemValue(SvKind::IsFrontFace)
         );
+        assert_eq!(
+            classify_type("DispatchRaysIndex"),
+            ParamKind::SystemValue(SvKind::DispatchRaysIndex)
+        );
+    }
+
+    #[test]
+    fn goldy_raygen_miss_chit_wrappers() {
+        let src = r#"
+import goldy_exp;
+struct HitPayload { uint hit; }
+
+[goldy_raygen]
+void rgen_main(Accel scene, Scattered<uint> hits, DispatchRaysIndex idx) {
+    RayDesc ray;
+    ray.Origin = float3(0, 0, -2);
+    ray.TMin = 0.001;
+    ray.Direction = float3(0, 0, 1);
+    ray.TMax = 100;
+    HitPayload p;
+    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 0, 0, ray, p);
+    hits[idx.x] = p.hit;
+}
+
+[goldy_miss]
+void rmiss_main(inout HitPayload p) { p.hit = 0; }
+
+[goldy_closesthit]
+void rchit_main(inout HitPayload p) { p.hit = 1; }
+"#;
+        let out = transform_virtual_main(src);
+        assert!(out.contains(r#"[shader("raygeneration")]"#), "{out}");
+        assert!(out.contains(r#"[shader("miss")]"#), "{out}");
+        assert!(out.contains(r#"[shader("closesthit")]"#), "{out}");
+        assert!(out.contains("goldy_accel"), "{out}");
+        assert!(out.contains("goldy_dispatch_rays_index()"), "{out}");
+        assert!(out.contains("inout HitPayload"), "{out}");
+        assert!(out.contains("BuiltInTriangleIntersectionAttributes"), "{out}");
+        assert!(!out.contains("[goldy_raygen]"), "{out}");
     }
 
     #[test]

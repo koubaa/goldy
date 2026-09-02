@@ -246,7 +246,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .shader_int8(true);
 
     let enable_ray_query = physical_device.ray_query;
-    if enable_ray_query {
+    let enable_rtp = physical_device.ray_tracing_pipelines;
+    let enable_accel = enable_ray_query || enable_rtp;
+    if enable_accel {
         vulkan_12_features = vulkan_12_features.buffer_device_address(true);
     }
 
@@ -271,6 +273,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .acceleration_structure(true)
         .descriptor_binding_acceleration_structure_update_after_bind(true);
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+    let mut ray_tracing_pipeline_features =
+        vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
 
     // Mali-G715 (and many mobile GPUs) lack vertex-stage image/buffer stores.
     // Requesting an unavailable VkPhysicalDeviceFeatures bit fails vkCreateDevice
@@ -304,10 +308,14 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     if supports_compute_derivative_quads {
         features2 = features2.push_next(&mut compute_derivatives_features);
     }
+    if enable_accel {
+        features2 = features2.push_next(&mut accel_structure_features);
+    }
     if enable_ray_query {
-        features2 = features2
-            .push_next(&mut accel_structure_features)
-            .push_next(&mut ray_query_features);
+        features2 = features2.push_next(&mut ray_query_features);
+    }
+    if enable_rtp {
+        features2 = features2.push_next(&mut ray_tracing_pipeline_features);
     }
 
     // Per-context compute queue pool (see types::MAX_CONTEXT_COMPUTE_QUEUES).
@@ -380,10 +388,15 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     if supports_compute_derivative_quads && has_nv_compute_derivatives {
         device_extensions.push(NV_COMPUTE_DERIVATIVES.as_ptr());
     }
-    if enable_ray_query {
+    if enable_accel {
         device_extensions.push(khr::deferred_host_operations::NAME.as_ptr());
         device_extensions.push(khr::acceleration_structure::NAME.as_ptr());
+    }
+    if enable_ray_query {
         device_extensions.push(khr::ray_query::NAME.as_ptr());
+    }
+    if enable_rtp {
+        device_extensions.push(khr::ray_tracing_pipeline::NAME.as_ptr());
     }
 
     let device_create_info = vk::DeviceCreateInfo::default()
@@ -462,7 +475,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
         ];
-        if enable_ray_query {
+        if enable_accel {
             binding_flags.push(vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND);
         }
 
@@ -496,7 +509,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                 .descriptor_count(types::MAX_BINDLESS_RESOURCES)
                 .stage_flags(vk::ShaderStageFlags::ALL),
         ];
-        if enable_ray_query {
+        if enable_accel {
             bindings.push(
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(types::bindless_bindings::ACCEL)
@@ -537,7 +550,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                 descriptor_count: types::MAX_BINDLESS_RESOURCES,
             },
         ];
-        if enable_ray_query {
+        if enable_accel {
             pool_sizes.push(vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
                 descriptor_count: types::MAX_BINDLESS_RESOURCES,
@@ -606,10 +619,32 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
-    let accel_khr = if enable_ray_query {
+    let accel_khr = if enable_accel {
         Some(ash::khr::acceleration_structure::Device::new(&state.instance, &device))
     } else {
         None
+    };
+    let rtp_khr = if enable_rtp {
+        Some(ash::khr::ray_tracing_pipeline::Device::new(&state.instance, &device))
+    } else {
+        None
+    };
+    let (rt_shader_group_handle_size, rt_shader_group_handle_alignment, rt_shader_group_base_alignment) = if enable_rtp
+    {
+        let mut rtp_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rtp_props);
+        unsafe {
+            state
+                .instance
+                .get_physical_device_properties2(physical_device_handle, &mut props2);
+        }
+        (
+            rtp_props.shader_group_handle_size,
+            rtp_props.shader_group_handle_alignment.max(1),
+            rtp_props.shader_group_base_alignment.max(1),
+        )
+    } else {
+        (0, 1, 1)
     };
 
     state.devices.insert(
@@ -633,7 +668,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             sparse_page_pool: Mutex::new(sparse_page_pool),
             map_memory2: map_memory2_loader,
             ray_query: enable_ray_query,
+            ray_tracing_pipelines: enable_rtp,
             accel_khr,
+            rtp_khr,
+            rt_shader_group_handle_size,
+            rt_shader_group_handle_alignment,
+            rt_shader_group_base_alignment,
             accel_transient_buffers: Mutex::new(Vec::new()),
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,

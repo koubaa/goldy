@@ -3548,6 +3548,9 @@ impl WebGpuBackend {
                     GpuCommand::BuildAccelerationStructure(build) => {
                         self.record_accel_build(&mut encoder, build)?;
                     }
+                    GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                        anyhow::bail!("WebGPU backend does not support ray tracing pipelines");
+                    }
                 }
             }
         }

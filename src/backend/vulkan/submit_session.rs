@@ -6,7 +6,8 @@
 use super::compute;
 use super::types::{
     SharedAccelTable, SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextFrameTable,
-    SharedContextMap, SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext,
+    SharedContextMap, SharedLogicalDevice, SharedPipelineTable, SharedRayTracingPipelineTable, SharedRenderTargetTable,
+    SharedSubmissionContext,
     SharedTextureTable, VulkanState,
 };
 use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
@@ -23,6 +24,7 @@ pub(crate) struct VulkanSubmitView<'a> {
     pub buffers: &'a SharedBufferTable,
     pub pipelines: &'a SharedPipelineTable,
     pub compute_pipelines: &'a SharedComputePipelineTable,
+    pub rt_pipelines: &'a SharedRayTracingPipelineTable,
     pub render_targets: &'a SharedRenderTargetTable,
     pub textures: &'a SharedTextureTable,
     pub accels: &'a SharedAccelTable,
@@ -38,6 +40,7 @@ impl VulkanState {
             buffers: &self.buffers,
             pipelines: &self.pipelines,
             compute_pipelines: &self.compute_pipelines,
+            rt_pipelines: &self.rt_pipelines,
             render_targets: &self.render_targets,
             textures: &self.textures,
             accels: &self.accels,
@@ -84,6 +87,7 @@ pub(crate) struct VulkanSubmitSession {
     buffers: SharedBufferTable,
     pipelines: SharedPipelineTable,
     compute_pipelines: SharedComputePipelineTable,
+    rt_pipelines: SharedRayTracingPipelineTable,
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
     accels: SharedAccelTable,
@@ -123,6 +127,7 @@ impl VulkanSubmitSession {
             buffers: Arc::clone(&state.buffers),
             pipelines: Arc::clone(&state.pipelines),
             compute_pipelines: Arc::clone(&state.compute_pipelines),
+            rt_pipelines: Arc::clone(&state.rt_pipelines),
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
             accels: Arc::clone(&state.accels),
@@ -144,6 +149,7 @@ impl VulkanSubmitSession {
                 buffers: &self.buffers,
                 pipelines: &self.pipelines,
                 compute_pipelines: &self.compute_pipelines,
+                rt_pipelines: &self.rt_pipelines,
                 render_targets: &self.render_targets,
                 textures: &self.textures,
                 accels: &self.accels,

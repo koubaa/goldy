@@ -11,7 +11,8 @@
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
 use super::super::{
-    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RayTracingPipelineHandle,
+    RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::timeline::TimelineValue;
@@ -915,7 +916,12 @@ pub(crate) struct LogicalDevice {
     pub map_memory2: ash::khr::map_memory2::Device,
     /// Inline ray query + acceleration structures (optional).
     pub ray_query: bool,
+    pub ray_tracing_pipelines: bool,
     pub accel_khr: Option<ash::khr::acceleration_structure::Device>,
+    pub rtp_khr: Option<ash::khr::ray_tracing_pipeline::Device>,
+    pub rt_shader_group_handle_size: u32,
+    pub rt_shader_group_handle_alignment: u32,
+    pub rt_shader_group_base_alignment: u32,
     /// Scratch / instance upload buffers freed at device destroy (MVP).
     pub accel_transient_buffers: Mutex<Vec<(vk::Buffer, vk::DeviceMemory)>>,
 
@@ -1276,6 +1282,22 @@ pub(crate) struct ComputePipelineState {
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.
+    pub shader_debug_name: String,
+}
+
+/// Ray-tracing pipeline plus internally allocated shader-binding table.
+pub(crate) struct RayTracingPipelineState {
+    pub device_handle: DeviceHandle,
+    pub pipeline: vk::Pipeline,
+    pub layout: vk::PipelineLayout,
+    pub sbt_buffer: vk::Buffer,
+    pub sbt_memory: vk::DeviceMemory,
+    pub raygen: vk::StridedDeviceAddressRegionKHR,
+    pub miss: vk::StridedDeviceAddressRegionKHR,
+    pub hit: vk::StridedDeviceAddressRegionKHR,
+    pub callable: vk::StridedDeviceAddressRegionKHR,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    pub binding_element_strides: Vec<Option<u32>>,
     pub shader_debug_name: String,
 }
 
@@ -1965,6 +1987,12 @@ handle_table!(
     AccelerationStructureHandle,
     AccelState
 );
+handle_table!(
+    RayTracingPipelineTable,
+    SharedRayTracingPipelineTable,
+    RayTracingPipelineHandle,
+    RayTracingPipelineState
+);
 
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
@@ -1982,6 +2010,7 @@ pub(super) struct VulkanState {
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,
     pub compute_pipelines: SharedComputePipelineTable,
+    pub rt_pipelines: SharedRayTracingPipelineTable,
     pub render_targets: SharedRenderTargetTable,
     pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,

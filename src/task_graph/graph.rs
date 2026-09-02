@@ -456,6 +456,22 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                     }
                 }
             }
+            NodeKind::TraceRays {
+                pipeline,
+                resource_slots,
+                user_slots,
+                width,
+                height,
+                depth,
+            } => {
+                12u8.hash(&mut h);
+                pipeline.hash(&mut h);
+                hash_resource_slots_for_fingerprint(resource_slots, &mut h);
+                user_slots.hash(&mut h);
+                width.hash(&mut h);
+                height.hash(&mut h);
+                depth.hash(&mut h);
+            }
             NodeKind::ClearBuffer { buffer, offset, size } => {
                 1u8.hash(&mut h);
                 buffer.hash(&mut h);

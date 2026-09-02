@@ -110,7 +110,7 @@ pub(super) fn ensure_stage_compiled(
                     .adapters
                     .iter()
                     .find(|a| a.adapter_id == ld.adapter_id)
-                    .is_some_and(|a| a.ray_query)
+                    .is_some_and(|a| a.ray_query || a.ray_tracing_pipelines)
                 {
                     defines.push(("GOLDY_RAY_QUERY", "1"));
                 }

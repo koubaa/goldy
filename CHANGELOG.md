@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mesh_main`, …); reflection maps `RaytracingAccelerationStructure` to
   `ResourceKind::AccelerationStructure`.
 
+- **`RayTracingPipeline` / `Scheme::trace_rays`** — one raygen, miss, and triangle
+  closest-hit group with a backend-owned shader-binding table. Vulkan
+  `vkCmdTraceRaysKHR` and DX12 `DispatchRays` (DIRECT queue). Bind raygen
+  resources like compute (`Accel`, `Scattered`, `DispatchRaysIndex`). Skip when
+  `DeviceCapabilities::ray_tracing_pipelines` is false.
+
 - **`GOLDY_VALIDATION=host_access`** — page-protect CPU-backend parcel storage
   (page-aligned, unshared mapping + guard page). Stray host pointers fault
   outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.

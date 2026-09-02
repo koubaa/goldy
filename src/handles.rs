@@ -15,6 +15,7 @@ pub(crate) type BufferHandle = u64;
 pub(crate) type ShaderHandle = u64;
 pub(crate) type PipelineHandle = u64;
 pub(crate) type ComputePipelineHandle = u64;
+pub(crate) type RayTracingPipelineHandle = u64;
 pub(crate) type RenderTargetHandle = u64;
 #[cfg(feature = "graphics")]
 pub(crate) type SurfaceHandle = u64;

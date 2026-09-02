@@ -574,3 +574,52 @@ public struct IsFrontFace {
     public bool value;
     public __init(bool v) { value = v; }
 }
+
+public uint3 goldy_dispatch_rays_index() {
+    __target_switch
+    {
+    case hlsl: __intrinsic_asm "DispatchRaysIndex";
+    case glsl: __intrinsic_asm "(gl_LaunchIDEXT)";
+    case spirv:
+        return spirv_asm
+        {
+            result:$$uint3 = OpLoad builtin(LaunchIdKHR:uint3);
+        };
+    default:
+        return uint3(0);
+    }
+}
+
+public uint3 goldy_dispatch_rays_dimensions() {
+    __target_switch
+    {
+    case hlsl: __intrinsic_asm "DispatchRaysDimensions";
+    case glsl: __intrinsic_asm "(gl_LaunchSizeEXT)";
+    case spirv:
+        return spirv_asm
+        {
+            result:$$uint3 = OpLoad builtin(LaunchSizeKHR:uint3);
+        };
+    default:
+        return uint3(0);
+    }
+}
+
+/// Ray index in a `TraceRays` / `DispatchRays` grid (`DispatchRaysIndex()`).
+public struct DispatchRaysIndex {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint2 xy { get { return uint2(x, y); } }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
+}
+
+/// Launch dimensions of `TraceRays` / `DispatchRays` (`DispatchRaysDimensions()`).
+public struct DispatchRaysDimensions {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
+}

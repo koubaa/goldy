@@ -47,8 +47,8 @@ impl AccelerationStructure {
     /// Allocate an empty triangle BLAS sized for `max_triangles` (indexed or not).
     pub fn blas_triangles(device: &Device, max_triangles: u32, max_vertices: u32, vertex_stride: u32) -> Result<Self> {
         anyhow::ensure!(
-            device.capabilities().ray_query,
-            "this adapter does not support inline ray query (DeviceCapabilities::ray_query)"
+            device.capabilities().ray_query || device.capabilities().ray_tracing_pipelines,
+            "this adapter does not support acceleration structures (need ray_query or ray_tracing_pipelines)"
         );
         anyhow::ensure!(max_triangles > 0 && max_vertices > 0 && vertex_stride >= 12, "invalid BLAS sizing");
         let (handle, bindless) = {
@@ -76,8 +76,8 @@ impl AccelerationStructure {
     /// Allocate an empty TLAS that can hold up to `max_instances` BLAS instances.
     pub fn tlas(device: &Device, max_instances: u32) -> Result<Self> {
         anyhow::ensure!(
-            device.capabilities().ray_query,
-            "this adapter does not support inline ray query (DeviceCapabilities::ray_query)"
+            device.capabilities().ray_query || device.capabilities().ray_tracing_pipelines,
+            "this adapter does not support acceleration structures (need ray_query or ray_tracing_pipelines)"
         );
         anyhow::ensure!(max_instances > 0, "TLAS max_instances must be > 0");
         let (handle, bindless) = {

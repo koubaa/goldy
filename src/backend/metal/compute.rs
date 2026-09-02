@@ -1277,6 +1277,9 @@ pub(super) fn record_commands_to_buffer(
                 super::accel::encode_build(state, command_buffer, build)?;
                 has_recorded_gpu_work = true;
             }
+            GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                anyhow::bail!("Metal backend does not support ray tracing pipelines");
+            }
             GpuCommand::ResourceBarrier {
                 buffers: buf_entries,
                 textures: tex_entries,
@@ -1507,6 +1510,7 @@ fn stage_uploads(
             GpuCommand::BuildAccelerationStructure(_) => {
                 would_have_gpu_work = true;
             }
+            GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {}
         }
     }
 

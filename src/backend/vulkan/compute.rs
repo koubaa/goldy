@@ -72,17 +72,31 @@ fn collect_slots_from_raw_bind(indices: &[u32], categories: &[Option<crate::type
 fn collect_slot_keys_from_gpu_commands(
     commands: &[GpuCommand],
     compute_pipelines: &SharedComputePipelineTable,
+    rt_pipelines: &super::types::SharedRayTracingPipelineTable,
     _buffers: &SharedBufferTable,
 ) -> Vec<SlotKey> {
     let mut current_pipeline = None;
+    let mut current_rt = None;
     let mut slots = Vec::new();
     let compute_read = compute_pipelines.read().unwrap();
+    let rt_read = rt_pipelines.read().unwrap();
     for cmd in commands {
         match cmd {
-            GpuCommand::SetPipeline(p) => current_pipeline = Some(*p),
+            GpuCommand::SetPipeline(p) => {
+                current_pipeline = Some(*p);
+                current_rt = None;
+            }
+            GpuCommand::SetRayTracingPipeline(p) => {
+                current_rt = Some(*p);
+                current_pipeline = None;
+            }
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 if let Some(h) = current_pipeline {
                     if let Some(p) = compute_read.entries.get(&h) {
+                        slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                    }
+                } else if let Some(h) = current_rt {
+                    if let Some(p) = rt_read.entries.get(&h) {
                         slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
                     }
                 }
@@ -116,22 +130,36 @@ fn collect_slot_keys_from_gpu_commands(
 fn collect_slot_keys_from_graph_commands(
     commands: &[GraphCommand],
     compute_pipelines: &SharedComputePipelineTable,
+    rt_pipelines: &super::types::SharedRayTracingPipelineTable,
     pipelines: &SharedPipelineTable,
     buffers: &SharedBufferTable,
 ) -> Vec<SlotKey> {
     let mut slots = Vec::new();
     let mut current_compute_pipeline = None;
+    let mut current_rt_pipeline = None;
     let mut current_render_pipeline = None;
     let compute_read = compute_pipelines.read().unwrap();
+    let rt_read = rt_pipelines.read().unwrap();
     let pipelines_read = pipelines.read().unwrap();
     let buffers_read = buffers.read().unwrap();
     for gc in commands {
         match gc {
             GraphCommand::Compute(cmd) => match cmd {
-                GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
+                GpuCommand::SetPipeline(p) => {
+                    current_compute_pipeline = Some(*p);
+                    current_rt_pipeline = None;
+                }
+                GpuCommand::SetRayTracingPipeline(p) => {
+                    current_rt_pipeline = Some(*p);
+                    current_compute_pipeline = None;
+                }
                 GpuCommand::BindResourcesRaw { indices, .. } => {
                     if let Some(h) = current_compute_pipeline {
                         if let Some(p) = compute_read.entries.get(&h) {
+                            slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                        }
+                    } else if let Some(h) = current_rt_pipeline {
+                        if let Some(p) = rt_read.entries.get(&h) {
                             slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
                         }
                     }
@@ -204,7 +232,9 @@ fn slot_usage_to_vk_stage(usage: &SlotUsageSet, on_graphics_queue: bool) -> vk::
     }
     let mut flags = vk::PipelineStageFlags2::empty();
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
-        flags |= vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::DRAW_INDIRECT;
+        flags |= vk::PipelineStageFlags2::COMPUTE_SHADER
+            | vk::PipelineStageFlags2::DRAW_INDIRECT
+            | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR;
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         flags |= vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR;
@@ -975,6 +1005,7 @@ pub(super) fn submit_with_scope(
                 );
             }
         }
+        super::rt_pipeline::bind_rt_descriptor_set(logical_device, cmd);
 
         let mut vk_dispatch_idx = 0usize;
         if let Some(ref prof) = vk_gpu_profile {
@@ -990,6 +1021,7 @@ pub(super) fn submit_with_scope(
 
         // Track current pipeline for resource slot binding
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
+        let mut current_rt: Option<super::RayTracingPipelineHandle> = None;
         let mut belt_idx = 0usize;
         let mut texture_upload_idx = 0usize;
         let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
@@ -1023,6 +1055,7 @@ pub(super) fn submit_with_scope(
                             );
                         }
                         current_pipeline = Some(*handle);
+                        current_rt = None;
                     }
                 }
                 GpuCommand::BindResourcesRaw {
@@ -1063,6 +1096,42 @@ pub(super) fn submit_with_scope(
                                 0,
                                 layout.as_bytes(),
                             );
+                        }
+                    } else if let Some(h) = current_rt {
+                        let rt_read = view.rt_pipelines.read().unwrap();
+                        if let Some(pipeline) = rt_read.entries.get(&h) {
+                            crate::backend::with_layout_validation(|| {
+                                crate::backend::validate_raw_binding_strides(
+                                    raw_indices,
+                                    &pipeline.push_constant_categories,
+                                    &pipeline.binding_element_strides,
+                                    |idx, cat| {
+                                        buffer_stride_for_bindless_index(
+                                            &buffers.read().unwrap().entries,
+                                            device_handle,
+                                            idx,
+                                            cat,
+                                        )
+                                    },
+                                    &pipeline.shader_debug_name,
+                                )
+                            })?;
+                            let mut layout = PushLayout::default();
+                            shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                            shared::set_frame_table_slots(
+                                &mut layout,
+                                scope.frame_table.selector_slot,
+                                scope.frame_table.table_slot,
+                            );
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd,
+                                    pipeline.layout,
+                                    vk::ShaderStageFlags::ALL,
+                                    0,
+                                    layout.as_bytes(),
+                                );
+                            }
                         }
                     }
                 }
@@ -1180,6 +1249,27 @@ pub(super) fn submit_with_scope(
                 }
                 GpuCommand::BuildAccelerationStructure(build) => {
                     super::accel::record_build(view, cmd, device_handle, build)?;
+                }
+                GpuCommand::SetRayTracingPipeline(handle) => {
+                    current_pipeline = None;
+                    current_rt = Some(*handle);
+                    let rt_read = view.rt_pipelines.read().unwrap();
+                    if let Some(ps) = rt_read.entries.get(handle) {
+                        super::rt_pipeline::bind_pipeline(logical_device, cmd, ps);
+                    }
+                }
+                GpuCommand::TraceRays {
+                    width,
+                    height,
+                    depth,
+                    ..
+                } => {
+                    let rt_read = view.rt_pipelines.read().unwrap();
+                    if let Some(h) = current_rt {
+                        if let Some(ps) = rt_read.entries.get(&h) {
+                            super::rt_pipeline::cmd_trace_rays(logical_device, cmd, ps, *width, *height, *depth)?;
+                        }
+                    }
                 }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
@@ -1651,7 +1741,7 @@ pub(super) fn submit_with_scope(
     let signal_value = allocate_timeline_value(&ld.timeline_next);
     register_submit_timeline(ld, signal_value, false, ctx);
 
-    let used_slots = collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.buffers);
+    let used_slots = collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.rt_pipelines, view.buffers);
     ld.descriptors
         .lock()
         .unwrap()
@@ -1988,6 +2078,7 @@ pub(super) fn submit_graph_with_scope(
             );
         }
     }
+    super::rt_pipeline::bind_rt_descriptor_set(logical_device, cmd);
 
     let mut vk_dispatch_idx = 0usize;
     if let Some(ref prof) = vk_gpu_profile {
@@ -2005,6 +2096,7 @@ pub(super) fn submit_graph_with_scope(
     let compute_pipelines = &view.compute_pipelines;
     let buffers = &view.buffers;
     let mut current_compute_pipeline: Option<ComputePipelineHandle> = None;
+    let mut current_rt: Option<super::RayTracingPipelineHandle> = None;
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
     let mut frame_table_prologue_in_cb = false;
@@ -2042,6 +2134,7 @@ pub(super) fn submit_graph_with_scope(
                             );
                         }
                         current_compute_pipeline = Some(*handle);
+                        current_rt = None;
                     }
                 }
                 GpuCommand::BindResourcesRaw {
@@ -2082,6 +2175,26 @@ pub(super) fn submit_graph_with_scope(
                                 0,
                                 layout.as_bytes(),
                             );
+                        }
+                    } else if let Some(h) = current_rt {
+                        let rt_read = view.rt_pipelines.read().unwrap();
+                        if let Some(pipeline) = rt_read.entries.get(&h) {
+                            let mut layout = PushLayout::default();
+                            shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                            shared::set_frame_table_slots(
+                                &mut layout,
+                                scope.frame_table.selector_slot,
+                                scope.frame_table.table_slot,
+                            );
+                            unsafe {
+                                logical_device.device.cmd_push_constants(
+                                    cmd,
+                                    pipeline.layout,
+                                    vk::ShaderStageFlags::ALL,
+                                    0,
+                                    layout.as_bytes(),
+                                );
+                            }
                         }
                     }
                 }
@@ -2199,6 +2312,27 @@ pub(super) fn submit_graph_with_scope(
                 }
                 GpuCommand::BuildAccelerationStructure(build) => {
                     super::accel::record_build(view, cmd, device_handle, build)?;
+                }
+                GpuCommand::SetRayTracingPipeline(handle) => {
+                    current_compute_pipeline = None;
+                    current_rt = Some(*handle);
+                    let rt_read = view.rt_pipelines.read().unwrap();
+                    if let Some(ps) = rt_read.entries.get(handle) {
+                        super::rt_pipeline::bind_pipeline(logical_device, cmd, ps);
+                    }
+                }
+                GpuCommand::TraceRays {
+                    width,
+                    height,
+                    depth,
+                    ..
+                } => {
+                    let rt_read = view.rt_pipelines.read().unwrap();
+                    if let Some(h) = current_rt {
+                        if let Some(ps) = rt_read.entries.get(&h) {
+                            super::rt_pipeline::cmd_trace_rays(logical_device, cmd, ps, *width, *height, *depth)?;
+                        }
+                    }
                 }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
@@ -2749,7 +2883,7 @@ pub(super) fn submit_graph_with_scope(
     }
 
     let used_slots =
-        collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.pipelines, view.buffers);
+        collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.rt_pipelines, view.pipelines, view.buffers);
 
     let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let (queue, queue_lock) = if route_device {

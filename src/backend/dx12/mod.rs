@@ -49,6 +49,7 @@ mod process_shared;
 mod pso_cache;
 mod render_commands;
 mod render_target;
+mod rt_pipeline;
 mod sampler;
 mod shader;
 mod staging;
@@ -231,6 +232,7 @@ impl Dx12Backend {
             shaders: std::sync::Arc::new(std::sync::RwLock::new(types::ShaderTable::new())),
             pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::PipelineTable::new())),
             compute_pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::ComputePipelineTable::new())),
+            rt_pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::RayTracingPipelineTable::new())),
             render_targets: std::sync::Arc::new(std::sync::RwLock::new(types::RenderTargetTable::new())),
             surfaces: HashMap::new(),
             next_surface_handle: 1,
@@ -1257,6 +1259,62 @@ impl GpuBackend for Dx12Backend {
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
         compute::destroy(&mut self.state, pipeline_handle);
+    }
+
+    fn create_ray_tracing_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuRayTracingPipelineDesc,
+        debug_name: Option<&str>,
+    ) -> Result<RayTracingPipelineHandle> {
+        let handle = rt_pipeline::create(
+            &mut self.state,
+            device_handle,
+            desc.raygen,
+            desc.miss,
+            desc.closest_hit,
+            debug_name,
+        )?;
+        let (cats, slot_kinds, strides) = self
+            .state
+            .shaders
+            .read()
+            .unwrap()
+            .entries
+            .get(&desc.raygen)
+            .and_then(|s| s.reflection.as_ref())
+            .map(|r| {
+                (
+                    r.push_constant_categories.clone(),
+                    r.push_constant_slot_kinds.clone(),
+                    r.binding_element_strides.clone(),
+                )
+            })
+            .unwrap_or_default();
+        {
+            let mut rt_write = self.state.rt_pipelines.write().unwrap();
+            if let Some(ps) = rt_write.entries.get_mut(&handle) {
+                ps.push_constant_categories = cats;
+                ps.push_constant_slot_kinds = slot_kinds;
+                ps.binding_element_strides = strides;
+            }
+        }
+        Ok(handle)
+    }
+
+    fn destroy_ray_tracing_pipeline(&mut self, pipeline_handle: RayTracingPipelineHandle) {
+        rt_pipeline::destroy(&self.state, pipeline_handle);
+    }
+
+    fn ray_tracing_pipeline_slot_access(
+        &self,
+        pipeline: RayTracingPipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        let read = self.state.rt_pipelines.read().unwrap();
+        let Some(ps) = read.entries.get(&pipeline) else {
+            return Vec::new();
+        };
+        slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
     }
 
     fn compute_pipeline_slot_access(

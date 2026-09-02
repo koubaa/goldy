@@ -273,6 +273,15 @@ pub enum NodeKind {
     WithdrawRead { withdraw_id: u32 },
     /// GPU acceleration-structure build (BLAS triangles or TLAS instances).
     BuildAccelerationStructure(crate::backend::AccelBuildCommand),
+    /// Hardware `TraceRays` / `DispatchRays` (internal SBT on the pipeline).
+    TraceRays {
+        pipeline: crate::backend::RayTracingPipelineHandle,
+        resource_slots: Vec<u32>,
+        user_slots: Vec<u32>,
+        width: u32,
+        height: u32,
+        depth: u32,
+    },
 }
 
 /// A single node in the task graph.

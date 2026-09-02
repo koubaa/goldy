@@ -59,6 +59,7 @@ pub mod exchange;
 mod heap_tests;
 pub mod parcel;
 pub mod retained_pool;
+pub mod rt_pipeline;
 pub mod scheme;
 pub mod signal;
 #[cfg(feature = "graphics")]
@@ -87,6 +88,7 @@ pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use accel::{AccelInstance, AccelKind, AccelerationStructure};
+pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc};
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;
