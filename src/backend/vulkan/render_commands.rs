@@ -26,7 +26,7 @@ pub(super) fn record(
             RenderCommand::ClearDepth(_) => {
                 // Depth clear is applied as attachment load at pass begin.
             }
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 *current_pipeline = Some(*pipeline_handle);
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
                     unsafe {

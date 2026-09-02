@@ -129,7 +129,7 @@ fn raster_fingerprint(
     for command in commands {
         std::mem::discriminant(command).hash(&mut hash);
         match command {
-            RenderCommand::SetPipeline(handle) => {
+            RenderCommand::SetPipeline(handle) | RenderCommand::SetMeshPipeline(handle) => {
                 backend
                     .pipelines
                     .get(handle)
@@ -1121,7 +1121,7 @@ pub(super) fn render_to_target(
             RenderCommand::ClearDepth(_) => {
                 // Applied at pass begin (matches shipped DX12).
             }
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 let pipeline = backend
                     .pipelines
                     .get(pipeline_handle)

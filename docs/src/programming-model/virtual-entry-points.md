@@ -44,7 +44,7 @@ Each resource parameter occupies one **bindless slot** (a 16-bit index packed in
 | `DirectSpatial<T>` | `goldy_direct_spatial<T>(slot)` | Read/write 2D texture |
 | `ByteAddress` | `goldy_byte_address(slot)` | Raw byte-address buffer |
 | `Filter` | `goldy_filter(slot)` | Sampler state |
-| `Accel` | `goldy_accel(slot)` | Top-level acceleration structure (`RayQuery` / `TraceRay`, when the device sets `GOLDY_RAY_QUERY`) |
+| `Accel` | `goldy_accel(slot)` | Top-level acceleration structure (`RayQuery` / `TraceRay`, when `DeviceCapabilities::ray_query` or `ray_tracing_pipelines` is set) |
 
 ### Broadcast Parameters
 

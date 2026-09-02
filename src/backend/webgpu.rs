@@ -4966,7 +4966,7 @@ impl GpuBackend for WebGpuBackend {
             for command in commands {
                 match command {
                     RenderCommand::ClearDepth(_) => {}
-                    RenderCommand::SetPipeline(handle) => {
+                    RenderCommand::SetPipeline(handle) | RenderCommand::SetMeshPipeline(handle) => {
                         let pipeline = self
                             .graphics_pipelines
                             .get(handle)

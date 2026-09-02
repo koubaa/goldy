@@ -128,7 +128,7 @@ pub(super) fn record(
     for cmd in commands {
         match cmd {
             RenderCommand::ClearDepth(_) => {}
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
                     encoder.set_render_pipeline_state(&pipeline.pipeline);
                     current_primitive_type = pipeline.primitive_type;

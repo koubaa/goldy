@@ -177,7 +177,6 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
         D3D12_RESOURCE_STATE_COMMON,
     )?;
     let gpu_va = unsafe { as_res.GetGPUVirtualAddress() };
-    let scratch_va = unsafe { scratch.GetGPUVirtualAddress() };
 
     let handle = state.accels.write().unwrap().alloc_handle();
     let bindless_offset = {
@@ -195,13 +194,11 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
             gpu_va,
             bindless_offset,
             scratch,
-            scratch_va,
             max_primitives,
             max_vertices,
             vertex_stride,
         },
     );
-    let _ = max_vertices;
     Ok(handle)
 }
 
@@ -237,11 +234,14 @@ pub(super) fn bindless_index(state: &Dx12State, handle: AccelerationStructureHan
 }
 
 /// Record an AS build onto an already-open compute/direct list.
+///
+/// `geom_keep` holds CPU `pGeometryDescs` until the command list is `Close()`d.
 pub(super) fn record_build_list(
     scope: &Dx12SubmitScope<'_>,
     cl: &ID3D12GraphicsCommandList,
     cl7: &ID3D12GraphicsCommandList7,
     build: &AccelBuildCommand,
+    geom_keep: &mut Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
 ) -> Result<()> {
     let cl4: ID3D12GraphicsCommandList4 = cl.cast().context("BuildRaytracingAccelerationStructure needs CL4")?;
     let buffers = scope.buffers().read().unwrap();
@@ -270,6 +270,16 @@ pub(super) fn record_build_list(
         } => {
             let dest_as = accels.entries.get(dest).context("invalid BLAS")?;
             anyhow::ensure!(!dest_as.is_tlas, "build_blas destination is a TLAS");
+            anyhow::ensure!(
+                *vertex_count <= dest_as.max_vertices,
+                "build_blas vertex_count {vertex_count} exceeds create-time max_vertices {}",
+                dest_as.max_vertices
+            );
+            anyhow::ensure!(
+                *vertex_stride == dest_as.vertex_stride,
+                "build_blas vertex_stride {vertex_stride} does not match create-time stride {}",
+                dest_as.vertex_stride
+            );
             let vb = buffers.entries.get(vertex_buffer).context("invalid vertex buffer")?;
             let vaddr = unsafe { vb.resource.GetGPUVirtualAddress() } + vertex_offset;
             let mut geom = dummy_triangle_geom(*vertex_count, dest_as.max_primitives, *vertex_stride);
@@ -282,19 +292,21 @@ pub(super) fn record_build_list(
                 geom.Anonymous.Triangles.IndexCount = *index_count;
                 geom.Anonymous.Triangles.IndexBuffer = unsafe { idx.resource.GetGPUVirtualAddress() } + index_offset;
             }
+            geom_keep.push(Box::new(geom));
+            let geom = geom_keep.last().expect("just pushed");
             let desc = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
-                DestAccelerationStructureData: dest_as.gpu_va,
+                DestAccelerationStructureData: unsafe { dest_as.resource.GetGPUVirtualAddress() },
                 Inputs: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
                     Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
                     Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
                     NumDescs: 1,
                     DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
                     Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
-                        pGeometryDescs: &geom,
+                        pGeometryDescs: geom.as_ref(),
                     },
                 },
                 SourceAccelerationStructureData: 0,
-                ScratchAccelerationStructureData: dest_as.scratch_va,
+                ScratchAccelerationStructureData: unsafe { dest_as.scratch.GetGPUVirtualAddress() },
             };
             unsafe {
                 cl4.BuildRaytracingAccelerationStructure(&desc, None);
@@ -303,6 +315,12 @@ pub(super) fn record_build_list(
         AccelBuildCommand::Tlas { dest, instances } => {
             let dest_as = accels.entries.get(dest).context("invalid TLAS")?;
             anyhow::ensure!(dest_as.is_tlas, "build_tlas destination is a BLAS");
+            anyhow::ensure!(
+                instances.len() as u32 <= dest_as.max_primitives,
+                "build_tlas instance count {} exceeds create-time max {}",
+                instances.len(),
+                dest_as.max_primitives
+            );
             let mut packed = Vec::with_capacity(instances.len());
             for inst in instances.iter() {
                 let blas = accels.entries.get(&inst.blas).context("invalid instance BLAS")?;
@@ -334,7 +352,7 @@ pub(super) fn record_build_list(
             }
             let inst_va = unsafe { inst_res.GetGPUVirtualAddress() };
             let desc = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
-                DestAccelerationStructureData: dest_as.gpu_va,
+                DestAccelerationStructureData: unsafe { dest_as.resource.GetGPUVirtualAddress() },
                 Inputs: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
                     Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
                     Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
@@ -345,7 +363,7 @@ pub(super) fn record_build_list(
                     },
                 },
                 SourceAccelerationStructureData: 0,
-                ScratchAccelerationStructureData: dest_as.scratch_va,
+                ScratchAccelerationStructureData: unsafe { dest_as.scratch.GetGPUVirtualAddress() },
             };
             unsafe {
                 cl4.BuildRaytracingAccelerationStructure(&desc, None);

@@ -37,7 +37,7 @@ fn record_with_tables(
             RenderCommand::ClearDepth(_) => {
                 // Depth clear is applied at pass begin.
             }
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 let pipelines_read = record.pipelines.read().unwrap();
                 if let Some(pipeline) = pipelines_read.entries.get(pipeline_handle) {
                     current_vertex_stride = pipeline.vertex_stride;

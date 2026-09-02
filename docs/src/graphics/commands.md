@@ -73,6 +73,8 @@ pass.set_mesh_pipeline(&mesh_pipeline);
 pass.dispatch_mesh(1, 1, 1);        // mesh workgroups (Vulkan / DX12 / Metal)
 ```
 
+Do not mix `draw` with a mesh pipeline or `dispatch_mesh` with a vertex pipeline — `Scheme::submit` returns `GoldyError::Validation` with a hint. Create `MeshPipeline` only when `device.capabilities().mesh_shaders` is true (see [Target Hardware](../design/hardware.md)).
+
 `set_pipeline` binds a [`RenderPipeline`](pipelines.md) and, if any parcels were declared with `with_parcel` beforehand, resolves and binds their bindless handles for that pipeline's typed shader parameters. Calling `set_pipeline` again mid-pass starts a new binding scope for subsequent draws — declare each draw's parcels right before the `set_pipeline` call that will consume them.
 
 For fullscreen or procedurally-generated geometry (no vertex buffer at all), skip `set_vertex_buffer` entirely and generate positions from `SV_VertexID` in the shader — see [Vertex Types and Layouts](vertices.md).

@@ -352,7 +352,7 @@ where
     let mut current_pipeline: Option<PipelineHandle> = None;
     for cmd in commands {
         match cmd {
-            RenderCommand::SetPipeline(h) => current_pipeline = Some(*h),
+            RenderCommand::SetPipeline(h) | RenderCommand::SetMeshPipeline(h) => current_pipeline = Some(*h),
             RenderCommand::BindResources { buffers } => {
                 if let Some(ph) = current_pipeline {
                     if let Some((expected, name)) = pipeline_strides(ph) {
@@ -404,8 +404,10 @@ pub(crate) struct FrameToken {
 pub(crate) enum RenderCommand {
     /// Clear the depth buffer.
     ClearDepth(f32),
-    /// Set the active pipeline.
+    /// Set the active vertex/fragment pipeline.
     SetPipeline(PipelineHandle),
+    /// Set the active mesh (+ fragment) pipeline.
+    SetMeshPipeline(PipelineHandle),
     /// Set a vertex buffer.
     SetVertexBuffer {
         slot: u32,

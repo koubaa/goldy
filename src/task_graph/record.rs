@@ -211,7 +211,7 @@ impl RenderPassRecord {
     }
 
     pub fn set_mesh_pipeline(&mut self, pipeline: &crate::MeshPipeline) -> &mut Self {
-        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        self.commands.push(RenderCommand::SetMeshPipeline(pipeline.handle));
         if !self.pending_push_constants.is_empty() {
             let handles: Vec<ResourceHandle> = self
                 .pending_push_constants

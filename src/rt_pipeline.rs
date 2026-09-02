@@ -41,7 +41,11 @@ impl RayTracingPipeline {
     pub fn new_with_label(device: &Device, desc: &RayTracingPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
         anyhow::ensure!(
             device.capabilities().ray_tracing_pipelines,
-            "this adapter does not support ray tracing pipelines (DeviceCapabilities::ray_tracing_pipelines)"
+            "this adapter does not support ray tracing pipelines \
+             (DeviceCapabilities::ray_tracing_pipelines is false). \
+             hint: use inline RayQuery in a [goldy_compute] kernel when ray_query is true \
+             (all Metal RT, many iGPUs). Full TraceRays needs Vulkan VK_KHR_ray_tracing_pipeline \
+             or DXR. Query device.capabilities().ray_tracing_pipelines."
         );
         tracing::debug!(?label, "Creating ray tracing pipeline");
         let mut backend = device.inner.backend.lock().unwrap();

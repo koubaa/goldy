@@ -766,6 +766,8 @@ pub struct Scheme {
     /// Registered present exchanges: one claim slot per transaction, keyed by dense present_idx.
     #[cfg(feature = "graphics")]
     present_transactions: Vec<PresentTransactionInfo>,
+    /// Record-time diagnostics flushed on [`Self::submit`].
+    record_errors: Vec<String>,
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -776,6 +778,13 @@ fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError>
             "acceleration-structure geometry requires a buffer parcel"
         ))),
     }
+}
+
+fn parcel_has_accel_input(parcel: &Parcel) -> bool {
+    parcel
+        .buffer_descriptor()
+        .map(|(_, flags)| flags.contains(BufferFlags::ACCEL_INPUT))
+        .unwrap_or(true)
 }
 
 impl Scheme {
@@ -800,6 +809,7 @@ impl Scheme {
             present_bindings: Vec::new(),
             #[cfg(feature = "graphics")]
             present_transactions: Vec::new(),
+            record_errors: Vec::new(),
         }
     }
 
@@ -903,7 +913,20 @@ impl Scheme {
     ) -> Result<(), GoldyError> {
         self.dirty = true;
         if dest.kind != crate::accel::AccelKind::Blas {
-            return Err(GoldyError::Backend(anyhow::anyhow!("build_blas requires a BLAS")));
+            return Err(GoldyError::Validation(
+                "build_blas requires a triangle BLAS, but the destination is a TLAS. \
+                 hint: create with AccelerationStructure::blas_triangles, or call build_tlas \
+                 for instance structures."
+                    .into(),
+            ));
+        }
+        if !parcel_has_accel_input(vertices) {
+            return Err(GoldyError::Validation(
+                "build_blas vertex parcel is missing BufferFlags::ACCEL_INPUT. \
+                 hint: acquire the geometry buffer with BufferFlags::ACCEL_INPUT \
+                 (Vulkan/DX12/Metal require AS-build usage on BLAS inputs)."
+                    .into(),
+            ));
         }
         let (vertex_buffer, vertex_offset) = parcel_gpu_buffer(vertices)?;
         self.submit_state.register_parcel_stamp(vertices);
@@ -924,6 +947,13 @@ impl Scheme {
                 access: NodeAccess::Read,
             });
             let (h, off) = parcel_gpu_buffer(idx)?;
+            if !parcel_has_accel_input(idx) {
+                return Err(GoldyError::Validation(
+                    "build_blas index parcel is missing BufferFlags::ACCEL_INPUT. \
+                     hint: acquire index buffers used as BLAS geometry with BufferFlags::ACCEL_INPUT."
+                        .into(),
+                ));
+            }
             (Some(h), off, count)
         } else {
             (None, 0, 0)
@@ -953,10 +983,18 @@ impl Scheme {
     ) -> Result<(), GoldyError> {
         self.dirty = true;
         if dest.kind != crate::accel::AccelKind::Tlas {
-            return Err(GoldyError::Backend(anyhow::anyhow!("build_tlas requires a TLAS")));
+            return Err(GoldyError::Validation(
+                "build_tlas requires a TLAS, but the destination is a BLAS. \
+                 hint: create with AccelerationStructure::tlas, or call build_blas for triangle geometry."
+                    .into(),
+            ));
         }
         if instances.is_empty() {
-            return Err(GoldyError::Backend(anyhow::anyhow!("build_tlas requires at least one instance")));
+            return Err(GoldyError::Validation(
+                "build_tlas requires at least one instance. \
+                 hint: pass a non-empty &[AccelInstance] of BLASes."
+                    .into(),
+            ));
         }
         let mut bindings = vec![ResourceBinding {
             resource: dest.resource_id(),
@@ -965,7 +1003,11 @@ impl Scheme {
         let mut rec = Vec::with_capacity(instances.len());
         for inst in instances {
             if inst.blas.kind != crate::accel::AccelKind::Blas {
-                return Err(GoldyError::Backend(anyhow::anyhow!("TLAS instance must reference a BLAS")));
+                return Err(GoldyError::Validation(
+                    "build_tlas instance must reference a BLAS, not a TLAS. \
+                     hint: AccelInstance.blas must be AccelerationStructure::blas_triangles."
+                        .into(),
+                ));
             }
             bindings.push(ResourceBinding {
                 resource: inst.blas.resource_id(),
@@ -1551,6 +1593,10 @@ impl Scheme {
         }
 
         validate_present_exchange_bindings(&self.ir, &self.present_transactions)?;
+        if let Some(msg) = self.record_errors.first() {
+            return Err(GoldyError::Validation(msg.clone()));
+        }
+        crate::task_graph::validate::validate_graph(&self.ir)?;
 
         let submit_result = {
             let grant_count = self.present_transactions.len();
@@ -1815,6 +1861,10 @@ impl Scheme {
             self.submit_state.invalidate_retention();
         }
 
+        crate::task_graph::validate::validate_graph(&self.ir)?;
+        if let Some(msg) = self.record_errors.first() {
+            return Err(GoldyError::Validation(msg.clone()));
+        }
         {
             use crate::task_graph::cross_submit::net_access_per_resource;
             let net = net_access_per_resource(&self.ir);
@@ -2256,8 +2306,10 @@ impl Scheme {
             )));
         }
         if src.format() != dst.format() {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "copy_texture_region: format mismatch {:?} → {:?}",
+            return Err(GoldyError::Validation(format!(
+                "copy_texture_region: format mismatch {:?} → {:?}. \
+                 hint: copies require identical TextureFormat on src and dst; \
+                 convert in a compute/render pass if you need a format change.",
                 src.format(),
                 dst.format()
             )));
@@ -2792,6 +2844,9 @@ type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
 
 pub(crate) trait SchemeBindable {
     fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult;
+    fn accel_kind(&self) -> Option<crate::accel::AccelKind> {
+        None
+    }
 }
 
 impl SchemeBindable for Parcel {
@@ -2853,6 +2908,10 @@ impl SchemeBindable for crate::AccelerationStructure {
             self.resource_index(crate::types::ResourceAccess::Read),
         )
     }
+
+    fn accel_kind(&self) -> Option<crate::accel::AccelKind> {
+        Some(self.kind)
+    }
 }
 
 impl SchemeBindable for crate::Texture {
@@ -2908,6 +2967,14 @@ impl<'a> SchemeNodeBuilder<'a> {
             .flatten()
             .unwrap_or_else(|| node_access_to_resource_access(access));
         let (resource_identity, slot) = bindable.resolve(self.scheme, descriptor_access);
+        if bindable.accel_kind() == Some(crate::accel::AccelKind::Blas) {
+            self.scheme.record_errors.push(
+                "with_parcel bound a BLAS as a shader Accel parameter. \
+                 hint: RayQuery / TraceRay take a TLAS. Build the BLAS, then Scheme::build_tlas, \
+                 and bind the TLAS."
+                    .into(),
+            );
+        }
         let slot = slot.unwrap_or_else(|| {
             panic!(
                 "with_parcel: resource has no descriptor for {access:?} access; \
@@ -3279,7 +3346,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     /// Bind a [`crate::MeshPipeline`] and typed push-constant resources, like [`Self::set_pipeline`].
     pub fn set_mesh_pipeline(&mut self, pipeline: &crate::MeshPipeline) -> &mut Self {
-        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        self.commands.push(RenderCommand::SetMeshPipeline(pipeline.handle));
         if !self.pending_push_constants.is_empty() {
             let handles: Vec<ResourceHandle> = self
                 .pending_push_constants
@@ -4425,6 +4492,41 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("render target");
         scheme.copy_to_present(&rt, lease);
         scheme.register_present_exchange(lease)
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn submit_rejects_dispatch_mesh_without_pipeline() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        {
+            let mut pass = scheme.render_pass("mesh", &rt, crate::types::TargetLoad::Discard);
+            pass.dispatch_mesh(1, 1, 1);
+            pass.finish();
+        }
+        let err = scheme.submit().expect_err("dispatch_mesh without pipeline");
+        let s = err.to_string();
+        assert!(s.contains("set_mesh_pipeline"), "unexpected error: {s}");
+    }
+
+    #[test]
+    fn submit_rejects_blas_as_shader_accel() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let blas = crate::AccelerationStructure::blas_triangles(&device, 1, 3, 12).expect("BLAS");
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("trace", &pipeline)
+            .with_parcel(&blas, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+        let err = scheme.submit().expect_err("BLAS as Accel");
+        let s = err.to_string();
+        assert!(s.contains("BLAS"), "unexpected error: {s}");
     }
 
     #[cfg(feature = "graphics")]

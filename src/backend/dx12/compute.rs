@@ -172,10 +172,13 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool, on_direct_que
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         // A non-storage upload buffer can only ever be a copy *source*, but the
-        // sync stage (COPY) is identical either way. AS builds also consume
-        // vertex/index buffers classified as TRANSFER in GraphIR.
+        // sync stage (COPY) is identical either way.
+        // Do not OR BUILD_RAYTRACING here: GraphIR classifies both copies and
+        // AS builds as TRANSFER, and BUILD_RAYTRACING is incompatible with
+        // COPY_DEST (debug layer ID 1331). AS visibility is a global barrier
+        // in `accel::record_build_list`.
         let _ = is_storage;
-        sync.0 |= D3D12_BARRIER_SYNC_COPY.0 | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0;
+        sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
         if on_direct_queue {
@@ -223,12 +226,9 @@ fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, is_storage: bool) 
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         if usage.access == NodeAccessUnion::Write && is_storage {
             access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
-        } else if is_storage {
-            // Geometry buffers fed to AS builds are storage (UAV) heaps; DXR
-            // reads them as SRVs, not copy sources.
-            access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
         } else {
-            // Non-storage upload buffers can only ever be a copy source.
+            // Copy source — including ACCEL_INPUT geometry after a GPU upload.
+            // SHADER_RESOURCE is not valid with SYNC_COPY (ID 1331).
             access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0;
         }
     }
@@ -1015,6 +1015,8 @@ struct CmdCtx<'a> {
     pending_deletions: Vec<super::types::PendingDeletion>,
     /// Frame table row chosen at prologue record time (stable under concurrent submits).
     frame_table_row: Option<u32>,
+    /// CPU `pGeometryDescs` must remain valid until `Close()` (DXR spec).
+    rt_geom_descs: Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
@@ -1910,7 +1912,7 @@ fn record_gpu_command(
             }
         }
         GpuCommand::BuildAccelerationStructure(build) => {
-            super::accel::record_build_list(scope, cl, cl7, build)?;
+            super::accel::record_build_list(scope, cl, cl7, build, &mut ctx.rt_geom_descs)?;
         }
         GpuCommand::SetRayTracingPipeline(handle) => {
             ctx.current_compute_pipeline = None;
@@ -2014,6 +2016,10 @@ fn execute_signal_and_finish(
     if let Err(e) = unsafe { command_list.Close() } {
         if let Some(slot) = scope.sc.lock().unwrap().compute_allocator_pool.get_mut(slot_idx) {
             slot.in_recording = false;
+            // Close failed: list is still recording. Drop it so the next acquire
+            // creates a fresh list instead of Reset() failing in a tight loop.
+            slot.command_list = None;
+            slot.pre_reset = false;
         }
         if let Some(row) = frame_table_row {
             super::frame_table::record_submission(scope.frame_table(), row, 0);
@@ -2184,7 +2190,7 @@ fn execute_signal_and_finish_device(
     frame_table_row: Option<u32>,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    if let Err(e) = unsafe { command_list.Close() } {
+        if let Err(e) = unsafe { command_list.Close() } {
         if let Some(row) = frame_table_row {
             super::frame_table::record_submission(scope.frame_table(), row, 0);
         }
@@ -2320,7 +2326,9 @@ pub(super) fn submit_with_scope(
     let route_device = commands.iter().any(|c| {
         matches!(
             c,
-            GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. }
+            GpuCommand::SetRayTracingPipeline(_)
+                | GpuCommand::TraceRays { .. }
+                | GpuCommand::BuildAccelerationStructure(_)
         )
     });
     let (command_list, slot_idx, on_device_queue) = {
@@ -2484,7 +2492,7 @@ pub(super) fn submit_with_scope(
     };
 
     let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
-    let (belt_idx_final, pending_deletions, frame_table_row) = {
+    let (belt_idx_final, pending_deletions, frame_table_row, _rt_geom_keep) = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
         let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
@@ -2500,6 +2508,7 @@ pub(super) fn submit_with_scope(
             current_rt: None,
             pending_deletions: Vec::new(),
             frame_table_row: None,
+            rt_geom_descs: Vec::new(),
         };
         for cmd in &commands {
             record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, cmd)?;
@@ -2512,7 +2521,7 @@ pub(super) fn submit_with_scope(
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, row_guard.take())
+        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, row_guard.take(), cmd_ctx.rt_geom_descs)
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
@@ -2609,7 +2618,11 @@ pub(super) fn submit_graph_with_scope(
     let has_rt = commands.iter().any(|c| {
         matches!(
             c,
-            GraphCommand::Compute(GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. })
+            GraphCommand::Compute(
+                GpuCommand::SetRayTracingPipeline(_)
+                    | GpuCommand::TraceRays { .. }
+                    | GpuCommand::BuildAccelerationStructure(_)
+            )
         )
     });
     let route_device = has_render || has_rt;
@@ -2774,7 +2787,7 @@ pub(super) fn submit_graph_with_scope(
     };
 
     let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
-    let (belt_idx_final, pending_deletions, frame_table_row);
+    let (belt_idx_final, pending_deletions, frame_table_row, _rt_geom_keep);
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
         let mut cmd_ctx = CmdCtx {
@@ -2791,6 +2804,7 @@ pub(super) fn submit_graph_with_scope(
             current_rt: None,
             pending_deletions: Vec::new(),
             frame_table_row: None,
+            rt_geom_descs: Vec::new(),
         };
 
         let mut frame_table_prologue_in_cb = false;
@@ -2878,6 +2892,7 @@ pub(super) fn submit_graph_with_scope(
         belt_idx_final = cmd_ctx.belt_idx;
         pending_deletions = cmd_ctx.pending_deletions;
         frame_table_row = row_guard.take();
+        _rt_geom_keep = cmd_ctx.rt_geom_descs;
     }
 
     let tail = compute_submit_tail_barrier(on_device_queue);
@@ -3363,6 +3378,26 @@ mod barrier_lowering_tests {
             slot_usage_to_dx12_access_for_buffer(&r, true),
             D3D12_BARRIER_ACCESS_COPY_SOURCE
         ));
+        assert!(!has(
+            slot_usage_to_dx12_access_for_buffer(&r, true),
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+        ));
+    }
+
+    /// GraphIR maps AS builds to TRANSFER. Mixing BUILD_RAYTRACING sync with
+    /// COPY_DEST access is debug layer ID 1331 (`ray_query` Close failure).
+    #[test]
+    fn transfer_buffer_sync_is_copy_only() {
+        let w = slot(NodeAccess::Write, UsageKindFlags::TRANSFER);
+        let sync = slot_usage_to_dx12_sync(&w, true, true);
+        assert_ne!(sync.0 & D3D12_BARRIER_SYNC_COPY.0, 0);
+        assert_eq!(
+            sync.0 & D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0,
+            0,
+            "BUILD_RAYTRACING must not share a buffer barrier with COPY_DEST"
+        );
+        let access = slot_usage_to_dx12_access_for_buffer(&w, true);
+        assert!(has(access, D3D12_BARRIER_ACCESS_COPY_DEST));
     }
 
     /// Render-pass buffer read maps to SHADER_RESOURCE (vertex/pixel), never an

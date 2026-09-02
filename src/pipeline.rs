@@ -161,12 +161,18 @@ impl MeshPipeline {
     pub fn new_with_label(device: &Device, desc: &MeshPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
         anyhow::ensure!(
             device.capabilities().mesh_shaders,
-            "this adapter does not support mesh shaders (DeviceCapabilities::mesh_shaders)"
+            "this adapter does not support mesh shaders (DeviceCapabilities::mesh_shaders is false). \
+             hint: skip MeshPipeline::new, or pick an adapter with mesh shaders \
+             (Vulkan VK_EXT_mesh_shader, DX12 mesh tier 1, Metal Apple7 / Mac2). \
+             Query device.capabilities().mesh_shaders."
         );
         if desc.amplification.is_some() {
             anyhow::ensure!(
                 device.capabilities().amplification_shaders,
-                "this adapter does not support amplification/task shaders (DeviceCapabilities::amplification_shaders)"
+                "this adapter does not support amplification/task shaders \
+                 (DeviceCapabilities::amplification_shaders is false). \
+                 hint: set MeshPipelineDesc::amplification to None, or pick an adapter that \
+                 reports amplification_shaders."
             );
         }
         tracing::debug!(?label, "Creating mesh pipeline");

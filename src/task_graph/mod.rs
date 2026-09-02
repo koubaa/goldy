@@ -9,6 +9,7 @@ pub(crate) mod cross_submit;
 mod graph;
 mod ir;
 pub mod record;
+pub(crate) mod validate;
 
 pub use graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]

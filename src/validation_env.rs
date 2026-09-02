@@ -14,7 +14,9 @@
 //!     shader/PSO create and bind groups). For loader-only Vulkan layers, set
 //!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
-//!   - `scheme` / `readback` — retained-scheme withdraw staging invariants (staging pool, frame pairing)
+//!   - `scheme` / `readback` / `graph` — retained-scheme withdraw staging invariants
+//!     plus graph-level lifetime checks (Accel built in this scheme before TraceRay /
+//!     RayQuery). Cycle detection, mesh/draw mix-ups, and BLAS/TLAS misuse always run.
 //!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
 //!   - `all` — layout, GPU API, timeline, scheme, and host_access
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
@@ -78,7 +80,7 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
                 "timeline" => out.timeline = true,
-                "scheme" | "readback" => out.scheme = true,
+                "scheme" | "readback" | "graph" => out.scheme = true,
                 "host_access" | "host-access" => out.host_access = true,
                 _ => {}
             }
@@ -234,11 +236,9 @@ mod tests {
         assert!(p.timeline);
         assert!(!p.scheme);
 
-        let p = parse_validation_list("scheme");
-        assert!(!p.layout);
-        assert!(!p.gpu_api);
-        assert!(!p.timeline);
+        let p = parse_validation_list("graph");
         assert!(p.scheme);
+        assert!(!p.gpu_api);
 
         let p = parse_validation_list("host_access");
         assert!(p.host_access);

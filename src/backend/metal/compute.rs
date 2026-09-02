@@ -71,7 +71,7 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
             } => {
                 for rc in render_cmds {
                     match rc {
-                        RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => current_render_pipeline = Some(*p),
                         RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
                                 if let Some(buf) = state.buffers.get(h) {

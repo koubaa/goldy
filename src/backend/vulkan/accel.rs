@@ -225,6 +225,10 @@ pub(super) fn record_build(
             index_count,
         } => {
             let dest_as = accels.entries.get(dest).context("invalid BLAS handle")?;
+            anyhow::ensure!(
+                dest_as.kind == vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
+                "build_blas destination is not a BLAS"
+            );
             let vb = buffers.entries.get(vertex_buffer).context("invalid vertex buffer")?;
             let vaddr = buffer_device_address(&ld.device, vb.buffer) + vertex_offset;
             let mut triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
@@ -267,6 +271,10 @@ pub(super) fn record_build(
         }
         AccelBuildCommand::Tlas { dest, instances } => {
             let dest_as = accels.entries.get(dest).context("invalid TLAS handle")?;
+            anyhow::ensure!(
+                dest_as.kind == vk::AccelerationStructureTypeKHR::TOP_LEVEL,
+                "build_tlas destination is not a TLAS"
+            );
             let mut vk_instances = Vec::with_capacity(instances.len());
             for inst in instances.iter() {
                 let blas = accels.entries.get(&inst.blas).context("invalid instance BLAS")?;
@@ -282,11 +290,11 @@ pub(super) fn record_build(
                     },
                 });
             }
-            let byte_len = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() * vk_instances.len();
-            let bytes = unsafe { std::slice::from_raw_parts(vk_instances.as_ptr() as *const u8, byte_len) };
-            // Host-visible instance buffer for this encode (leaked until idle is acceptable for MVP;
-            // scratch + instance buffers are device-local copies below).
-            let (inst_buf, inst_mem) = create_host_upload(view.instance, ld, bytes)?;
+            let mut packed = Vec::with_capacity(vk_instances.len() * 64);
+            for inst in &vk_instances {
+                packed.extend_from_slice(&instance_bytes::instance_to_bytes(inst));
+            }
+            let (inst_buf, inst_mem) = create_host_upload(view.instance, ld, &packed)?;
             let inst_addr = buffer_device_address(&ld.device, inst_buf);
             let instances_data = vk::AccelerationStructureGeometryInstancesDataKHR::default()
                 .array_of_pointers(false)
@@ -363,6 +371,15 @@ fn record_build_inner(
     geom: vk::AccelerationStructureGeometryKHR<'_>,
     primitive_count: u32,
 ) -> Result<()> {
+    anyhow::ensure!(
+        dest.kind == ty,
+        "acceleration structure build kind mismatch"
+    );
+    anyhow::ensure!(
+        primitive_count <= dest.max_primitives,
+        "AS build count {primitive_count} exceeds create-time max {}",
+        dest.max_primitives
+    );
     let (scratch, scratch_mem) = create_gpu_buffer(
         instance,
         ld,
@@ -432,11 +449,8 @@ fn record_build_inner(
 mod instance_bytes {
     use super::*;
     pub fn instance_to_bytes(i: &vk::AccelerationStructureInstanceKHR) -> [u8; 64] {
-        // SAFETY: Vulkan instance desc is 64 bytes.
+        const _: () = assert!(std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() == 64);
+        // SAFETY: Vulkan instance desc is exactly 64 bytes.
         unsafe { std::mem::transmute_copy(i) }
     }
-}
-
-fn _unused_instance_bytes() {
-    let _ = instance_bytes::instance_to_bytes;
 }

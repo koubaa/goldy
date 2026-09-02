@@ -261,6 +261,16 @@ name = "solid_cube"
 path = "examples/solid_cube.rs"
 required-features = ["examples"]
 
+[[example]]
+name = "mesh_triangle"
+path = "examples/mesh_triangle.rs"
+required-features = ["examples"]
+
+[[example]]
+name = "ray_query"
+path = "examples/ray_query.rs"
+required-features = ["examples"]
+
 [[bin]]
 name = "update-screenshots"
 path = "tools/update_screenshots.rs"

@@ -191,7 +191,7 @@ fn collect_slot_keys_from_graph_commands(
             } => {
                 for rc in render_cmds {
                     match rc {
-                        RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => current_render_pipeline = Some(*p),
                         RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
                                 if let Some(idx) = buffers_read.entries.get(h).and_then(|b| b.bindless_index) {

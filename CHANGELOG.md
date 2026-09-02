@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DeviceCapabilities::ray_tracing_pipelines` is false. Metal exposes
   `ray_query` only (no SBT / `TraceRays`).
 
+- **Graph validation (`GoldyError::Validation`)** — `Scheme::submit` always checks
+  dependency cycles, mesh vs vertex command mix-ups, BLAS/TLAS misuse, and
+  `BufferFlags::ACCEL_INPUT` on BLAS geometry, with `hint:` text. `GOLDY_VALIDATION=scheme`
+  (alias `graph`) also requires Accel builds in the same scheme before RayQuery / TraceRays.
+  Examples: `mesh_triangle`, `ray_query`.
 - **`GOLDY_VALIDATION=host_access`** — page-protect CPU-backend parcel storage
   (page-aligned, unshared mapping + guard page). Stray host pointers fault
   outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.

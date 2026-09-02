@@ -1589,7 +1589,6 @@ pub(crate) struct AccelState {
     pub gpu_va: u64,
     pub bindless_offset: Option<u32>,
     pub scratch: Direct3D12::ID3D12Resource,
-    pub scratch_va: u64,
     pub max_primitives: u32,
     pub max_vertices: u32,
     pub vertex_stride: u32,
