@@ -1225,7 +1225,7 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
 }
 
 /// Returns false when the wave slice contains nodes that must be submitted standalone
-/// (upload payload staging, non-stable copy destinations, etc.).
+/// (upload payload staging, non-stable copy destinations, AS builds, etc.).
 pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
     #[cfg(feature = "graphics")]
     use super::ResourceId;
@@ -1254,11 +1254,33 @@ pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 NodeKind::CopyRenderTarget { .. } => {
                     return false;
                 }
+                NodeKind::BuildAccelerationStructure(_) => return false,
                 _ => {}
             }
         }
     }
     true
+}
+
+pub(crate) fn wave_has_accel_build(ir: &GraphIR, wave: &Wave) -> bool {
+    wave.node_indices
+        .iter()
+        .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::BuildAccelerationStructure(_)))
+}
+
+/// True when every GPU node in `waves` is an acceleration-structure build.
+pub(crate) fn partition_waves_are_accel_build(ir: &GraphIR, waves: &[Wave]) -> bool {
+    let mut any = false;
+    for wave in waves {
+        for &ni in &wave.node_indices {
+            match &ir.nodes[ni].kind {
+                NodeKind::BuildAccelerationStructure(_) => any = true,
+                NodeKind::WithdrawRead { .. } => {}
+                _ => return false,
+            }
+        }
+    }
+    any
 }
 
 /// Fingerprint contribution from destination texture barrier layouts for pitched
@@ -1309,6 +1331,12 @@ fn split_wave_range_at_retainability(
         // split non-retainable upload waves (WriteBuffer) from subsequent compute — those
         // stay in one partition for payload refresh and barrier-cost heuristics.
         if prev_retain && !curr_retain {
+            out.push(sub_start..base + i);
+            sub_start = base + i;
+        } else if wave_has_accel_build(ir, &waves[i - 1]) && !wave_has_accel_build(ir, &waves[i]) {
+            // AS builds must not share a retained CB with RayQuery/TraceRays: re-executing
+            // BuildRaytracingAccelerationStructure every frame stalls the DIRECT queue
+            // (CPU-wait on present) and flickers the TLAS.
             out.push(sub_start..base + i);
             sub_start = base + i;
         }
@@ -1943,6 +1971,29 @@ mod tests {
                 1,
                 0,
             )],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        assert!(!waves_can_retain(&ir, &schedule.waves));
+    }
+
+    #[test]
+    fn accel_build_wave_is_not_retainable() {
+        let ir = GraphIR {
+            nodes: vec![TaskNode {
+                label: "build_blas",
+                bindings: vec![],
+                kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
+                    dest: 1,
+                    vertex_buffer: 0,
+                    vertex_offset: 0,
+                    vertex_count: 3,
+                    vertex_stride: 12,
+                    index_buffer: None,
+                    index_offset: 0,
+                    index_count: 0,
+                }),
+            }],
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);

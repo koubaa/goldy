@@ -1439,6 +1439,24 @@ fn submit_resolved_ir_partitions_replay(
             );
             let merged = sidecar.merge_sync(sync.as_ref());
 
+            if analysis::partition_waves_are_accel_build(ir, &waves)
+                && ir_clean
+                && replay
+                    .partition_last_tv
+                    .get(part_idx)
+                    .copied()
+                    .flatten()
+                    .is_some()
+            {
+                last_tv = replay.partition_last_tv[part_idx].unwrap();
+                boundary.record(separate, has_render, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                *partial_tv = last_tv;
+                *partial = result.clone();
+                part_idx += 1;
+                continue;
+            }
+
             if !can_retain {
                 if has_present {
                     ensure_present_ready(&present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
