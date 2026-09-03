@@ -4,7 +4,7 @@
 //! record [`crate::Scheme::build_blas`] / [`crate::Scheme::build_tlas`], then bind with
 //! [`crate::scheme::SchemeNodeBuilder::with_parcel`] as an `Accel` shader parameter.
 
-use crate::backend::{GpuBackend, GpuAccelCreate};
+use crate::backend::{GpuAccelCreate, GpuBackend};
 use crate::device::Device;
 use crate::handles::AccelerationStructureHandle;
 use crate::task_graph::ResourceId;
@@ -12,12 +12,35 @@ use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-/// Bottom-level (triangle) or top-level (instance) acceleration structure.
-pub struct AccelerationStructure {
+struct AccelerationStructureInner {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
-    pub(crate) handle: AccelerationStructureHandle,
+    handle: AccelerationStructureHandle,
     bindless: Option<u32>,
+    /// BLASes this TLAS still needs on the GPU. Empty for BLAS objects.
+    held_blases: Mutex<Vec<AccelerationStructure>>,
+}
+
+impl Drop for AccelerationStructureInner {
+    fn drop(&mut self) {
+        // GPU TLAS is destroyed first; `held_blases` drop afterwards (field drop order)
+        // so referenced BLASes stay alive until this TLAS is gone.
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_acceleration_structure(self.handle);
+        }
+    }
+}
+
+/// Bottom-level (triangle) or top-level (instance) acceleration structure.
+///
+/// Cloning is cheap (`Arc`). GPU teardown runs on the last drop and is deferred
+/// until in-flight command buffers retire (same model as buffers/textures).
+/// A TLAS keeps clones of every BLAS passed to [`crate::Scheme::build_tlas`],
+/// so dropping the caller's BLAS handle cannot invalidate a live TLAS.
+#[derive(Clone)]
+pub struct AccelerationStructure {
+    inner: Arc<AccelerationStructureInner>,
+    pub(crate) handle: AccelerationStructureHandle,
     pub(crate) kind: AccelKind,
 }
 
@@ -69,10 +92,14 @@ impl AccelerationStructure {
             (handle, bindless)
         };
         Ok(Self {
-            _device: device.clone(),
-            backend: Arc::clone(&device.inner.backend),
+            inner: Arc::new(AccelerationStructureInner {
+                _device: device.clone(),
+                backend: Arc::clone(&device.inner.backend),
+                handle,
+                bindless,
+                held_blases: Mutex::new(Vec::new()),
+            }),
             handle,
-            bindless,
             kind: AccelKind::Blas,
         })
     }
@@ -98,17 +125,22 @@ impl AccelerationStructure {
             (handle, bindless)
         };
         Ok(Self {
-            _device: device.clone(),
-            backend: Arc::clone(&device.inner.backend),
+            inner: Arc::new(AccelerationStructureInner {
+                _device: device.clone(),
+                backend: Arc::clone(&device.inner.backend),
+                handle,
+                bindless,
+                held_blases: Mutex::new(Vec::new()),
+            }),
             handle,
-            bindless,
             kind: AccelKind::Tlas,
         })
     }
 
     /// Bindless identity for scheme slot binding.
     pub fn handle(&self, _access: ResourceAccess) -> Option<ResourceHandle> {
-        self.bindless
+        self.inner
+            .bindless
             .map(|index| ResourceHandle::new(ResourceCategory::Accel, index))
     }
 
@@ -119,12 +151,14 @@ impl AccelerationStructure {
     pub(crate) fn resource_id(&self) -> ResourceId {
         ResourceId::Accel(self.handle)
     }
-}
 
-impl Drop for AccelerationStructure {
-    fn drop(&mut self) {
-        if let Ok(mut backend) = self.backend.lock() {
-            backend.destroy_acceleration_structure(self.handle);
+    /// Keep the BLASes referenced by this TLAS alive for as long as `self` lives.
+    pub(crate) fn retain_blases(&self, instances: &[AccelInstance<'_>]) {
+        if self.kind != AccelKind::Tlas {
+            return;
         }
+        let mut held = self.inner.held_blases.lock().unwrap();
+        held.clear();
+        held.extend(instances.iter().map(|inst| inst.blas.clone()));
     }
 }

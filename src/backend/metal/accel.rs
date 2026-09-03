@@ -96,8 +96,40 @@ pub(super) fn destroy(state: &mut MetalState, handle: AccelerationStructureHandl
     let Some(accel) = state.accels.remove(&handle) else {
         return;
     };
-    if let Some(ld) = state.devices.get(&accel.device_handle) {
-        ld.descriptors.lock().unwrap().resource_registry.unregister_accel(handle);
+    let gpu_idle = super::gpu_is_idle(state);
+    let device_handle = accel.device_handle;
+    let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+    let base_barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+    let base = ctx_h
+        .filter(|_| !gpu_idle && base_barrier > 0)
+        .map(|h| vec![(h, base_barrier)])
+        .unwrap_or_default();
+    let barrier = if let Some(device) = state.devices.get(&device_handle) {
+        let slots = {
+            let registry = device.descriptors.lock().unwrap();
+            registry.resource_registry.accel_slot_keys(handle)
+        };
+        super::compute::evict_retained_graphs_using_slots(state, device_handle, &slots);
+        let mut registry = device.descriptors.lock().unwrap();
+        let requirements = registry.bindless_retirement_requirements_for_accel(handle, base);
+        let barrier = requirements.iter().map(|(_, seq)| *seq).max().unwrap_or(0);
+        let _ = registry.reclaim_accel_slots(handle);
+        barrier
+    } else {
+        base_barrier
+    };
+    let deletion = super::types::PendingDeletion::Accel {
+        accel: accel.accel,
+        scratch: accel.scratch,
+    };
+    if let Some(h) = ctx_h {
+        if let Some(sc_arc) = state.contexts.get(&h) {
+            sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
+            return;
+        }
+    }
+    if let Some(device) = state.devices.get(&device_handle) {
+        device.deletion_queue.lock().unwrap().queue(barrier, deletion);
     }
 }
 
@@ -109,6 +141,7 @@ pub(super) fn encode_build(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     build: &AccelBuildCommand,
+    uploads: &mut Vec<mtl::Buffer>,
 ) -> Result<()> {
     let encoder = command_buffer.new_acceleration_structure_command_encoder();
     match build {
@@ -124,20 +157,46 @@ pub(super) fn encode_build(
         } => {
             let dest_as = state.accels.get(dest).context("invalid BLAS")?;
             anyhow::ensure!(!dest_as.is_tlas, "build_blas destination is a TLAS");
+            anyhow::ensure!(
+                *vertex_count <= dest_as.max_vertices,
+                "build_blas vertex_count {vertex_count} exceeds create-time max_vertices {}",
+                dest_as.max_vertices
+            );
+            anyhow::ensure!(
+                *vertex_stride == dest_as.vertex_stride,
+                "build_blas vertex_stride {vertex_stride} does not match create-time stride {}",
+                dest_as.vertex_stride
+            );
             let vb = state.buffers.get(vertex_buffer).context("invalid vertex buffer")?;
+            let vertex_end = vertex_offset.saturating_add(*vertex_count as u64 * *vertex_stride as u64);
+            anyhow::ensure!(
+                vertex_end <= vb.size,
+                "build_blas vertex range exceeds buffer size"
+            );
             let geom = mtl::AccelerationStructureTriangleGeometryDescriptor::descriptor();
             geom.set_vertex_buffer(Some(&vb.buffer));
             geom.set_vertex_buffer_offset(*vertex_offset);
             geom.set_vertex_stride(*vertex_stride as u64);
             geom.set_opaque(true);
             let tri_count = if *index_count > 0 {
+                anyhow::ensure!(
+                    *index_count % 3 == 0,
+                    "build_blas index_count {index_count} is not a multiple of 3"
+                );
                 *index_count / 3
             } else {
                 *vertex_count / 3
             };
+            anyhow::ensure!(
+                tri_count <= dest_as.max_primitives,
+                "build_blas triangle count {tri_count} exceeds create-time max {}",
+                dest_as.max_primitives
+            );
             geom.set_triangle_count(tri_count as u64);
             if let Some(ib) = index_buffer {
                 let idx = state.buffers.get(ib).context("invalid index buffer")?;
+                let index_end = index_offset.saturating_add(*index_count as u64 * 4);
+                anyhow::ensure!(index_end <= idx.size, "build_blas index range exceeds buffer size");
                 geom.set_index_buffer(Some(&idx.buffer));
                 geom.set_index_buffer_offset(*index_offset);
                 geom.set_index_type(mtl::MTLIndexType::UInt32);
@@ -185,6 +244,7 @@ pub(super) fn encode_build(
             let arr = mtl::Array::from_owned_slice(&as_refs);
             tlas_desc.set_instanced_acceleration_structures(&arr);
             encoder.build_acceleration_structure(&dest_as.accel, &tlas_desc, &dest_as.scratch, 0);
+            uploads.push(inst_buf);
         }
     }
     encoder.end_encoding();

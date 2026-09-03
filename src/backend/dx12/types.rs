@@ -698,6 +698,11 @@ pub(crate) enum PendingDeletion {
     /// tracked in any resource map.  Dropping it releases the COM reference and
     /// frees the GPU memory once the fence is met.
     StandaloneResource(Direct3D12::ID3D12Resource),
+    Accel {
+        accel_handle: AccelerationStructureHandle,
+        resource: Direct3D12::ID3D12Resource,
+        scratch: Direct3D12::ID3D12Resource,
+    },
 }
 
 /// Identifies which descriptor heap owns a deferred slot reclamation.
@@ -973,6 +978,38 @@ impl DescriptorRegistry {
         for slot in slots {
             self.queue_slot_reclamation(slot);
         }
+    }
+
+    pub(crate) fn reclaim_accel_slots(&mut self, handle: AccelerationStructureHandle) {
+        let slots = self.resource_registry.extract_accel_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(DeferredSlot::CbvSrvUav(slot));
+        }
+    }
+
+    pub(crate) fn accel_slot_keys(&self, handle: AccelerationStructureHandle) -> Vec<DeferredSlot> {
+        self.resource_registry
+            .accel_offsets
+            .get(&handle)
+            .copied()
+            .map(|offset| vec![DeferredSlot::CbvSrvUav(offset)])
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn bindless_retirement_requirements_for_accel(
+        &self,
+        handle: AccelerationStructureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots: Vec<u32> = self
+            .accel_slot_keys(handle)
+            .into_iter()
+            .filter_map(|s| match s {
+                DeferredSlot::CbvSrvUav(offset) => Some(offset),
+                DeferredSlot::Sampler(_) => None,
+            })
+            .collect();
+        self.merge_slot_requirements(&slots, base)
     }
 
     /// Return pending slots to the free list once every referencing context has retired.
@@ -1376,6 +1413,16 @@ pub(crate) fn destroy_pending_deletion(
         PendingDeletion::StandaloneResource(resource) => {
             let _ = queue_requirements;
             drop(resource);
+        }
+        PendingDeletion::Accel {
+            accel_handle,
+            resource,
+            scratch,
+        } => {
+            let _ = queue_requirements;
+            registry.reclaim_accel_slots(accel_handle);
+            drop(resource);
+            drop(scratch);
         }
     }
 }

@@ -619,6 +619,7 @@ pub(super) fn record_commands_to_buffer(
     tex_idx: &mut usize,
     gpu_idle: bool,
     prologue_row: Option<u32>,
+    accel_uploads: &mut Vec<mtl::Buffer>,
 ) -> Result<()> {
     let mut guard = EncoderGuard {
         compute: None,
@@ -1281,7 +1282,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::BuildAccelerationStructure(build) => {
                 end_compute!();
                 end_blit!();
-                super::accel::encode_build(state, command_buffer, build)?;
+                super::accel::encode_build(state, command_buffer, build, accel_uploads)?;
                 has_recorded_gpu_work = true;
             }
             GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
@@ -1586,10 +1587,11 @@ pub(super) fn submit(
     // Reclaim and pre-stage all uploads before recording.
     let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, commands)?;
 
-    {
+    let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
+        let mut accel_uploads = Vec::new();
         record_commands_to_buffer(
             state,
             command_buffer_ref,
@@ -1602,8 +1604,10 @@ pub(super) fn submit(
             &mut tex_idx,
             gpu_idle,
             prologue_row,
+            &mut accel_uploads,
         )?;
-    }
+        accel_uploads
+    };
 
     let ld = state
         .devices
@@ -1643,6 +1647,12 @@ pub(super) fn submit(
         sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.last_submitted_seq = signal_value;
+        for buffer in accel_uploads.drain(..) {
+            sc.deletion_queue.queue(
+                signal_value,
+                super::types::PendingDeletion::AccelUpload { buffer },
+            );
+        }
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1763,12 +1773,13 @@ pub(super) fn submit_graph(
     //
     // belt_idx and tex_idx advance across all compute-batch calls to
     // record_commands_to_buffer so they consume the single pre-pass result.
-    {
+    let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         let mut compute_batch: Vec<GpuCommand> = Vec::new();
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
+        let mut accel_uploads = Vec::new();
 
         for cmd in commands {
             match cmd {
@@ -1794,6 +1805,7 @@ pub(super) fn submit_graph(
                             &mut tex_idx,
                             gpu_idle,
                             prologue_row,
+                            &mut accel_uploads,
                         )?;
                         compute_batch.clear();
                     }
@@ -1847,9 +1859,11 @@ pub(super) fn submit_graph(
                 &mut tex_idx,
                 gpu_idle,
                 prologue_row,
+                &mut accel_uploads,
             )?;
         }
-    }
+        accel_uploads
+    };
 
     // Signal timeline and commit — same pattern as `submit`.
     let ld = state
@@ -1888,6 +1902,12 @@ pub(super) fn submit_graph(
         sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.last_submitted_seq = signal_value;
+        for buffer in accel_uploads.drain(..) {
+            sc.deletion_queue.queue(
+                signal_value,
+                super::types::PendingDeletion::AccelUpload { buffer },
+            );
+        }
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {

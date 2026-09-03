@@ -100,7 +100,7 @@ pub(super) fn create(
     };
 
     let shader_config = D3D12_RAYTRACING_SHADER_CONFIG {
-        MaxPayloadSizeInBytes: 16,
+        MaxPayloadSizeInBytes: crate::rt_pipeline::MAX_RAY_PAYLOAD_BYTES,
         MaxAttributeSizeInBytes: 8,
     };
     let pipeline_config = D3D12_RAYTRACING_PIPELINE_CONFIG {

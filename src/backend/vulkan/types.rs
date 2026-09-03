@@ -180,6 +180,28 @@ impl DescriptorRegistry {
         }
     }
 
+    /// Reclaim bindless slots for a destroyed acceleration structure.
+    pub(crate) fn reclaim_accel_slots(&mut self, handle: AccelerationStructureHandle) {
+        let slots = self.resource_registry.extract_accel_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(slot);
+        }
+    }
+
+    pub(crate) fn accel_slot_keys(&self, handle: AccelerationStructureHandle) -> Vec<SlotKey> {
+        self.resource_registry.accel_slot_keys(handle)
+    }
+
+    /// Same as [`Self::bindless_retirement_requirements_for_buffer`] but for an AS handle.
+    pub(crate) fn bindless_retirement_requirements_for_accel(
+        &self,
+        handle: AccelerationStructureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.accel_slot_keys(handle);
+        self.merge_slot_requirements(&slots, base)
+    }
+
     /// Return pending slots to the free list once every referencing context has retired.
     ///
     /// Takes a pre-snapshotted map of `(context_handle → completed_timeline_value)` rather
@@ -384,10 +406,20 @@ impl ResourceRegistry {
         index
     }
 
-    pub fn unregister_accel(&mut self, handle: AccelerationStructureHandle) {
-        if let Some(index) = self.accel_indices.remove(&handle) {
-            self.accel.free(index);
-        }
+    pub fn accel_slot_keys(&self, handle: AccelerationStructureHandle) -> Vec<SlotKey> {
+        self.accel_indices
+            .get(&handle)
+            .copied()
+            .map(|index| vec![SlotKey::Accel(index)])
+            .unwrap_or_default()
+    }
+
+    /// Remove an acceleration structure's handle mapping without recycling the slot.
+    pub fn extract_accel_slots(&mut self, handle: AccelerationStructureHandle) -> Vec<SlotKey> {
+        self.accel_indices
+            .remove(&handle)
+            .map(|index| vec![SlotKey::Accel(index)])
+            .unwrap_or_default()
     }
 
     /// Bindless slot keys for `handle` without removing the registry entry.
@@ -924,8 +956,6 @@ pub(crate) struct LogicalDevice {
     pub rt_shader_group_handle_size: u32,
     pub rt_shader_group_handle_alignment: u32,
     pub rt_shader_group_base_alignment: u32,
-    /// Scratch / instance upload buffers freed at device destroy (MVP).
-    pub accel_transient_buffers: Mutex<Vec<(vk::Buffer, vk::DeviceMemory)>>,
 
     // Bindless infrastructure
     /// Global descriptor pool for bindless resources
@@ -1397,7 +1427,8 @@ pub(crate) struct AccelState {
     pub as_handle: vk::AccelerationStructureKHR,
     pub device_address: u64,
     pub bindless_index: Option<u32>,
-    pub scratch_size: u64,
+    pub scratch: vk::Buffer,
+    pub scratch_memory: vk::DeviceMemory,
     pub max_primitives: u32,
 }
 
@@ -1590,6 +1621,14 @@ pub(crate) enum PendingDeletion {
     Sampler {
         sampler: vk::Sampler,
     },
+    Accel {
+        accel_handle: AccelerationStructureHandle,
+        as_handle: vk::AccelerationStructureKHR,
+        buffer: vk::Buffer,
+        memory: vk::DeviceMemory,
+        scratch: vk::Buffer,
+        scratch_memory: vk::DeviceMemory,
+    },
 }
 
 /// Deferred deletion queue for a device.
@@ -1698,6 +1737,10 @@ pub(crate) fn destroy_pending_deletion(
             registry.reclaim_texture_slots(texture_handle);
             destroy_pending_deletion_gpu(ld, resource);
         }
+        PendingDeletion::Accel { accel_handle, .. } => {
+            registry.reclaim_accel_slots(accel_handle);
+            destroy_pending_deletion_gpu(ld, resource);
+        }
         other => destroy_pending_deletion_gpu(ld, other),
     }
 }
@@ -1784,6 +1827,22 @@ fn destroy_pending_deletion_gpu(ld: &LogicalDevice, resource: PendingDeletion) {
             }
             PendingDeletion::Sampler { sampler } => {
                 device.destroy_sampler(sampler, None);
+            }
+            PendingDeletion::Accel {
+                accel_handle: _,
+                as_handle,
+                buffer,
+                memory,
+                scratch,
+                scratch_memory,
+            } => {
+                if let Some(khr) = ld.accel_khr.as_ref() {
+                    khr.destroy_acceleration_structure(as_handle, None);
+                }
+                device.destroy_buffer(buffer, None);
+                device.free_memory(memory, None);
+                device.destroy_buffer(scratch, None);
+                device.free_memory(scratch_memory, None);
             }
         }
     }

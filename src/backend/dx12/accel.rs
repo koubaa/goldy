@@ -75,16 +75,25 @@ fn write_as_srv(ld: &super::types::LogicalDevice, gpu_va: u64, offset: u32) {
     }
 }
 
-fn dummy_triangle_geom(max_vertices: u32, _max_triangles: u32, vertex_stride: u32) -> D3D12_RAYTRACING_GEOMETRY_DESC {
+fn dummy_triangle_geom(
+    max_vertices: u32,
+    max_triangles: u32,
+    vertex_stride: u32,
+    indexed: bool,
+) -> D3D12_RAYTRACING_GEOMETRY_DESC {
     D3D12_RAYTRACING_GEOMETRY_DESC {
         Type: D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES,
         Flags: D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE,
         Anonymous: D3D12_RAYTRACING_GEOMETRY_DESC_0 {
             Triangles: D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC {
                 Transform3x4: 0,
-                IndexFormat: DXGI_FORMAT_UNKNOWN,
+                IndexFormat: if indexed {
+                    DXGI_FORMAT_R32_UINT
+                } else {
+                    DXGI_FORMAT_UNKNOWN
+                },
                 VertexFormat: DXGI_FORMAT_R32G32B32_FLOAT,
-                IndexCount: 0,
+                IndexCount: if indexed { max_triangles.saturating_mul(3) } else { 0 },
                 VertexCount: max_vertices,
                 IndexBuffer: 0,
                 VertexBuffer: D3D12_GPU_VIRTUAL_ADDRESS_AND_STRIDE {
@@ -141,7 +150,7 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
             max_vertices,
             vertex_stride,
         } => {
-            let geom = dummy_triangle_geom(max_vertices, max_triangles, vertex_stride);
+            let geom = dummy_triangle_geom(max_vertices, max_triangles, vertex_stride, true);
             let sizes = prebuild_sizes(
                 &ld.device,
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
@@ -209,18 +218,22 @@ pub(super) fn destroy(state: &Dx12State, handle: AccelerationStructureHandle) {
     let Some(ld) = state.devices.get(&accel.device_handle) else {
         return;
     };
-    if let Some(offset) = accel.bindless_offset {
-        let slots = ld
-            .descriptors
-            .lock()
-            .unwrap()
-            .resource_registry
-            .extract_accel_slots(handle);
-        for slot in slots {
-            ld.descriptors.lock().unwrap().resource_registry.free_cbv_srv_uav_slot(slot);
-        }
-        let _ = offset;
-    }
+    let slots = ld.descriptors.lock().unwrap().accel_slot_keys(handle);
+    super::compute::evict_retained_graphs_using_slots(state, accel.device_handle, &slots);
+    let ctx_h = super::context::destroy_attribution_context(state, accel.device_handle);
+    let base = super::context::reclamation_requirements(state, accel.device_handle, ctx_h);
+    let requirements = {
+        let registry = ld.descriptors.lock().unwrap();
+        registry.bindless_retirement_requirements_for_accel(handle, base)
+    };
+    ld.deletion_queue.lock().unwrap().queue(
+        requirements,
+        super::types::PendingDeletion::Accel {
+            accel_handle: handle,
+            resource: accel.resource,
+            scratch: accel.scratch,
+        },
+    );
 }
 
 pub(super) fn bindless_index(state: &Dx12State, handle: AccelerationStructureHandle) -> Option<u32> {
@@ -242,6 +255,7 @@ pub(super) fn record_build_list(
     cl7: &ID3D12GraphicsCommandList7,
     build: &AccelBuildCommand,
     geom_keep: &mut Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
+    pending_deletions: &mut Vec<super::types::PendingDeletion>,
 ) -> Result<()> {
     let cl4: ID3D12GraphicsCommandList4 = cl.cast().context("BuildRaytracingAccelerationStructure needs CL4")?;
     let buffers = scope.buffers().read().unwrap();
@@ -282,7 +296,21 @@ pub(super) fn record_build_list(
             );
             let vb = buffers.entries.get(vertex_buffer).context("invalid vertex buffer")?;
             let vaddr = unsafe { vb.resource.GetGPUVirtualAddress() } + vertex_offset;
-            let mut geom = dummy_triangle_geom(*vertex_count, dest_as.max_primitives, *vertex_stride);
+            let primitive_count = if *index_count > 0 {
+                anyhow::ensure!(
+                    *index_count % 3 == 0,
+                    "build_blas index_count {index_count} is not a multiple of 3"
+                );
+                *index_count / 3
+            } else {
+                *vertex_count / 3
+            };
+            anyhow::ensure!(
+                primitive_count <= dest_as.max_primitives,
+                "build_blas primitive count {primitive_count} exceeds create-time max_triangles {}",
+                dest_as.max_primitives
+            );
+            let mut geom = dummy_triangle_geom(*vertex_count, dest_as.max_primitives, *vertex_stride, false);
             geom.Anonymous.Triangles.VertexBuffer.StartAddress = vaddr;
             geom.Anonymous.Triangles.VertexBuffer.StrideInBytes = *vertex_stride as u64;
             geom.Anonymous.Triangles.VertexCount = *vertex_count;
@@ -368,15 +396,15 @@ pub(super) fn record_build_list(
             unsafe {
                 cl4.BuildRaytracingAccelerationStructure(&desc, None);
             }
-            // Keep the upload buffer alive until GPU idle by leaking into the AS scratch's
-            // sibling list is not available; stash on a per-device mutex via clone of COM.
-            std::mem::forget(inst_res);
+            pending_deletions.push(super::types::PendingDeletion::StandaloneResource(inst_res));
         }
     }
     let barrier = D3D12_GLOBAL_BARRIER {
         SyncBefore: D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
         SyncAfter: D3D12_BARRIER_SYNC(
-            D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0 | D3D12_BARRIER_SYNC_COMPUTE_SHADING.0,
+            D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0
+                | D3D12_BARRIER_SYNC_COMPUTE_SHADING.0
+                | D3D12_BARRIER_SYNC_RAYTRACING.0,
         ),
         AccessBefore: D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
         AccessAfter: D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,

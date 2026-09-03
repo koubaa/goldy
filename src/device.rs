@@ -443,7 +443,8 @@ pub struct DeviceCapabilities {
     /// structures, DXR tier 1.1, Metal `supportsRaytracing`).
     ///
     /// When `true`, [`crate::AccelerationStructure`] create/build and `Accel` shader
-    /// parameters are available.
+    /// parameters are available. WebGPU reports `false` until WGSL inline ray query
+    /// is wired through Slang.
     pub ray_query: bool,
 
     /// Adapter exposes ray-tracing pipelines (Vulkan `VK_KHR_ray_tracing_pipeline`,

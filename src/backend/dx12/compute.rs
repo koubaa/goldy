@@ -1912,7 +1912,7 @@ fn record_gpu_command(
             }
         }
         GpuCommand::BuildAccelerationStructure(build) => {
-            super::accel::record_build_list(scope, cl, cl7, build, &mut ctx.rt_geom_descs)?;
+            super::accel::record_build_list(scope, cl, cl7, build, &mut ctx.rt_geom_descs, &mut ctx.pending_deletions)?;
         }
         GpuCommand::SetRayTracingPipeline(handle) => {
             ctx.current_compute_pipeline = None;

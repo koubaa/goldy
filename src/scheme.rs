@@ -928,6 +928,22 @@ impl Scheme {
                     .into(),
             ));
         }
+        if vertex_count == 0 || vertex_stride < 12 {
+            return Err(GoldyError::Validation(
+                "build_blas requires vertex_count > 0 and vertex_stride >= 12 (float3). \
+                 hint: pass the vertex count and stride used to create the BLAS."
+                    .into(),
+            ));
+        }
+        let vertex_bytes = vertex_count as u64 * vertex_stride as u64;
+        if vertex_bytes > vertices.byte_size() {
+            return Err(GoldyError::Validation(format!(
+                "build_blas vertex range ({vertex_count} vertices × {vertex_stride} bytes = {vertex_bytes}) \
+                 exceeds parcel size {} bytes. \
+                 hint: shrink vertex_count/stride or acquire a larger ACCEL_INPUT buffer.",
+                vertices.byte_size()
+            )));
+        }
         let (vertex_buffer, vertex_offset) = parcel_gpu_buffer(vertices)?;
         self.submit_state.register_parcel_stamp(vertices);
         let mut bindings = vec![
@@ -954,8 +970,30 @@ impl Scheme {
                         .into(),
                 ));
             }
+            if count == 0 || count % 3 != 0 {
+                return Err(GoldyError::Validation(
+                    "build_blas index_count must be a positive multiple of 3 (triangle list). \
+                     hint: pass 3 × triangle_count 32-bit indices."
+                        .into(),
+                ));
+            }
+            let index_bytes = count as u64 * 4;
+            if index_bytes > idx.byte_size() {
+                return Err(GoldyError::Validation(format!(
+                    "build_blas index range ({count} × 4 = {index_bytes} bytes) exceeds parcel size {} bytes. \
+                     hint: shrink index_count or acquire a larger ACCEL_INPUT index buffer.",
+                    idx.byte_size()
+                )));
+            }
             (Some(h), off, count)
         } else {
+            if vertex_count % 3 != 0 {
+                return Err(GoldyError::Validation(
+                    "build_blas without indices requires vertex_count to be a multiple of 3. \
+                     hint: pass an index parcel, or provide 3 vertices per triangle."
+                        .into(),
+                ));
+            }
             (None, 0, 0)
         };
         self.ir.nodes.push(TaskNode {
@@ -1020,6 +1058,7 @@ impl Scheme {
                 custom_index: inst.custom_index,
             });
         }
+        dest.retain_blases(instances);
         self.ir.nodes.push(TaskNode {
             label: "build_tlas",
             bindings,
@@ -3398,6 +3437,7 @@ mod tests {
     use crate::task_graph::NodeAccess;
     use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
+    use crate::types::BufferFlags;
     use crate::BufferKind;
     use crate::MemoryExchange;
     use std::sync::Arc;
@@ -4527,6 +4567,73 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let err = scheme.submit().expect_err("BLAS as Accel");
         let s = err.to_string();
         assert!(s.contains("BLAS"), "unexpected error: {s}");
+    }
+
+    #[test]
+    fn build_blas_rejects_vertex_range_past_parcel() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let verts = pool
+            .acquire_buffer(12, BufferKind::Scattered, None, BufferFlags::ACCEL_INPUT, None)
+            .expect("verts");
+        let blas = crate::AccelerationStructure::blas_triangles(&device, 2, 6, 12).expect("BLAS");
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .build_blas(&blas, verts.whole(), 6, 12, None)
+            .expect_err("vertex range");
+        let s = err.to_string();
+        assert!(s.contains("exceeds parcel size"), "unexpected error: {s}");
+    }
+
+    #[test]
+    fn build_blas_rejects_index_count_not_multiple_of_three() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let verts = pool
+            .acquire_buffer(36, BufferKind::Scattered, None, BufferFlags::ACCEL_INPUT, None)
+            .expect("verts");
+        let idx = pool
+            .acquire_buffer(16, BufferKind::Scattered, None, BufferFlags::ACCEL_INPUT, None)
+            .expect("idx");
+        let blas = crate::AccelerationStructure::blas_triangles(&device, 2, 3, 12).expect("BLAS");
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .build_blas(&blas, verts.whole(), 3, 12, Some((idx.whole(), 4)))
+            .expect_err("index_count");
+        let s = err.to_string();
+        assert!(s.contains("multiple of 3"), "unexpected error: {s}");
+    }
+
+    #[test]
+    fn tlas_retains_blas_after_caller_drop() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let blas = crate::AccelerationStructure::blas_triangles(&device, 1, 3, 12).expect("BLAS");
+        let tlas = crate::AccelerationStructure::tlas(&device, 1).expect("TLAS");
+        let blas_handle = blas.handle;
+        let mut scheme = Scheme::new(&ctx);
+        let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scheme
+            .build_tlas(
+                &tlas,
+                &[crate::AccelInstance {
+                    blas: &blas,
+                    transform: identity,
+                    mask: 0xFF,
+                    custom_index: 0,
+                }],
+            )
+            .expect("build_tlas");
+        drop(blas);
+        device.with_mock(|m| {
+            assert!(m.has_accel(blas_handle), "TLAS must keep the BLAS GPU object alive");
+        });
+        drop(tlas);
+        device.with_mock(|m| {
+            assert!(!m.has_accel(blas_handle), "BLAS should destroy after last TLAS drop");
+        });
     }
 
     #[cfg(feature = "graphics")]

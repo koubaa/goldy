@@ -308,6 +308,11 @@ impl MockBackend {
         self.context_state(ctx)
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_accel(&self, accel: AccelerationStructureHandle) -> bool {
+        self.accels.contains_key(&accel)
+    }
+
     /// Max completed over live contexts on `device`, floored by `retired_floor`.
     fn device_retired(&self, device: DeviceHandle) -> u64 {
         let floor = self

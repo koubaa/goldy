@@ -980,7 +980,7 @@ pub(super) fn submit_with_scope(
         cb
     };
 
-    let (cmd, belt_idx, _texture_upload_idx, frame_table_row) = {
+    let (cmd, belt_idx, _texture_upload_idx, frame_table_row, accel_uploads) = {
         let logical_device = view.devices.get(&device_handle).context("Invalid device handle")?;
 
         // Cross-submission acquire: make prior submit's writes visible to this
@@ -1024,6 +1024,7 @@ pub(super) fn submit_with_scope(
         let mut current_rt: Option<super::RayTracingPipelineHandle> = None;
         let mut belt_idx = 0usize;
         let mut texture_upload_idx = 0usize;
+        let mut accel_uploads = Vec::new();
         let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
 
         // Process commands (same logic as dispatch)
@@ -1248,7 +1249,7 @@ pub(super) fn submit_with_scope(
                     vk_dispatch_idx += 1;
                 }
                 GpuCommand::BuildAccelerationStructure(build) => {
-                    super::accel::record_build(view, cmd, device_handle, build)?;
+                    super::accel::record_build(view, cmd, device_handle, build, &mut accel_uploads)?;
                 }
                 GpuCommand::SetRayTracingPipeline(handle) => {
                     current_pipeline = None;
@@ -1728,7 +1729,7 @@ pub(super) fn submit_with_scope(
             return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
         }
 
-        (cmd, belt_idx, texture_upload_idx, row_guard.take())
+        (cmd, belt_idx, texture_upload_idx, row_guard.take(), accel_uploads)
     };
 
     let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
@@ -1753,6 +1754,7 @@ pub(super) fn submit_with_scope(
 
     row_guard.commit(signal_value);
     record_last_submitted(scope, false, signal_value);
+    super::accel::queue_uploads(scope, signal_value, accel_uploads);
     {
         let mut sc = scope.sc.lock().unwrap();
         sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
@@ -2099,6 +2101,7 @@ pub(super) fn submit_graph_with_scope(
     let mut current_rt: Option<super::RayTracingPipelineHandle> = None;
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
+    let mut accel_uploads = Vec::new();
     let mut frame_table_prologue_in_cb = false;
     let mut frame_table_row: Option<u32> = None;
     let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
@@ -2311,7 +2314,7 @@ pub(super) fn submit_graph_with_scope(
                     vk_dispatch_idx += 1;
                 }
                 GpuCommand::BuildAccelerationStructure(build) => {
-                    super::accel::record_build(view, cmd, device_handle, build)?;
+                    super::accel::record_build(view, cmd, device_handle, build, &mut accel_uploads)?;
                 }
                 GpuCommand::SetRayTracingPipeline(handle) => {
                     current_compute_pipeline = None;
@@ -2926,6 +2929,7 @@ pub(super) fn submit_graph_with_scope(
 
     row_guard.commit(signal_value);
     record_last_submitted(scope, route_device, signal_value);
+    super::accel::queue_uploads(scope, signal_value, accel_uploads);
     {
         let mut sc = scope.sc.lock().unwrap();
         if let Some((key, frame_table_row)) = retain_plan {

@@ -6,11 +6,22 @@ use crate::shader::ShaderModule;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
+/// DX12 `D3D12_RAYTRACING_SHADER_CONFIG::MaxPayloadSizeInBytes`.
+///
+/// Vulkan does not impose this cap at pipeline create (the SPIR-V payload type
+/// sizes the storage). Keep shader payloads at or below this size so the same
+/// Slang source works on both backends.
+pub const MAX_RAY_PAYLOAD_BYTES: u32 = 128;
+
 /// Triangle-hit ray-tracing pipeline (one raygen, one miss, one closest-hit).
 ///
 /// The shader-binding table is allocated and filled by the backend. Bind resources
 /// on [`crate::Scheme::trace_rays`] the same way as a compute node (bindless slots
 /// from the **raygen** signature).
+///
+/// Recursion depth is 1 (`TraceRay` from a hit shader is not supported). DX12
+/// payloads must fit in [`MAX_RAY_PAYLOAD_BYTES`]; Vulkan uses the shader-declared
+/// payload size.
 pub struct RayTracingPipeline {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,

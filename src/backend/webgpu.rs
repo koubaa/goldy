@@ -4083,10 +4083,7 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
-        let ray_query = self
-            .adapters
-            .get(adapter_id as usize)
-            .is_some_and(|adapter| adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY));
+        let _ = adapter_id;
         crate::device::DeviceCapabilities {
             preferred_surface_format: TextureFormat::Bgra8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
@@ -4112,7 +4109,8 @@ impl GpuBackend for WebGpuBackend {
             host_sidecar_on_submit_worker: true,
             split_compute_partitions_on_barrier_cost: false,
             fuse_upload_with_compute_partitions: true,
-            ray_query,
+            // Slang WGSL has no TraceRayInline; do not advertise ray_query until shaders work.
+            ray_query: false,
             ..crate::device::DeviceCapabilities::default()
         }
     }

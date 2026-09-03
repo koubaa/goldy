@@ -96,7 +96,9 @@ pub(super) fn query_rt_mesh_features(instance: &ash::Instance, handle: vk::Physi
         instance.get_physical_device_features2(handle, &mut features2);
     }
 
-    let accel = has_as && as_feat.acceleration_structure == vk::TRUE;
+    let accel = has_as
+        && as_feat.acceleration_structure == vk::TRUE
+        && as_feat.descriptor_binding_acceleration_structure_update_after_bind == vk::TRUE;
     RtMeshFeatures {
         ray_query: accel && has_rq && rq_feat.ray_query == vk::TRUE,
         ray_tracing_pipelines: accel && has_rtp && rtp_feat.ray_tracing_pipeline == vk::TRUE,
@@ -692,7 +694,6 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             rt_shader_group_handle_size,
             rt_shader_group_handle_alignment,
             rt_shader_group_base_alignment,
-            accel_transient_buffers: Mutex::new(Vec::new()),
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
             bindless_descriptor_set,
@@ -1097,6 +1098,28 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     if let Some(staging_memory) = texture.staging_memory {
                         logical_device.device.free_memory(staging_memory, None);
                     }
+                }
+            }
+
+            // Destroy leftover acceleration structures (user Drop may already have queued them).
+            let accel_handles: Vec<_> = state
+                .accels
+                .read()
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|(_, a)| a.device_handle == device_handle)
+                .map(|(h, _)| *h)
+                .collect();
+            for handle in accel_handles {
+                if let Some(accel) = state.accels.write().unwrap().entries.remove(&handle) {
+                    if let Some(khr) = logical_device.accel_khr.as_ref() {
+                        khr.destroy_acceleration_structure(accel.as_handle, None);
+                    }
+                    logical_device.device.destroy_buffer(accel.buffer, None);
+                    logical_device.device.free_memory(accel.memory, None);
+                    logical_device.device.destroy_buffer(accel.scratch, None);
+                    logical_device.device.free_memory(accel.scratch_memory, None);
                 }
             }
 

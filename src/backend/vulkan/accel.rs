@@ -131,6 +131,12 @@ pub(super) fn create(
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
+    let (scratch, scratch_memory) = create_gpu_buffer(
+        &state.instance,
+        &ld,
+        scratch_size,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+    )?;
 
     let create_info = vk::AccelerationStructureCreateInfoKHR::default()
         .buffer(buffer)
@@ -164,7 +170,8 @@ pub(super) fn create(
             as_handle,
             device_address,
             bindless_index,
-            scratch_size,
+            scratch,
+            scratch_memory,
             max_primitives,
         },
     );
@@ -178,18 +185,25 @@ pub(super) fn destroy(state: &VulkanState, handle: AccelerationStructureHandle) 
     let Some(ld) = state.devices.get(&accel.device_handle) else {
         return;
     };
-    if let Some(_index) = accel.bindless_index {
-        ld.descriptors.lock().unwrap().resource_registry.unregister_accel(handle);
-    }
-    if let Some(khr) = ld.accel_khr.as_ref() {
-        unsafe {
-            khr.destroy_acceleration_structure(accel.as_handle, None);
-        }
-    }
-    unsafe {
-        ld.device.destroy_buffer(accel.buffer, None);
-        ld.device.free_memory(accel.memory, None);
-    }
+    let slots = ld.descriptors.lock().unwrap().accel_slot_keys(handle);
+    super::compute::evict_retained_graphs_using_slots(state, accel.device_handle, &slots);
+    let ctx_h = super::context::destroy_attribution_context(state, accel.device_handle);
+    let base = super::context::reclamation_requirements(state, accel.device_handle, ctx_h);
+    let requirements = {
+        let registry = ld.descriptors.lock().unwrap();
+        registry.bindless_retirement_requirements_for_accel(handle, base)
+    };
+    ld.deletion_queue.lock().unwrap().queue(
+        requirements,
+        types::PendingDeletion::Accel {
+            accel_handle: handle,
+            as_handle: accel.as_handle,
+            buffer: accel.buffer,
+            memory: accel.memory,
+            scratch: accel.scratch,
+            scratch_memory: accel.scratch_memory,
+        },
+    );
 }
 
 pub(super) fn bindless_index(state: &VulkanState, handle: AccelerationStructureHandle) -> Option<u32> {
@@ -202,11 +216,36 @@ pub(super) fn bindless_index(state: &VulkanState, handle: AccelerationStructureH
         .and_then(|a| a.bindless_index)
 }
 
+pub(super) type AccelUpload = (vk::Buffer, vk::DeviceMemory);
+
+pub(super) fn queue_uploads(
+    scope: &super::submit_session::VulkanSubmitScope<'_>,
+    signal_value: u64,
+    uploads: Vec<AccelUpload>,
+) {
+    if uploads.is_empty() {
+        return;
+    }
+    let mut sc = scope.sc.lock().unwrap();
+    for (buffer, memory) in uploads {
+        sc.deletion_queue.queue(
+            signal_value,
+            types::PendingDeletion::ReplacedBufferGpu {
+                buffer,
+                memory,
+                staging_buffer: None,
+                staging_memory: None,
+            },
+        );
+    }
+}
+
 pub(super) fn record_build(
     view: &super::submit_session::VulkanSubmitView<'_>,
     cmd: vk::CommandBuffer,
     device_handle: DeviceHandle,
     build: &AccelBuildCommand,
+    uploads: &mut Vec<AccelUpload>,
 ) -> Result<()> {
     let ld = view.devices.get(&device_handle).context("Invalid device")?;
     let accel_khr = ld.accel_khr.as_ref().context("no acceleration_structure loader")?;
@@ -259,7 +298,6 @@ pub(super) fn record_build(
                 *vertex_count / 3
             };
             record_build_inner(
-                view.instance,
                 ld,
                 accel_khr,
                 cmd,
@@ -305,7 +343,6 @@ pub(super) fn record_build(
                 .geometry_type(vk::GeometryTypeKHR::INSTANCES)
                 .geometry(vk::AccelerationStructureGeometryDataKHR { instances: instances_data });
             record_build_inner(
-                view.instance,
                 ld,
                 accel_khr,
                 cmd,
@@ -314,14 +351,7 @@ pub(super) fn record_build(
                 geom,
                 instances.len() as u32,
             )?;
-            // Keep instance buffer alive until GPU idle by leaking into device deletion via immediate
-            // destroy after wait is not available here — destroy at end of submit is unsafe.
-            // Store on a thread-local isn't great. For MVP, attach to dest_as by not freeing
-            // until AccelState drop... we leak inst_buf for now by stuffing into a mutex list.
-            ld.accel_transient_buffers
-                .lock()
-                .unwrap()
-                .push((inst_buf, inst_mem));
+            uploads.push((inst_buf, inst_mem));
         }
     }
     Ok(())
@@ -362,7 +392,6 @@ fn create_host_upload(
 }
 
 fn record_build_inner(
-    instance: &ash::Instance,
     ld: &LogicalDevice,
     accel_khr: &ash::khr::acceleration_structure::Device,
     cmd: vk::CommandBuffer,
@@ -380,13 +409,7 @@ fn record_build_inner(
         "AS build count {primitive_count} exceeds create-time max {}",
         dest.max_primitives
     );
-    let (scratch, scratch_mem) = create_gpu_buffer(
-        instance,
-        ld,
-        dest.scratch_size,
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    )?;
-    let scratch_addr = buffer_device_address(&ld.device, scratch);
+    let scratch_addr = buffer_device_address(&ld.device, dest.scratch);
     // Host-visible instance buffers and vertex uploads must be visible to the
     // AS-build stage (not just TRANSFER / COMPUTE).
     let pre = vk::MemoryBarrier2::default()
@@ -432,7 +455,9 @@ fn record_build_inner(
         .src_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
         .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
         .dst_stage_mask(
-            vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+                | vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
         )
         .dst_access_mask(
             vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags2::SHADER_READ,
@@ -441,7 +466,6 @@ fn record_build_inner(
     unsafe {
         ld.device.cmd_pipeline_barrier2(cmd, &dep);
     }
-    ld.accel_transient_buffers.lock().unwrap().push((scratch, scratch_mem));
     Ok(())
 }
 

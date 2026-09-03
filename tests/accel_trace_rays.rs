@@ -11,7 +11,13 @@ mod imp {
         Instance, MemoryExchange, NodeAccess, RayTracingPipeline, RayTracingPipelineDesc, RequestAdapterOptions,
         RetainedPool, Scheme, ShaderModule,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    static GPU: Mutex<()> = Mutex::new(());
+
+    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+        GPU.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn make_device() -> Device {
         Instance::new()
@@ -48,6 +54,7 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
 
     #[test]
     fn triangle_blas_tlas_trace_rays() {
+        let _gpu = gpu_lock();
         let device = make_device();
         if !device.capabilities().ray_tracing_pipelines {
             eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
@@ -108,5 +115,108 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
         let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(value, 1, "expected a closest-hit on the unit triangle");
+    }
+
+    const LARGE_PAYLOAD_SLANG: &str = r#"
+import goldy_exp;
+struct HitPayload { uint hit; uint a; uint b; uint c; uint d; }
+
+[goldy_raygen]
+void rgen_main(Accel scene, Scattered<uint> hits, DispatchRaysIndex idx)
+{
+    RayDesc ray;
+    ray.Origin = float3(0.0, 0.0, -2.0);
+    ray.TMin = 0.001;
+    ray.Direction = float3(0.0, 0.0, 1.0);
+    ray.TMax = 100.0;
+    HitPayload p;
+    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 0, 0, ray, p);
+    hits[idx.x] = p.hit + p.a + p.b + p.c + p.d;
+}
+
+[goldy_miss]
+void rmiss_main(inout HitPayload p) {
+    p.hit = 0;
+    p.a = 0;
+    p.b = 0;
+    p.c = 0;
+    p.d = 0;
+}
+
+[goldy_closesthit]
+void rchit_main(inout HitPayload p) {
+    p.hit = 1;
+    p.a = 0;
+    p.b = 0;
+    p.c = 0;
+    p.d = 0;
+}
+"#;
+
+    #[test]
+    fn triangle_trace_rays_payload_larger_than_16_bytes() {
+        let _gpu = gpu_lock();
+        let device = make_device();
+        if !device.capabilities().ray_tracing_pipelines {
+            eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
+            return;
+        }
+        if matches!(device.backend_type(), BackendType::WebGpu | BackendType::Metal) {
+            eprintln!("skip: ray-tracing pipelines / SBT recording are Vulkan and DX12 only");
+            return;
+        }
+        let ctx = submission_context(&device);
+
+        let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, -0.5, 0.0]];
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let verts = pool
+            .acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)
+            .expect("vertex buffer");
+        let hits = pool
+            .acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())
+            .expect("hits");
+
+        let blas = AccelerationStructure::blas_triangles(&device, 1, 3, 12).expect("BLAS");
+        let tlas = AccelerationStructure::tlas(&device, 1).expect("TLAS");
+        let shader = ShaderModule::from_slang(&device, LARGE_PAYLOAD_SLANG).expect("compile RT shader");
+        let pipeline = RayTracingPipeline::new(
+            &device,
+            &RayTracingPipelineDesc {
+                raygen: &shader,
+                miss: &shader,
+                closest_hit: &shader,
+            },
+        )
+        .expect("rt pipeline");
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.build_blas(&blas, verts.whole(), 3, 12, None).expect("build_blas");
+        let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scheme
+            .build_tlas(
+                &tlas,
+                &[AccelInstance {
+                    blas: &blas,
+                    transform: identity,
+                    mask: 0xFF,
+                    custom_index: 0,
+                }],
+            )
+            .expect("build_tlas");
+        scheme
+            .trace_rays("trace", &pipeline)
+            .with_parcel(&tlas, NodeAccess::Read)
+            .with_parcel(&hits, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, hits.whole())
+            .expect("withdraw");
+        let mut frame = scheme.submit().expect("submit");
+        drop(blas);
+        drop(tlas);
+        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let value: u32 = bytemuck::pod_read_unaligned(&bytes);
+        assert_eq!(value, 1, "expected a closest-hit with a 20-byte payload");
     }
 }

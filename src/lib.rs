@@ -88,7 +88,7 @@ pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use accel::{AccelInstance, AccelKind, AccelerationStructure};
-pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc};
+pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc, MAX_RAY_PAYLOAD_BYTES};
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;

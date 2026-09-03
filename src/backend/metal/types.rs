@@ -495,6 +495,14 @@ pub(crate) enum PendingDeletion {
     Sampler {
         sampler: SamplerState,
     },
+    Accel {
+        accel: mtl::AccelerationStructure,
+        scratch: MTLBuffer,
+    },
+    /// TLAS instance-descriptor upload, kept until the command buffer completes.
+    AccelUpload {
+        buffer: MTLBuffer,
+    },
 }
 
 pub(crate) struct DeletionQueue {
@@ -1004,10 +1012,19 @@ impl ResourceRegistry {
         local_index + 5 * MAX_RESOURCES_PER_CATEGORY
     }
 
-    pub fn unregister_accel(&mut self, handle: AccelerationStructureHandle) {
-        if let Some(index) = self.accel_indices.remove(&handle) {
-            self.accel.free(index);
-        }
+    pub fn accel_slot_keys(&self, handle: AccelerationStructureHandle) -> Vec<MetalSlotKey> {
+        self.accel_indices
+            .get(&handle)
+            .copied()
+            .map(|index| vec![MetalSlotKey::Accel(index)])
+            .unwrap_or_default()
+    }
+
+    pub fn extract_accel_slots(&mut self, handle: AccelerationStructureHandle) -> Vec<MetalSlotKey> {
+        self.accel_indices
+            .remove(&handle)
+            .map(|index| vec![MetalSlotKey::Accel(index)])
+            .unwrap_or_default()
     }
 
     /// Remove a buffer handle from the registry and return its LOCAL slot
@@ -1363,6 +1380,31 @@ impl DescriptorRegistry {
     /// Slot keys for a live buffer handle (for gating physical GPU free).
     pub(crate) fn buffer_retained_slot_keys(&self, handle: BufferHandle) -> Vec<MetalSlotKey> {
         self.resource_registry.buffer_slot_keys(handle)
+    }
+
+    pub(crate) fn reclaim_accel_slots(&mut self, handle: AccelerationStructureHandle) -> Vec<MetalSlotKey> {
+        let slots = self.resource_registry.extract_accel_slots(handle);
+        for slot in slots.iter().copied() {
+            self.queue_slot_reclamation(slot);
+        }
+        slots
+    }
+
+    pub(crate) fn bindless_retirement_requirements_for_accel(
+        &self,
+        handle: AccelerationStructureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.accel_slot_keys(handle);
+        let mut merged: std::collections::HashMap<super::ContextHandle, u64> = base.into_iter().collect();
+        for &slot in &slots {
+            if let Some(map) = self.slot_last_seen.get(&slot) {
+                for (ctx, seq) in map.iter() {
+                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
+                }
+            }
+        }
+        merged.into_iter().collect()
     }
 }
 
