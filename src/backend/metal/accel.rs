@@ -29,8 +29,9 @@ fn dummy_triangle_descriptor(max_triangles: u32, vertex_stride: u32) -> mtl::Pri
     geom.set_triangle_count(max_triangles as u64);
     geom.set_vertex_stride(vertex_stride as u64);
     geom.set_opaque(true);
+    let geom: mtl::AccelerationStructureGeometryDescriptor = From::from(geom);
     let prim = mtl::PrimitiveAccelerationStructureDescriptor::descriptor();
-    prim.set_geometry_descriptors(&mtl::Array::from_slice(&[geom]));
+    prim.set_geometry_descriptors(mtl::Array::from_owned_slice(&[geom]));
     prim
 }
 
@@ -201,8 +202,9 @@ pub(super) fn encode_build(
                 geom.set_index_buffer_offset(*index_offset);
                 geom.set_index_type(mtl::MTLIndexType::UInt32);
             }
+            let geom: mtl::AccelerationStructureGeometryDescriptor = From::from(geom);
             let prim = mtl::PrimitiveAccelerationStructureDescriptor::descriptor();
-            prim.set_geometry_descriptors(&mtl::Array::from_slice(&[geom]));
+            prim.set_geometry_descriptors(mtl::Array::from_owned_slice(&[geom]));
             encoder.build_acceleration_structure(&dest_as.accel, &prim, &dest_as.scratch, 0);
         }
         AccelBuildCommand::Tlas { dest, instances } => {
@@ -211,7 +213,7 @@ pub(super) fn encode_build(
             let ld = state.devices.get(&dest_as.device_handle).context("invalid device")?;
             let mut packed = Vec::with_capacity(instances.len());
             let mut as_refs = Vec::with_capacity(instances.len());
-            for inst in instances {
+            for inst in instances.iter() {
                 let blas = state.accels.get(&inst.blas).context("invalid instance BLAS")?;
                 as_refs.push(blas.accel.clone());
                 let mut d = mtl::MTLAccelerationStructureUserIDInstanceDescriptor::default();

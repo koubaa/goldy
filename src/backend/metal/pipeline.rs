@@ -1,7 +1,7 @@
 //! Graphics pipeline management logic.
 
 use super::super::shared::GraphicsPipelineCreateDesc;
-use super::super::{PipelineHandle, ShaderHandle};
+use super::super::{DeviceHandle, PipelineHandle, ShaderHandle};
 use super::types::{MetalState, PipelineState};
 use super::utils::{compare_to_mtl, depth_format_to_mtl, format_to_mtl, topology_to_mtl, vertex_format_to_mtl};
 use crate::slang::SlangStage;

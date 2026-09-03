@@ -2273,6 +2273,44 @@ mod rt_mesh_compile_tests {
     }
 
     #[test]
+    fn compile_mesh_metal_assigns_whole_vertex_struct() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("shaders")
+            .to_string_lossy()
+            .into_owned();
+        let source = r#"
+            import goldy_exp;
+            struct MeshOutput {
+                float4 pos : SV_Position;
+                float4 color : COLOR;
+            };
+            [goldy_mesh]
+            [numthreads(1, 1, 1)]
+            [outputtopology("triangle")]
+            void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
+                SetMeshOutputCounts(3, 1);
+                verts[0] = { float4(0.0, -0.5, 0.0, 1.0), float4(1.0, 0.0, 0.0, 1.0) };
+                verts[1] = { float4(-0.5, 0.5, 0.0, 1.0), float4(0.0, 1.0, 0.0, 1.0) };
+                verts[2] = { float4(0.5, 0.5, 0.0, 1.0), float4(0.0, 0.0, 1.0, 1.0) };
+                tris[0] = uint3(0, 1, 2);
+            }
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Metal,
+                &[("mesh_main", SlangStage::Mesh)],
+                &[&path],
+                &[("__METAL__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("mesh Metal compile failed");
+        assert!(!out.shader.data.is_empty());
+    }
+
+    #[test]
     fn reflect_acceleration_structure_parameter_block() {
         let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
         let source = r#"

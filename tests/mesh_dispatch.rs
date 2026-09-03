@@ -38,12 +38,9 @@ struct MeshOutput {
 [outputtopology("triangle")]
 void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
     SetMeshOutputCounts(3, 1);
-    verts[0].pos = float4(-1.0, -1.0, 0.0, 1.0);
-    verts[0].color = float4(1.0, 0.0, 0.0, 1.0);
-    verts[1].pos = float4(3.0, -1.0, 0.0, 1.0);
-    verts[1].color = float4(1.0, 0.0, 0.0, 1.0);
-    verts[2].pos = float4(-1.0, 3.0, 0.0, 1.0);
-    verts[2].color = float4(1.0, 0.0, 0.0, 1.0);
+    verts[0] = { float4(-1.0, -1.0, 0.0, 1.0), float4(1.0, 0.0, 0.0, 1.0) };
+    verts[1] = { float4(3.0, -1.0, 0.0, 1.0), float4(1.0, 0.0, 0.0, 1.0) };
+    verts[2] = { float4(-1.0, 3.0, 0.0, 1.0), float4(1.0, 0.0, 0.0, 1.0) };
     tris[0] = uint3(0, 1, 2);
 }
 
