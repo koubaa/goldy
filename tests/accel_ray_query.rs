@@ -7,8 +7,9 @@ mod submission;
 mod imp {
     use crate::submission::submission_context;
     use goldy::{
-        types::{BackendType, BufferFlags}, AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Device, DeviceDescriptor,
-        Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+        types::{BackendType, BufferFlags},
+        AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
+        MemoryExchange, NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
     };
     use std::sync::{Arc, Mutex};
 
@@ -79,7 +80,9 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
         let mut scheme = Scheme::new(&ctx);
-        scheme.build_blas(&blas, verts.whole(), 3, 12, None).expect("build_blas");
+        scheme
+            .build_blas(&blas, verts.whole(), 3, 12, None)
+            .expect("build_blas");
         let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         scheme
             .build_tlas(

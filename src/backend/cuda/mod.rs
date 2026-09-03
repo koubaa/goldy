@@ -926,9 +926,8 @@ impl CudaBackend {
                 category.map(|category| match category {
                     crate::types::ResourceCategory::Broadcast
                     | crate::types::ResourceCategory::Texture
-                    | crate::types::ResourceCategory::Sampler | crate::types::ResourceCategory::Accel => {
-                        ResourceAccess::Read
-                    }
+                    | crate::types::ResourceCategory::Sampler
+                    | crate::types::ResourceCategory::Accel => ResourceAccess::Read,
                     crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
                         ResourceAccess::ReadWrite
                     }
@@ -5357,7 +5356,8 @@ impl GpuBackend for CudaBackend {
             | crate::types::ResourceCategory::Broadcast
             | crate::types::ResourceCategory::Texture
             | crate::types::ResourceCategory::StorageImage
-            | crate::types::ResourceCategory::Sampler | crate::types::ResourceCategory::Accel => 4096,
+            | crate::types::ResourceCategory::Sampler
+            | crate::types::ResourceCategory::Accel => 4096,
         }
     }
 

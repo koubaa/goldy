@@ -1441,12 +1441,7 @@ fn submit_resolved_ir_partitions_replay(
 
             if analysis::partition_waves_are_accel_build(ir, &waves)
                 && ir_clean
-                && replay
-                    .partition_last_tv
-                    .get(part_idx)
-                    .copied()
-                    .flatten()
-                    .is_some()
+                && replay.partition_last_tv.get(part_idx).copied().flatten().is_some()
             {
                 last_tv = replay.partition_last_tv[part_idx].unwrap();
                 boundary.record(separate, has_render, last_tv);

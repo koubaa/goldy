@@ -147,8 +147,8 @@ pub(super) fn create(
         pSubobjects: subobjects.as_ptr(),
     };
 
-    let state_object: ID3D12StateObject = unsafe { logical_device.device.CreateStateObject(&desc) }
-        .context("CreateStateObject (DXR pipeline)")?;
+    let state_object: ID3D12StateObject =
+        unsafe { logical_device.device.CreateStateObject(&desc) }.context("CreateStateObject (DXR pipeline)")?;
 
     let props: ID3D12StateObjectProperties = state_object.cast().context("ID3D12StateObjectProperties")?;
     let id_size = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES as usize;
@@ -169,8 +169,7 @@ pub(super) fn create(
     unsafe {
         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
         let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-        sbt.Map(0, Some(&no_read), Some(&mut mapped))
-            .context("map DXR SBT")?;
+        sbt.Map(0, Some(&no_read), Some(&mut mapped)).context("map DXR SBT")?;
         let bytes = std::slice::from_raw_parts_mut(mapped as *mut u8, sbt_size as usize);
         bytes.fill(0);
         bytes[..id_size].copy_from_slice(&rgen_id);

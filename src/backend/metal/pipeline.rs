@@ -239,7 +239,12 @@ pub(super) fn create_mesh(
             depth: 1,
         });
     let object_threadgroup = amplification
-        .and_then(|amp| state.shaders.get(&amp).map(|s| threadgroup_from_source(&s.slang_source)))
+        .and_then(|amp| {
+            state
+                .shaders
+                .get(&amp)
+                .map(|s| threadgroup_from_source(&s.slang_source))
+        })
         .unwrap_or(mtl::MTLSize {
             width: 0,
             height: 0,

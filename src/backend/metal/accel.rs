@@ -3,8 +3,8 @@
 use super::types::{AccelState, MetalState, ResourceRegistry};
 use super::{AccelerationStructureHandle, DeviceHandle};
 use crate::backend::{AccelBuildCommand, GpuAccelCreate};
-use anyhow::{Context, Result};
 use ::metal as mtl;
+use anyhow::{Context, Result};
 use mtl::{DeviceRef, MTLResourceOptions};
 use objc::{msg_send, sel, sel_impl};
 
@@ -13,8 +13,7 @@ fn write_bindless(ld: &super::types::LogicalDevice, accel: &mtl::AccelerationStr
     if offset + ld.accel_encoder.encoded_length() > super::types::ARGUMENT_BUFFER_SIZE {
         return;
     }
-    ld.accel_encoder
-        .set_argument_buffer(&ld.argument_buffer, offset);
+    ld.accel_encoder.set_argument_buffer(&ld.argument_buffer, offset);
     unsafe {
         let _: () = msg_send![
             ld.accel_encoder.as_ref(),
@@ -40,7 +39,11 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     desc: &GpuAccelCreate,
 ) -> Result<AccelerationStructureHandle> {
-    let ld = state.devices.get(&device_handle).context("Invalid device handle")?.clone();
+    let ld = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .clone();
     anyhow::ensure!(ld.device.supports_raytracing(), "Metal device has no ray tracing");
 
     let (is_tlas, as_desc, max_primitives, max_vertices, vertex_stride): (
@@ -66,10 +69,13 @@ pub(super) fn create(
     };
 
     let sizes = ld.device.acceleration_structure_sizes_with_descriptor(&as_desc);
-    let accel = ld.device.new_acceleration_structure_with_size(sizes.acceleration_structure_size);
-    let scratch = ld
+    let accel = ld
         .device
-        .new_buffer(sizes.build_scratch_buffer_size.max(16), MTLResourceOptions::StorageModePrivate);
+        .new_acceleration_structure_with_size(sizes.acceleration_structure_size);
+    let scratch = ld.device.new_buffer(
+        sizes.build_scratch_buffer_size.max(16),
+        MTLResourceOptions::StorageModePrivate,
+    );
 
     let handle = state.next_accel_handle;
     state.next_accel_handle += 1;
@@ -170,10 +176,7 @@ pub(super) fn encode_build(
             );
             let vb = state.buffers.get(vertex_buffer).context("invalid vertex buffer")?;
             let vertex_end = vertex_offset.saturating_add(*vertex_count as u64 * *vertex_stride as u64);
-            anyhow::ensure!(
-                vertex_end <= vb.size,
-                "build_blas vertex range exceeds buffer size"
-            );
+            anyhow::ensure!(vertex_end <= vb.size, "build_blas vertex range exceeds buffer size");
             let geom = mtl::AccelerationStructureTriangleGeometryDescriptor::descriptor();
             geom.set_vertex_buffer(Some(&vb.buffer));
             geom.set_vertex_buffer_offset(*vertex_offset);
@@ -230,7 +233,8 @@ pub(super) fn encode_build(
                 d.acceleration_structure_index = (as_refs.len() - 1) as u32;
                 packed.push(d);
             }
-            let byte_len = (packed.len() * std::mem::size_of::<mtl::MTLAccelerationStructureUserIDInstanceDescriptor>()) as u64;
+            let byte_len =
+                (packed.len() * std::mem::size_of::<mtl::MTLAccelerationStructureUserIDInstanceDescriptor>()) as u64;
             let inst_buf = ld.device.new_buffer_with_data(
                 packed.as_ptr() as *const std::ffi::c_void,
                 byte_len,
@@ -240,9 +244,9 @@ pub(super) fn encode_build(
             tlas_desc.set_instance_count(instances.len() as u64);
             tlas_desc.set_instance_descriptor_type(mtl::MTLAccelerationStructureInstanceDescriptorType::UserID);
             tlas_desc.set_instance_descriptor_buffer(&inst_buf);
-            tlas_desc.set_instance_descriptor_stride(
-                std::mem::size_of::<mtl::MTLAccelerationStructureUserIDInstanceDescriptor>() as u64,
-            );
+            tlas_desc.set_instance_descriptor_stride(std::mem::size_of::<
+                mtl::MTLAccelerationStructureUserIDInstanceDescriptor,
+            >() as u64);
             let arr = mtl::Array::from_owned_slice(&as_refs);
             tlas_desc.set_instanced_acceleration_structures(&arr);
             encoder.build_acceleration_structure(&dest_as.accel, &tlas_desc, &dest_as.scratch, 0);

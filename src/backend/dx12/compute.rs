@@ -1088,64 +1088,67 @@ fn record_gpu_command(
         } => {
             let pipelines_read = scope.compute_pipelines().read().unwrap();
             let rt_read = scope.rt_pipelines().read().unwrap();
-            if let Some(pipeline) = ctx.current_compute_pipeline.and_then(|h| pipelines_read.entries.get(&h)) {
-                    crate::backend::with_layout_validation(|| {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| {
-                                buffer_stride_for_bindless_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                    cat,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )?;
-                        crate::backend::validate_bindless_slot_kinds(
-                            raw_indices,
-                            &pipeline.push_constant_slot_kinds,
-                            |idx| {
-                                super::buffer::bindless_slot_kind_for_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )
-                    })?;
+            if let Some(pipeline) = ctx
+                .current_compute_pipeline
+                .and_then(|h| pipelines_read.entries.get(&h))
+            {
+                crate::backend::with_layout_validation(|| {
+                    crate::backend::validate_raw_binding_strides(
+                        raw_indices,
+                        &pipeline.push_constant_categories,
+                        &pipeline.binding_element_strides,
+                        |idx, cat| {
+                            buffer_stride_for_bindless_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                                cat,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_bindless_slot_kinds(
+                        raw_indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| {
+                            super::buffer::bindless_slot_kind_for_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )
+                })?;
             } else if let Some(pipeline) = ctx.current_rt.and_then(|h| rt_read.entries.get(&h)) {
-                    crate::backend::with_layout_validation(|| {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| {
-                                buffer_stride_for_bindless_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                    cat,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )?;
-                        crate::backend::validate_bindless_slot_kinds(
-                            raw_indices,
-                            &pipeline.push_constant_slot_kinds,
-                            |idx| {
-                                super::buffer::bindless_slot_kind_for_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )
-                    })?;
+                crate::backend::with_layout_validation(|| {
+                    crate::backend::validate_raw_binding_strides(
+                        raw_indices,
+                        &pipeline.push_constant_categories,
+                        &pipeline.binding_element_strides,
+                        |idx, cat| {
+                            buffer_stride_for_bindless_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                                cat,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_bindless_slot_kinds(
+                        raw_indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| {
+                            super::buffer::bindless_slot_kind_for_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )
+                })?;
             }
             let mut layout = types::PushLayout::default();
             shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
@@ -1912,7 +1915,14 @@ fn record_gpu_command(
             }
         }
         GpuCommand::BuildAccelerationStructure(build) => {
-            super::accel::record_build_list(scope, cl, cl7, build, &mut ctx.rt_geom_descs, &mut ctx.pending_deletions)?;
+            super::accel::record_build_list(
+                scope,
+                cl,
+                cl7,
+                build,
+                &mut ctx.rt_geom_descs,
+                &mut ctx.pending_deletions,
+            )?;
         }
         GpuCommand::SetRayTracingPipeline(handle) => {
             ctx.current_compute_pipeline = None;
@@ -1925,10 +1935,7 @@ fn record_gpu_command(
             }
         }
         GpuCommand::TraceRays {
-            width,
-            height,
-            depth,
-            ..
+            width, height, depth, ..
         } => {
             let rt_read = scope.rt_pipelines().read().unwrap();
             if let Some(h) = ctx.current_rt {
@@ -2190,7 +2197,7 @@ fn execute_signal_and_finish_device(
     frame_table_row: Option<u32>,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-        if let Err(e) = unsafe { command_list.Close() } {
+    if let Err(e) = unsafe { command_list.Close() } {
         if let Some(row) = frame_table_row {
             super::frame_table::record_submission(scope.frame_table(), row, 0);
         }
@@ -2521,7 +2528,12 @@ pub(super) fn submit_with_scope(
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, row_guard.take(), cmd_ctx.rt_geom_descs)
+        (
+            cmd_ctx.belt_idx,
+            cmd_ctx.pending_deletions,
+            row_guard.take(),
+            cmd_ctx.rt_geom_descs,
+        )
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.

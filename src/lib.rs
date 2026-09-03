@@ -12,8 +12,8 @@
 //! let device = adapter.request_device(&Default::default()).unwrap();
 //! ```
 
-pub(crate) mod backend;
 pub mod accel;
+pub(crate) mod backend;
 pub mod buffer;
 pub mod compute;
 pub mod context;
@@ -88,7 +88,6 @@ pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
 pub use accel::{AccelInstance, AccelKind, AccelerationStructure};
-pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc, MAX_RAY_PAYLOAD_BYTES};
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;
@@ -107,6 +106,7 @@ pub use kernel::{
 };
 #[cfg(feature = "graphics")]
 pub use pipeline::{MeshPipeline, MeshPipelineDesc, RenderPipeline, RenderPipelineDesc};
+pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc, MAX_RAY_PAYLOAD_BYTES};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;

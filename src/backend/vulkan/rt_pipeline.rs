@@ -110,8 +110,15 @@ pub(super) fn create(
         .max_pipeline_ray_recursion_depth(1)
         .layout(layout);
 
-    let pipelines = unsafe { rtp.create_ray_tracing_pipelines(vk::DeferredOperationKHR::null(), logical_device.pipeline_cache, &[create_info], None) }
-        .map_err(|e| anyhow::anyhow!("vkCreateRayTracingPipelinesKHR: {e:?}"))?;
+    let pipelines = unsafe {
+        rtp.create_ray_tracing_pipelines(
+            vk::DeferredOperationKHR::null(),
+            logical_device.pipeline_cache,
+            &[create_info],
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("vkCreateRayTracingPipelinesKHR: {e:?}"))?;
     let pipeline = pipelines[0];
 
     let handle_size = logical_device.rt_shader_group_handle_size as usize;
@@ -196,11 +203,7 @@ pub(super) fn destroy(
     }
 }
 
-pub(super) fn bind_pipeline(
-    ld: &LogicalDevice,
-    cmd: vk::CommandBuffer,
-    ps: &RayTracingPipelineState,
-) {
+pub(super) fn bind_pipeline(ld: &LogicalDevice, cmd: vk::CommandBuffer, ps: &RayTracingPipelineState) {
     unsafe {
         ld.device
             .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::RAY_TRACING_KHR, ps.pipeline);
@@ -235,9 +238,7 @@ pub(super) fn bind_rt_descriptor_set(ld: &LogicalDevice, cmd: vk::CommandBuffer)
     if ld.rtp_khr.is_none() {
         return;
     }
-    if let (Some(bindless_set), Some(bindless_layout)) =
-        (ld.bindless_descriptor_set, ld.bindless_pipeline_layout)
-    {
+    if let (Some(bindless_set), Some(bindless_layout)) = (ld.bindless_descriptor_set, ld.bindless_pipeline_layout) {
         unsafe {
             ld.device.cmd_bind_descriptor_sets(
                 cmd,

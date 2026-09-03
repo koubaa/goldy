@@ -73,7 +73,11 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     desc: &GpuAccelCreate,
 ) -> Result<AccelerationStructureHandle> {
-    let ld = state.devices.get(&device_handle).context("Invalid device handle")?.clone();
+    let ld = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .clone();
     anyhow::ensure!(ld.accel_khr.is_some(), "Vulkan device has no acceleration structures");
     let accel_khr = ld.accel_khr.as_ref().unwrap();
 
@@ -149,10 +153,14 @@ pub(super) fn create(
         let mut table = state.accels.write().unwrap();
         table.alloc_handle()
     };
-    let bindless_index = {
+    // BLAS must not be written into ACCELERATION_STRUCTURE_KHR descriptors (VUID-03579).
+    // Only TLAS (and generic) are valid for shader ray-query / trace bindings.
+    let bindless_index = if ty == vk::AccelerationStructureTypeKHR::TOP_LEVEL {
         let index = ld.descriptors.lock().unwrap().resource_registry.register_accel(handle);
         write_accel_descriptor(&ld, as_handle, index);
         Some(index)
+    } else {
+        None
     };
 
     let device_address = {
@@ -272,9 +280,7 @@ pub(super) fn record_build(
             let vaddr = buffer_device_address(&ld.device, vb.buffer) + vertex_offset;
             let mut triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
                 .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                    device_address: vaddr,
-                })
+                .vertex_data(vk::DeviceOrHostAddressConstKHR { device_address: vaddr })
                 .vertex_stride(*vertex_stride as u64)
                 .max_vertex(vertex_count.saturating_sub(1));
             if let Some(ib) = index_buffer {
@@ -282,9 +288,7 @@ pub(super) fn record_build(
                 let iaddr = buffer_device_address(&ld.device, idx.buffer) + index_offset;
                 triangles = triangles
                     .index_type(vk::IndexType::UINT32)
-                    .index_data(vk::DeviceOrHostAddressConstKHR {
-                        device_address: iaddr,
-                    });
+                    .index_data(vk::DeviceOrHostAddressConstKHR { device_address: iaddr });
             } else {
                 triangles = triangles.index_type(vk::IndexType::NONE_KHR);
             }
@@ -341,7 +345,9 @@ pub(super) fn record_build(
                 });
             let geom = vk::AccelerationStructureGeometryKHR::default()
                 .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-                .geometry(vk::AccelerationStructureGeometryDataKHR { instances: instances_data });
+                .geometry(vk::AccelerationStructureGeometryDataKHR {
+                    instances: instances_data,
+                });
             record_build_inner(
                 ld,
                 accel_khr,
@@ -365,13 +371,11 @@ fn create_host_upload(
     let size = bytes.len() as u64;
     let qf = ld.concurrent_queue_families();
     let buffer_info = super::utils::with_buffer_sharing(
-        vk::BufferCreateInfo::default()
-            .size(size.max(1))
-            .usage(
-                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-            ),
+        vk::BufferCreateInfo::default().size(size.max(1)).usage(
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_DST,
+        ),
         qf.as_ref(),
     );
     let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }?;
@@ -400,10 +404,7 @@ fn record_build_inner(
     geom: vk::AccelerationStructureGeometryKHR<'_>,
     primitive_count: u32,
 ) -> Result<()> {
-    anyhow::ensure!(
-        dest.kind == ty,
-        "acceleration structure build kind mismatch"
-    );
+    anyhow::ensure!(dest.kind == ty, "acceleration structure build kind mismatch");
     anyhow::ensure!(
         primitive_count <= dest.max_primitives,
         "AS build count {primitive_count} exceeds create-time max {}",
@@ -459,9 +460,7 @@ fn record_build_inner(
                 | vk::PipelineStageFlags2::COMPUTE_SHADER
                 | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
         )
-        .dst_access_mask(
-            vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags2::SHADER_READ,
-        );
+        .dst_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags2::SHADER_READ);
     let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
     unsafe {
         ld.device.cmd_pipeline_barrier2(cmd, &dep);

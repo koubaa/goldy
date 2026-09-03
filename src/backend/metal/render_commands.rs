@@ -28,11 +28,7 @@ pub(super) fn render_stages_for_pass(is_mesh: bool) -> mtl::MTLRenderStages {
     mtl::MTLRenderStages::from_bits_truncate(bits)
 }
 
-fn bind_goldy_argument_buffer(
-    encoder: &mtl::RenderCommandEncoderRef,
-    argument_buffer: &mtl::BufferRef,
-    is_mesh: bool,
-) {
+fn bind_goldy_argument_buffer(encoder: &mtl::RenderCommandEncoderRef, argument_buffer: &mtl::BufferRef, is_mesh: bool) {
     encoder.set_fragment_buffer(0, Some(argument_buffer), 0);
     if is_mesh {
         encoder.set_mesh_buffer(0, Some(argument_buffer), 0);

@@ -3436,8 +3436,8 @@ mod tests {
     use crate::shader::ShaderModule;
     use crate::task_graph::NodeAccess;
     use crate::task_graph::NodeKind;
-    use crate::types::ResourceAccess;
     use crate::types::BufferFlags;
+    use crate::types::ResourceAccess;
     use crate::BufferKind;
     use crate::MemoryExchange;
     use std::sync::Arc;

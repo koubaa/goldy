@@ -5,8 +5,8 @@
 //! Run with: cargo run --example mesh_triangle --features examples
 
 use goldy::{
-    Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MeshPipeline, MeshPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MeshPipeline, MeshPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
 };
 use std::sync::Arc;
 use std::time::Instant;

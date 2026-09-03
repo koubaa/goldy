@@ -11,10 +11,10 @@
 //! - `types`: Internal state structs
 //! - `utils`: Format conversion and helpers
 
+mod accel;
 pub(super) mod api_log;
 mod buffer;
 mod compute;
-mod accel;
 mod context;
 mod device;
 mod frame_table;

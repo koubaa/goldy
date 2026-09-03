@@ -71,7 +71,9 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
             } => {
                 for rc in render_cmds {
                     match rc {
-                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => {
+                            current_render_pipeline = Some(*p)
+                        }
                         RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
                                 if let Some(buf) = state.buffers.get(h) {
@@ -1648,10 +1650,8 @@ pub(super) fn submit(
         sc.last_committed_timeline = Some(signal_value);
         sc.last_submitted_seq = signal_value;
         for buffer in accel_uploads.drain(..) {
-            sc.deletion_queue.queue(
-                signal_value,
-                super::types::PendingDeletion::AccelUpload { buffer },
-            );
+            sc.deletion_queue
+                .queue(signal_value, super::types::PendingDeletion::AccelUpload { buffer });
         }
     }
     if let Some(row) = prologue_row {
@@ -1903,10 +1903,8 @@ pub(super) fn submit_graph(
         sc.last_committed_timeline = Some(signal_value);
         sc.last_submitted_seq = signal_value;
         for buffer in accel_uploads.drain(..) {
-            sc.deletion_queue.queue(
-                signal_value,
-                super::types::PendingDeletion::AccelUpload { buffer },
-            );
+            sc.deletion_queue
+                .queue(signal_value, super::types::PendingDeletion::AccelUpload { buffer });
         }
     }
     if let Some(row) = prologue_row {

@@ -77,27 +77,25 @@ fn validate_render_pass_commands(ir: &GraphIR) -> Result<(), GoldyError> {
             match cmd {
                 RenderCommand::SetPipeline(_) => pipeline = Some(false),
                 RenderCommand::SetMeshPipeline(_) => pipeline = Some(true),
-                RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } => {
-                    match pipeline {
-                        None => {
-                            return Err(validation(format!(
-                                "render pass \"{}\" recorded draw/draw_indexed without a pipeline. \
+                RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } => match pipeline {
+                    None => {
+                        return Err(validation(format!(
+                            "render pass \"{}\" recorded draw/draw_indexed without a pipeline. \
                                  hint: call set_pipeline(&render_pipeline) before draw, or \
                                  set_mesh_pipeline + dispatch_mesh for mesh shaders.",
-                                node.label
-                            )));
-                        }
-                        Some(true) => {
-                            return Err(validation(format!(
-                                "render pass \"{}\" recorded draw/draw_indexed after set_mesh_pipeline. \
+                            node.label
+                        )));
+                    }
+                    Some(true) => {
+                        return Err(validation(format!(
+                            "render pass \"{}\" recorded draw/draw_indexed after set_mesh_pipeline. \
                                  hint: mesh pipelines use dispatch_mesh(x, y, z), not draw. \
                                  Call set_pipeline for a vertex/fragment pipeline before draw.",
-                                node.label
-                            )));
-                        }
-                        Some(false) => {}
+                            node.label
+                        )));
                     }
-                }
+                    Some(false) => {}
+                },
                 RenderCommand::DispatchMesh { x, y, z } => {
                     if *x == 0 || *y == 0 || *z == 0 {
                         return Err(validation(format!(
@@ -164,10 +162,7 @@ fn validate_accel_kind_uses(ir: &GraphIR) -> Result<(), GoldyError> {
         }
     }
     for node in &ir.nodes {
-        let reads_accel = matches!(
-            &node.kind,
-            NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. }
-        );
+        let reads_accel = matches!(&node.kind, NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. });
         if !reads_accel {
             continue;
         }
@@ -198,10 +193,7 @@ fn validate_scheme_strict(ir: &GraphIR) -> Result<(), GoldyError> {
             };
             built.insert(dest);
         }
-        let traces = matches!(
-            &node.kind,
-            NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. }
-        );
+        let traces = matches!(&node.kind, NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. });
         if !traces {
             continue;
         }

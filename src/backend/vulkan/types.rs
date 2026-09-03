@@ -11,9 +11,8 @@
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
 use super::super::{
-    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RayTracingPipelineHandle,
-    RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle,
+    RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
@@ -2044,12 +2043,7 @@ handle_table!(
 );
 handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
 handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
-handle_table!(
-    AccelTable,
-    SharedAccelTable,
-    AccelerationStructureHandle,
-    AccelState
-);
+handle_table!(AccelTable, SharedAccelTable, AccelerationStructureHandle, AccelState);
 handle_table!(
     RayTracingPipelineTable,
     SharedRayTracingPipelineTable,

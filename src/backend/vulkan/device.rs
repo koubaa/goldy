@@ -57,15 +57,16 @@ pub(super) struct RtMeshFeatures {
 
 /// Probe RT and mesh-shader support without creating a logical device.
 pub(super) fn query_rt_mesh_features(instance: &ash::Instance, handle: vk::PhysicalDevice) -> RtMeshFeatures {
-    let ext_names: std::collections::HashSet<String> = unsafe { instance.enumerate_device_extension_properties(handle) }
-        .unwrap_or_default()
-        .into_iter()
-        .map(|ext| {
-            unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
+    let ext_names: std::collections::HashSet<String> =
+        unsafe { instance.enumerate_device_extension_properties(handle) }
+            .unwrap_or_default()
+            .into_iter()
+            .map(|ext| {
+                unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
 
     let has_as = ext_names.contains("VK_KHR_acceleration_structure");
     let has_rq = ext_names.contains("VK_KHR_ray_query");
@@ -489,7 +490,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
         ];
         if enable_accel {
-            binding_flags.push(vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND);
+            binding_flags
+                .push(vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND);
         }
 
         let mut binding_flags_info =

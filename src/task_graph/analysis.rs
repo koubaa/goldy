@@ -1653,7 +1653,9 @@ pub(crate) fn emit_graph_commands_for_waves(
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
                 NodeKind::BuildAccelerationStructure(build) => {
-                    commands.push(GraphCommand::Compute(GpuCommand::BuildAccelerationStructure(build.clone())));
+                    commands.push(GraphCommand::Compute(GpuCommand::BuildAccelerationStructure(
+                        build.clone(),
+                    )));
                 }
                 NodeKind::Dispatch { .. }
                 | NodeKind::TraceRays { .. }

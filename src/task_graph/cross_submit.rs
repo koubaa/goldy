@@ -184,7 +184,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyTextureRegion { .. }
-        |         NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
+        | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
         NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
     }

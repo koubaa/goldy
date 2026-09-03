@@ -77,7 +77,10 @@ impl AccelerationStructure {
              adapter with RT (Vulkan VK_KHR_acceleration_structure, DXR, Metal supportsRaytracing). \
              Query device.capabilities().ray_query."
         );
-        anyhow::ensure!(max_triangles > 0 && max_vertices > 0 && vertex_stride >= 12, "invalid BLAS sizing");
+        anyhow::ensure!(
+            max_triangles > 0 && max_vertices > 0 && vertex_stride >= 12,
+            "invalid BLAS sizing"
+        );
         let (handle, bindless) = {
             let mut backend = device.inner.backend.lock().unwrap();
             let handle = backend.create_acceleration_structure(
@@ -117,10 +120,8 @@ impl AccelerationStructure {
         anyhow::ensure!(max_instances > 0, "TLAS max_instances must be > 0");
         let (handle, bindless) = {
             let mut backend = device.inner.backend.lock().unwrap();
-            let handle = backend.create_acceleration_structure(
-                device.inner.handle,
-                &GpuAccelCreate::Tlas { max_instances },
-            )?;
+            let handle =
+                backend.create_acceleration_structure(device.inner.handle, &GpuAccelCreate::Tlas { max_instances })?;
             let bindless = backend.accel_bindless_index(handle);
             (handle, bindless)
         };

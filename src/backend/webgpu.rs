@@ -31,8 +31,9 @@ use crate::slang::virtual_main::{CudaStorageTextureSpec, WgpuComputeLayout, Wgpu
 use crate::slang::OwnedLayoutCheck;
 use crate::tracy_zone;
 use crate::types::{
-    AddressMode, BufferFlags, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState, DeviceType,
-    FilterMode, IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout, VertexFormat,
+    AddressMode, BufferFlags, BufferKind, BufferResizeCost, CompareFunction, DepthFormat, DepthStencilState,
+    DeviceType, FilterMode, IndexFormat, PresentMode, PrimitiveTopology, ResourceCategory, VertexBufferLayout,
+    VertexFormat,
 };
 use crate::{goldy_event, goldy_span};
 use anyhow::{Context as _, Result};
@@ -2171,7 +2172,11 @@ impl WebGpuBackend {
             .with_context(|| format!("WebGPU: registry key {index} references a destroyed acceleration structure"))
     }
 
-    fn record_accel_build(&mut self, encoder: &mut wgpu::CommandEncoder, build: &crate::backend::AccelBuildCommand) -> Result<()> {
+    fn record_accel_build(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        build: &crate::backend::AccelBuildCommand,
+    ) -> Result<()> {
         match build {
             crate::backend::AccelBuildCommand::BlasTriangles {
                 dest,
@@ -2187,7 +2192,9 @@ impl WebGpuBackend {
                     "WebGPU experimental ray query: indexed BLAS builds are not wired yet"
                 );
                 let (size, stored_stride) = match &self.accels.get(dest).context("WebGPU: invalid BLAS")?.kind {
-                    WebGpuAccelKind::Blas { size, vertex_stride, .. } => (size.clone(), *vertex_stride),
+                    WebGpuAccelKind::Blas {
+                        size, vertex_stride, ..
+                    } => (size.clone(), *vertex_stride),
                     WebGpuAccelKind::Tlas(_) => anyhow::bail!("WebGPU: build_blas destination is a TLAS"),
                 };
                 anyhow::ensure!(
@@ -2199,7 +2206,10 @@ impl WebGpuBackend {
                     "WebGPU: BLAS vertex_offset must be a multiple of vertex_stride"
                 );
                 let first_vertex = (*vertex_offset / u64::from(stored_stride)) as u32;
-                let vertex = self.buffers.get(vertex_buffer).context("WebGPU: invalid BLAS vertex buffer")?;
+                let vertex = self
+                    .buffers
+                    .get(vertex_buffer)
+                    .context("WebGPU: invalid BLAS vertex buffer")?;
                 let geom = wgpu::BlasTriangleGeometry {
                     size: &size,
                     vertex_buffer: &vertex.buffer,
@@ -2225,7 +2235,12 @@ impl WebGpuBackend {
             crate::backend::AccelBuildCommand::Tlas { dest, instances } => {
                 let mut packed = Vec::new();
                 for inst in instances.iter() {
-                    let blas = match &self.accels.get(&inst.blas).context("WebGPU: invalid instance BLAS")?.kind {
+                    let blas = match &self
+                        .accels
+                        .get(&inst.blas)
+                        .context("WebGPU: invalid instance BLAS")?
+                        .kind
+                    {
                         WebGpuAccelKind::Blas { blas, .. } => blas,
                         WebGpuAccelKind::Tlas(_) => anyhow::bail!("WebGPU: TLAS instance must be a BLAS"),
                     };
@@ -5867,11 +5882,7 @@ impl GpuBackend for WebGpuBackend {
                 .values()
                 .filter(|sampler| sampler.device == device)
                 .count() as u32,
-            ResourceCategory::Accel => self
-                .accels
-                .values()
-                .filter(|accel| accel.device == device)
-                .count() as u32,
+            ResourceCategory::Accel => self.accels.values().filter(|accel| accel.device == device).count() as u32,
         };
         self.max_bindless_slots_per_category(device, category)
             .saturating_sub(used)

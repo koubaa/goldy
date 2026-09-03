@@ -573,14 +573,11 @@ pub fn transform_virtual_main(source: &str) -> String {
 pub fn transform_virtual_main_cpu(source: &str) -> Result<String, String> {
     let has_compute = source.contains("[goldy_compute]");
     let has_graphics = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
-    let has_rt = source.contains("[goldy_raygen]")
-        || source.contains("[goldy_miss]")
-        || source.contains("[goldy_closesthit]");
+    let has_rt =
+        source.contains("[goldy_raygen]") || source.contains("[goldy_miss]") || source.contains("[goldy_closesthit]");
     let has_mesh = source.contains("[goldy_mesh]") || source.contains("[goldy_amplification]");
     if has_graphics || has_rt || has_mesh {
-        return Err(
-            "CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt/mesh)".into(),
-        );
+        return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt/mesh)".into());
     }
     if !has_compute {
         return Ok(source.to_string());
@@ -1969,13 +1966,13 @@ pub enum ParamKind {
 /// The kind of system-value a `SystemValue` param maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvKind {
-    DispatchThreadId, // SV_DispatchThreadID  uint3
-    GroupThreadId,    // SV_GroupThreadID     uint3
-    GroupId,          // SV_GroupID           uint3
-    VertexId,         // SV_VertexID          uint
-    InstanceId,       // SV_InstanceID        uint
-    IsFrontFace,      // SV_IsFrontFace       bool
-    DispatchRaysIndex, // SV_DispatchRaysIndex uint3
+    DispatchThreadId,       // SV_DispatchThreadID  uint3
+    GroupThreadId,          // SV_GroupThreadID     uint3
+    GroupId,                // SV_GroupID           uint3
+    VertexId,               // SV_VertexID          uint
+    InstanceId,             // SV_InstanceID        uint
+    IsFrontFace,            // SV_IsFrontFace       bool
+    DispatchRaysIndex,      // SV_DispatchRaysIndex uint3
     DispatchRaysDimensions, // SV_DispatchRaysDimensions uint3
 }
 
@@ -2756,10 +2753,7 @@ impl WrapperBuilder {
             }
             ParamKind::SystemValue(sv) => {
                 if let Some(helper) = sv.goldy_intrinsic() {
-                    self.push_body_stmt(&format!(
-                        "    {} {} = {}({});",
-                        param.ty, param.name, param.ty, helper
-                    ));
+                    self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, helper));
                     self.push_call(&param.name);
                 } else {
                     let gn = format!("_sv{}", *sv_idx);
@@ -3303,7 +3297,11 @@ fn find_outputtopology_in_range(source: &str, start: usize, end: usize) -> Optio
 
 /// Parse `outputtopology("triangle")` from the inner content of `[outputtopology(...)]`.
 fn parse_outputtopology(s: &str) -> Option<String> {
-    let rest = s.strip_prefix("outputtopology")?.trim_start().strip_prefix('(')?.trim_start();
+    let rest = s
+        .strip_prefix("outputtopology")?
+        .trim_start()
+        .strip_prefix('(')?
+        .trim_start();
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(rest[..end].to_string())

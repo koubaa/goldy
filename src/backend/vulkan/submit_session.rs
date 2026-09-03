@@ -7,8 +7,7 @@ use super::compute;
 use super::types::{
     SharedAccelTable, SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextFrameTable,
     SharedContextMap, SharedLogicalDevice, SharedPipelineTable, SharedRayTracingPipelineTable, SharedRenderTargetTable,
-    SharedSubmissionContext,
-    SharedTextureTable, VulkanState,
+    SharedSubmissionContext, SharedTextureTable, VulkanState,
 };
 use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
 use crate::timeline::TimelineValue;

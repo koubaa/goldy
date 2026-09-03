@@ -1319,20 +1319,18 @@ impl SlangCompiler {
             k if k == SlangTypeKind::SamplerState as i32 => ResourceKind::Sampler,
             k if k == SlangTypeKind::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
             k if k == SlangTypeKind::ParameterBlock as i32 => ResourceKind::ParameterBlock,
-            k if k == SlangTypeKind::Resource as i32 => {
-                match binding_type {
-                    b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
-                    b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::RayTracingAccelerationStructure as i32 => {
-                        ResourceKind::AccelerationStructure
-                    }
-                    _ => ResourceKind::Other,
+            k if k == SlangTypeKind::Resource as i32 => match binding_type {
+                b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
+                b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::RayTracingAccelerationStructure as i32 => {
+                    ResourceKind::AccelerationStructure
                 }
-            }
+                _ => ResourceKind::Other,
+            },
             k if k == SlangTypeKind::ShaderStorageBuffer as i32 => ResourceKind::MutableBuffer,
             _ => match binding_type {
                 b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,

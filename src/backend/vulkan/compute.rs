@@ -191,7 +191,9 @@ fn collect_slot_keys_from_graph_commands(
             } => {
                 for rc in render_cmds {
                     match rc {
-                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => {
+                            current_render_pipeline = Some(*p)
+                        }
                         RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
                                 if let Some(idx) = buffers_read.entries.get(h).and_then(|b| b.bindless_index) {
@@ -1260,10 +1262,7 @@ pub(super) fn submit_with_scope(
                     }
                 }
                 GpuCommand::TraceRays {
-                    width,
-                    height,
-                    depth,
-                    ..
+                    width, height, depth, ..
                 } => {
                     let rt_read = view.rt_pipelines.read().unwrap();
                     if let Some(h) = current_rt {
@@ -1742,7 +1741,8 @@ pub(super) fn submit_with_scope(
     let signal_value = allocate_timeline_value(&ld.timeline_next);
     register_submit_timeline(ld, signal_value, false, ctx);
 
-    let used_slots = collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.rt_pipelines, view.buffers);
+    let used_slots =
+        collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.rt_pipelines, view.buffers);
     ld.descriptors
         .lock()
         .unwrap()
@@ -2325,10 +2325,7 @@ pub(super) fn submit_graph_with_scope(
                     }
                 }
                 GpuCommand::TraceRays {
-                    width,
-                    height,
-                    depth,
-                    ..
+                    width, height, depth, ..
                 } => {
                     let rt_read = view.rt_pipelines.read().unwrap();
                     if let Some(h) = current_rt {
@@ -2885,8 +2882,13 @@ pub(super) fn submit_graph_with_scope(
         return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
     }
 
-    let used_slots =
-        collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.rt_pipelines, view.pipelines, view.buffers);
+    let used_slots = collect_slot_keys_from_graph_commands(
+        commands,
+        view.compute_pipelines,
+        view.rt_pipelines,
+        view.pipelines,
+        view.buffers,
+    );
 
     let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let (queue, queue_lock) = if route_device {

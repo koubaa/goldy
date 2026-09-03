@@ -12,8 +12,8 @@
 // Allow isize casts needed for FFI with raw-window-handle and ash
 #![allow(clippy::unnecessary_cast)]
 
-mod api_log;
 mod accel;
+mod api_log;
 mod buffer;
 mod compute;
 mod context;
@@ -1057,11 +1057,8 @@ impl GpuBackend for VulkanBackend {
             Some(h) => Some(self.ensure_shader_stage_compiled(h, crate::slang::SlangStage::Amplification)?),
             None => None,
         };
-        let (cats, strides) = render_reflection_data(
-            &self.state.shaders.read().unwrap().entries,
-            desc.mesh,
-            desc.fragment,
-        );
+        let (cats, strides) =
+            render_reflection_data(&self.state.shaders.read().unwrap().entries, desc.mesh, desc.fragment);
         let shader_debug_name = debug_name
             .map(str::to_owned)
             .unwrap_or_else(|| format!("mesh_pipeline#{}", desc.mesh));

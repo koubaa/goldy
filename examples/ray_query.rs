@@ -7,9 +7,11 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, types::{BackendType, BufferFlags}, AccelInstance, AccelerationStructure, Buffer,
-    BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange, PresentMode,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction,
+    task_graph::NodeAccess,
+    types::{BackendType, BufferFlags},
+    AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor,
+    Instance, MemoryExchange, PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    SurfaceExchange, Transaction,
 };
 use std::sync::Arc;
 use winit::{

@@ -1421,9 +1421,10 @@ impl GpuBackend for CpuBackend {
             .iter()
             .map(|category| {
                 category.map(|category| match category {
-                    ResourceCategory::Broadcast | ResourceCategory::Texture | ResourceCategory::Sampler | ResourceCategory::Accel => {
-                        ResourceAccess::Read
-                    }
+                    ResourceCategory::Broadcast
+                    | ResourceCategory::Texture
+                    | ResourceCategory::Sampler
+                    | ResourceCategory::Accel => ResourceAccess::Read,
                     ResourceCategory::Scattered | ResourceCategory::StorageImage => ResourceAccess::ReadWrite,
                 })
             })

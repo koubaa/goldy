@@ -47,8 +47,7 @@ pub(crate) mod cuda;
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
     AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
-    RayTracingPipelineHandle,
-    RenderTargetHandle, SamplerHandle, ShaderHandle, TextureHandle,
+    RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, TextureHandle,
 };
 #[cfg(feature = "graphics")]
 pub(crate) use crate::handles::{SurfaceHandle, SwapchainImageHandle};
@@ -1734,10 +1733,7 @@ pub(crate) trait GpuBackend:
         let _ = pipeline;
     }
 
-    fn ray_tracing_pipeline_slot_access(
-        &self,
-        _pipeline: RayTracingPipelineHandle,
-    ) -> Vec<Option<ResourceAccess>> {
+    fn ray_tracing_pipeline_slot_access(&self, _pipeline: RayTracingPipelineHandle) -> Vec<Option<ResourceAccess>> {
         Vec::new()
     }
 

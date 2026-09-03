@@ -52,10 +52,8 @@ fn create_committed(
     state: D3D12_RESOURCE_STATES,
 ) -> Result<ID3D12Resource> {
     let mut resource: Option<ID3D12Resource> = None;
-    unsafe {
-        device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, None, &mut resource)
-    }
-    .context("CreateCommittedResource (accel)")?;
+    unsafe { device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, None, &mut resource) }
+        .context("CreateCommittedResource (accel)")?;
     resource.context("CreateCommittedResource returned null")
 }
 
@@ -133,8 +131,16 @@ fn prebuild_sizes(
     Ok(info)
 }
 
-pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &GpuAccelCreate) -> Result<AccelerationStructureHandle> {
-    let ld = state.devices.get(&device_handle).context("Invalid device handle")?.clone();
+pub(super) fn create(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    desc: &GpuAccelCreate,
+) -> Result<AccelerationStructureHandle> {
+    let ld = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .clone();
     anyhow::ensure!(
         state
             .adapters
@@ -182,7 +188,10 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
     let scratch = create_committed(
         &ld.device,
         default_heap(),
-        buffer_desc(sizes.ScratchDataSizeInBytes.max(256), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+        buffer_desc(
+            sizes.ScratchDataSizeInBytes.max(256),
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        ),
         D3D12_RESOURCE_STATE_COMMON,
     )?;
     let gpu_va = unsafe { as_res.GetGPUVirtualAddress() };
@@ -371,11 +380,7 @@ pub(super) fn record_build_list(
             unsafe {
                 let mut mapped = std::ptr::null_mut();
                 inst_res.Map(0, None, Some(&mut mapped))?;
-                std::ptr::copy_nonoverlapping(
-                    packed.as_ptr() as *const u8,
-                    mapped as *mut u8,
-                    byte_len as usize,
-                );
+                std::ptr::copy_nonoverlapping(packed.as_ptr() as *const u8, mapped as *mut u8, byte_len as usize);
                 inst_res.Unmap(0, None);
             }
             let inst_va = unsafe { inst_res.GetGPUVirtualAddress() };
@@ -386,9 +391,7 @@ pub(super) fn record_build_list(
                     Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
                     NumDescs: instances.len() as u32,
                     DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
-                    Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
-                        InstanceDescs: inst_va,
-                    },
+                    Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 { InstanceDescs: inst_va },
                 },
                 SourceAccelerationStructureData: 0,
                 ScratchAccelerationStructureData: unsafe { dest_as.scratch.GetGPUVirtualAddress() },
