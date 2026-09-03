@@ -76,6 +76,11 @@ fn render_reflection_data(
     }
 }
 
+/// Highest instance API Goldy is designed to use. Physical devices are still
+/// filtered to Vulkan 1.4+; this value may be lowered to match an older
+/// `VK_LAYER_KHRONOS_validation` so the loader does not warn.
+const VULKAN_TARGET_API: u32 = vk::make_api_version(0, 1, 4, 0);
+
 /// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
 /// `api`, `all`, … — see `validation_env`), or when the loader forces
 /// `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
@@ -86,6 +91,39 @@ fn vulkan_instance_validation_enabled() -> bool {
     std::env::var("VK_INSTANCE_LAYERS")
         .map(|layers| layers.contains("VK_LAYER_KHRONOS_validation"))
         .unwrap_or(false)
+}
+
+fn layer_spec_version(entry: &ash::Entry, layer_name: &[u8]) -> Option<u32> {
+    let layers = unsafe { entry.enumerate_instance_layer_properties() }.ok()?;
+    layers.into_iter().find_map(|layer| {
+        let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+        (name.to_bytes() == layer_name).then_some(layer.spec_version)
+    })
+}
+
+fn api_version_older(a: u32, b: u32) -> bool {
+    let (am, an) = (vk::api_version_major(a), vk::api_version_minor(a));
+    let (bm, bn) = (vk::api_version_major(b), vk::api_version_minor(b));
+    am < bm || (am == bm && an < bn)
+}
+
+/// Instance `apiVersion` to advertise. Clamped to the Khronos validation layer's
+/// spec version when that layer is enabled (VUID loader warning otherwise).
+fn instance_api_version(entry: &ash::Entry, enable_validation: bool) -> u32 {
+    let mut api = VULKAN_TARGET_API;
+    if enable_validation {
+        if let Some(layer_ver) = layer_spec_version(entry, b"VK_LAYER_KHRONOS_validation") {
+            if api_version_older(layer_ver, api) {
+                tracing::info!(
+                    "Vulkan instance apiVersion {}.{} to match Khronos validation (devices still require 1.4+)",
+                    vk::api_version_major(layer_ver),
+                    vk::api_version_minor(layer_ver),
+                );
+                api = vk::make_api_version(0, vk::api_version_major(layer_ver), vk::api_version_minor(layer_ver), 0);
+            }
+        }
+    }
+    api
 }
 
 /// Vulkan backend.
@@ -152,17 +190,15 @@ impl VulkanBackend {
         let minor = vk::api_version_minor(instance_version);
         tracing::info!("Vulkan loader version: {}.{}", major, minor);
 
-        // Note: We request 1.4 from the instance, but the loader may be older.
-        // The actual version check happens per-device when we enumerate physical devices.
-        // Drivers can support 1.4 even if the loader is 1.3.
-
-        // Create instance with Vulkan 1.4 and surface extensions
+        // Create instance with surface extensions. Physical devices are filtered
+        // to 1.4+; instance apiVersion is clamped if Khronos validation is older.
+        let enable_validation = vulkan_instance_validation_enabled();
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"goldy")
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(c"goldy")
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::make_api_version(0, 1, 4, 0));
+            .api_version(instance_api_version(&entry, enable_validation));
 
         // Surface extensions for windowed presentation
         let mut extensions: Vec<*const c_char> = vec![khr::surface::NAME.as_ptr()];
@@ -177,7 +213,6 @@ impl VulkanBackend {
         extensions.push(khr::android_surface::NAME.as_ptr());
 
         // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
-        let enable_validation = vulkan_instance_validation_enabled();
         let mut enabled_layers: Vec<*const c_char> = Vec::new();
         if enable_validation {
             tracing::info!("Vulkan validation layers ENABLED");
