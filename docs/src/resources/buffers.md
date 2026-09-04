@@ -206,6 +206,46 @@ It is implemented for common multi-byte primitives (`u16`, `u32`, `f32`, `f64`, 
 
 **Not implemented for `u8`/`i8`** — passing `&[u8]` would set stride to 1, which almost never matches the shader's expected struct stride. Use `RetainedPool::acquire_buffer` with an explicit element stride for raw bytes.
 
+## Rust-generated Slang structs
+
+`#[derive(goldy::GpuType)]` makes Rust the source of truth for a structured-buffer
+element. Pass `Type::GPU_TYPE` when creating the shader and reference the type
+without redeclaring it in authored Slang:
+
+```rust
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
+struct Particle {
+    position: [f32; 3],
+    #[gpu(padding)]
+    _position_pad: f32,
+    color: [f32; 4],
+}
+
+let shader = ShaderModule::from_slang_with_gpu_types(
+    &device,
+    source,
+    &[Particle::GPU_TYPE],
+)?;
+```
+
+```slang
+// Particle is injected by Goldy.
+[goldy_compute]
+void cs_main(BufRO<Particle> particles, ThreadId id) {
+    Particle particle = particles[id.x];
+}
+```
+
+Goldy emits reserved `__goldy_pad0`, `__goldy_pad1`, ... fields for Rust
+padding gaps and always validates the generated declaration using Slang
+reflection. Mark explicit Rust padding fields with `#[gpu(padding)]`; they are
+omitted from the logical schema and replaced by reserved generated fields.
+
+The portable initial field set is `f32`, `u32`, `i32`, 2–4 lane arrays of those
+scalars, and square `f32` matrices. Unsupported or sub-word layouts fail with an
+actionable error instead of silently changing the ABI.
+
 ## Matrix Convention
 
 Goldy uses **column-major** matrix layout in uniform/constant buffers across all backends. Rust math libraries (glam, nalgebra, ultraviolet) already store matrices column-major, so upload directly without transposing:

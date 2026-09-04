@@ -44,6 +44,7 @@
 
 pub mod compiler;
 pub mod ffi;
+mod gpu_type;
 pub mod loader;
 pub mod virtual_main;
 
@@ -53,6 +54,7 @@ pub use compiler::{
     StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;
+pub use gpu_type::{GpuField, GpuFieldType, GpuType};
 pub use virtual_main::{
     emit_wrapper_from_kernel_def, entry_def_from_kernel_def, transform_virtual_main_cpu, try_kernel_def_from_source,
 };

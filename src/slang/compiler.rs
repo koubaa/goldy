@@ -1608,6 +1608,28 @@ mod struct_layout_validate_tests {
     }
 
     #[test]
+    fn gpu_type_derive_generates_portable_field_metadata() {
+        #[derive(goldy_derive::GpuType)]
+        #[repr(C)]
+        struct GeneratedVertex {
+            pos: [f32; 3],
+            uv: [f32; 2],
+            light: u32,
+        }
+
+        let ty = GeneratedVertex::GPU_TYPE;
+        assert_eq!(ty.type_name, "GeneratedVertex");
+        assert_eq!(ty.rust_size, 24);
+        assert_eq!(ty.fields.len(), 3);
+        assert_eq!(ty.fields[0].offset, 0);
+        assert_eq!(ty.fields[0].ty, crate::GpuFieldType::F32x3);
+        assert_eq!(ty.fields[1].offset, 12);
+        assert_eq!(ty.fields[1].ty, crate::GpuFieldType::F32x2);
+        assert_eq!(ty.fields[2].offset, 20);
+        assert_eq!(ty.fields[2].ty, crate::GpuFieldType::U32);
+    }
+
+    #[test]
     fn layout_check_validates_against_matching_slang_layout() {
         #[derive(goldy_derive::LayoutCheckable)]
         #[repr(C)]

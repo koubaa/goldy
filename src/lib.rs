@@ -12,6 +12,8 @@
 //! let device = adapter.request_device(&Default::default()).unwrap();
 //! ```
 
+extern crate self as goldy;
+
 pub mod accel;
 pub(crate) mod backend;
 pub mod buffer;
@@ -97,6 +99,7 @@ pub use device::{
     RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
 };
 pub use goldy_derive::compute;
+pub use goldy_derive::GpuType;
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
 pub use kernel::gpu;
@@ -111,7 +114,9 @@ pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
-pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
+pub use slang::{
+    layout_validation_enabled, GpuField, GpuFieldType, GpuType, LayoutCheck, StructFieldLayout, StructLayout,
+};
 pub use task_graph::NodeAccess;
 pub use texture::TextureCopyFootprint;
 
