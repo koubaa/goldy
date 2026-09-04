@@ -1625,18 +1625,26 @@ pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
 /// upload resource is ready before command recording begins.
 pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferHandle, min_size: u64) -> Result<()> {
+    let needed = min_size.min(UPLOAD_CHUNK_SIZE).max(1);
     let device_handle = {
         let buffers_read = state.buffers.read().unwrap();
         let buffer = buffers_read
             .entries
             .get(&buffer_handle)
             .context("ensure_upload_buffer: invalid handle")?;
-        if buffer.upload_buffer.is_some() {
-            return Ok(());
+        // Reuse only if the existing staging resource can hold this write's chunk.
+        // Sizing from the first (often tiny) write and then copying a larger payload
+        // into it previously caused STATUS_ACCESS_VIOLATION on Map/copy.
+        if let Some(existing) = buffer.upload_buffer.as_ref() {
+            let width = unsafe { existing.GetDesc().Width };
+            if width >= needed {
+                return Ok(());
+            }
         }
         buffer.device_handle
     };
-    let chunk_size = min_size.min(UPLOAD_CHUNK_SIZE);
+    // Always allocate the full chunk cap so later larger writes can reuse safely.
+    let chunk_size = UPLOAD_CHUNK_SIZE;
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -1766,17 +1774,15 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
 
     // Storage buffer (DEFAULT heap): chunked upload via a capped-size staging buffer.
     let data_len = data.len() as u64;
-    let chunk_size = data_len.min(UPLOAD_CHUNK_SIZE);
+    let needed_chunk = data_len.min(UPLOAD_CHUNK_SIZE);
 
     let device_handle = buffer.device_handle;
     let main_resource = buffer.resource.clone();
-    let needs_upload_buffer = buffer.upload_buffer.is_none();
     drop(buffers_read);
 
-    // Create or reuse the upload buffer (capped at chunk_size)
-    if needs_upload_buffer {
-        ensure_upload_buffer(state, buffer_handle, chunk_size)?;
-    }
+    // Ensure staging exists and is large enough for this write (grows if a prior
+    // smaller write created an undersized upload buffer).
+    ensure_upload_buffer(state, buffer_handle, needed_chunk)?;
 
     let upload_buf = state
         .buffers
@@ -1789,7 +1795,8 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
         .as_ref()
         .unwrap()
         .clone();
-    let upload_buf_size = chunk_size;
+    // Chunk against the real staging resource width, not this write's byte length.
+    let upload_buf_size = unsafe { upload_buf.GetDesc().Width }.max(1).min(UPLOAD_CHUNK_SIZE);
 
     // Upload in chunks
     let mut written = 0u64;

@@ -111,7 +111,7 @@ fn prebuild_sizes(
 ) -> Result<D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO> {
     let mut inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
         Type: ty,
-        Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+        Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD,
         NumDescs: if ty == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL {
             instance_count
         } else {
@@ -156,13 +156,29 @@ pub(super) fn create(
             max_vertices,
             vertex_stride,
         } => {
-            let geom = dummy_triangle_geom(max_vertices, max_triangles, vertex_stride, true);
-            let sizes = prebuild_sizes(
+            // Scratch/result sizes can differ for indexed vs non-indexed builds —
+            // allocate the max so either path is safe.
+            let geom_indexed = dummy_triangle_geom(max_vertices, max_triangles, vertex_stride, true);
+            let geom_list = dummy_triangle_geom(max_vertices, max_triangles, vertex_stride, false);
+            let sizes_i = prebuild_sizes(
                 &ld.device,
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
-                Some(&geom),
+                Some(&geom_indexed),
                 0,
             )?;
+            let sizes_n = prebuild_sizes(
+                &ld.device,
+                D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
+                Some(&geom_list),
+                0,
+            )?;
+            let sizes = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
+                ResultDataMaxSizeInBytes: sizes_i.ResultDataMaxSizeInBytes.max(sizes_n.ResultDataMaxSizeInBytes),
+                ScratchDataSizeInBytes: sizes_i.ScratchDataSizeInBytes.max(sizes_n.ScratchDataSizeInBytes),
+                UpdateScratchDataSizeInBytes: sizes_i
+                    .UpdateScratchDataSizeInBytes
+                    .max(sizes_n.UpdateScratchDataSizeInBytes),
+            };
             (false, sizes, max_triangles, max_vertices, vertex_stride)
         }
         GpuAccelCreate::Tlas { max_instances } => {
@@ -176,6 +192,7 @@ pub(super) fn create(
         }
     };
 
+    // Enhanced barriers: create in COMMON; first build uses COMMON→AS_WRITE.
     let as_res = create_committed(
         &ld.device,
         default_heap(),
@@ -183,7 +200,7 @@ pub(super) fn create(
             sizes.ResultDataMaxSizeInBytes,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE,
         ),
-        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+        D3D12_RESOURCE_STATE_COMMON,
     )?;
     let scratch = create_committed(
         &ld.device,
@@ -215,6 +232,7 @@ pub(super) fn create(
             max_primitives,
             max_vertices,
             vertex_stride,
+            built: std::sync::atomic::AtomicBool::new(false),
         },
     );
     Ok(handle)
@@ -269,17 +287,6 @@ pub(super) fn record_build_list(
     let cl4: ID3D12GraphicsCommandList4 = cl.cast().context("BuildRaytracingAccelerationStructure needs CL4")?;
     let buffers = scope.buffers().read().unwrap();
     let accels = scope.accels().read().unwrap();
-    // Geometry / instance uploads and a prior BLAS write must be visible to
-    // `BUILD_RAYTRACING` (graph TRANSFER maps to COPY, which is not enough).
-    let pre = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_ALL,
-        SyncAfter: D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
-        AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
-        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-    };
-    unsafe {
-        barriers::barrier_globals(cl7, std::slice::from_ref(&pre));
-    }
     match build {
         AccelBuildCommand::BlasTriangles {
             dest,
@@ -319,6 +326,61 @@ pub(super) fn record_build_list(
                 "build_blas primitive count {primitive_count} exceeds create-time max_triangles {}",
                 dest_as.max_primitives
             );
+
+            // Per-resource barriers (global COMMON→typed is illegal per debug layer 1331).
+            // Rebuilds must use AS_READ→AS_WRITE: post-barrier leaves AS_READ, and
+            // claiming COMMON→AS_WRITE on a later build TDRs (RQ15 stress iter 3).
+            let rebuild = dest_as.built.load(std::sync::atomic::Ordering::Relaxed);
+            let as_access_before = if rebuild {
+                D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ
+            } else {
+                D3D12_BARRIER_ACCESS_COMMON
+            };
+            // Geometry stays in SRV after the first build's pre-barrier; rebuilds must
+            // not claim COMMON→SRV (enhanced barriers + RQ15 iter-2 TDR).
+            let geom_access_before = if rebuild {
+                D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+            } else {
+                D3D12_BARRIER_ACCESS_COMMON
+            };
+            let mut pre = vec![
+                barriers::buffer_barrier_full(
+                    &vb.resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    geom_access_before,
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                ),
+                barriers::buffer_barrier_full(
+                    &dest_as.scratch,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                ),
+                barriers::buffer_barrier_full(
+                    &dest_as.resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    as_access_before,
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                ),
+            ];
+            if let Some(ib) = index_buffer {
+                let idx = buffers.entries.get(ib).context("invalid index buffer")?;
+                pre.push(barriers::buffer_barrier_full(
+                    &idx.resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    geom_access_before,
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                ));
+            }
+            unsafe {
+                barriers::barrier_buffers(cl7, &pre);
+                barriers::drop_buffer_barriers(&mut pre);
+            }
+
             let mut geom = dummy_triangle_geom(*vertex_count, dest_as.max_primitives, *vertex_stride, false);
             geom.Anonymous.Triangles.VertexBuffer.StartAddress = vaddr;
             geom.Anonymous.Triangles.VertexBuffer.StrideInBytes = *vertex_stride as u64;
@@ -335,7 +397,7 @@ pub(super) fn record_build_list(
                 DestAccelerationStructureData: unsafe { dest_as.resource.GetGPUVirtualAddress() },
                 Inputs: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
                     Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
-                    Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+                    Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD,
                     NumDescs: 1,
                     DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
                     Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
@@ -348,6 +410,31 @@ pub(super) fn record_build_list(
             unsafe {
                 cl4.BuildRaytracingAccelerationStructure(&desc, None);
             }
+            let mut post = [
+                barriers::buffer_barrier_full(
+                    &dest_as.resource,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_SYNC(
+                        D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0
+                            | D3D12_BARRIER_SYNC_COMPUTE_SHADING.0
+                            | D3D12_BARRIER_SYNC_RAYTRACING.0,
+                    ),
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
+                ),
+                barriers::buffer_barrier_full(
+                    &dest_as.scratch,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                ),
+            ];
+            unsafe {
+                barriers::barrier_buffers(cl7, &post);
+                barriers::drop_buffer_barriers(&mut post);
+            }
+            dest_as.built.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         AccelBuildCommand::Tlas { dest, instances } => {
             let dest_as = accels.entries.get(dest).context("invalid TLAS")?;
@@ -384,11 +471,55 @@ pub(super) fn record_build_list(
                 inst_res.Unmap(0, None);
             }
             let inst_va = unsafe { inst_res.GetGPUVirtualAddress() };
+
+            let as_access_before = if dest_as.built.load(std::sync::atomic::Ordering::Relaxed) {
+                D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ
+            } else {
+                D3D12_BARRIER_ACCESS_COMMON
+            };
+            let mut pre = vec![
+                barriers::buffer_barrier_full(
+                    &inst_res,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                ),
+                barriers::buffer_barrier_full(
+                    &dest_as.scratch,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                ),
+                barriers::buffer_barrier_full(
+                    &dest_as.resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    as_access_before,
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                ),
+            ];
+            for inst in instances.iter() {
+                let blas = accels.entries.get(&inst.blas).context("invalid instance BLAS")?;
+                pre.push(barriers::buffer_barrier_full(
+                    &blas.resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
+                ));
+            }
+            unsafe {
+                barriers::barrier_buffers(cl7, &pre);
+                barriers::drop_buffer_barriers(&mut pre);
+            }
+
             let desc = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
                 DestAccelerationStructureData: unsafe { dest_as.resource.GetGPUVirtualAddress() },
                 Inputs: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
                     Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-                    Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+                    Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD,
                     NumDescs: instances.len() as u32,
                     DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
                     Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 { InstanceDescs: inst_va },
@@ -399,21 +530,33 @@ pub(super) fn record_build_list(
             unsafe {
                 cl4.BuildRaytracingAccelerationStructure(&desc, None);
             }
+            let mut post = [
+                barriers::buffer_barrier_full(
+                    &dest_as.resource,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_SYNC(
+                        D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0
+                            | D3D12_BARRIER_SYNC_COMPUTE_SHADING.0
+                            | D3D12_BARRIER_SYNC_RAYTRACING.0,
+                    ),
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+                    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
+                ),
+                barriers::buffer_barrier_full(
+                    &dest_as.scratch,
+                    D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                ),
+            ];
+            unsafe {
+                barriers::barrier_buffers(cl7, &post);
+                barriers::drop_buffer_barriers(&mut post);
+            }
+            dest_as.built.store(true, std::sync::atomic::Ordering::Relaxed);
             pending_deletions.push(super::types::PendingDeletion::StandaloneResource(inst_res));
         }
-    }
-    let barrier = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
-        SyncAfter: D3D12_BARRIER_SYNC(
-            D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0
-                | D3D12_BARRIER_SYNC_COMPUTE_SHADING.0
-                | D3D12_BARRIER_SYNC_RAYTRACING.0,
-        ),
-        AccessBefore: D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
-        AccessAfter: D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
-    };
-    unsafe {
-        barriers::barrier_globals(cl7, std::slice::from_ref(&barrier));
     }
     Ok(())
 }

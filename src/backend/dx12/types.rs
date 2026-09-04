@@ -1639,6 +1639,9 @@ pub(crate) struct AccelState {
     pub max_primitives: u32,
     pub max_vertices: u32,
     pub vertex_stride: u32,
+    /// After the first build, post-barriers leave the AS in AS_READ; rebuilds must
+    /// use AS_READ→AS_WRITE (not COMMON→AS_WRITE) or DX12 can TDR on later builds.
+    pub built: std::sync::atomic::AtomicBool,
 }
 
 /// Maximum number of frames that can be in-flight at once.
