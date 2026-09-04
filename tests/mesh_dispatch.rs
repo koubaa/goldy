@@ -14,7 +14,13 @@ mod imp {
         types::BackendType, Color, Device, DeviceDescriptor, Instance, MeshPipeline, MeshPipelineDesc,
         RequestAdapterOptions, RetainedPool, ShaderModule, TargetLoad, TextureFormat,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    static GPU: Mutex<()> = Mutex::new(());
+
+    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+        GPU.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn make_device() -> Device {
         Instance::new()
@@ -57,6 +63,7 @@ float4 fs_main(FsIn input) : SV_Target {
 
     #[test]
     fn mesh_fullscreen_triangle_is_red() {
+        let _gpu = gpu_lock();
         let device = make_device();
         if !device.capabilities().mesh_shaders {
             eprintln!("skip: DeviceCapabilities::mesh_shaders is false on this adapter");

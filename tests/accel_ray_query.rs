@@ -161,6 +161,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
                 }],
             )
             .expect("build_tlas");
+        drop(blas);
         scheme
             .node("trace", &pipeline)
             .with_parcel(&tlas, NodeAccess::Read)
