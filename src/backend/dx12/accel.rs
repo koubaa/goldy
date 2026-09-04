@@ -281,7 +281,7 @@ pub(super) fn record_build_list(
     cl: &ID3D12GraphicsCommandList,
     cl7: &ID3D12GraphicsCommandList7,
     build: &AccelBuildCommand,
-    geom_keep: &mut Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
+    geom_keep: &mut Vec<D3D12_RAYTRACING_GEOMETRY_DESC>,
     pending_deletions: &mut Vec<super::types::PendingDeletion>,
 ) -> Result<()> {
     let cl4: ID3D12GraphicsCommandList4 = cl.cast().context("BuildRaytracingAccelerationStructure needs CL4")?;
@@ -391,7 +391,7 @@ pub(super) fn record_build_list(
                 geom.Anonymous.Triangles.IndexCount = *index_count;
                 geom.Anonymous.Triangles.IndexBuffer = unsafe { idx.resource.GetGPUVirtualAddress() } + index_offset;
             }
-            geom_keep.push(Box::new(geom));
+            geom_keep.push(geom);
             let geom = geom_keep.last().expect("just pushed");
             let desc = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
                 DestAccelerationStructureData: unsafe { dest_as.resource.GetGPUVirtualAddress() },
@@ -401,7 +401,7 @@ pub(super) fn record_build_list(
                     NumDescs: 1,
                     DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
                     Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
-                        pGeometryDescs: geom.as_ref(),
+                        pGeometryDescs: geom,
                     },
                 },
                 SourceAccelerationStructureData: 0,
@@ -448,13 +448,14 @@ pub(super) fn record_build_list(
             let mut packed = Vec::with_capacity(instances.len());
             for inst in instances.iter() {
                 let blas = accels.entries.get(&inst.blas).context("invalid instance BLAS")?;
-                let mut d = D3D12_RAYTRACING_INSTANCE_DESC::default();
-                d.Transform = inst.transform;
-                d._bitfield1 = (inst.custom_index & 0x00ff_ffff) | (u32::from(inst.mask) << 24);
-                // High 8 bits are instance flags; disable facing cull so a +Z ray
-                // from -Z still hits a CCW triangle in the XY plane.
-                d._bitfield2 = (D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE.0 as u32) << 24;
-                d.AccelerationStructure = blas.gpu_va;
+                let d = D3D12_RAYTRACING_INSTANCE_DESC {
+                    Transform: inst.transform,
+                    _bitfield1: (inst.custom_index & 0x00ff_ffff) | (u32::from(inst.mask) << 24),
+                    // High 8 bits are instance flags; disable facing cull so a +Z ray
+                    // from -Z still hits a CCW triangle in the XY plane.
+                    _bitfield2: (D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE.0 as u32) << 24,
+                    AccelerationStructure: blas.gpu_va,
+                };
                 packed.push(d);
             }
             let byte_len = (packed.len() * std::mem::size_of::<D3D12_RAYTRACING_INSTANCE_DESC>()) as u64;

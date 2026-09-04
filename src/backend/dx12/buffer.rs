@@ -1625,7 +1625,7 @@ pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
 /// upload resource is ready before command recording begins.
 pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferHandle, min_size: u64) -> Result<()> {
-    let needed = min_size.min(UPLOAD_CHUNK_SIZE).max(1);
+    let needed = min_size.clamp(1, UPLOAD_CHUNK_SIZE);
     let device_handle = {
         let buffers_read = state.buffers.read().unwrap();
         let buffer = buffers_read
@@ -1796,7 +1796,7 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
         .unwrap()
         .clone();
     // Chunk against the real staging resource width, not this write's byte length.
-    let upload_buf_size = unsafe { upload_buf.GetDesc().Width }.max(1).min(UPLOAD_CHUNK_SIZE);
+    let upload_buf_size = unsafe { upload_buf.GetDesc().Width }.clamp(1, UPLOAD_CHUNK_SIZE);
 
     // Upload in chunks
     let mut written = 0u64;

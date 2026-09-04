@@ -722,6 +722,7 @@ pub(crate) enum GpuCommand {
 }
 
 /// Create-time sizing for [`GpuBackend::create_acceleration_structure`].
+#[allow(dead_code)] // fields matched by GPU backends behind feature flags
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GpuAccelCreate {
     BlasTriangles {
@@ -763,6 +764,7 @@ pub(crate) enum AccelBuildCommand {
 }
 
 /// Shader modules for a triangle-hit RT pipeline (one raygen, one miss, one closest-hit).
+#[allow(dead_code)] // fields read by GPU backends behind feature flags
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GpuRayTracingPipelineDesc {
     pub raygen: ShaderHandle,
@@ -771,6 +773,7 @@ pub(crate) struct GpuRayTracingPipelineDesc {
 }
 
 /// Mesh (+ optional amplification) graphics pipeline.
+#[allow(dead_code)] // constructed by mesh pipeline backends behind feature flags
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GpuMeshPipelineDesc {
     pub mesh: ShaderHandle,

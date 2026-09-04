@@ -987,7 +987,7 @@ impl Scheme {
             }
             (Some(h), off, count)
         } else {
-            if vertex_count % 3 != 0 {
+            if !vertex_count.is_multiple_of(3) {
                 return Err(GoldyError::Validation(
                     "build_blas without indices requires vertex_count to be a multiple of 3. \
                      hint: pass an index parcel, or provide 3 vertices per triangle."

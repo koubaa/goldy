@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 fn align_up(value: u64, align: u64) -> u64 {
     let a = align.max(1);
-    (value + a - 1) / a * a
+    value.div_ceil(a) * a
 }
 
 fn create_sbt_buffer(
@@ -49,6 +49,7 @@ fn create_sbt_buffer(
     Ok((buffer, memory, addr))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, SharedLogicalDevice>,

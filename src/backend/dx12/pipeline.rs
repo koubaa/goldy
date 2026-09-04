@@ -584,6 +584,7 @@ fn mesh_pso_tail(
 }
 
 /// Create a mesh (+ optional amplification) graphics pipeline via a PSO stream.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_mesh(
     state: &mut Dx12State,
     device_handle: DeviceHandle,

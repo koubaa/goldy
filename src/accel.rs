@@ -1,4 +1,4 @@
-//! Ray-tracing acceleration structures (BLAS / TLAS) for inline [`RayQuery`].
+//! Ray-tracing acceleration structures (BLAS / TLAS) for inline `RayQuery`.
 //!
 //! Create with [`AccelerationStructure::blas_triangles`] or [`AccelerationStructure::tlas`],
 //! record [`crate::Scheme::build_blas`] / [`crate::Scheme::build_tlas`], then bind with

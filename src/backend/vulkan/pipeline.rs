@@ -371,6 +371,7 @@ pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) 
 }
 
 /// Create a mesh (+ optional task/amplification) graphics pipeline.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_mesh(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     pipelines: &SharedPipelineTable,

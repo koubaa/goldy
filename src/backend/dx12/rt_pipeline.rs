@@ -14,7 +14,7 @@ fn utf16(s: &str) -> Vec<u16> {
 
 fn align_up(v: u64, a: u64) -> u64 {
     let a = a.max(1);
-    (v + a - 1) / a * a
+    v.div_ceil(a) * a
 }
 
 pub(super) fn create(

@@ -1016,7 +1016,7 @@ struct CmdCtx<'a> {
     /// Frame table row chosen at prologue record time (stable under concurrent submits).
     frame_table_row: Option<u32>,
     /// CPU `pGeometryDescs` must remain valid until `Close()` (DXR spec).
-    rt_geom_descs: Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
+    rt_geom_descs: Vec<D3D12_RAYTRACING_GEOMETRY_DESC>,
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
