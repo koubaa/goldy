@@ -9,14 +9,18 @@ use mtl::{DeviceRef, MTLResourceOptions};
 use objc::{msg_send, sel, sel_impl};
 
 fn write_bindless(ld: &super::types::LogicalDevice, accel: &mtl::AccelerationStructure, local: u32) {
-    let offset = (ResourceRegistry::accel_global_index(local) as u64) * ld.accel_encoder.encoded_length();
-    if offset + ld.accel_encoder.encoded_length() > super::types::ARGUMENT_BUFFER_SIZE {
+    let accel_encoder = ld
+        .accel_encoder
+        .as_ref()
+        .expect("accel encoder missing on device without ray tracing");
+    let offset = (ResourceRegistry::accel_global_index(local) as u64) * accel_encoder.encoded_length();
+    if offset + accel_encoder.encoded_length() > super::types::ARGUMENT_BUFFER_SIZE {
         return;
     }
-    ld.accel_encoder.set_argument_buffer(&ld.argument_buffer, offset);
+    accel_encoder.set_argument_buffer(&ld.argument_buffer, offset);
     unsafe {
         let _: () = msg_send![
-            ld.accel_encoder.as_ref(),
+            accel_encoder.as_ref(),
             setAccelerationStructure: accel.as_ref()
             atIndex: 0u64
         ];

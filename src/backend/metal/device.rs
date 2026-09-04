@@ -217,7 +217,7 @@ pub(super) fn create_argument_encoders(
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
-    mtl::ArgumentEncoder,
+    Option<mtl::ArgumentEncoder>,
 ) {
     // Encoder for raw buffer pointers (RWStructuredBuffer / StructuredBuffer).
     let buffer_arg_desc = mtl::ArgumentDescriptor::new();
@@ -266,15 +266,21 @@ pub(super) fn create_argument_encoders(
     let sampler_stride = sampler_encoder.encoded_length();
     tracing::info!("Created sampler ArgumentEncoder (encoded_length={})", sampler_stride);
 
-    let accel_arg_desc = mtl::ArgumentDescriptor::new();
-    accel_arg_desc.set_index(0);
-    accel_arg_desc.set_data_type(mtl::MTLDataType::InstanceAccelerationStructure);
-    accel_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
-    let accel_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[accel_arg_desc]));
-    tracing::info!(
-        "Created accel ArgumentEncoder (encoded_length={})",
-        accel_encoder.encoded_length()
-    );
+    let accel_encoder = if device.supports_raytracing() {
+        let accel_arg_desc = mtl::ArgumentDescriptor::new();
+        accel_arg_desc.set_index(0);
+        accel_arg_desc.set_data_type(mtl::MTLDataType::InstanceAccelerationStructure);
+        accel_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
+        let accel_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[accel_arg_desc]));
+        tracing::info!(
+            "Created accel ArgumentEncoder (encoded_length={})",
+            accel_encoder.encoded_length()
+        );
+        Some(accel_encoder)
+    } else {
+        tracing::info!("Skipping accel ArgumentEncoder (device has no ray tracing)");
+        None
+    };
 
     // Every resource category in the argument buffer is laid out as
     // MAX_RESOURCES_PER_CATEGORY × 8 bytes.  ARGUMENT_BUFFER_SIZE is derived

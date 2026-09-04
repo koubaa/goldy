@@ -29,6 +29,15 @@ mod imp {
             .expect("device")
     }
 
+    fn skip_on_software_vulkan(device: &Device) -> bool {
+        let name = device.adapter().name().to_ascii_lowercase();
+        if name.contains("lavapipe") || name.contains("llvmpipe") {
+            eprintln!("skip: TraceRays / SBT is unstable on Mesa lavapipe");
+            return true;
+        }
+        false
+    }
+
     const TRACE_SLANG: &str = r#"
 import goldy_exp;
 struct HitPayload { uint hit; }
@@ -63,6 +72,9 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
         }
         if matches!(device.backend_type(), BackendType::WebGpu | BackendType::Metal) {
             eprintln!("skip: ray-tracing pipelines / SBT recording are Vulkan and DX12 only");
+            return;
+        }
+        if skip_on_software_vulkan(&device) {
             return;
         }
         let ctx = submission_context(&device);
@@ -166,6 +178,9 @@ void rchit_main(inout HitPayload p) {
         }
         if matches!(device.backend_type(), BackendType::WebGpu | BackendType::Metal) {
             eprintln!("skip: ray-tracing pipelines / SBT recording are Vulkan and DX12 only");
+            return;
+        }
+        if skip_on_software_vulkan(&device) {
             return;
         }
         let ctx = submission_context(&device);

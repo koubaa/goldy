@@ -276,12 +276,13 @@ pub(super) fn bindless_index(state: &Dx12State, handle: AccelerationStructureHan
 /// Record an AS build onto an already-open compute/direct list.
 ///
 /// `geom_keep` holds CPU `pGeometryDescs` until the command list is `Close()`d.
+#[allow(clippy::vec_box)] // heap-stable geometry desc pointers until command list Close()
 pub(super) fn record_build_list(
     scope: &Dx12SubmitScope<'_>,
     cl: &ID3D12GraphicsCommandList,
     cl7: &ID3D12GraphicsCommandList7,
     build: &AccelBuildCommand,
-    geom_keep: &mut Vec<D3D12_RAYTRACING_GEOMETRY_DESC>,
+    geom_keep: &mut Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
     pending_deletions: &mut Vec<super::types::PendingDeletion>,
 ) -> Result<()> {
     let cl4: ID3D12GraphicsCommandList4 = cl.cast().context("BuildRaytracingAccelerationStructure needs CL4")?;
@@ -381,7 +382,8 @@ pub(super) fn record_build_list(
                 barriers::drop_buffer_barriers(&mut pre);
             }
 
-            let mut geom = dummy_triangle_geom(*vertex_count, dest_as.max_primitives, *vertex_stride, false);
+            let indexed = index_buffer.is_some();
+            let mut geom = dummy_triangle_geom(dest_as.max_vertices, dest_as.max_primitives, *vertex_stride, indexed);
             geom.Anonymous.Triangles.VertexBuffer.StartAddress = vaddr;
             geom.Anonymous.Triangles.VertexBuffer.StrideInBytes = *vertex_stride as u64;
             geom.Anonymous.Triangles.VertexCount = *vertex_count;
@@ -391,7 +393,7 @@ pub(super) fn record_build_list(
                 geom.Anonymous.Triangles.IndexCount = *index_count;
                 geom.Anonymous.Triangles.IndexBuffer = unsafe { idx.resource.GetGPUVirtualAddress() } + index_offset;
             }
-            geom_keep.push(geom);
+            geom_keep.push(Box::new(geom));
             let geom = geom_keep.last().expect("just pushed");
             let desc = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
                 DestAccelerationStructureData: unsafe { dest_as.resource.GetGPUVirtualAddress() },
@@ -401,7 +403,7 @@ pub(super) fn record_build_list(
                     NumDescs: 1,
                     DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
                     Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
-                        pGeometryDescs: geom,
+                        pGeometryDescs: geom.as_ref(),
                     },
                 },
                 SourceAccelerationStructureData: 0,

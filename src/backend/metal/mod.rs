@@ -1237,11 +1237,14 @@ mod tests {
             smp_enc.encoded_length(),
             "storage-image and sampler encoder strides differ"
         );
-        assert_eq!(
-            accel_enc.encoded_length(),
-            smp_enc.encoded_length(),
-            "accel and sampler encoder strides differ"
-        );
+        if device.supports_raytracing() {
+            let accel_enc = accel_enc.expect("ray-tracing device must have accel encoder");
+            assert_eq!(
+                accel_enc.encoded_length(),
+                smp_enc.encoded_length(),
+                "accel and sampler encoder strides differ"
+            );
+        }
 
         // The stride must evenly divide ARGUMENT_BUFFER_SIZE so that all 6
         // resource categories fit without overflow.

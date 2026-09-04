@@ -715,8 +715,8 @@ pub(crate) struct LogicalDevice {
     /// Its `encoded_length()` is the authoritative per-slot stride for the sampler
     /// category; never hardcode 8 when encoding sampler offsets.
     pub sampler_encoder: ArgumentEncoder,
-    /// Encoder for writing instance/primitive acceleration structures.
-    pub accel_encoder: ArgumentEncoder,
+    /// Encoder for writing instance/primitive acceleration structures (when RT is available).
+    pub accel_encoder: Option<ArgumentEncoder>,
     /// Frame-table selector + device table (arg slots 0–1) and N-frame ring guard.
     pub frame_table: Mutex<super::frame_table::MetalFrameTable>,
     /// Registry tracking resource indices in the argument buffer

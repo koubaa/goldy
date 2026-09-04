@@ -156,12 +156,12 @@ pub(super) fn create(
     };
     let miss = vk::StridedDeviceAddressRegionKHR {
         device_address: sbt_addr + region,
-        stride: rec,
+        stride: region,
         size: region,
     };
     let hit = vk::StridedDeviceAddressRegionKHR {
         device_address: sbt_addr + region * 2,
-        stride: rec,
+        stride: region,
         size: region,
     };
     let callable = vk::StridedDeviceAddressRegionKHR::default();
