@@ -157,6 +157,42 @@ impl ShaderModule {
     /// Generated types are always reflection-validated. Authored `layout_checks` retain their
     /// existing opt-in validation behavior.
     #[allow(clippy::too_many_arguments)]
+    /// Compile `source` and always validate `gpu_types` without injecting their declarations.
+    ///
+    /// Use this when the types already exist in `source` or an imported shader library
+    /// (for example after [`crate::ShaderLibrary::from_source_with_gpu_types`]).
+    pub fn validate_existing_gpu_types(device: &Device, source: &str, gpu_types: &[GpuType<'_>]) -> Result<()> {
+        let mut generated_checks = Vec::with_capacity(gpu_types.len());
+        let mut names = std::collections::HashSet::with_capacity(gpu_types.len());
+        for gpu_type in gpu_types {
+            if !names.insert(gpu_type.type_name) {
+                bail!("duplicate generated GpuType `{}`", gpu_type.type_name);
+            }
+            generated_checks.push(gpu_type.generate()?.check);
+        }
+        if generated_checks.is_empty() {
+            return Ok(());
+        }
+
+        let library_paths = device
+            .get_shader_search_paths()
+            .context("Failed to prepare shader library paths")?;
+        let all_paths: Vec<String> = library_paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
+
+        let mut backend = device.inner.backend.lock().unwrap();
+        let handle = backend.create_shader_with_checks(
+            device.inner.handle,
+            source,
+            &path_refs,
+            &[],
+            Default::default(),
+            generated_checks,
+        )?;
+        backend.destroy_shader(handle);
+        Ok(())
+    }
+
     pub fn from_slang_with_gpu_types_and_options(
         device: &Device,
         source: &str,

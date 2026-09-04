@@ -80,6 +80,11 @@ pub(crate) struct GeneratedGpuType {
 }
 
 impl GpuType<'_> {
+    /// Slang `struct` declaration for this type, including synthetic padding fields.
+    pub fn to_slang_source(&self) -> Result<String> {
+        Ok(self.generate()?.source)
+    }
+
     /// Emit a Slang struct whose explicit padding reproduces the Rust byte layout.
     pub(crate) fn generate(&self) -> Result<GeneratedGpuType> {
         if self.type_name.is_empty() {
