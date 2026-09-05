@@ -400,6 +400,8 @@ pub struct SlangCompiler {
     library: Arc<SlangLibrary>,
     global_session: *mut IGlobalSession,
     shader_disk_cache: std::sync::Mutex<crate::shader_cache::ShaderBytecodeDiskCache>,
+    /// Compile keys already run through the opt-in bounds analysis (one report per shader).
+    bounds_analyzed: std::sync::Mutex<std::collections::HashSet<u64>>,
 }
 
 // SlangCompiler is Send + Sync because each compilation creates its own request
@@ -440,6 +442,7 @@ impl SlangCompiler {
             library,
             global_session,
             shader_disk_cache: std::sync::Mutex::new(crate::shader_cache::ShaderBytecodeDiskCache::new_load_or_empty()),
+            bounds_analyzed: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -525,6 +528,35 @@ impl SlangCompiler {
         optimization_level: OptimizationLevel,
         f: impl FnOnce(&Self, *mut SlangCompileRequest, i32) -> Result<R>,
     ) -> Result<R> {
+        self.with_compiled_request_opts(
+            source,
+            target,
+            entry_points,
+            search_paths,
+            defines,
+            optimization_level,
+            false,
+            f,
+        )
+    }
+
+    /// [`Self::with_compiled_request`] with an explicit debug-info switch.
+    ///
+    /// `debug_info` requests `SLANG_DEBUG_INFO_LEVEL_STANDARD`, which for SPIR-V embeds
+    /// `NonSemantic.Shader.DebugInfo.100` line tables. Production compiles leave it off;
+    /// the bounds analysis turns it on so diagnostics can cite Slang source locations.
+    #[allow(clippy::too_many_arguments)]
+    fn with_compiled_request_opts<R>(
+        &self,
+        source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: OptimizationLevel,
+        debug_info: bool,
+        f: impl FnOnce(&Self, *mut SlangCompileRequest, i32) -> Result<R>,
+    ) -> Result<R> {
         let _guard = SLANG_PROCESS_LOCK.lock().unwrap();
 
         // Create session with session-level preprocessor macros.
@@ -550,6 +582,20 @@ impl SlangCompiler {
         if !macro_descs.is_empty() {
             session_desc.preprocessor_macros = macro_descs.as_ptr();
             session_desc.preprocessor_macro_count = macro_descs.len() as i64;
+        }
+        // Debug info has to be a *session* option: request-level `spSetDebugInfoLevel` is not
+        // honored for requests created from `ISession::createCompileRequest`.
+        let option_entries: Vec<CompilerOptionEntry> = if debug_info {
+            vec![CompilerOptionEntry::int(
+                COMPILER_OPTION_DEBUG_INFORMATION,
+                SLANG_DEBUG_INFO_LEVEL_STANDARD,
+            )]
+        } else {
+            Vec::new()
+        };
+        if !option_entries.is_empty() {
+            session_desc.compiler_option_entries = option_entries.as_ptr().cast();
+            session_desc.compiler_option_entry_count = option_entries.len() as u32;
         }
 
         tracing::debug!(
@@ -858,7 +904,124 @@ impl SlangCompiler {
             }
         }
 
+        if target == ShaderTarget::Spirv && crate::validation_env::bounds_validation_enabled() {
+            self.report_bounds_analysis(
+                effective_source,
+                entry_points,
+                search_paths,
+                defines,
+                optimization_level,
+            );
+        }
+
         Ok(out)
+    }
+
+    /// Compile `source` to SPIR-V with standard debug info and run the static bounds analysis.
+    ///
+    /// This is a separate Slang request from the production compile so the bytecode handed
+    /// to the driver is unchanged; the debug-info build only feeds the analysis. Returns the
+    /// report, or the compile/analysis error.
+    pub fn analyze_spirv_bounds(
+        &self,
+        source: &str,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: OptimizationLevel,
+    ) -> Result<super::bounds_analysis::BoundsReport> {
+        let mut all_defines = Self::bindless_defines_for_target(ShaderTarget::Spirv);
+        for d in defines {
+            if !all_defines.contains(d) {
+                all_defines.push(*d);
+            }
+        }
+        let effective = effective_slang_source_for_compile(source);
+        let spirv = self.with_compiled_request_opts(
+            effective.as_ref(),
+            ShaderTarget::Spirv,
+            entry_points,
+            search_paths,
+            &all_defines,
+            optimization_level,
+            true,
+            |slf, request, target_index| {
+                let ep_count = entry_points.len().max(1);
+                let mut blobs = Vec::with_capacity(ep_count);
+                for i in 0..ep_count {
+                    blobs.push(entry_point_code_blob(&slf.library, request, i as i32, target_index)?);
+                }
+                Ok(blobs)
+            },
+        )?;
+        let mut report = super::bounds_analysis::BoundsReport::default();
+        for (i, blob) in spirv.iter().enumerate() {
+            if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+                let dir = std::path::Path::new(&dump_dir);
+                let _ = std::fs::create_dir_all(dir);
+                let name = entry_points.get(i).map(|(n, _)| *n).unwrap_or("entry");
+                let path = dir.join(format!("{name}_bounds_debug.spv"));
+                if std::fs::write(&path, blob).is_ok() {
+                    tracing::info!("Dumped debug-info SPIR-V for bounds analysis to {}", path.display());
+                }
+            }
+            let r = super::bounds_analysis::analyze_spirv_bytes(blob)?;
+            report.checked_accesses += r.checked_accesses;
+            report.proven_safe += r.proven_safe;
+            report.diagnostics.extend(r.diagnostics);
+        }
+        Ok(report)
+    }
+
+    /// Opt-in (`GOLDY_VALIDATION=bounds`) hook: analyze once per distinct compile and log
+    /// every unproven dynamic index as a warning. Never fails the compile.
+    fn report_bounds_analysis(
+        &self,
+        effective_source: &str,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        optimization_level: OptimizationLevel,
+    ) {
+        let key = crate::shader_cache::compile_cache_key(
+            effective_source,
+            ShaderTarget::Spirv,
+            entry_points,
+            search_paths,
+            defines,
+            &[],
+            optimization_level,
+        );
+        {
+            let mut seen = self.bounds_analyzed.lock().unwrap_or_else(|p| p.into_inner());
+            if !seen.insert(key) {
+                return;
+            }
+        }
+        let t0 = std::time::Instant::now();
+        // `analyze_spirv_bounds` re-applies the virtual-main rewrite; on already-effective
+        // source that is a no-op, so pass it straight through.
+        match self.analyze_spirv_bounds(
+            effective_source,
+            entry_points,
+            search_paths,
+            defines,
+            optimization_level,
+        ) {
+            Ok(report) => {
+                crate::shader_timing::record("slang.bounds_analysis", "", t0.elapsed());
+                tracing::debug!(
+                    checked = report.checked_accesses,
+                    proven_safe = report.proven_safe,
+                    unproven = report.diagnostics.len(),
+                    "shader bounds analysis"
+                );
+                for d in &report.diagnostics {
+                    tracing::warn!("shader bounds: {d}");
+                }
+            }
+            Err(e) => tracing::debug!(?e, "shader bounds analysis skipped"),
+        }
     }
 
     fn validate_owned_layout_checks(

@@ -42,6 +42,7 @@
 //! println!("Compiled {} bytes of SPIR-V", out.shader.data.len());
 //! ```
 
+pub mod bounds_analysis;
 pub mod compiler;
 pub mod ffi;
 mod gpu_type;
@@ -49,6 +50,7 @@ pub mod graphics_link;
 pub mod loader;
 pub mod virtual_main;
 
+pub use bounds_analysis::{BoundsAnalysisError, BoundsDiagnostic, BoundsReport, SourceLocation};
 pub use compiler::{
     layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout, LayoutCheck,
     OwnedLayoutCheck, ParameterBlockLayout, ResourceKind, ShaderReflection, ShaderTarget, SlangCompiler,

@@ -18,7 +18,9 @@
 //!     plus graph-level lifetime checks (Accel built in this scheme before TraceRay /
 //!     RayQuery). Cycle detection, mesh/draw mix-ups, and BLAS/TLAS misuse always run.
 //!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
-//!   - `all` — layout, GPU API, timeline, scheme, and host_access
+//!   - `bounds` / `shader_bounds` — static bounds analysis of dynamic array indices in
+//!     Slang-generated SPIR-V (warnings only; see `docs/src/design/shader-bounds-analysis.md`)
+//!   - `all` — layout, GPU API, timeline, scheme, host_access, and bounds
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
@@ -36,6 +38,7 @@ struct ParsedValidation {
     timeline: bool,
     scheme: bool,
     host_access: bool,
+    bounds: bool,
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -76,12 +79,14 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                     out.timeline = true;
                     out.scheme = true;
                     out.host_access = true;
+                    out.bounds = true;
                 }
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
                 "timeline" => out.timeline = true,
                 "scheme" | "readback" | "graph" => out.scheme = true,
                 "host_access" | "host-access" => out.host_access = true,
+                "bounds" | "shader_bounds" | "shader-bounds" => out.bounds = true,
                 _ => {}
             }
         }
@@ -138,6 +143,13 @@ pub(crate) fn scheme_validation_enabled() -> bool {
 #[must_use]
 pub fn validation_fatal_enabled() -> bool {
     env_truthy("GOLDY_VALIDATION_FATAL")
+}
+
+/// Static bounds analysis of dynamic array indices in Slang-generated SPIR-V
+/// (`GOLDY_VALIDATION=bounds`). Warnings only; never fails a compile.
+#[must_use]
+pub fn bounds_validation_enabled() -> bool {
+    from_goldy_validation_var().bounds
 }
 
 /// Page-protect CPU-visible GPU copies so stray host pointers fault.
@@ -261,6 +273,12 @@ mod tests {
         assert!(p.gpu_api);
         assert!(p.timeline);
         assert!(p.scheme);
+        assert!(p.bounds);
+
+        let p = parse_validation_list("bounds");
+        assert!(p.bounds);
+        assert!(!p.layout);
+        assert!(!p.gpu_api);
 
         let p = parse_validation_list("api,fatal");
         assert!(p.gpu_api);

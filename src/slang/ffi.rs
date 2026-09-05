@@ -61,6 +61,46 @@ impl Default for TargetDesc {
     }
 }
 
+/// `slang::CompilerOptionValue` — one option value for [`CompilerOptionEntry`].
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct CompilerOptionValue {
+    /// `CompilerOptionValueKind`: 0 = Int, 1 = String.
+    pub kind: i32,
+    pub int_value0: i32,
+    pub int_value1: i32,
+    pub string_value0: *const c_char,
+    pub string_value1: *const c_char,
+}
+
+/// `slang::CompilerOptionEntry` — session/target-level compiler option
+/// (`SessionDesc::compilerOptionEntries`).
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct CompilerOptionEntry {
+    /// `CompilerOptionName` discriminant.
+    pub name: i32,
+    pub value: CompilerOptionValue,
+}
+
+impl CompilerOptionEntry {
+    pub fn int(name: i32, value: i32) -> Self {
+        Self {
+            name,
+            value: CompilerOptionValue {
+                kind: 0,
+                int_value0: value,
+                int_value1: 0,
+                string_value0: std::ptr::null(),
+                string_value1: std::ptr::null(),
+            },
+        }
+    }
+}
+
+/// `CompilerOptionName::DebugInformation` (intValue0: `SlangDebugInfoLevel`).
+pub const COMPILER_OPTION_DEBUG_INFORMATION: i32 = 44;
+
 /// Slang matrix layout modes (matches SlangMatrixLayoutMode enum in slang.h).
 /// Controls how `float4x4` in constant buffers is interpreted in memory.
 pub const SLANG_MATRIX_LAYOUT_MODE_UNKNOWN: i32 = 0;
@@ -404,6 +444,12 @@ pub const SLANG_OPTIMIZATION_LEVEL_NONE: c_int = 0;
 pub const SLANG_OPTIMIZATION_LEVEL_DEFAULT: c_int = 1;
 pub const SLANG_OPTIMIZATION_LEVEL_HIGH: c_int = 2;
 pub const SLANG_OPTIMIZATION_LEVEL_MAXIMAL: c_int = 3;
+
+/// Slang debug info levels (matches SlangDebugInfoLevel in slang.h).
+pub const SLANG_DEBUG_INFO_LEVEL_NONE: c_int = 0;
+pub const SLANG_DEBUG_INFO_LEVEL_MINIMAL: c_int = 1;
+pub const SLANG_DEBUG_INFO_LEVEL_STANDARD: c_int = 2;
+pub const SLANG_DEBUG_INFO_LEVEL_MAXIMAL: c_int = 3;
 
 /// Function pointer types for dynamic loading
 pub type FnSpCreateSession = unsafe extern "C" fn(deprecated: *const c_char) -> *mut SlangSession;
