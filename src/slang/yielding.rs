@@ -1087,6 +1087,8 @@ fn keep_program_buffers(c: &ContinuationDecl) -> String {
 
 /// Never-taken stores so WebGPU's WGSL auto-layout cannot drop a host-bound slot.
 /// A load into an unused local is not enough: Naga deletes it, then the binding.
+/// The store is `buf[1] = buf[0]` (not a redundant `buf[0] = buf[0]`) so store
+/// elimination cannot drop it either; the sentinel branch never runs.
 fn touch_program_buffers<'a>(
     params: impl IntoIterator<Item = &'a ProgramParam>,
     sentinel: &str,
@@ -1096,13 +1098,13 @@ fn touch_program_buffers<'a>(
     let mut s = String::new();
     for p in params.into_iter().filter(|p| !p.is_scalar) {
         let stmt = if p.ty.starts_with("Scattered<") {
-            format!("if ({sentinel} == 0xFFFFFFFFu) {{ {n}[0] = {n}[0]; }}", n = p.name)
+            format!("if ({sentinel} == 0xFFFFFFFFu) {{ {n}[1] = {n}[0]; }}", n = p.name)
         } else if p.ty.starts_with("BufRO<") {
             let Some(sink) = ro_sink else {
                 continue;
             };
             format!(
-                "if ({sentinel} == 0xFFFFFFFFu && goldy_buf_len({n}) == 0xFFFFFFFFu) {{ {sink}[0] = {sink}[0]; }}",
+                "if ({sentinel} == 0xFFFFFFFFu && goldy_buf_len({n}) == 0xFFFFFFFFu) {{ {sink}[1] = {sink}[0]; }}",
                 n = p.name
             )
         } else {
@@ -1200,7 +1202,7 @@ void cs_resume(Scattered<uint> data, Resolved<uint> r, St s, ThreadId tid) {
         assert!(!out.contains("$yield"));
         assert!(!out.contains("[goldy_petition"));
         assert!(!out.contains("[goldy_resume"));
-        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { data[0] = data[0]; }"));
+        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { data[1] = data[0]; }"));
         assert!(!out.contains("__goldy_keep"));
         assert!(out.contains(
             "void cs_main(Scattered<uint> data, uint scale, ThreadId tid, Scattered<Fetch> __gy_pay_cs_resume, \
@@ -1232,8 +1234,8 @@ struct S { uint x; };
 [goldy_resume] void got(Scattered<uint> out, Resolved<uint> r, S s) { out[s.x] = 1u; }
 "#;
         let out = lower(src, None).unwrap();
-        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { out[0] = out[0]; }"));
-        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { fout[0] = fout[0]; }"));
+        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { out[1] = out[0]; }"));
+        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { fout[1] = fout[0]; }"));
     }
 
     #[test]
@@ -1242,7 +1244,7 @@ struct S { uint x; };
         assert_eq!(out.matches("[goldy_compute]").count(), 1);
         assert!(out.contains("void __goldy_prologue_cs_main("));
         assert!(out.contains("[numthreads(32, 1, 1)]\nvoid cs_main(Scattered<uint> data, Scattered<St> __gy_st, Scattered<uint2> __gy_res, Scattered<uint> __gy_arena, ThreadId __gy_tid, uint __gy_count) {"));
-        assert!(out.contains("if (__gy_count == 0xFFFFFFFFu) { data[0] = data[0]; }"));
+        assert!(out.contains("if (__gy_count == 0xFFFFFFFFu) { data[1] = data[0]; }"));
         assert!(out.contains("cs_resume(data, __gy_rv, __gy_s, __gy_tid);"));
         assert!(lower(SRC, Some("nope")).is_err());
     }
