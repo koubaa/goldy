@@ -458,6 +458,19 @@ impl GpuBackend for VulkanBackend {
         BackendType::Vulkan
     }
 
+    fn compute_shader_target(&self) -> Option<crate::slang::ShaderTarget> {
+        Some(crate::slang::ShaderTarget::Spirv)
+    }
+
+    fn seed_compute_stage(
+        &mut self,
+        shader: ShaderHandle,
+        bytecode: &[u8],
+        reflection: crate::slang::ShaderReflection,
+    ) -> Result<()> {
+        shader::seed_compute_stage(&self.state.devices, &self.state.shaders, shader, bytecode, reflection)
+    }
+
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
         device::enumerate(&self.state.physical_devices)
     }

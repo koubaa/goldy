@@ -181,3 +181,42 @@ pub(super) fn ensure_stage_compiled(
 
     Ok(bytecode)
 }
+
+/// Install DXIL compiled outside the backend mutex.
+pub(super) fn seed_compute_stage(
+    state: &mut Dx12State,
+    shader_handle: ShaderHandle,
+    bytecode: &[u8],
+    new_reflection: crate::slang::ShaderReflection,
+) -> Result<()> {
+    let mut shaders_write = state.shaders.write().unwrap();
+    let shader = shaders_write
+        .entries
+        .get_mut(&shader_handle)
+        .context("Invalid shader handle")?;
+    if shader.compute_bytecode.is_some() {
+        return Ok(());
+    }
+    shader.compute_bytecode = Some(bytecode.to_vec());
+    shader.layout_checks.clear();
+    if let Some(ref mut existing) = shader.reflection {
+        for pb in &new_reflection.parameter_blocks {
+            if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                existing.parameter_blocks.push(pb.clone());
+            }
+        }
+        if existing.push_constant_categories.is_empty() {
+            existing.push_constant_categories = new_reflection.push_constant_categories;
+        }
+        if existing.push_constant_slot_kinds.is_empty() {
+            existing.push_constant_slot_kinds = new_reflection.push_constant_slot_kinds;
+        }
+        if existing.binding_element_strides.is_empty() {
+            existing.binding_element_strides = new_reflection.binding_element_strides;
+        }
+    } else {
+        shader.reflection = Some(new_reflection);
+    }
+    tracing::debug!("Seeded compute DXIL ({} bytes)", bytecode.len());
+    Ok(())
+}

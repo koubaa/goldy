@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot reuse a stale `SetPipeline`. Structural mutations (new nodes,
   bindings) still drop all retained command lists.
 
+- **`ShaderModule::variant`** — frontend-retained source, search paths, and
+  preprocessor defines. `variant(extra_defines)` merges/overrides defines and
+  allocates a new backend shader handle without a per-backend trait method.
+  Post-virtual-main source is cached once per module (`OnceLock`).
+
+- **Unlocked compute Slang compile** — `ComputePipeline::new` runs Slang
+  outside `device.inner.backend.lock()` on Vulkan and DX12, then seeds the
+  stage cache before PSO create (still under the lock). Mock/CPU/Metal/WebGPU/CUDA
+  keep in-lock compile until they implement `seed_compute_stage`. No
+  `PipelineFactory` yet.
+
 - **CPU dispatches in `Scheme`** — `Scheme::cpu_node(label)` records a serial,
   stateless host function as a scheme node. The function's parameter list is
   its virtual main: one `&[T]` / `&mut [T]` (`T: bytemuck::Pod`) per parcel

@@ -45,13 +45,23 @@ use crate::backend::{GpuBackend, ShaderHandle};
 use crate::device::Device;
 use crate::slang::{layout_validation_enabled, LayoutCheck, OwnedLayoutCheck};
 use anyhow::{Context, Result};
-use std::sync::{Arc, Mutex};
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A compiled shader module.
 pub struct ShaderModule {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ShaderHandle,
+    /// Author-facing Slang (before virtual-main rewrite).
+    source: Arc<str>,
+    /// Library + extra search paths recorded at construction (not re-merged on [`Self::variant`]).
+    search_paths: Arc<[String]>,
+    defines: Arc<[(String, String)]>,
+    optimization_level: crate::types::OptimizationLevel,
+    layout_checks: Arc<[OwnedLayoutCheck]>,
+    /// Post-virtual-main source, filled on first compile / [`Self::effective_source`].
+    effective_source: OnceLock<Arc<str>>,
 }
 
 impl ShaderModule {
@@ -158,23 +168,81 @@ impl ShaderModule {
             .chain(extra_paths.iter().map(|s| s.to_string()))
             .collect();
 
-        let path_refs: Vec<&str> = all_paths.iter().map(|s| s.as_str()).collect();
+        let owned_defines: Vec<(String, String)> = defines
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        let owned_checks: Vec<OwnedLayoutCheck> = if validate {
+            layout_checks.iter().map(OwnedLayoutCheck::from_layout_check).collect()
+        } else {
+            Vec::new()
+        };
+
+        Self::create_retained(
+            device,
+            Arc::from(source),
+            all_paths.into(),
+            owned_defines.into(),
+            optimization_level,
+            owned_checks.into(),
+        )
+    }
+
+    /// New module with extra preprocessor defines merged into this module's defines.
+    ///
+    /// Keys in `extra_defines` override matching keys. Source, search paths (including
+    /// registered libraries), optimization level, and layout checks are reused. The
+    /// original module is unchanged.
+    pub fn variant(&self, extra_defines: &[(&str, &str)]) -> Result<Self> {
+        let mut merged: Vec<(String, String)> = self.defines.iter().cloned().collect();
+        for &(key, value) in extra_defines {
+            if let Some(existing) = merged.iter_mut().find(|(k, _)| k == key) {
+                existing.1 = value.to_string();
+            } else {
+                merged.push((key.to_string(), value.to_string()));
+            }
+        }
+        Self::create_retained(
+            &self._device,
+            Arc::clone(&self.source),
+            Arc::clone(&self.search_paths),
+            merged.into(),
+            self.optimization_level,
+            Arc::clone(&self.layout_checks),
+        )
+    }
+
+    fn create_retained(
+        device: &Device,
+        source: Arc<str>,
+        search_paths: Arc<[String]>,
+        defines: Arc<[(String, String)]>,
+        optimization_level: crate::types::OptimizationLevel,
+        layout_checks: Arc<[OwnedLayoutCheck]>,
+    ) -> Result<Self> {
+        let path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
+        let define_refs: Vec<(&str, &str)> = defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
         let mut backend = device.inner.backend.lock().unwrap();
-        let handle = if validate {
-            let owned_checks: Vec<OwnedLayoutCheck> =
-                layout_checks.iter().map(OwnedLayoutCheck::from_layout_check).collect();
-            backend.create_shader_with_checks(
+        let handle = if layout_checks.is_empty() {
+            backend.create_shader_with_paths(
                 device.inner.handle,
-                source,
+                source.as_ref(),
                 &path_refs,
-                defines,
+                &define_refs,
                 optimization_level,
-                owned_checks,
             )?
         } else {
-            backend.create_shader_with_paths(device.inner.handle, source, &path_refs, defines, optimization_level)?
+            backend.create_shader_with_checks(
+                device.inner.handle,
+                source.as_ref(),
+                &path_refs,
+                &define_refs,
+                optimization_level,
+                layout_checks.to_vec(),
+            )?
         };
+        drop(backend);
 
         tracing::debug!("Shader module created");
 
@@ -182,7 +250,55 @@ impl ShaderModule {
             _device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
+            source,
+            search_paths,
+            defines,
+            optimization_level,
+            layout_checks,
+            effective_source: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn search_paths(&self) -> &[String] {
+        &self.search_paths
+    }
+
+    pub(crate) fn defines(&self) -> &[(String, String)] {
+        &self.defines
+    }
+
+    pub(crate) fn optimization_level(&self) -> crate::types::OptimizationLevel {
+        self.optimization_level
+    }
+
+    pub(crate) fn layout_checks(&self) -> &[OwnedLayoutCheck] {
+        &self.layout_checks
+    }
+
+    /// Post-virtual-main translation unit, computed once per module.
+    pub(crate) fn effective_source(&self) -> &str {
+        self.effective_source
+            .get_or_init(
+                || match crate::slang::virtual_main::effective_slang_source_for_compile(&self.source) {
+                    Cow::Borrowed(_) => Arc::clone(&self.source),
+                    Cow::Owned(transformed) => Arc::from(transformed),
+                },
+            )
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn effective_source_arc(&self) -> Arc<str> {
+        Arc::clone(self.effective_source.get_or_init(|| {
+            match crate::slang::virtual_main::effective_slang_source_for_compile(&self.source) {
+                Cow::Borrowed(_) => Arc::clone(&self.source),
+                Cow::Owned(transformed) => Arc::from(transformed),
+            }
+        }))
     }
 }
 
@@ -250,4 +366,70 @@ float4 fs_main(VertexOutput input) : SV_Target {
     return color;
 }
 "#;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::compute::ComputePipeline;
+
+    fn mock_device() -> Device {
+        Device::from_backend(Box::new(MockBackend::new())).expect("mock device")
+    }
+
+    #[test]
+    fn variant_merges_defines_and_keeps_original() {
+        let device = mock_device();
+        let base =
+            ShaderModule::from_slang_with_paths_and_defines(&device, "void main() {}", &[], &[("A", "1"), ("B", "2")])
+                .expect("shader");
+        let variant = base.variant(&[("B", "9"), ("C", "3")]).expect("variant");
+
+        assert_ne!(base.handle, variant.handle);
+        assert_eq!(
+            base.defines(),
+            &[("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+        );
+        assert_eq!(
+            variant.defines(),
+            &[
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "9".to_string()),
+                ("C".to_string(), "3".to_string()),
+            ]
+        );
+        assert_eq!(variant.source(), base.source());
+        assert_eq!(variant.search_paths(), base.search_paths());
+    }
+
+    #[test]
+    fn effective_source_is_cached_per_module() {
+        let device = mock_device();
+        let shader = ShaderModule::from_slang(
+            &device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1,1,1)]
+void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
+"#,
+        )
+        .expect("shader");
+        let first = shader.effective_source_arc();
+        let second = shader.effective_source_arc();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_ne!(first.as_ref(), shader.source());
+    }
+
+    #[test]
+    fn compute_pipeline_new_on_mock_does_not_need_slang_target() {
+        let device = mock_device();
+        let shader = ShaderModule::from_slang(&device, "void main() {}").expect("shader");
+        {
+            let backend = device.inner.backend.lock().unwrap();
+            assert!(backend.compute_shader_target().is_none());
+        }
+        ComputePipeline::new(&device, &shader).expect("mock compute pipeline");
+    }
 }

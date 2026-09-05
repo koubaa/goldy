@@ -200,3 +200,85 @@ pub(super) fn ensure_stage_compiled(
 
     Ok(module)
 }
+
+/// Install SPIR-V compiled outside the backend mutex.
+pub(super) fn seed_compute_stage(
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    shaders: &SharedShaderTable,
+    shader_handle: ShaderHandle,
+    bytecode: &[u8],
+    reflection: crate::slang::ShaderReflection,
+) -> Result<()> {
+    {
+        let shaders_read = shaders.read().unwrap();
+        let shader = shaders_read
+            .entries
+            .get(&shader_handle)
+            .context("Invalid shader handle")?;
+        if shader.compute_module.is_some() {
+            return Ok(());
+        }
+    }
+
+    let device_handle = {
+        let shaders_read = shaders.read().unwrap();
+        shaders_read
+            .entries
+            .get(&shader_handle)
+            .context("Invalid shader handle")?
+            .device_handle
+    };
+    let logical_device = devices.get(&device_handle).context("Shader's device no longer valid")?;
+    let spirv_u32: &[u32] = bytemuck::cast_slice(bytecode);
+    let create_info = vk::ShaderModuleCreateInfo::default().code(spirv_u32);
+    let module = unsafe { logical_device.device.create_shader_module(&create_info, None) }
+        .context("Failed to create Vulkan shader module")?;
+
+    tracing::debug!("Seeded compute shader ({} SPIR-V words)", spirv_u32.len());
+
+    if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+        use std::io::Write;
+        let dir = std::path::Path::new(&dump_dir);
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join(format!("cs_main_h{shader_handle}_vulkan.spv"));
+        if let Ok(mut file) = std::fs::File::create(&path) {
+            let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
+            let _ = file.write_all(spirv_bytes);
+            tracing::info!("Dumped SPIR-V bytecode to {}", path.display());
+        }
+    }
+
+    let mut shaders_write = shaders.write().unwrap();
+    let shader = shaders_write
+        .entries
+        .get_mut(&shader_handle)
+        .context("Invalid shader handle")?;
+    if shader.compute_module.is_some() {
+        unsafe {
+            logical_device.device.destroy_shader_module(module, None);
+        }
+        return Ok(());
+    }
+    shader.compute_module = Some(module);
+    shader.layout_checks.clear();
+    merge_compute_reflection(shader, reflection);
+    Ok(())
+}
+
+fn merge_compute_reflection(shader: &mut ShaderState, reflection: crate::slang::ShaderReflection) {
+    if let Some(ref mut existing) = shader.reflection {
+        for pb in &reflection.parameter_blocks {
+            if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                existing.parameter_blocks.push(pb.clone());
+            }
+        }
+        if existing.push_constant_categories.is_empty() {
+            existing.push_constant_categories = reflection.push_constant_categories;
+        }
+        if existing.binding_element_strides.is_empty() {
+            existing.binding_element_strides = reflection.binding_element_strides;
+        }
+    } else {
+        shader.reflection = Some(reflection);
+    }
+}
