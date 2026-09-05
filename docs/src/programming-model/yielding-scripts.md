@@ -106,6 +106,9 @@ anything you need from the prologue in the state struct.
 - One `[goldy_compute]` entry per source, and `$yield` must appear directly in the
   prologue or a continuation body, not in a helper.
 - Indirect dispatch (`dispatch_shape_parcel`) is not supported for yielding nodes.
+- `goldy_buf_len` is not portable: on Metal, WebGPU, and CUDA it currently returns
+  `0xFFFFFFFF`. Pass an explicit `uint count` (or a constant) for bounds checks and
+  table wraps; do not use `key % goldy_buf_len(table)` in a handler.
 
 ## The host side
 

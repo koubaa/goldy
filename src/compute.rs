@@ -95,7 +95,13 @@ impl ComputePipeline {
                 let mut continuations = Vec::with_capacity(script.reflection.continuations.len());
                 for c in &script.reflection.continuations {
                     let module = compute_shader.continuation_module(&c.fn_name)?;
-                    let sub_label = format!("{}:{}", label.unwrap_or("yield"), c.fn_name);
+                    // Colons (and path separators) in the debug label become DXC
+                    // "filename" tokens on the WebGPU/DX12 path (`error reading 'yield:cs_resume'`).
+                    let raw = format!("{}_{}", label.unwrap_or("yield"), c.fn_name);
+                    let sub_label: String = raw
+                        .chars()
+                        .map(|ch| if matches!(ch, ':' | '/' | '\\') { '_' } else { ch })
+                        .collect();
                     continuations.push(Arc::new(Self::new_with_label(device, &module, Some(&sub_label))?));
                 }
                 Some(Arc::new(crate::petition::YieldPipelines {

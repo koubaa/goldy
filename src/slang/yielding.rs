@@ -977,9 +977,15 @@ fn emit(source: &str, analysis: &Analysis, variant: Option<&str>) -> Result<Stri
 }
 
 /// Entry-point parameter list of a continuation variant, in declaration order:
-/// program params, `Scattered<P> __gy_pay`, `Scattered<S> __gy_st`,
-/// `Scattered<uint2> __gy_res`, `Scattered<E> __gy_arena`, hidden yield params,
-/// `ThreadId __gy_tid`, `uint __gy_count`, hidden caps.
+/// program params, `Scattered<S> __gy_st`, `Scattered<uint2> __gy_res`,
+/// `Scattered<E> __gy_arena`, hidden yield params, `ThreadId __gy_tid`,
+/// `uint __gy_count`, hidden caps.
+///
+/// The incoming payload mailbox is not bound: the continuation reads state,
+/// the resolution table, and the result arena. Re-yields use the hidden
+/// `__gy_pay_<target>` parameters (the *next* mailbox), not the inbound one.
+/// Binding an unused `__gy_pay` made WebGPU's auto-layout drop it (WGSL DCE)
+/// while the host still bound the slot.
 fn continuation_entry(refl: &YieldReflection, c: &ContinuationDecl) -> String {
     let (x, y, z) = c.numthreads;
     let mut sig: Vec<String> = c
@@ -987,7 +993,6 @@ fn continuation_entry(refl: &YieldReflection, c: &ContinuationDecl) -> String {
         .iter()
         .map(|p| format!("{} {}", p.ty, p.name))
         .collect();
-    sig.push(format!("Scattered<{}> {HIDDEN_PREFIX}pay", c.petition));
     sig.push(format!("Scattered<{}> {HIDDEN_PREFIX}st", c.state_ty));
     sig.push(format!("Scattered<uint2> {HIDDEN_PREFIX}res"));
     sig.push(format!("Scattered<{}> {HIDDEN_PREFIX}arena", c.result_elem));
@@ -1131,7 +1136,7 @@ void cs_resume(Scattered<uint> data, Resolved<uint> r, St s, ThreadId tid) {
         let out = lower(SRC, Some("cs_resume")).unwrap();
         assert_eq!(out.matches("[goldy_compute]").count(), 1);
         assert!(out.contains("void __goldy_prologue_cs_main("));
-        assert!(out.contains("[numthreads(32, 1, 1)]\nvoid cs_main(Scattered<uint> data, Scattered<Fetch> __gy_pay, Scattered<St> __gy_st, Scattered<uint2> __gy_res, Scattered<uint> __gy_arena, ThreadId __gy_tid, uint __gy_count) {"));
+        assert!(out.contains("[numthreads(32, 1, 1)]\nvoid cs_main(Scattered<uint> data, Scattered<St> __gy_st, Scattered<uint2> __gy_res, Scattered<uint> __gy_arena, ThreadId __gy_tid, uint __gy_count) {"));
         assert!(out.contains("cs_resume(data, __gy_rv, __gy_s, __gy_tid);"));
         assert!(lower(SRC, Some("nope")).is_err());
     }

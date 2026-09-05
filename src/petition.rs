@@ -527,9 +527,11 @@ impl YieldDriver {
                 .map(|t| refl.continuation_index(t).expect("validated"))
                 .collect();
 
-            // Slot budget of the continuation dispatch (see `continuation_entry`).
+            // Slot budget of the continuation dispatch (see `continuation_entry`):
+            // program resources + st + res + arena, then pay_t+st_t per re-yield
+            // target and the shared cnt buffer when the body yields again.
             let extra_slots = if yields_to.is_empty() { 0 } else { 1 };
-            let resources = program_resources.len() + 4 + 2 * yields_to.len() + extra_slots;
+            let resources = program_resources.len() + 3 + 2 * yields_to.len() + extra_slots;
             if resources > MAX_BINDLESS_SLOTS {
                 return err(format!(
                     "`{name}` needs {resources} resource slots (max {MAX_BINDLESS_SLOTS}); bind fewer buffers"
@@ -796,7 +798,6 @@ impl YieldDriver {
                 node = node.with_parcel(p, *access);
             }
             node = node
-                .with_parcel(pt.pay[set].whole(), NodeAccess::Read)
                 .with_parcel(pt.st[set].whole(), NodeAccess::Read)
                 .with_parcel(pt.res.whole(), NodeAccess::Read)
                 .with_parcel(pt.arena.whole(), NodeAccess::Read);

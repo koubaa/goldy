@@ -59,8 +59,8 @@ struct St { uint lane; uint acc; };
 
 [goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(Scattered<uint> data, uint scale, ThreadId tid) {
-    if (tid.x >= goldy_buf_len(data)) return;
+void cs_main(Scattered<uint> data, uint scale, uint count, ThreadId tid) {
+    if (tid.x >= count) return;
     uint v = data[tid.x];
     if (v % 2u == 1u) {
         $yield(cs_resume, Fetch { v }, St { tid.x, v * scale });
@@ -100,6 +100,7 @@ pub fn fetch_and_resume(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(3)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(256, 1024, move |p: &Fetch, promised: Promised<'_, u32>| {
@@ -164,6 +165,7 @@ pub fn stall_chunks_the_prologue(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(1)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(128, 128, |p: &Fetch, promised: Promised<'_, u32>| {
@@ -192,6 +194,7 @@ pub fn drop_loses_excess_lanes(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(0)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(100, 100, |p: &Fetch, promised: Promised<'_, u32>| {
@@ -235,8 +238,8 @@ struct Walk { uint lane; uint acc; };
 
 [goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(Scattered<uint> steps, Scattered<uint> out, ThreadId tid) {
-    if (tid.x >= goldy_buf_len(steps)) return;
+void cs_main(Scattered<uint> steps, Scattered<uint> out, uint count, ThreadId tid) {
+    if (tid.x >= count) return;
     $yield(step, Step { tid.x, steps[tid.x] }, Walk { tid.x, 0u });
 }
 
@@ -272,6 +275,7 @@ pub fn continuation_yields_to_itself(device: &Device) {
         .node("walk", &pipeline)
         .with_parcel(&steps, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
+        .with_param(n)
         .yield_point(
             "step",
             YieldPoint::cpu(128, 128, |p: &Step, promised: Promised<'_, u32>| {
@@ -308,8 +312,8 @@ struct B { uint lane; uint fetched; };
 
 [goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(Scattered<uint> out, Scattered<float> fout, ThreadId tid) {
-    if (tid.x >= goldy_buf_len(out)) return;
+void cs_main(Scattered<uint> out, Scattered<float> fout, uint count, ThreadId tid) {
+    if (tid.x >= count) return;
     $yield(got_fetch, Fetch { tid.x }, A { tid.x });
 }
 
@@ -360,6 +364,7 @@ pub fn chained_continuations_with_multi_element_results(device: &Device) {
         .node("chain", &pipeline)
         .with_parcel(&out, NodeAccess::Write)
         .with_parcel(&fout, NodeAccess::Write)
+        .with_param(n)
         .yield_point(
             "got_fetch",
             YieldPoint::cpu(256, 16384, |p: &Fetch, promised: Promised<'_, u32>| {
@@ -407,6 +412,7 @@ pub fn arena_overflow_rejects(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(0)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(256, 10, |p: &Fetch, promised: Promised<'_, u32>| {
@@ -441,7 +447,7 @@ void cs_main(BufRO<Fetch> petitions, Scattered<Resolution> resolutions, Scattere
         goldy_reject(resolutions, tid.x);
         return;
     }
-    arena[tid.x] = table[key % goldy_buf_len(table)];
+    arena[tid.x] = table[key % 16u];
     goldy_resolve(resolutions, tid.x, tid.x, 1u);
 }
 "#;
@@ -461,6 +467,7 @@ pub fn node_handler_resolves_on_gpu(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(1)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::node(256, 256, &handler).with_parcel(&table, NodeAccess::Read),
@@ -498,8 +505,8 @@ struct S { uint lane; };
 
 [goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(Scattered<uint> out, ThreadId tid) {
-    if (tid.x >= goldy_buf_len(out)) return;
+void cs_main(Scattered<uint> out, uint count, ThreadId tid) {
+    if (tid.x >= count) return;
     $yield(got, Ask { tid.x }, S { tid.x });
 }
 
@@ -569,6 +576,7 @@ pub fn struct_result_elements(device: &Device) {
         scheme
             .node("pairs", &pipeline)
             .with_parcel(&out, NodeAccess::Write)
+            .with_param(n)
             .yield_point("got", point)
             .dispatch(n.div_ceil(64), 1, 1);
         scheme.submit().expect("submit").wait_until_settled().expect("settle");
@@ -590,6 +598,7 @@ pub fn validation_errors(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(1)
+        .with_param(n)
         .dispatch(1, 1, 1);
     let err = scheme.submit().err().expect("missing yield point must fail");
     assert!(matches!(err, GoldyError::Validation(_)), "{err}");
@@ -601,6 +610,7 @@ pub fn validation_errors(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(1)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(64, 64, |_: &Step, p: Promised<'_, u32>| p.reject()),
@@ -615,6 +625,7 @@ pub fn validation_errors(device: &Device) {
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(1)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(16, 64, |_: &Fetch, p: Promised<'_, u32>| p.reject()),
@@ -667,7 +678,7 @@ pub fn ordered_with_neighbouring_nodes(device: &Device) {
 import goldy_exp;
 [goldy_compute]
 [numthreads(64, 1, 1)]
-void cs_main(Scattered<uint> d, ThreadId t) { if (t.x < goldy_buf_len(d)) d[t.x] = d[t.x] + 1u; }
+void cs_main(Scattered<uint> d, uint count, ThreadId t) { if (t.x < count) d[t.x] = d[t.x] + 1u; }
 "#,
     )
     .expect("plus_one");
@@ -678,11 +689,13 @@ void cs_main(Scattered<uint> d, ThreadId t) { if (t.x < goldy_buf_len(d)) d[t.x]
     scheme
         .node("pre", &plus_one)
         .with_parcel(&data, NodeAccess::ReadWrite)
+        .with_param(n)
         .dispatch(n.div_ceil(64), 1, 1);
     scheme
         .node("fetch", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(0)
+        .with_param(n)
         .yield_point(
             "cs_resume",
             YieldPoint::cpu(256, 256, |p: &Fetch, promised: Promised<'_, u32>| {
@@ -693,6 +706,7 @@ void cs_main(Scattered<uint> d, ThreadId t) { if (t.x < goldy_buf_len(d)) d[t.x]
     scheme
         .node("post", &plus_one)
         .with_parcel(&data, NodeAccess::ReadWrite)
+        .with_param(n)
         .dispatch(n.div_ceil(64), 1, 1);
     let w = MemoryExchange::new(&ctx)
         .bind_withdraw(&mut scheme, &data)
