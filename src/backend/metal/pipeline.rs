@@ -169,10 +169,7 @@ pub(super) fn create_mesh(
         .get(&mesh_shader)
         .and_then(|s| super::shader::stage_library(s, SlangStage::Mesh))
         .context("mesh library missing after compile")?;
-    eprintln!(
-        "[goldy-mesh] mesh library functions: {:?}",
-        mesh_lib.function_names()
-    );
+    eprintln!("[goldy-mesh] mesh library functions: {:?}", mesh_lib.function_names());
     let mesh_function = super::objc_catch::catch_objc("get_function(mesh_main)", || {
         mesh_lib
             .get_function("mesh_main", None)
