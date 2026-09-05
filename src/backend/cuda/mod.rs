@@ -926,7 +926,8 @@ impl CudaBackend {
                 category.map(|category| match category {
                     crate::types::ResourceCategory::Broadcast
                     | crate::types::ResourceCategory::Texture
-                    | crate::types::ResourceCategory::Sampler => ResourceAccess::Read,
+                    | crate::types::ResourceCategory::Sampler
+                    | crate::types::ResourceCategory::Accel => ResourceAccess::Read,
                     crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
                         ResourceAccess::ReadWrite
                     }
@@ -2184,6 +2185,12 @@ impl CudaBackend {
                     frame_table = Some(Arc::clone(data));
                 }
                 GpuCommand::ResourceBarrier { .. } => {}
+                GpuCommand::BuildAccelerationStructure(_) => {
+                    anyhow::bail!("CUDA backend does not support acceleration structures");
+                }
+                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                    anyhow::bail!("CUDA backend does not support ray tracing pipelines");
+                }
                 GpuCommand::DispatchBatch { label, arg_data, count } => {
                     let pipeline_handle = current_pipeline.context("CUDA: DispatchBatch without a compute pipeline")?;
                     let batch_ops = self.materialize_dispatch_batch(
@@ -2486,6 +2493,12 @@ impl CudaBackend {
                         let _ = (src, dst);
                         anyhow::bail!("CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows");
                     }
+                }
+                GpuCommand::BuildAccelerationStructure(_) => {
+                    anyhow::bail!("CUDA backend does not support acceleration structures");
+                }
+                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                    anyhow::bail!("CUDA backend does not support ray tracing pipelines");
                 }
             }
         }
@@ -5343,7 +5356,8 @@ impl GpuBackend for CudaBackend {
             | crate::types::ResourceCategory::Broadcast
             | crate::types::ResourceCategory::Texture
             | crate::types::ResourceCategory::StorageImage
-            | crate::types::ResourceCategory::Sampler => 4096,
+            | crate::types::ResourceCategory::Sampler
+            | crate::types::ResourceCategory::Accel => 4096,
         }
     }
 
@@ -5370,6 +5384,7 @@ impl GpuBackend for CudaBackend {
                 .values()
                 .filter(|sampler| sampler.device == device)
                 .count() as u32,
+            crate::types::ResourceCategory::Accel => 0,
         };
         self.max_bindless_slots_per_category(device, category)
             .saturating_sub(used)
@@ -6305,6 +6320,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 .iter()
                 .any(|f| matches!(f, TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb)),
             "CUDA must not advertise BGRA render-target formats"
+        );
+        assert!(
+            !caps.ray_query && !caps.ray_tracing_pipelines && !caps.mesh_shaders && !caps.amplification_shaders,
+            "CUDA does not advertise RT or mesh shaders"
         );
         Ok(())
     }

@@ -11,6 +11,31 @@ use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
+fn apply_accel_input_usage(vk_usage: &mut vk::BufferUsageFlags, flags: BufferFlags) {
+    if flags.contains(BufferFlags::ACCEL_INPUT) {
+        *vk_usage |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
+    }
+}
+
+fn allocate_buffer_memory(
+    logical_device: &types::LogicalDevice,
+    mem_requirements: vk::MemoryRequirements,
+    memory_type: u32,
+    device_address: bool,
+) -> Result<vk::DeviceMemory> {
+    let mut bda = vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+    let alloc_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(mem_requirements.size)
+        .memory_type_index(memory_type);
+    let alloc_info = if device_address {
+        alloc_info.push_next(&mut bda)
+    } else {
+        alloc_info
+    };
+    Ok(unsafe { logical_device.device.allocate_memory(&alloc_info, None) }?)
+}
+
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
     device: &types::LogicalDevice,
@@ -96,6 +121,7 @@ pub(super) fn create(
             false
         }
     };
+    apply_accel_input_usage(&mut vk_usage, flags);
 
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
@@ -143,18 +169,19 @@ pub(super) fn create(
     )
     .context("Failed to find suitable memory type")?;
 
-    let alloc_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(mem_requirements.size)
-        .memory_type_index(memory_type);
-
-    let memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
-        .inspect_err(|_e| {
-            crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
-                reason: crate::signal::OversubscribedReason::BufferHeap,
-                size_hint: mem_requirements.size,
-            });
-        })
-        .context("Failed to allocate buffer memory")?;
+    let memory = allocate_buffer_memory(
+        logical_device,
+        mem_requirements,
+        memory_type,
+        flags.contains(BufferFlags::ACCEL_INPUT),
+    )
+    .inspect_err(|_e| {
+        crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+            reason: crate::signal::OversubscribedReason::BufferHeap,
+            size_hint: mem_requirements.size,
+        });
+    })
+    .context("Failed to allocate buffer memory")?;
 
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }.context("Failed to bind buffer memory")?;
 
@@ -299,6 +326,10 @@ pub(super) fn create_sparse_with_capacity(
     if logical_size >= 12 {
         vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
     }
+    anyhow::ensure!(
+        !flags.contains(BufferFlags::ACCEL_INPUT),
+        "BufferFlags::ACCEL_INPUT is not supported on sparse buffers"
+    );
 
     let qf = ld.concurrent_queue_families();
     let buffer_info = with_buffer_sharing(
@@ -796,6 +827,7 @@ fn allocate_vk_buffer_memory(
     } else {
         vk_usage |= vk::BufferUsageFlags::UNIFORM_BUFFER;
     }
+    apply_accel_input_usage(&mut vk_usage, flags);
 
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
@@ -835,12 +867,13 @@ fn allocate_vk_buffer_memory(
     )
     .context("Failed to find suitable memory type (resize)")?;
 
-    let alloc_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(mem_requirements.size)
-        .memory_type_index(memory_type);
-
-    let memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
-        .context("Failed to allocate buffer memory (resize)")?;
+    let memory = allocate_buffer_memory(
+        logical_device,
+        mem_requirements,
+        memory_type,
+        flags.contains(BufferFlags::ACCEL_INPUT),
+    )
+    .context("Failed to allocate buffer memory (resize)")?;
 
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind buffer memory (resize)")?;

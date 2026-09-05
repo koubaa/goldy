@@ -168,6 +168,7 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
             push_constant_categories: Vec::new(),
             binding_element_strides: Vec::new(),
             shader_debug_name,
+            is_mesh: false,
         },
     );
 
@@ -361,10 +362,139 @@ pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) 
             push_constant_categories: Vec::new(),
             binding_element_strides: Vec::new(),
             shader_debug_name,
+            is_mesh: false,
         },
     );
 
     tracing::debug!("Created pipeline with depth stencil (handle={})", handle);
+    Ok(handle)
+}
+
+/// Create a mesh (+ optional task/amplification) graphics pipeline.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn create_mesh(
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    pipelines: &SharedPipelineTable,
+    device_handle: DeviceHandle,
+    mesh_module: vk::ShaderModule,
+    fs_module: vk::ShaderModule,
+    task_module: Option<vk::ShaderModule>,
+    raster_desc: &crate::backend::shared::PipelineDesc<'_>,
+    depth_stencil: Option<&crate::types::DepthStencilState>,
+    shader_debug_name: String,
+) -> Result<PipelineHandle> {
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
+    anyhow::ensure!(
+        logical_device.mesh_shaders && logical_device.mesh_ext.is_some(),
+        "mesh shaders were not enabled on this Vulkan device"
+    );
+
+    let mesh_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::MESH_EXT)
+        .module(mesh_module)
+        .name(c"main");
+    let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(fs_module)
+        .name(c"main");
+    let task_stage = task_module.map(|module| {
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::TASK_EXT)
+            .module(module)
+            .name(c"main")
+    });
+    let mut shader_stages = Vec::with_capacity(3);
+    if let Some(ts) = task_stage {
+        shader_stages.push(ts);
+    }
+    shader_stages.push(mesh_stage);
+    shader_stages.push(fs_stage);
+
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .line_width(1.0)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .depth_bias_enable(false);
+    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+        .sample_shading_enable(false)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(false);
+    let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(std::slice::from_ref(&color_blend_attachment));
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let layout = logical_device
+        .bindless_pipeline_layout
+        .context("Bindless pipeline layout required")?;
+    let color_format = format_to_vk(raster_desc.target_format);
+    let mut rendering_info =
+        vk::PipelineRenderingCreateInfo::default().color_attachment_formats(std::slice::from_ref(&color_format));
+    let mut depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default();
+    if let Some(ds) = depth_stencil {
+        rendering_info = rendering_info.depth_attachment_format(depth_format_to_vk(ds.format));
+        depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(ds.depth_write_enabled)
+            .depth_compare_op(compare_to_vk(ds.depth_compare))
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
+    }
+
+    let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
+        .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .vertex_inputs(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS_2)
+        .images(vk::PipelineRobustnessImageBehaviorEXT::ROBUST_IMAGE_ACCESS_2);
+
+    let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&shader_stages)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisampling)
+        .color_blend_state(&color_blending)
+        .dynamic_state(&dynamic_state)
+        .layout(layout)
+        .push_next(&mut rendering_info)
+        .push_next(&mut robustness);
+    if depth_stencil.is_some() {
+        pipeline_info = pipeline_info.depth_stencil_state(&depth_stencil_state);
+    }
+
+    let vk_pipelines = unsafe {
+        logical_device.device.create_graphics_pipelines(
+            logical_device.pipeline_cache,
+            std::slice::from_ref(&pipeline_info),
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("Failed to create mesh pipeline: {:?}", e.1))?;
+
+    let handle = pipelines.write().unwrap().alloc_handle();
+    pipelines.write().unwrap().entries.insert(
+        handle,
+        PipelineState {
+            device_handle,
+            pipeline: vk_pipelines[0],
+            layout,
+            owns_layout: false,
+            parameter_block_layouts: Vec::new(),
+            push_constant_categories: Vec::new(),
+            binding_element_strides: Vec::new(),
+            shader_debug_name,
+            is_mesh: true,
+        },
+    );
+    tracing::debug!("Created mesh pipeline {}", handle);
     Ok(handle)
 }
 

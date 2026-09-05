@@ -58,6 +58,8 @@ pub enum ResourceKind {
     ParameterBlock,
     /// Other/unknown
     Other,
+    /// A ray-tracing acceleration structure (`RaytracingAccelerationStructure`)
+    AccelerationStructure,
 }
 
 /// Layout information for a single field within a ParameterBlock
@@ -115,6 +117,9 @@ pub struct ShaderReflection {
     /// (`GOLDY_VALIDATE_LAYOUTS`, `GOLDY_VALIDATION=layout`).
     #[serde(default)]
     pub binding_element_strides: Vec<Option<u32>>,
+    /// Per-entry graphics stage I/O (vertex attributes, interpolants, fragment outputs).
+    #[serde(default)]
+    pub stage_interfaces: Vec<crate::slang::graphics_link::StageInterface>,
 }
 
 /// Byte layout of a Slang `struct` under uniform / constant-buffer rules (`SlangLayoutRules::Default`).
@@ -945,6 +950,7 @@ impl SlangCompiler {
             Some(ResourceCategory::Scattered)
             | Some(ResourceCategory::Texture)
             | Some(ResourceCategory::Sampler)
+            | Some(ResourceCategory::Accel)
             | None => SlangParameterCategory::ShaderResource,
             Some(ResourceCategory::Broadcast) => unreachable!("handled above"),
         };
@@ -1183,9 +1189,328 @@ impl SlangCompiler {
             #[cfg(all(feature = "dx12", target_os = "windows"))]
             push_constant_slot_kinds: Vec::new(),
             binding_element_strides: Vec::new(),
+            stage_interfaces: self.extract_stage_interfaces(reflection_ptr),
         })
     }
 
+    fn extract_stage_interfaces(
+        &self,
+        reflection_ptr: *mut SlangReflection,
+    ) -> Vec<crate::slang::graphics_link::StageInterface> {
+        use crate::slang::ffi::{SlangParameterCategory, SlangTypeKind};
+        use crate::slang::graphics_link::StageInterface;
+
+        let mut out = Vec::new();
+        let ep_count = unsafe { (self.library.reflection_get_entry_point_count)(reflection_ptr) };
+        for i in 0..ep_count {
+            let ep = unsafe { (self.library.reflection_get_entry_point_by_index)(reflection_ptr, i) };
+            if ep.is_null() {
+                continue;
+            }
+            let name = unsafe {
+                let ptr = (self.library.reflection_entry_point_get_name)(ep);
+                if ptr.is_null() {
+                    format!("entry_{i}")
+                } else {
+                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                }
+            };
+            let stage_id = unsafe { (self.library.reflection_entry_point_get_stage)(ep) };
+            let stage_name = slang_stage_name(stage_id);
+
+            let mut iface = StageInterface {
+                stage: stage_name.to_string(),
+                entry_name: name,
+                vertex_inputs: Vec::new(),
+                payload_inputs: Vec::new(),
+                payload_outputs: Vec::new(),
+                fragment_outputs: Vec::new(),
+            };
+
+            let result = unsafe { (self.library.reflection_entry_point_get_result_var_layout)(ep) };
+            if !result.is_null() {
+                let mut fields = Vec::new();
+                self.collect_io_fields(result, "", &mut fields);
+                fields.retain(is_graphics_payload_field);
+                if stage_name == "fragment" {
+                    iface.fragment_outputs = fields;
+                } else {
+                    iface.payload_outputs = fields;
+                }
+            }
+
+            let param_count = unsafe { (self.library.reflection_entry_point_get_parameter_count)(ep) };
+            for p in 0..param_count {
+                let param = unsafe { (self.library.reflection_entry_point_get_parameter_by_index)(ep, p) };
+                if param.is_null() {
+                    continue;
+                }
+                let type_layout = unsafe { (self.library.reflection_variable_layout_get_type_layout)(param) };
+                if type_layout.is_null() {
+                    continue;
+                }
+                let category = unsafe { (self.library.reflection_type_layout_get_category)(type_layout) };
+                if category == SlangParameterCategory::Uniform as i32
+                    || category == SlangParameterCategory::PushConstantBuffer as i32
+                    || category == SlangParameterCategory::ConstantBuffer as i32
+                {
+                    continue;
+                }
+                let is_varying = category == SlangParameterCategory::VaryingInput as i32
+                    || category == SlangParameterCategory::VaryingOutput as i32
+                    || category == SlangParameterCategory::Mixed as i32
+                    || category == SlangParameterCategory::MetalPayload as i32;
+                let is_meshish = stage_name == "mesh" || stage_name == "amplification";
+                if !is_varying && !is_meshish {
+                    continue;
+                }
+                let mut fields = Vec::new();
+                self.collect_io_fields(param, "", &mut fields);
+                fields.retain(is_graphics_payload_field);
+                if fields.is_empty() {
+                    continue;
+                }
+                if category == SlangParameterCategory::VaryingOutput as i32
+                    || category == SlangParameterCategory::MetalPayload as i32
+                    || (is_meshish && stage_name == "mesh")
+                {
+                    iface.payload_outputs.extend(fields);
+                } else if stage_name == "vertex" {
+                    iface.vertex_inputs.extend(fields);
+                } else {
+                    iface.payload_inputs.extend(fields);
+                }
+            }
+
+            let _ = SlangTypeKind::None;
+            out.push(iface);
+        }
+        out
+    }
+
+    fn collect_io_fields(
+        &self,
+        var_layout: *mut super::ffi::SlangReflectionVariableLayout,
+        parent_struct: &str,
+        out: &mut Vec<crate::slang::graphics_link::StageIoField>,
+    ) {
+        use crate::slang::ffi::{SlangScalarType, SlangTypeKind};
+        use crate::slang::graphics_link::{parse_semantic, InterpolationMode, StageIoField};
+
+        let variable = unsafe { (self.library.reflection_variable_layout_get_variable)(var_layout) };
+        let field_name = if !variable.is_null() {
+            let ptr = unsafe { (self.library.reflection_variable_get_name)(variable) };
+            if ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+            }
+        } else {
+            String::new()
+        };
+
+        let type_layout = unsafe { (self.library.reflection_variable_layout_get_type_layout)(var_layout) };
+        if type_layout.is_null() {
+            return;
+        }
+        let type_ptr = unsafe { (self.library.reflection_type_layout_get_type)(type_layout) };
+        if type_ptr.is_null() {
+            return;
+        }
+        let kind = unsafe { (self.library.reflection_type_get_kind)(type_ptr) };
+        let type_name = unsafe {
+            let ptr = (self.library.reflection_type_get_name)(type_ptr);
+            if ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
+        };
+
+        if kind == SlangTypeKind::Struct as i32 {
+            let field_count = unsafe { (self.library.reflection_type_layout_get_field_count)(type_layout) };
+            if field_count > 0 {
+                let struct_name = if type_name.is_empty() {
+                    field_name.clone()
+                } else {
+                    type_name
+                };
+                for i in 0..field_count {
+                    let field = unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
+                    if !field.is_null() {
+                        self.collect_io_fields(field, &struct_name, out);
+                    }
+                }
+                return;
+            }
+        }
+
+        if kind == SlangTypeKind::Array as i32 {
+            let elem_layout = unsafe { (self.library.reflection_type_layout_get_element_type_layout)(type_layout) };
+            if !elem_layout.is_null() {
+                let elem_ty = unsafe { (self.library.reflection_type_layout_get_type)(elem_layout) };
+                if !elem_ty.is_null() {
+                    let elem_kind = unsafe { (self.library.reflection_type_get_kind)(elem_ty) };
+                    if elem_kind == SlangTypeKind::Struct as i32 {
+                        let elem_name = unsafe {
+                            let ptr = (self.library.reflection_type_get_name)(elem_ty);
+                            if ptr.is_null() {
+                                field_name.clone()
+                            } else {
+                                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                            }
+                        };
+                        let field_count = unsafe { (self.library.reflection_type_layout_get_field_count)(elem_layout) };
+                        for i in 0..field_count {
+                            let field =
+                                unsafe { (self.library.reflection_type_layout_get_field_by_index)(elem_layout, i) };
+                            if !field.is_null() {
+                                self.collect_io_fields(field, &elem_name, out);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        let semantic_ptr = unsafe { (self.library.reflection_variable_layout_get_semantic_name)(var_layout) };
+        let semantic_raw = if semantic_ptr.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(semantic_ptr) }.to_string_lossy().into_owned()
+        };
+        if semantic_raw.is_empty() && kind == SlangTypeKind::Struct as i32 {
+            return;
+        }
+        let semantic_index = unsafe { (self.library.reflection_variable_layout_get_semantic_index)(var_layout) } as u32;
+        let (semantic, parsed_index) = if semantic_raw.is_empty() {
+            (field_name.to_ascii_uppercase(), 0)
+        } else {
+            let (n, i) = parse_semantic(&semantic_raw);
+            (n, i)
+        };
+        let semantic_index = if parsed_index != 0 {
+            parsed_index
+        } else {
+            semantic_index
+        };
+
+        let (scalar_type, vector_size) = io_type_shape(&self.library, type_ptr, kind, &type_name);
+        let _ = SlangScalarType::None;
+        out.push(StageIoField {
+            field_name,
+            struct_name: if parent_struct.is_empty() {
+                type_name
+            } else {
+                parent_struct.to_string()
+            },
+            semantic,
+            semantic_index,
+            scalar_type,
+            vector_size,
+            interpolation: InterpolationMode::Perspective,
+        });
+    }
+}
+
+fn is_graphics_payload_field(field: &crate::slang::graphics_link::StageIoField) -> bool {
+    if field.field_name.starts_with('_') {
+        return false;
+    }
+    let sem = field.semantic.to_ascii_uppercase();
+    if sem.is_empty() {
+        return false;
+    }
+    if sem.starts_with("SV_GROUP")
+        || sem.starts_with("SV_DISPATCH")
+        || sem == "SV_VERTEXID"
+        || sem == "SV_INSTANCEID"
+        || sem == "SV_ISFRONTFACE"
+        || sem == "SV_PRIMITIVEID"
+    {
+        return false;
+    }
+    sem.starts_with("SV_")
+        || sem.starts_with("TEXCOORD")
+        || sem.starts_with("COLOR")
+        || sem.starts_with("NORMAL")
+        || sem.starts_with("TANGENT")
+        || sem.starts_with("BINORMAL")
+        || sem.starts_with("BLEND")
+        || sem == "POSITION"
+        || sem == "PSIZE"
+}
+
+fn slang_stage_name(stage: i32) -> &'static str {
+    // Matches SlangStage in ffi.rs / slang.h
+    match stage {
+        1 => "vertex",
+        2 => "hull",
+        3 => "domain",
+        4 => "geometry",
+        5 => "fragment",
+        6 => "compute",
+        7 => "raygen",
+        8 => "intersection",
+        9 => "anyhit",
+        10 => "closesthit",
+        11 => "miss",
+        12 => "callable",
+        13 => "mesh",
+        14 => "amplification",
+        _ => "unknown",
+    }
+}
+
+fn io_type_shape(
+    library: &super::loader::SlangLibrary,
+    type_ptr: *mut super::ffi::SlangReflectionType,
+    kind: i32,
+    type_name: &str,
+) -> (String, u32) {
+    use crate::slang::ffi::{SlangScalarType, SlangTypeKind};
+    use crate::slang::graphics_link::parse_value_shape;
+
+    if kind == SlangTypeKind::Vector as i32 {
+        let cols = unsafe { (library.reflection_type_get_column_count)(type_ptr) }.max(1);
+        let elem = unsafe { (library.reflection_type_get_element_type)(type_ptr) };
+        let scalar = if elem.is_null() {
+            scalar_type_name(unsafe { (library.reflection_type_get_scalar_type)(type_ptr) })
+        } else {
+            scalar_type_name(unsafe { (library.reflection_type_get_scalar_type)(elem) })
+        };
+        return (scalar, cols);
+    }
+    if kind == SlangTypeKind::Scalar as i32 {
+        return (
+            scalar_type_name(unsafe { (library.reflection_type_get_scalar_type)(type_ptr) }),
+            1,
+        );
+    }
+    let _ = SlangScalarType::None;
+    parse_value_shape(type_name)
+}
+
+fn scalar_type_name(scalar: i32) -> String {
+    use crate::slang::ffi::SlangScalarType;
+    match scalar {
+        x if x == SlangScalarType::Bool as i32 => "bool",
+        x if x == SlangScalarType::Int32 as i32 => "int",
+        x if x == SlangScalarType::Uint32 as i32 => "uint",
+        x if x == SlangScalarType::Float16 as i32 => "half",
+        x if x == SlangScalarType::Float32 as i32 => "float",
+        x if x == SlangScalarType::Float64 as i32 => "double",
+        x if x == SlangScalarType::Int8 as i32 => "int",
+        x if x == SlangScalarType::Uint8 as i32 => "uint",
+        x if x == SlangScalarType::Int16 as i32 => "int",
+        x if x == SlangScalarType::Uint16 as i32 => "uint",
+        _ => "float",
+    }
+    .to_string()
+}
+
+impl SlangCompiler {
     /// Extract layout information for a ParameterBlock.
     fn extract_parameter_block_layout(
         &self,
@@ -1287,8 +1612,20 @@ impl SlangCompiler {
                 continue;
             }
 
-            // Determine resource kind
-            let resource_kind = self.determine_resource_kind(field_type_layout);
+            // Get type name
+            let field_type = unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
+            let type_name = if !field_type.is_null() {
+                let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
+                if !type_name_ptr.is_null() {
+                    unsafe { CStr::from_ptr(type_name_ptr) }.to_string_lossy().into_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            let resource_kind = self.determine_resource_kind(field_type_layout, &type_name);
 
             // For Metal argument buffers (ParameterBlock context), try MetalArgumentBufferElement
             // category first. This handles buffers, textures, and other resources correctly.
@@ -1326,19 +1663,6 @@ impl SlangCompiler {
                 resource_kind
             );
 
-            // Get type name
-            let field_type = unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
-            let type_name = if !field_type.is_null() {
-                let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
-                if !type_name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(type_name_ptr) }.to_string_lossy().into_owned()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-
             fields.push(FieldLayout {
                 name,
                 offset,
@@ -1352,7 +1676,7 @@ impl SlangCompiler {
     }
 
     /// Determine the resource kind from a type layout.
-    fn determine_resource_kind(&self, type_layout: *mut SlangReflectionTypeLayout) -> ResourceKind {
+    fn determine_resource_kind(&self, type_layout: *mut SlangReflectionTypeLayout, type_name: &str) -> ResourceKind {
         let type_ptr = unsafe { (self.library.reflection_type_layout_get_type)(type_layout) };
         if type_ptr.is_null() {
             return ResourceKind::Other;
@@ -1361,45 +1685,49 @@ impl SlangCompiler {
         let type_kind = unsafe { (self.library.reflection_type_get_kind)(type_ptr) };
         let binding_type = unsafe { (self.library.reflection_type_layout_get_binding_type)(type_layout) };
 
-        // Debug logging for type detection
         tracing::trace!(
-            "determine_resource_kind: type_kind={}, binding_type={}",
+            "determine_resource_kind: type_kind={}, binding_type={}, type_name={}",
             type_kind,
-            binding_type
+            binding_type,
+            type_name
         );
 
-        match type_kind {
+        let kind = match type_kind {
             k if k == SlangTypeKind::SamplerState as i32 => ResourceKind::Sampler,
             k if k == SlangTypeKind::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
             k if k == SlangTypeKind::ParameterBlock as i32 => ResourceKind::ParameterBlock,
-            k if k == SlangTypeKind::Resource as i32 => {
-                // Check binding type to distinguish buffer vs texture, mutable vs immutable
-                match binding_type {
-                    b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
-                    b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
-                    _ => ResourceKind::Other,
+            k if k == SlangTypeKind::Resource as i32 => match binding_type {
+                b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
+                b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::RayTracingAccelerationStructure as i32 => {
+                    ResourceKind::AccelerationStructure
                 }
-            }
+                _ => ResourceKind::Other,
+            },
             k if k == SlangTypeKind::ShaderStorageBuffer as i32 => ResourceKind::MutableBuffer,
-            _ => {
-                // Try to infer from binding type if type_kind doesn't match expected values
-                // This helps with StructuredBuffer which may have different type_kind
-                match binding_type {
-                    b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
-                    b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
-                    b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
-                    b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
-                    _ => ResourceKind::Other,
+            _ => match binding_type {
+                b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
+                b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
+                b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
+                b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
+                b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
+                b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
+                b if b == SlangBindingType::RayTracingAccelerationStructure as i32 => {
+                    ResourceKind::AccelerationStructure
                 }
-            }
+                _ => ResourceKind::Other,
+            },
+        };
+        if kind == ResourceKind::Other && type_name.contains("AccelerationStructure") {
+            ResourceKind::AccelerationStructure
+        } else {
+            kind
         }
     }
 }
@@ -1654,6 +1982,28 @@ mod struct_layout_validate_tests {
         assert_eq!(name, "color");
         assert_eq!(offset, std::mem::size_of::<[f32; 2]>());
         assert_eq!(size, std::mem::size_of::<[f32; 4]>());
+    }
+
+    #[test]
+    fn gpu_type_derive_generates_portable_field_metadata() {
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy_derive::GpuType)]
+        #[repr(C)]
+        struct GeneratedVertex {
+            pos: [f32; 3],
+            uv: [f32; 2],
+            light: u32,
+        }
+
+        let ty = GeneratedVertex::GPU_TYPE;
+        assert_eq!(ty.type_name, "GeneratedVertex");
+        assert_eq!(ty.rust_size, 24);
+        assert_eq!(ty.fields.len(), 3);
+        assert_eq!(ty.fields[0].offset, 0);
+        assert_eq!(ty.fields[0].ty, crate::GpuFieldType::F32x3);
+        assert_eq!(ty.fields[1].offset, 12);
+        assert_eq!(ty.fields[1].ty, crate::GpuFieldType::F32x2);
+        assert_eq!(ty.fields[2].offset, 20);
+        assert_eq!(ty.fields[2].ty, crate::GpuFieldType::U32);
     }
 
     #[test]
@@ -2294,5 +2644,375 @@ mod cuda_direct_spatial_rgba8_view_tests {
             .expect("CUDA PTX compilation failed for DirectSpatial<float4, uint8_t4> subscript");
         let ptx = output.shader.as_str().expect("PTX text");
         assert!(!ptx.is_empty(), "PTX output is empty");
+    }
+}
+
+#[cfg(test)]
+mod rt_mesh_compile_tests {
+    use super::*;
+
+    #[test]
+    fn compile_raygen_spirv() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let source = r#"
+            [shader("raygeneration")]
+            void rgen_main() {}
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("rgen_main", SlangStage::RayGeneration)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("raygeneration SPIR-V compile failed");
+        assert!(!out.shader.data.is_empty());
+    }
+
+    #[test]
+    fn compile_mesh_spirv() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let source = r#"
+            struct MeshOutput {
+                float4 pos : SV_Position;
+            };
+            [shader("mesh")]
+            [numthreads(1, 1, 1)]
+            [outputtopology("triangle")]
+            void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
+                SetMeshOutputCounts(3, 1);
+                verts[0].pos = float4(-1, -1, 0, 1);
+                verts[1].pos = float4(3, -1, 0, 1);
+                verts[2].pos = float4(-1, 3, 0, 1);
+                tris[0] = uint3(0, 1, 2);
+            }
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("mesh_main", SlangStage::Mesh)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("mesh SPIR-V compile failed");
+        assert!(!out.shader.data.is_empty());
+    }
+
+    #[test]
+    fn compile_mesh_metal_assigns_whole_vertex_struct() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("shaders")
+            .to_string_lossy()
+            .into_owned();
+        let source = r#"
+            import goldy_exp;
+            struct MeshOutput {
+                float4 pos : SV_Position;
+                float4 color : COLOR;
+            };
+            [goldy_mesh]
+            [numthreads(1, 1, 1)]
+            [outputtopology("triangle")]
+            void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
+                SetMeshOutputCounts(3, 1);
+                verts[0] = { float4(0.0, -0.5, 0.0, 1.0), float4(1.0, 0.0, 0.0, 1.0) };
+                verts[1] = { float4(-0.5, 0.5, 0.0, 1.0), float4(0.0, 1.0, 0.0, 1.0) };
+                verts[2] = { float4(0.5, 0.5, 0.0, 1.0), float4(0.0, 0.0, 1.0, 1.0) };
+                tris[0] = uint3(0, 1, 2);
+            }
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Metal,
+                &[("mesh_main", SlangStage::Mesh)],
+                &[&path],
+                &[("__METAL__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("mesh Metal compile failed");
+        assert!(!out.shader.data.is_empty());
+    }
+
+    #[test]
+    fn reflect_acceleration_structure_parameter_block() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let source = r#"
+            struct Scene {
+                RaytracingAccelerationStructure tlas;
+            };
+            ParameterBlock<Scene> gScene;
+
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void cs_main(uint3 tid : SV_DispatchThreadID) {
+                RayDesc ray;
+                ray.Origin = float3(0, 0, 0);
+                ray.Direction = float3(0, 0, 1);
+                ray.TMin = 0;
+                ray.TMax = 1;
+                RayQuery<RAY_FLAG_NONE> q;
+                q.TraceRayInline(gScene.tlas, RAY_FLAG_NONE, 0xff, ray);
+            }
+        "#;
+        let out = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("acceleration-structure compute compile failed");
+        let kinds: Vec<_> = out
+            .reflection
+            .parameter_blocks
+            .iter()
+            .flat_map(|pb| pb.fields.iter().map(|f| f.resource_kind))
+            .collect();
+        assert!(
+            kinds.contains(&ResourceKind::AccelerationStructure),
+            "expected AccelerationStructure in reflection, got {kinds:?} blocks={:?}",
+            out.reflection.parameter_blocks
+        );
+    }
+
+    #[test]
+    fn compile_goldy_compute_accel_spirv() {
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+        let path = {
+            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            manifest_dir.join("shaders").to_string_lossy().into_owned()
+        };
+        let source = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
+{
+    RayDesc ray;
+    ray.Origin = float3(0.0, 0.0, -2.0);
+    ray.TMin = 0.001;
+    ray.Direction = float3(0.0, 0.0, 1.0);
+    ray.TMax = 100.0;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, ray);
+    q.Proceed();
+    hits[id.x] = q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 1 : 0;
+}
+"#;
+        let out = compiler
+            .compile_bindless_with_reflection_and_defines(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("GOLDY_RAY_QUERY", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("goldy_compute Accel SPIR-V compile failed");
+        assert!(!out.shader.data.is_empty());
+        let words = out.shader.as_spirv().expect("SPIR-V");
+        assert_eq!(words[0], 0x07230203);
+    }
+}
+
+#[cfg(test)]
+mod stage_io_reflection_tests {
+    use super::*;
+
+    fn shader_path() -> String {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("shaders").to_string_lossy().into_owned()
+    }
+
+    const VS_FS: &str = r#"
+import goldy_exp;
+
+struct VertIn {
+    float3 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+struct Varying {
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+};
+
+[goldy_vertex]
+Varying vs_main(VertIn input) {
+    Varying o;
+    o.position = float4(input.pos, 1);
+    o.uv = input.uv;
+    return o;
+}
+
+[goldy_fragment]
+float4 fs_main(Varying input) : SV_Target {
+    return float4(input.uv, 0, 1);
+}
+"#;
+
+    #[test]
+    fn spirv_reflects_vertex_and_fragment_io() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let vs = compiler
+            .compile_bindless_with_reflection_and_defines(
+                VS_FS,
+                ShaderTarget::Spirv,
+                &[("vs_main", SlangStage::Vertex)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("VS SPIR-V");
+        let fs = compiler
+            .compile_bindless_with_reflection_and_defines(
+                VS_FS,
+                ShaderTarget::Spirv,
+                &[("fs_main", SlangStage::Fragment)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("FS SPIR-V");
+        let vs_io = vs
+            .reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == "vertex")
+            .expect("vertex interface");
+        let fs_io = fs
+            .reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == "fragment")
+            .expect("fragment interface");
+        assert!(
+            !vs_io.payload_outputs.is_empty() || !vs_io.vertex_inputs.is_empty(),
+            "expected vertex I/O fields, got {vs_io:?}"
+        );
+        crate::slang::graphics_link::refine_payload_link("vertex", "fragment", vs_io, fs_io)
+            .expect("reflected VS/FS payload should link");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dxil_reflects_vertex_and_fragment_io() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let vs = compiler
+            .compile_bindless_with_reflection_and_defines(
+                VS_FS,
+                ShaderTarget::Dxil,
+                &[("vs_main", SlangStage::Vertex)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("VS DXIL");
+        assert!(!vs.reflection.stage_interfaces.is_empty());
+    }
+
+    const MESH_FS: &str = r#"
+import goldy_exp;
+
+struct MeshOut {
+    float4 pos : SV_Position;
+    float4 color : COLOR;
+};
+struct FsIn {
+    float4 pos : SV_Position;
+    float4 color : COLOR;
+};
+
+[goldy_mesh]
+[numthreads(1,1,1)]
+[outputtopology("triangle")]
+void mesh_main(out vertices MeshOut verts[3], out indices uint3 tris[1]) {
+    SetMeshOutputCounts(3, 1);
+    verts[0] = { float4(0,0,0,1), float4(1,0,0,1) };
+    tris[0] = uint3(0, 1, 2);
+}
+
+[goldy_fragment]
+float4 fs_main(FsIn input) : SV_Target { return input.color; }
+"#;
+
+    #[test]
+    fn spirv_reflects_mesh_vertex_payload() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let mesh = compiler
+            .compile_bindless_with_reflection_and_defines(
+                MESH_FS,
+                ShaderTarget::Spirv,
+                &[("mesh_main", SlangStage::Mesh)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("mesh SPIR-V");
+        let fs = compiler
+            .compile_bindless_with_reflection_and_defines(
+                MESH_FS,
+                ShaderTarget::Spirv,
+                &[("fs_main", SlangStage::Fragment)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("FS SPIR-V");
+        let fs_io = fs
+            .reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == "fragment")
+            .expect("fragment interface");
+        assert!(
+            fs_io
+                .payload_inputs
+                .iter()
+                .any(|f| f.semantic.eq_ignore_ascii_case("SV_POSITION")),
+            "expected fragment payload SV_Position, got {fs_io:?}"
+        );
+        let mesh_io = mesh
+            .reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == "mesh")
+            .expect("mesh interface");
+        let producer_outs = if mesh_io.payload_outputs.is_empty() {
+            &mesh_io.payload_inputs
+        } else {
+            &mesh_io.payload_outputs
+        };
+        if producer_outs
+            .iter()
+            .any(|f| f.semantic.eq_ignore_ascii_case("SV_POSITION"))
+        {
+            let mut producer = mesh_io.clone();
+            producer.payload_outputs = producer_outs.clone();
+            crate::slang::graphics_link::refine_payload_link("mesh", "fragment", &producer, fs_io)
+                .expect("reflected mesh/FS payload should link");
+        }
     }
 }

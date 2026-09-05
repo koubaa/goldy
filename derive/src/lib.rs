@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, punctuated::Punctuated, Data, DeriveInput, Expr, Fields, Meta, Token, Type};
 
 mod compute;
 
@@ -133,4 +133,266 @@ pub fn derive_layout_checkable(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+/// Derive a GPU type from logical `#[repr(C)]` fields.
+///
+/// Goldy packs the type into the Slang structured-buffer ABI at upload and when
+/// generating the matching Slang struct. Do not declare padding fields.
+#[proc_macro_derive(GpuType)]
+pub fn derive_gpu_type(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_gpu_type(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_gpu_type(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            name,
+            "GpuType cannot be derived for generic structs",
+        ));
+    }
+    let has_repr_c = input.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("repr") {
+            return false;
+        }
+        attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .map(|items| items.iter().any(|item| item.path().is_ident("C")))
+            .unwrap_or(false)
+    });
+    if !has_repr_c {
+        return Err(syn::Error::new_spanned(name, "GpuType requires #[repr(C)]"));
+    }
+
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(named) => &named.named,
+            _ => return Err(syn::Error::new_spanned(name, "GpuType requires named fields")),
+        },
+        _ => return Err(syn::Error::new_spanned(name, "GpuType can only be derived on structs")),
+    };
+
+    let mut entries = Vec::with_capacity(fields.len());
+    for field in fields {
+        let ident = field.ident.as_ref().expect("named field");
+        let field_name = ident.to_string();
+        if field_name.starts_with("__goldy_pad") {
+            return Err(syn::Error::new_spanned(
+                ident,
+                "field names beginning with `__goldy_pad` are reserved for generated Slang padding",
+            ));
+        }
+        let variant = gpu_field_type(&field.ty)?;
+        let ty = &field.ty;
+        entries.push(quote! {
+            ::goldy::GpuField {
+                name: #field_name,
+                offset: ::std::mem::offset_of!(#name, #ident),
+                size: ::std::mem::size_of::<#ty>(),
+                ty: ::goldy::GpuFieldType::#variant,
+            }
+        });
+    }
+    let count = entries.len();
+    let type_name = name.to_string();
+
+    Ok(quote! {
+        impl #name {
+            /// Rust-authored GPU type descriptor used to generate the matching Slang struct.
+            pub const GPU_TYPE: ::goldy::GpuType<'static> = ::goldy::GpuType {
+                type_name: #type_name,
+                rust_size: ::std::mem::size_of::<#name>(),
+                fields: {
+                    const FIELDS: [::goldy::GpuField<'static>; #count] = [
+                        #(#entries),*
+                    ];
+                    &FIELDS
+                },
+            };
+        }
+
+        impl ::goldy::StructuredBufferElement for #name {
+            fn gpu_element_stride() -> usize {
+                #name::GPU_TYPE
+                    .storage_stride()
+                    .expect("GpuType storage stride")
+            }
+
+            fn gpu_encode_slice(items: &[Self]) -> ::std::borrow::Cow<'_, [u8]> {
+                if items.is_empty() {
+                    return ::std::borrow::Cow::Borrowed(&[]);
+                }
+                match #name::GPU_TYPE.encode_pod_slice(items) {
+                    Ok(bytes) => ::std::borrow::Cow::Owned(bytes),
+                    Err(err) => panic!("{err}"),
+                }
+            }
+        }
+    })
+}
+
+fn gpu_field_type(ty: &Type) -> syn::Result<syn::Ident> {
+    if let Type::Path(path) = ty {
+        if path.qself.is_none() && path.path.segments.len() == 1 {
+            let ident = &path.path.segments[0].ident;
+            let variant = match ident.to_string().as_str() {
+                "f32" => "F32",
+                "u32" => "U32",
+                "i32" => "I32",
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "unsupported GpuType field; supported scalars are f32, u32, and i32",
+                    ))
+                }
+            };
+            return Ok(syn::Ident::new(variant, ident.span()));
+        }
+    }
+
+    let Type::Array(outer) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "unsupported GpuType field; use a supported scalar, [T; 2..4] vector, or square f32 matrix",
+        ));
+    };
+    let outer_len = array_len(&outer.len)?;
+
+    if let Type::Array(inner) = outer.elem.as_ref() {
+        let inner_len = array_len(&inner.len)?;
+        if inner_len != outer_len || !(2..=4).contains(&outer_len) || !is_scalar(inner.elem.as_ref(), "f32") {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "GpuType matrices must be square [[f32; N]; N] with N in 2..=4",
+            ));
+        }
+        return Ok(syn::Ident::new(
+            &format!("F32x{outer_len}x{outer_len}"),
+            proc_macro2::Span::call_site(),
+        ));
+    }
+
+    if !(2..=4).contains(&outer_len) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "GpuType vectors must have 2, 3, or 4 elements",
+        ));
+    }
+    let prefix = if is_scalar(outer.elem.as_ref(), "f32") {
+        "F32"
+    } else if is_scalar(outer.elem.as_ref(), "u32") {
+        "U32"
+    } else if is_scalar(outer.elem.as_ref(), "i32") {
+        "I32"
+    } else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "GpuType vectors support only f32, u32, and i32 elements",
+        ));
+    };
+    Ok(syn::Ident::new(
+        &format!("{prefix}x{outer_len}"),
+        proc_macro2::Span::call_site(),
+    ))
+}
+
+fn array_len(expr: &Expr) -> syn::Result<usize> {
+    let Expr::Lit(lit) = expr else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "GpuType array lengths must be integer literals",
+        ));
+    };
+    let syn::Lit::Int(value) = &lit.lit else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "GpuType array lengths must be integer literals",
+        ));
+    };
+    value.base10_parse()
+}
+
+fn is_scalar(ty: &Type, expected: &str) -> bool {
+    matches!(
+        ty,
+        Type::Path(path)
+            if path.qself.is_none()
+                && path.path.segments.len() == 1
+                && path.path.segments[0].ident == expected
+    )
+}
+
+#[cfg(test)]
+mod gpu_type_tests {
+    use super::*;
+
+    #[test]
+    fn maps_portable_scalars_vectors_and_matrices() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[repr(C)]
+            struct Example {
+                scalar: f32,
+                vector: [u32; 3],
+                matrix: [[f32; 4]; 4],
+            }
+        };
+        let expanded = expand_gpu_type(&input).unwrap().to_string();
+        assert!(expanded.contains("GpuFieldType :: F32"));
+        assert!(expanded.contains("GpuFieldType :: U32x3"));
+        assert!(expanded.contains("GpuFieldType :: F32x4x4"));
+    }
+
+    #[test]
+    fn rejects_reserved_names() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[repr(C)]
+            struct Example {
+                __goldy_pad0: u32,
+            }
+        };
+        let err = expand_gpu_type(&input).unwrap_err().to_string();
+        assert!(err.contains("reserved"));
+    }
+
+    #[test]
+    fn rejects_unsupported_field_types() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[repr(C)]
+            struct Example {
+                value: u64,
+            }
+        };
+        let err = expand_gpu_type(&input).unwrap_err().to_string();
+        assert!(err.contains("unsupported"));
+    }
+
+    #[test]
+    fn all_named_fields_are_logical() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[repr(C)]
+            struct Example {
+                value: [f32; 3],
+                uv: [f32; 2],
+            }
+        };
+        let expanded = expand_gpu_type(&input).unwrap().to_string();
+        assert!(expanded.contains("\"value\""));
+        assert!(expanded.contains("\"uv\""));
+        assert!(expanded.contains("StructuredBufferElement"));
+    }
+
+    #[test]
+    fn accepts_repr_c_with_explicit_alignment() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[repr(C, align(16))]
+            struct Example {
+                values: [u32; 3],
+            }
+        };
+        expand_gpu_type(&input).unwrap();
+    }
 }

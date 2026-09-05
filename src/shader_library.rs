@@ -32,6 +32,7 @@
 //! device.register_library(my_lib)?;
 //! ```
 
+use crate::GpuType;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -88,6 +89,27 @@ impl ShaderLibrary {
             name: name.to_string(),
             modules,
         }
+    }
+
+    /// Create a library after injecting Slang declarations generated from Rust GPU types.
+    ///
+    /// Use this when a shared module references a type whose ABI is owned by Rust
+    /// (`#[derive(GpuType)]`). The generated structs are prepended before `source`.
+    pub fn from_source_with_gpu_types(name: &str, source: &str, gpu_types: &[GpuType<'_>]) -> Result<Self> {
+        let mut generated = String::new();
+        let mut seen = std::collections::HashSet::with_capacity(gpu_types.len());
+        for gpu_type in gpu_types {
+            if !seen.insert(gpu_type.type_name) {
+                anyhow::bail!("duplicate generated GpuType `{}`", gpu_type.type_name);
+            }
+            generated.push_str(&gpu_type.to_slang_source()?);
+            generated.push('\n');
+        }
+        if !generated.is_empty() {
+            generated.push_str("#line 1\n");
+        }
+        generated.push_str(source);
+        Ok(Self::from_source(name, &generated))
     }
 
     /// Create a library from multiple embedded source strings.

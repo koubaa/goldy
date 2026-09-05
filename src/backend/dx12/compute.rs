@@ -7,7 +7,7 @@ use super::pso_cache;
 use super::shader;
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
-use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, ShaderHandle};
+use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RayTracingPipelineHandle, ShaderHandle};
 use crate::backend::submission_worker::allocate_timeline_value;
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
@@ -21,9 +21,13 @@ use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::types::ResourceCategory;
 
 /// Post-record tail barrier: make UAV and copy writes visible to subsequent operations.
-fn compute_submit_tail_barrier() -> D3D12_GLOBAL_BARRIER {
+fn compute_submit_tail_barrier(on_direct_queue: bool) -> D3D12_GLOBAL_BARRIER {
+    let mut sync_before = D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0;
+    if on_direct_queue {
+        sync_before |= D3D12_BARRIER_SYNC_RAYTRACING.0;
+    }
     D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
+        SyncBefore: D3D12_BARRIER_SYNC(sync_before),
         SyncAfter: D3D12_BARRIER_SYNC_ALL,
         AccessBefore: D3D12_BARRIER_ACCESS(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0),
         AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
@@ -161,10 +165,18 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool, on_direct_que
     let mut sync = D3D12_BARRIER_SYNC(0);
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
         sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
+        if on_direct_queue {
+            // `DispatchRays` is recorded on the DIRECT queue; TLAS / hit UAVs need RT sync.
+            sync.0 |= D3D12_BARRIER_SYNC_RAYTRACING.0;
+        }
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         // A non-storage upload buffer can only ever be a copy *source*, but the
         // sync stage (COPY) is identical either way.
+        // Do not OR BUILD_RAYTRACING here: GraphIR classifies both copies and
+        // AS builds as TRANSFER, and BUILD_RAYTRACING is incompatible with
+        // COPY_DEST (debug layer ID 1331). AS visibility is a global barrier
+        // in `accel::record_build_list`.
         let _ = is_storage;
         sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
     }
@@ -215,7 +227,8 @@ fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, is_storage: bool) 
         if usage.access == NodeAccessUnion::Write && is_storage {
             access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
         } else {
-            // Non-storage upload buffers can only ever be a copy source.
+            // Copy source — including ACCEL_INPUT geometry after a GPU upload.
+            // SHADER_RESOURCE is not valid with SYNC_COPY (ID 1331).
             access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0;
         }
     }
@@ -334,7 +347,8 @@ fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&
         match c {
             GpuCommand::Dispatch { label, .. }
             | GpuCommand::DispatchIndirect { label, .. }
-            | GpuCommand::DispatchBatch { label, .. } => {
+            | GpuCommand::DispatchBatch { label, .. }
+            | GpuCommand::TraceRays { label, .. } => {
                 labels.push(*label);
             }
             _ => {}
@@ -350,7 +364,8 @@ fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<
         if let GraphCommand::Compute(
             GpuCommand::Dispatch { label, .. }
             | GpuCommand::DispatchIndirect { label, .. }
-            | GpuCommand::DispatchBatch { label, .. },
+            | GpuCommand::DispatchBatch { label, .. }
+            | GpuCommand::TraceRays { label, .. },
         ) = gc
         {
             labels.push(*label);
@@ -996,9 +1011,13 @@ struct CmdCtx<'a> {
     gpu_profile: &'a mut Option<Dx12GpuProfileResources>,
     dispatch_idx: u32,
     current_compute_pipeline: Option<ComputePipelineHandle>,
+    current_rt: Option<RayTracingPipelineHandle>,
     pending_deletions: Vec<super::types::PendingDeletion>,
     /// Frame table row chosen at prologue record time (stable under concurrent submits).
     frame_table_row: Option<u32>,
+    /// CPU `pGeometryDescs` must remain valid until `Close()` (DXR spec).
+    #[allow(clippy::vec_box)]
+    rt_geom_descs: Vec<Box<D3D12_RAYTRACING_GEOMETRY_DESC>>,
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
@@ -1034,6 +1053,7 @@ fn record_gpu_command(
             let _tz = tracy_zone!("dx12.set_pipeline");
 
             ctx.current_compute_pipeline = Some(*handle);
+            ctx.current_rt = None;
             // This optimization was attempted but led to a slight performance regression
             // It seems to be related to latency hiding - changing the root signatures
             // caused the driver to warm up the GPU while the barrier drained.
@@ -1068,37 +1088,68 @@ fn record_gpu_command(
             frame_table_base,
         } => {
             let pipelines_read = scope.compute_pipelines().read().unwrap();
-            if let Some(h) = ctx.current_compute_pipeline {
-                if let Some(pipeline) = pipelines_read.entries.get(&h) {
-                    crate::backend::with_layout_validation(|| {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| {
-                                buffer_stride_for_bindless_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                    cat,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )?;
-                        crate::backend::validate_bindless_slot_kinds(
-                            raw_indices,
-                            &pipeline.push_constant_slot_kinds,
-                            |idx| {
-                                super::buffer::bindless_slot_kind_for_index(
-                                    &scope.buffers().read().unwrap().entries,
-                                    device_handle,
-                                    idx,
-                                )
-                            },
-                            &pipeline.shader_debug_name,
-                        )
-                    })?;
-                }
+            let rt_read = scope.rt_pipelines().read().unwrap();
+            if let Some(pipeline) = ctx
+                .current_compute_pipeline
+                .and_then(|h| pipelines_read.entries.get(&h))
+            {
+                crate::backend::with_layout_validation(|| {
+                    crate::backend::validate_raw_binding_strides(
+                        raw_indices,
+                        &pipeline.push_constant_categories,
+                        &pipeline.binding_element_strides,
+                        |idx, cat| {
+                            buffer_stride_for_bindless_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                                cat,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_bindless_slot_kinds(
+                        raw_indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| {
+                            super::buffer::bindless_slot_kind_for_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )
+                })?;
+            } else if let Some(pipeline) = ctx.current_rt.and_then(|h| rt_read.entries.get(&h)) {
+                crate::backend::with_layout_validation(|| {
+                    crate::backend::validate_raw_binding_strides(
+                        raw_indices,
+                        &pipeline.push_constant_categories,
+                        &pipeline.binding_element_strides,
+                        |idx, cat| {
+                            buffer_stride_for_bindless_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                                cat,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_bindless_slot_kinds(
+                        raw_indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| {
+                            super::buffer::bindless_slot_kind_for_index(
+                                &scope.buffers().read().unwrap().entries,
+                                device_handle,
+                                idx,
+                            )
+                        },
+                        &pipeline.shader_debug_name,
+                    )
+                })?;
             }
             let mut layout = types::PushLayout::default();
             shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
@@ -1864,6 +1915,38 @@ fn record_gpu_command(
                 }
             }
         }
+        GpuCommand::BuildAccelerationStructure(build) => {
+            super::accel::record_build_list(
+                scope,
+                cl,
+                cl7,
+                build,
+                &mut ctx.rt_geom_descs,
+                &mut ctx.pending_deletions,
+            )?;
+        }
+        GpuCommand::SetRayTracingPipeline(handle) => {
+            ctx.current_compute_pipeline = None;
+            ctx.current_rt = Some(*handle);
+            let rt_read = scope.rt_pipelines().read().unwrap();
+            if let Some(pipeline_state) = rt_read.entries.get(handle) {
+                unsafe {
+                    cl.SetComputeRootSignature(&pipeline_state.root_signature);
+                }
+            }
+        }
+        GpuCommand::TraceRays {
+            width, height, depth, ..
+        } => {
+            let rt_read = scope.rt_pipelines().read().unwrap();
+            if let Some(h) = ctx.current_rt {
+                if let Some(ps) = rt_read.entries.get(&h) {
+                    let cl4: ID3D12GraphicsCommandList4 =
+                        cl.cast().context("DispatchRays requires ID3D12GraphicsCommandList4")?;
+                    super::rt_pipeline::dispatch_rays(&cl4, ps, *width, *height, *depth);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1941,6 +2024,10 @@ fn execute_signal_and_finish(
     if let Err(e) = unsafe { command_list.Close() } {
         if let Some(slot) = scope.sc.lock().unwrap().compute_allocator_pool.get_mut(slot_idx) {
             slot.in_recording = false;
+            // Close failed: list is still recording. Drop it so the next acquire
+            // creates a fresh list instead of Reset() failing in a tight loop.
+            slot.command_list = None;
+            slot.pre_reset = false;
         }
         if let Some(row) = frame_table_row {
             super::frame_table::record_submission(scope.frame_table(), row, 0);
@@ -2244,9 +2331,23 @@ pub(super) fn submit_with_scope(
     let frame_table_staging = super::frame_table::extract_staging_from_commands(&commands);
     let device_handle = scope.device_handle;
     let _tz = tracy_zone!("dx12.submit");
-    let (command_list, slot_idx) = {
+    let route_device = commands.iter().any(|c| {
+        matches!(
+            c,
+            GpuCommand::SetRayTracingPipeline(_)
+                | GpuCommand::TraceRays { .. }
+                | GpuCommand::BuildAccelerationStructure(_)
+        )
+    });
+    let (command_list, slot_idx, on_device_queue) = {
         let _tz_acq = tracy_zone!("dx12.submit.acquire_allocator");
-        acquire_allocator_slot(scope)?
+        if route_device {
+            let (cl, idx) = acquire_device_direct_slot(scope)?;
+            (cl, idx, true)
+        } else {
+            let (cl, idx) = acquire_allocator_slot(scope)?;
+            (cl, idx, false)
+        }
     };
 
     let ctx_fence = &scope.ctx_fence;
@@ -2399,12 +2500,12 @@ pub(super) fn submit_with_scope(
     };
 
     let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
-    let (belt_idx_final, pending_deletions, frame_table_row) = {
+    let (belt_idx_final, pending_deletions, frame_table_row, _rt_geom_keep) = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
         let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
-            on_direct_queue: false,
+            on_direct_queue: on_device_queue,
             belt_slices: &belt_slices,
             belt_idx: 0,
             staged_texture_uploads: &staged_texture_uploads,
@@ -2412,8 +2513,10 @@ pub(super) fn submit_with_scope(
             gpu_profile: &mut dx_gpu_profile,
             dispatch_idx: 0,
             current_compute_pipeline: None,
+            current_rt: None,
             pending_deletions: Vec::new(),
             frame_table_row: None,
+            rt_geom_descs: Vec::new(),
         };
         for cmd in &commands {
             record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, cmd)?;
@@ -2426,11 +2529,16 @@ pub(super) fn submit_with_scope(
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, row_guard.take())
+        (
+            cmd_ctx.belt_idx,
+            cmd_ctx.pending_deletions,
+            row_guard.take(),
+            cmd_ctx.rt_geom_descs,
+        )
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
-    let tail = compute_submit_tail_barrier();
+    let tail = compute_submit_tail_barrier(on_device_queue);
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
@@ -2448,27 +2556,45 @@ pub(super) fn submit_with_scope(
     }
 
     let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &scope.buffers().read().unwrap().entries);
-    let tv = execute_signal_and_finish(
-        scope,
-        &command_list,
-        dx_gpu_profile.take(),
-        SubmitFinish {
-            ctx,
+    let tv = if on_device_queue {
+        let stamp_ctx = scope
+            .device_owner
+            .context("device owner handle missing for DXR DispatchRays")?;
+        execute_signal_and_finish_device(
+            scope,
+            &command_list,
             device_handle,
+            stamp_ctx,
             slot_idx,
-            retain_key: None,
+            None,
             used_slots,
             frame_table_staging,
             frame_table_row,
-            pending_deletions,
-        },
-        StagingFinish {
-            texture_uploads: staged_texture_uploads,
-            belt_slices_len: belt_slices.len(),
-            belt_idx: belt_idx_final,
-        },
-        sync,
-    )?;
+            sync,
+        )?
+    } else {
+        execute_signal_and_finish(
+            scope,
+            &command_list,
+            dx_gpu_profile.take(),
+            SubmitFinish {
+                ctx,
+                device_handle,
+                slot_idx,
+                retain_key: None,
+                used_slots,
+                frame_table_staging,
+                frame_table_row,
+                pending_deletions,
+            },
+            StagingFinish {
+                texture_uploads: staged_texture_uploads,
+                belt_slices_len: belt_slices.len(),
+                belt_idx: belt_idx_final,
+            },
+            sync,
+        )?
+    };
     Ok(tv)
 }
 
@@ -2502,7 +2628,17 @@ pub(super) fn submit_graph_with_scope(
     let device_handle = scope.device_handle;
     let _tz = tracy_zone!("dx12.submit_graph");
     let has_render = commands.iter().any(|c| matches!(c, GraphCommand::Render { .. }));
-    let route_device = has_render;
+    let has_rt = commands.iter().any(|c| {
+        matches!(
+            c,
+            GraphCommand::Compute(
+                GpuCommand::SetRayTracingPipeline(_)
+                    | GpuCommand::TraceRays { .. }
+                    | GpuCommand::BuildAccelerationStructure(_)
+            )
+        )
+    });
+    let route_device = has_render || has_rt;
     let (command_list, slot_idx, on_device_queue) = if route_device {
         let (cl, idx) = acquire_device_direct_slot(scope)?;
         (cl, idx, true)
@@ -2664,7 +2800,7 @@ pub(super) fn submit_graph_with_scope(
     };
 
     let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
-    let (belt_idx_final, pending_deletions, frame_table_row);
+    let (belt_idx_final, pending_deletions, frame_table_row, _rt_geom_keep);
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
         let mut cmd_ctx = CmdCtx {
@@ -2678,8 +2814,10 @@ pub(super) fn submit_graph_with_scope(
             gpu_profile: &mut dx_gpu_profile,
             dispatch_idx: 0,
             current_compute_pipeline: None,
+            current_rt: None,
             pending_deletions: Vec::new(),
             frame_table_row: None,
+            rt_geom_descs: Vec::new(),
         };
 
         let mut frame_table_prologue_in_cb = false;
@@ -2767,9 +2905,10 @@ pub(super) fn submit_graph_with_scope(
         belt_idx_final = cmd_ctx.belt_idx;
         pending_deletions = cmd_ctx.pending_deletions;
         frame_table_row = row_guard.take();
+        _rt_geom_keep = cmd_ctx.rt_geom_descs;
     }
 
-    let tail = compute_submit_tail_barrier();
+    let tail = compute_submit_tail_barrier(on_device_queue);
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
@@ -3252,6 +3391,26 @@ mod barrier_lowering_tests {
             slot_usage_to_dx12_access_for_buffer(&r, true),
             D3D12_BARRIER_ACCESS_COPY_SOURCE
         ));
+        assert!(!has(
+            slot_usage_to_dx12_access_for_buffer(&r, true),
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+        ));
+    }
+
+    /// GraphIR maps AS builds to TRANSFER. Mixing BUILD_RAYTRACING sync with
+    /// COPY_DEST access is debug layer ID 1331 (`ray_query` Close failure).
+    #[test]
+    fn transfer_buffer_sync_is_copy_only() {
+        let w = slot(NodeAccess::Write, UsageKindFlags::TRANSFER);
+        let sync = slot_usage_to_dx12_sync(&w, true, true);
+        assert_ne!(sync.0 & D3D12_BARRIER_SYNC_COPY.0, 0);
+        assert_eq!(
+            sync.0 & D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE.0,
+            0,
+            "BUILD_RAYTRACING must not share a buffer barrier with COPY_DEST"
+        );
+        let access = slot_usage_to_dx12_access_for_buffer(&w, true);
+        assert!(has(access, D3D12_BARRIER_ACCESS_COPY_DEST));
     }
 
     /// Render-pass buffer read maps to SHADER_RESOURCE (vertex/pixel), never an

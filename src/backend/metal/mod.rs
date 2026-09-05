@@ -11,6 +11,7 @@
 //! - `types`: Internal state structs
 //! - `utils`: Format conversion and helpers
 
+mod accel;
 pub(super) mod api_log;
 mod buffer;
 mod compute;
@@ -18,6 +19,7 @@ mod context;
 mod device;
 mod frame_table;
 pub(super) mod metal_capture;
+mod objc_catch;
 mod objc_id;
 mod pending_submit;
 mod pipeline;
@@ -207,6 +209,8 @@ impl MetalBackend {
                 next_texture_handle: 1,
                 samplers: std::collections::HashMap::new(),
                 next_sampler_handle: 1,
+                accels: std::collections::HashMap::new(),
+                next_accel_handle: 1,
                 slang_compiler: Some(slang_compiler),
             },
         })
@@ -346,7 +350,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
-        device::adapter_capabilities(adapter_id)
+        device::adapter_capabilities(&self.state.adapters, adapter_id)
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
@@ -644,6 +648,73 @@ impl GpuBackend for MetalBackend {
         pipeline::destroy(&mut self.state, pipeline);
     }
 
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.state.shaders.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+        }
+    }
+
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        shader::ensure_stage_compiled(&mut self.state, shader, stage)
+    }
+
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let reflection = self.state.shaders.get(&shader)?.reflection.as_ref()?;
+        let want = match stage {
+            crate::slang::SlangStage::Vertex => "vertex",
+            crate::slang::SlangStage::Fragment => "fragment",
+            crate::slang::SlangStage::Mesh => "mesh",
+            crate::slang::SlangStage::Amplification => "amplification",
+            _ => return None,
+        };
+        reflection.stage_interfaces.iter().find(|s| s.stage == want).cloned()
+    }
+
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(ps) = self.state.pipelines.get_mut(&pipeline) {
+            ps.push_constant_categories = contract.categories();
+            if ps.binding_element_strides.len() != contract.resources.len() {
+                ps.binding_element_strides = vec![None; contract.resources.len()];
+            }
+        }
+    }
+
+    fn create_mesh_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("mesh_pipeline#{}", desc.mesh));
+        pipeline::create_mesh(
+            &mut self.state,
+            device,
+            desc.mesh,
+            desc.fragment,
+            desc.amplification,
+            raster,
+            depth_stencil,
+            shader_debug_name,
+        )
+    }
+
     fn create_render_target_with_depth(
         &mut self,
         device: DeviceHandle,
@@ -719,6 +790,22 @@ impl GpuBackend for MetalBackend {
 
     fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32> {
         sampler::bindless_index(&self.state, sampler)
+    }
+
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        accel::create(&mut self.state, device, desc)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        accel::destroy(&mut self.state, accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        accel::bindless_index(&self.state, accel)
     }
 
     fn create_surface(
@@ -1171,7 +1258,7 @@ mod tests {
         use ::metal::Device as MTLDevice;
 
         let device = MTLDevice::system_default().expect("No Metal device available");
-        let (buf_enc, tex_enc, si_enc, smp_enc) = create_argument_encoders(&device);
+        let (buf_enc, tex_enc, si_enc, smp_enc, accel_enc) = create_argument_encoders(&device);
 
         // All four encoders must report the same 8-byte stride.
         assert_eq!(
@@ -1195,8 +1282,16 @@ mod tests {
             smp_enc.encoded_length(),
             "storage-image and sampler encoder strides differ"
         );
+        if device.supports_raytracing() {
+            let accel_enc = accel_enc.expect("ray-tracing device must have accel encoder");
+            assert_eq!(
+                accel_enc.encoded_length(),
+                smp_enc.encoded_length(),
+                "accel and sampler encoder strides differ"
+            );
+        }
 
-        // The stride must evenly divide ARGUMENT_BUFFER_SIZE so that all 5
+        // The stride must evenly divide ARGUMENT_BUFFER_SIZE so that all 6
         // resource categories fit without overflow.
         assert_eq!(
             ARGUMENT_BUFFER_SIZE % smp_enc.encoded_length(),

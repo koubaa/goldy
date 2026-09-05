@@ -1,14 +1,15 @@
-//! Textured quad example - demonstrates texture sampling.
+//! Textured quad example — stage-local resources, automatic payload linking, named draw bindings.
 //!
-//! Demonstrates retained scheme with offscreen render pass → copy-to-present.
+//! The vertex stage has no bindless resources; the fragment stage declares `tex` and `smp`.
+//! Goldy links `FullscreenVarying` and binds resources by pipeline name.
 //!
 //! Run with: cargo run --example textured_quad
 
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
     Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, NodeAccess, Parcel,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
-    ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderBinding,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -149,12 +150,9 @@ impl App {
         sampler: &Sampler,
         scene_rt: &Lease<LeaseRenderTarget>,
     ) -> anyhow::Result<Transaction> {
-        let shader_resources = [
-            ShaderResourceSlot::Parcel {
-                parcel: texture,
-                access: NodeAccess::Read,
-            },
-            ShaderResourceSlot::Sampler(sampler),
+        let bindings = [
+            ShaderBinding::read("tex", texture),
+            ShaderBinding::sampler("smp", sampler),
         ];
 
         let mut pass = scheme.render_pass(
@@ -167,7 +165,7 @@ impl App {
                 a: 1.0,
             }),
         );
-        pass.with_shader_resources(&shader_resources);
+        pass.with_shader_bindings(&bindings);
         pass.with_parcel(vertex_buffer, NodeAccess::Read);
 
         pass.set_pipeline(pipeline);

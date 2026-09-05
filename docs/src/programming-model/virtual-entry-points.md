@@ -9,6 +9,12 @@ Goldy's **virtual entry points** let you write shader entry points with clean, t
 | `[goldy_compute]` | Compute | `[shader("compute")]` |
 | `[goldy_vertex]` | Vertex | `[shader("vertex")]` |
 | `[goldy_fragment]` | Fragment | `[shader("fragment")]` |
+| `[goldy_raygen]` | Ray generation | `[shader("raygeneration")]` |
+| `[goldy_miss]` | Miss | `[shader("miss")]` |
+| `[goldy_closesthit]` | Closest hit | `[shader("closesthit")]` |
+| `[goldy_mesh]` | Mesh | `[shader("mesh")]` |
+| `[goldy_amplification]` | Amplification / task | `[shader("amplification")]` |
+
 
 A minimal example:
 
@@ -38,6 +44,7 @@ Each resource parameter occupies one **bindless slot** (a 16-bit index packed in
 | `DirectSpatial<T>` | `goldy_direct_spatial<T>(slot)` | Read/write 2D texture |
 | `ByteAddress` | `goldy_byte_address(slot)` | Raw byte-address buffer |
 | `Filter` | `goldy_filter(slot)` | Sampler state |
+| `Accel` | `goldy_accel(slot)` | Top-level acceleration structure (`RayQuery` / `TraceRay`, when `DeviceCapabilities::ray_query` or `ray_tracing_pipelines` is set) |
 
 ### Broadcast Parameters
 
@@ -53,7 +60,7 @@ void cs_main(SimParams params, Scattered<Particle> data, ThreadId id) {
 }
 ```
 
-In vertex and fragment shaders, the **last** unrecognized struct is treated as the stage input (vertex attributes or fragment varyings) rather than a broadcast. All preceding unrecognized structs are broadcasts.
+In vertex and fragment shaders, the **last** unrecognized struct is treated as the stage input (vertex attributes or fragment varyings) rather than a broadcast. All preceding unrecognized structs are broadcasts. Payload structs are shader-owned: define them once (or with matching semantics in each module) and Goldy links producer → consumer structurally. Rust never repeats a `Varying` type.
 
 ### System-Value Parameters
 
@@ -67,6 +74,8 @@ System-value wrapper types are mapped to `SV_*` semantics. The generated entry p
 | `VertexId` | `SV_VertexID` | `.value` |
 | `InstanceId` | `SV_InstanceID` | `.value` |
 | `IsFrontFace` | `SV_IsFrontFace` | `.value` |
+| `DispatchRaysIndex` | `SV_DispatchRaysIndex` | `.x`, `.y`, `.z` (raygen) |
+| `DispatchRaysDimensions` | `SV_DispatchRaysDimensions` | `.x`, `.y`, `.z` (raygen) |
 
 ### Scalar Parameters
 
@@ -97,9 +106,9 @@ float4 fs_main(MyUniforms cfg, FullscreenVarying input) : SV_Target {
 
 The transform (implemented in `slang/virtual_main.rs`) runs before Slang compilation and performs three operations:
 
-1. **Generates a wrapper function** with the real `[shader("...")]` attribute and a fixed 16-word push-constant signature.
-2. **Renames the user function** from `cs_main` to `_goldy_user_cs_main` so both can coexist.
-3. **Removes the `[goldy_*]` attribute** and `[numthreads]` from the renamed user function (they live on the generated wrapper).
+1. **Generates a wrapper function** with the real `[shader("...")]` attribute and a fixed 16-word push-constant signature (mesh wrappers also declare `out vertices` / `out indices`).
+2. **Renames the user function** to `_goldy_user_<name>` (or `goldy_mesh` / `goldy_amplification` for those stages) so both can coexist.
+3. **Removes the `[goldy_*]` attribute** and `[numthreads]` / `[outputtopology]` from the renamed helper (they live on the generated wrapper).
 
 ### Push Constant Layout
 
@@ -148,13 +157,16 @@ The `#line 1` directive is inserted between the generated wrapper and the user s
 
 ### Vertex/Fragment Example
 
+Define the interpolated payload once. Each stage lists only the resources it reads. Goldy links `VSOutput` to the fragment input by semantic (`SV_Position`, `TEXCOORD0`, …), not by struct name, and merges `scene` into one pipeline slot.
+
 ```hlsl
+struct VSOutput {
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+};
+
 [goldy_vertex]
 VSOutput vs_main(SceneUniforms scene, Scattered<Instance> instances, VertexId vid, InstanceId iid) {
-    // scene → broadcast (slot 0)
-    // instances → scattered (slot 1)
-    // vid → SV_VertexID
-    // iid → SV_InstanceID
     Instance inst = instances[iid.value];
     VSOutput out;
     // ... transform vertex ...
@@ -164,15 +176,25 @@ VSOutput vs_main(SceneUniforms scene, Scattered<Instance> instances, VertexId vi
 [goldy_fragment]
 float4 fs_main(SceneUniforms scene, Interpolated<float4> albedo, Filter samp,
                VSOutput input) : SV_Target {
-    // scene → broadcast (slot 0)
-    // albedo → texture (slot 1)
-    // samp → sampler (slot 2)
-    // input → pass-through stage varying
     return albedo.Sample(samp, input.uv) * scene.tint;
 }
 ```
 
-Both entry points share the same push-constant layout. Fragment shader slot expectations take precedence when Goldy extracts category metadata (since resource binding typically lives there in a vertex+fragment pair).
+On the CPU, bind by those parameter names:
+
+```rust
+pass.with_shader_bindings(&[
+    ShaderBinding::read("scene", &scene),
+    ShaderBinding::read("instances", &instances),
+    ShaderBinding::read("albedo", &albedo),
+    ShaderBinding::sampler("samp", &sampler),
+]);
+pass.set_pipeline(&pipeline);
+```
+
+The merged raster contract is fragment-first (`scene`, `albedo`, `samp`) then unique vertex resources (`instances`). Wrappers remap each stage onto that shared push layout, so the vertex shader still sees `scene` as its local first parameter while reading pipeline slot 0.
+
+Builtins (`VertexId`, `InstanceId`) are invocation-provided; they are not part of the resource contract.
 
 ## Preprocessor Conditionals
 

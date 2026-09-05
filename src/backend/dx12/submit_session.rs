@@ -27,10 +27,12 @@ pub(crate) struct Dx12RecordState<'a> {
     pub shaders: &'a SharedShaderTable,
     pub pipelines: &'a SharedPipelineTable,
     pub compute_pipelines: &'a SharedComputePipelineTable,
+    pub rt_pipelines: &'a super::types::SharedRayTracingPipelineTable,
     pub render_targets: &'a SharedRenderTargetTable,
     pub textures: &'a SharedTextureTable,
     #[allow(dead_code)]
     pub samplers: &'a SharedSamplerTable,
+    pub accels: &'a super::types::SharedAccelTable,
 }
 
 /// Cloned handles for one partition submit — no global backend lock required.
@@ -88,6 +90,10 @@ impl<'a> Dx12SubmitScope<'a> {
         self.record.compute_pipelines
     }
 
+    pub fn rt_pipelines(&self) -> &'a super::types::SharedRayTracingPipelineTable {
+        self.record.rt_pipelines
+    }
+
     pub fn render_targets(&self) -> &'a SharedRenderTargetTable {
         self.record.render_targets
     }
@@ -99,6 +105,10 @@ impl<'a> Dx12SubmitScope<'a> {
     #[allow(dead_code)]
     pub fn samplers(&self) -> &'a SharedSamplerTable {
         self.record.samplers
+    }
+
+    pub fn accels(&self) -> &'a super::types::SharedAccelTable {
+        self.record.accels
     }
 }
 
@@ -130,9 +140,11 @@ pub(crate) fn record_state_from_backend<'a>(
         shaders: &state.shaders,
         pipelines: &state.pipelines,
         compute_pipelines: &state.compute_pipelines,
+        rt_pipelines: &state.rt_pipelines,
         render_targets: &state.render_targets,
         textures: &state.textures,
         samplers: &state.samplers,
+        accels: &state.accels,
     })
 }
 
@@ -153,9 +165,11 @@ pub(crate) fn record_state_for_legacy_render<'a>(
         shaders: &state.shaders,
         pipelines: &state.pipelines,
         compute_pipelines: &state.compute_pipelines,
+        rt_pipelines: &state.rt_pipelines,
         render_targets: &state.render_targets,
         textures: &state.textures,
         samplers: &state.samplers,
+        accels: &state.accels,
     })
 }
 
@@ -173,9 +187,11 @@ pub(crate) struct Dx12SubmitSession {
     shaders: SharedShaderTable,
     pipelines: SharedPipelineTable,
     compute_pipelines: SharedComputePipelineTable,
+    rt_pipelines: super::types::SharedRayTracingPipelineTable,
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
+    accels: super::types::SharedAccelTable,
     device_owner_handle: Option<ContextHandle>,
     ctx_fence: ID3D12Fence,
 }
@@ -227,9 +243,11 @@ impl Dx12SubmitSession {
             shaders: Arc::clone(&state.shaders),
             pipelines: Arc::clone(&state.pipelines),
             compute_pipelines: Arc::clone(&state.compute_pipelines),
+            rt_pipelines: Arc::clone(&state.rt_pipelines),
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
+            accels: Arc::clone(&state.accels),
             device_owner_handle,
             ctx_fence,
         }))
@@ -249,9 +267,11 @@ impl Dx12SubmitSession {
                 shaders: &self.shaders,
                 pipelines: &self.pipelines,
                 compute_pipelines: &self.compute_pipelines,
+                rt_pipelines: &self.rt_pipelines,
                 render_targets: &self.render_targets,
                 textures: &self.textures,
                 samplers: &self.samplers,
+                accels: &self.accels,
             },
             context_fences: &self.context_fences,
             ctx_fence: self.ctx_fence.clone(),

@@ -289,6 +289,8 @@ pub enum ResourceCategory {
     Texture,
     /// Sampler slot. Used with `goldy_filter`.
     Sampler,
+    /// Acceleration-structure slot. Used with `goldy_accel` / `Accel`.
+    Accel,
 }
 
 impl ResourceCategory {
@@ -300,6 +302,7 @@ impl ResourceCategory {
             ResourceCategory::StorageImage => "storage_image",
             ResourceCategory::Texture => "texture",
             ResourceCategory::Sampler => "sampler",
+            ResourceCategory::Accel => "accel",
         }
     }
 
@@ -467,6 +470,11 @@ bitflags! {
         /// Prefer deposits for application uploads. Only valid for [`BufferKind::Scattered`].
         /// Cannot be combined with [`Self::CPU_READABLE`] or [`Self::GPU_ONLY`].
         const CPU_WRITABLE = 1 << 4;
+        /// Geometry buffer used as BLAS build input (vertex or index data).
+        ///
+        /// Vulkan adds `SHADER_DEVICE_ADDRESS` and acceleration-structure build-input
+        /// usage. Other backends ignore extra bits that are not required.
+        const ACCEL_INPUT = 1 << 5;
     }
 }
 

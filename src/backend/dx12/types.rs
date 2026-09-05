@@ -11,8 +11,8 @@
 //! - Shaders access resources by indexing into the descriptor heaps
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::timeline::SmallContextMap;
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
@@ -77,6 +77,7 @@ pub(crate) struct ResourceRegistry {
     /// Maps texture handle to UAV offset (for storage textures / TextureKind::Direct)
     pub texture_uav_offsets: HashMap<TextureHandle, u32>,
     pub sampler_offsets: HashMap<SamplerHandle, u32>,
+    pub accel_offsets: HashMap<AccelerationStructureHandle, u32>,
 }
 
 #[allow(dead_code)]
@@ -127,6 +128,16 @@ impl ResourceRegistry {
         let offset = self.sampler.alloc();
         self.sampler_offsets.insert(handle, offset);
         offset
+    }
+
+    pub fn register_accel(&mut self, handle: AccelerationStructureHandle) -> u32 {
+        let offset = self.cbv_srv_uav.alloc();
+        self.accel_offsets.insert(handle, offset);
+        offset
+    }
+
+    pub fn extract_accel_slots(&mut self, handle: AccelerationStructureHandle) -> Vec<u32> {
+        self.accel_offsets.remove(&handle).into_iter().collect()
     }
 
     /// Reserve the low bindless indices for runtime protocol (frame table).
@@ -540,6 +551,14 @@ pub(crate) struct DxgiAdapterInfo {
     pub adapter_id: u32,
     /// From `D3D12_FEATURE_DATA_D3D12_OPTIONS::TiledResourcesTier` at enumeration.
     pub supports_reserved_buffers: bool,
+    /// DXR tier 1.1 (`D3D12_RAYTRACING_TIER_1_1`) — inline ray query.
+    pub ray_query: bool,
+    /// DXR tier 1.0+ — ray-tracing pipelines.
+    pub ray_tracing_pipelines: bool,
+    /// `D3D12_MESH_SHADER_TIER_1`.
+    pub mesh_shaders: bool,
+    /// Amplification shaders ship with mesh-shader tier 1.
+    pub amplification_shaders: bool,
 }
 
 /// A slot in the compute command allocator pool.
@@ -679,6 +698,11 @@ pub(crate) enum PendingDeletion {
     /// tracked in any resource map.  Dropping it releases the COM reference and
     /// frees the GPU memory once the fence is met.
     StandaloneResource(Direct3D12::ID3D12Resource),
+    Accel {
+        accel_handle: AccelerationStructureHandle,
+        resource: Direct3D12::ID3D12Resource,
+        scratch: Direct3D12::ID3D12Resource,
+    },
 }
 
 /// Identifies which descriptor heap owns a deferred slot reclamation.
@@ -954,6 +978,38 @@ impl DescriptorRegistry {
         for slot in slots {
             self.queue_slot_reclamation(slot);
         }
+    }
+
+    pub(crate) fn reclaim_accel_slots(&mut self, handle: AccelerationStructureHandle) {
+        let slots = self.resource_registry.extract_accel_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(DeferredSlot::CbvSrvUav(slot));
+        }
+    }
+
+    pub(crate) fn accel_slot_keys(&self, handle: AccelerationStructureHandle) -> Vec<DeferredSlot> {
+        self.resource_registry
+            .accel_offsets
+            .get(&handle)
+            .copied()
+            .map(|offset| vec![DeferredSlot::CbvSrvUav(offset)])
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn bindless_retirement_requirements_for_accel(
+        &self,
+        handle: AccelerationStructureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots: Vec<u32> = self
+            .accel_slot_keys(handle)
+            .into_iter()
+            .filter_map(|s| match s {
+                DeferredSlot::CbvSrvUav(offset) => Some(offset),
+                DeferredSlot::Sampler(_) => None,
+            })
+            .collect();
+        self.merge_slot_requirements(&slots, base)
     }
 
     /// Return pending slots to the free list once every referencing context has retired.
@@ -1358,6 +1414,16 @@ pub(crate) fn destroy_pending_deletion(
             let _ = queue_requirements;
             drop(resource);
         }
+        PendingDeletion::Accel {
+            accel_handle,
+            resource,
+            scratch,
+        } => {
+            let _ = queue_requirements;
+            registry.reclaim_accel_slots(accel_handle);
+            drop(resource);
+            drop(scratch);
+        }
     }
 }
 
@@ -1424,10 +1490,16 @@ pub(crate) struct ShaderState {
     pub fragment_bytecode: Option<Vec<u8>>,
     /// Cached compiled compute shader bytecode
     pub compute_bytecode: Option<Vec<u8>>,
+    /// Cached bytecode for ray-tracing / mesh / amplification stages.
+    pub extra_bytecode: HashMap<crate::slang::SlangStage, Vec<u8>>,
     /// Reflection data for bindless rendering (ParameterBlock layouts)
     pub reflection: Option<crate::slang::ShaderReflection>,
     /// Pending struct layout validation on first stage compile; cleared after success.
     pub layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    /// Per-stage local-name → pipeline-slot remaps for graphics linking.
+    pub stage_slot_remaps: HashMap<crate::slang::SlangStage, HashMap<String, u32>>,
+    /// Bytecode compiled with a non-identity slot remap, keyed by (stage as u32, fingerprint).
+    pub remapped_bytecode: HashMap<(u32, u64), Vec<u8>>,
 }
 
 /// Graphics pipeline state.
@@ -1450,6 +1522,8 @@ pub(crate) struct PipelineState {
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
     pub shader_debug_name: String,
+    /// True when this PSO is mesh (+ optional amplification) rather than VS/PS.
+    pub is_mesh: bool,
 }
 
 /// Compute pipeline state.
@@ -1467,6 +1541,27 @@ pub(crate) struct ComputePipelineState {
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
+    pub shader_debug_name: String,
+}
+
+/// DXR state object + GPU shader-binding table.
+#[allow(dead_code)] // `sbt` / `device_handle` keep COM objects and identity; GPU uses VAs
+pub(crate) struct RayTracingPipelineState {
+    pub device_handle: DeviceHandle,
+    pub state_object: Direct3D12::ID3D12StateObject,
+    pub root_signature: Direct3D12::ID3D12RootSignature,
+    pub sbt: Direct3D12::ID3D12Resource,
+    pub raygen_va: u64,
+    pub raygen_size: u64,
+    pub miss_va: u64,
+    pub miss_size: u64,
+    pub miss_stride: u64,
+    pub hit_va: u64,
+    pub hit_size: u64,
+    pub hit_stride: u64,
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    pub push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
+    pub binding_element_strides: Vec<Option<u32>>,
     pub shader_debug_name: String,
 }
 
@@ -1535,6 +1630,22 @@ pub(crate) struct SamplerState {
     pub desc: SamplerDesc,
     /// Bindless descriptor heap offset (same as sampler_offset when bindless is enabled)
     pub bindless_offset: Option<u32>,
+}
+
+/// BLAS or TLAS plus bindless raytracing-acceleration-structure SRV.
+pub(crate) struct AccelState {
+    pub device_handle: DeviceHandle,
+    pub is_tlas: bool,
+    pub resource: Direct3D12::ID3D12Resource,
+    pub gpu_va: u64,
+    pub bindless_offset: Option<u32>,
+    pub scratch: Direct3D12::ID3D12Resource,
+    pub max_primitives: u32,
+    pub max_vertices: u32,
+    pub vertex_stride: u32,
+    /// After the first build, post-barriers leave the AS in AS_READ; rebuilds must
+    /// use AS_READ→AS_WRITE (not COMMON→AS_WRITE) or DX12 can TDR on later builds.
+    pub built: std::sync::atomic::AtomicBool,
 }
 
 /// Maximum number of frames that can be in-flight at once.
@@ -1638,6 +1749,13 @@ handle_table!(
 );
 handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
 handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
+handle_table!(AccelTable, SharedAccelTable, AccelerationStructureHandle, AccelState);
+handle_table!(
+    RayTracingPipelineTable,
+    SharedRayTracingPipelineTable,
+    RayTracingPipelineHandle,
+    RayTracingPipelineState
+);
 
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
@@ -1667,11 +1785,13 @@ pub(super) struct Dx12State {
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,
     pub compute_pipelines: SharedComputePipelineTable,
+    pub rt_pipelines: SharedRayTracingPipelineTable,
     pub render_targets: SharedRenderTargetTable,
     pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,
     pub textures: SharedTextureTable,
     pub samplers: SharedSamplerTable,
+    pub accels: SharedAccelTable,
     /// Next RTV descriptor offset (high-water mark; prefer free_rtv_offsets first)
     pub next_rtv_offset: u32,
     /// Recycled RTV descriptor slots available for reuse

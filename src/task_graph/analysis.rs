@@ -113,6 +113,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         #[cfg(feature = "graphics")]
         (ResourceId::PresentLease(a), ResourceId::PresentLease(b)) => a == b,
         (ResourceId::Deposit(a), ResourceId::Deposit(b)) => a == b,
+        (ResourceId::Accel(a), ResourceId::Accel(b)) => a == b,
         _ => false,
     }
 }
@@ -235,6 +236,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         #[cfg(feature = "graphics")]
         PresentLease(u32),
         Deposit(u32),
+        Accel(u64),
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -251,6 +253,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             #[cfg(feature = "graphics")]
             ResourceId::PresentLease(id) => GroupKey::PresentLease(id),
             ResourceId::Deposit(id) => GroupKey::Deposit(id),
+            ResourceId::Accel(h) => GroupKey::Accel(h),
         }
     }
 
@@ -528,7 +531,7 @@ pub(crate) fn waves_have_cpu_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
 /// Map a node's kind to the Koubaa pipeline category it belongs to.
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
-        NodeKind::Dispatch { .. } => UsageKindFlags::COMPUTE,
+        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } => UsageKindFlags::COMPUTE,
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
@@ -541,6 +544,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         // WithdrawRead participates in ordering edges but emits no GPU work in the IR.
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
+        NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
         // The device-visible footprint of a CPU dispatch is its staging copies.
         NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
     }
@@ -566,6 +570,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
             | ResourceId::Deposit(_)
+            | ResourceId::Accel(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE
@@ -646,6 +651,7 @@ fn compute_barriers(
                                     barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
                                 );
                             }
+                            ResourceId::Accel(_) => {}
                             _ => {
                                 // Collapse sub-range to parent for backend barrier commands.
                                 if let Some(h) = bi.resource.canonical_buffer_handle() {
@@ -866,7 +872,11 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
                 }
-                NodeKind::Dispatch { .. }
+                NodeKind::BuildAccelerationStructure(build) => {
+                    commands.push(GpuCommand::BuildAccelerationStructure(build.clone()));
+                }
+                NodeKind::TraceRays { .. }
+                | NodeKind::Dispatch { .. }
                 | NodeKind::RenderPass { .. }
                 | NodeKind::WithdrawRead { .. }
                 | NodeKind::CpuDispatch { .. } => {}
@@ -1004,6 +1014,32 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 }
 
                 i += run_end;
+            }
+        }
+
+        for &idx in &wave.node_indices {
+            let node = &ir.nodes[idx];
+            if let NodeKind::TraceRays {
+                pipeline,
+                resource_slots,
+                user_slots,
+                width,
+                height,
+                depth,
+            } = &node.kind
+            {
+                let slots = match resolver {
+                    Some(r) => r.resolve_slots(resource_slots, &node.bindings),
+                    None => resource_slots.clone(),
+                };
+                commands.push(GpuCommand::SetRayTracingPipeline(*pipeline));
+                push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
+                commands.push(GpuCommand::TraceRays {
+                    label: Some(node.label),
+                    width: *width,
+                    height: *height,
+                    depth: *depth,
+                });
             }
         }
 
@@ -1251,7 +1287,7 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
 }
 
 /// Returns false when the wave slice contains nodes that must be submitted standalone
-/// (upload payload staging, non-stable copy destinations, etc.).
+/// (upload payload staging, non-stable copy destinations, AS builds, etc.).
 pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
     #[cfg(feature = "graphics")]
     use super::ResourceId;
@@ -1281,11 +1317,33 @@ pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 NodeKind::CopyRenderTarget { .. } => {
                     return false;
                 }
+                NodeKind::BuildAccelerationStructure(_) => return false,
                 _ => {}
             }
         }
     }
     true
+}
+
+pub(crate) fn wave_has_accel_build(ir: &GraphIR, wave: &Wave) -> bool {
+    wave.node_indices
+        .iter()
+        .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::BuildAccelerationStructure(_)))
+}
+
+/// True when every GPU node in `waves` is an acceleration-structure build.
+pub(crate) fn partition_waves_are_accel_build(ir: &GraphIR, waves: &[Wave]) -> bool {
+    let mut any = false;
+    for wave in waves {
+        for &ni in &wave.node_indices {
+            match &ir.nodes[ni].kind {
+                NodeKind::BuildAccelerationStructure(_) => any = true,
+                NodeKind::WithdrawRead { .. } => {}
+                _ => return false,
+            }
+        }
+    }
+    any
 }
 
 /// Fingerprint contribution from destination texture barrier layouts for pitched
@@ -1336,6 +1394,12 @@ fn split_wave_range_at_retainability(
         // split non-retainable upload waves (WriteBuffer) from subsequent compute — those
         // stay in one partition for payload refresh and barrier-cost heuristics.
         if prev_retain && !curr_retain {
+            out.push(sub_start..base + i);
+            sub_start = base + i;
+        } else if wave_has_accel_build(ir, &waves[i - 1]) && !wave_has_accel_build(ir, &waves[i]) {
+            // AS builds must not share a retained CB with RayQuery/TraceRays: re-executing
+            // BuildRaytracingAccelerationStructure every frame stalls the DIRECT queue
+            // (CPU-wait on present) and flickers the TLAS.
             out.push(sub_start..base + i);
             sub_start = base + i;
         }
@@ -1651,7 +1715,13 @@ pub(crate) fn emit_graph_commands_for_waves(
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
+                NodeKind::BuildAccelerationStructure(build) => {
+                    commands.push(GraphCommand::Compute(GpuCommand::BuildAccelerationStructure(
+                        build.clone(),
+                    )));
+                }
                 NodeKind::Dispatch { .. }
+                | NodeKind::TraceRays { .. }
                 | NodeKind::RenderPass { .. }
                 | NodeKind::WithdrawRead { .. }
                 | NodeKind::CpuDispatch { .. } => {}
@@ -1695,6 +1765,31 @@ pub(crate) fn emit_graph_commands_for_waves(
                             }));
                         }
                     }
+                }
+                NodeKind::TraceRays {
+                    pipeline,
+                    resource_slots,
+                    user_slots,
+                    width,
+                    height,
+                    depth,
+                } => {
+                    let slots = match resolver {
+                        Some(r) => r.resolve_slots(resource_slots, &node.bindings),
+                        None => resource_slots.clone(),
+                    };
+                    commands.push(GraphCommand::Compute(GpuCommand::SetRayTracingPipeline(*pipeline)));
+                    let mut bind_cmds = Vec::new();
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
+                    for cmd in bind_cmds {
+                        commands.push(GraphCommand::Compute(cmd));
+                    }
+                    commands.push(GraphCommand::Compute(GpuCommand::TraceRays {
+                        label: Some(node.label),
+                        width: *width,
+                        height: *height,
+                        depth: *depth,
+                    }));
                 }
                 NodeKind::RenderPass {
                     target,
@@ -1942,6 +2037,29 @@ mod tests {
                 1,
                 0,
             )],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        assert!(!waves_can_retain(&ir, &schedule.waves));
+    }
+
+    #[test]
+    fn accel_build_wave_is_not_retainable() {
+        let ir = GraphIR {
+            nodes: vec![TaskNode {
+                label: "build_blas",
+                bindings: vec![],
+                kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
+                    dest: 1,
+                    vertex_buffer: 0,
+                    vertex_offset: 0,
+                    vertex_count: 3,
+                    vertex_stride: 12,
+                    index_buffer: None,
+                    index_offset: 0,
+                    index_count: 0,
+                }),
+            }],
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);

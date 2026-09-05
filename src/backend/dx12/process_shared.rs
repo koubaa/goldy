@@ -112,12 +112,16 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
                         .to_string();
                     tracing::info!("  [{}] {}", adapter_index, name);
 
-                    let supports_reserved_buffers = device::query_supports_reserved_buffers(&adapter);
+                    let gpu = device::query_adapter_gpu_features(&adapter);
                     adapters.push(DxgiAdapterInfo {
                         adapter,
                         desc,
                         adapter_id: adapter_index,
-                        supports_reserved_buffers,
+                        supports_reserved_buffers: gpu.supports_reserved_buffers,
+                        ray_query: gpu.ray_query,
+                        ray_tracing_pipelines: gpu.ray_tracing_pipelines,
+                        mesh_shaders: gpu.mesh_shaders,
+                        amplification_shaders: gpu.amplification_shaders,
                     });
                 }
                 adapter_index += 1;
@@ -138,12 +142,16 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
                             .trim_end_matches('\0')
                             .to_string();
                         tracing::info!("  [{}] {} (WARP)", WARP_ADAPTER_ID, name);
-                        let supports_reserved_buffers = device::query_supports_reserved_buffers(&adapter);
+                        let gpu = device::query_adapter_gpu_features(&adapter);
                         adapters.push(DxgiAdapterInfo {
                             adapter,
                             desc,
                             adapter_id: WARP_ADAPTER_ID,
-                            supports_reserved_buffers,
+                            supports_reserved_buffers: gpu.supports_reserved_buffers,
+                            ray_query: gpu.ray_query,
+                            ray_tracing_pipelines: gpu.ray_tracing_pipelines,
+                            mesh_shaders: gpu.mesh_shaders,
+                            amplification_shaders: gpu.amplification_shaders,
                         });
                     }
                     Err(e) => tracing::warn!("WARP GetDesc1 failed: {:?}", e),

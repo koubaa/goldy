@@ -564,6 +564,60 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             12u8.hash(h);
             cpu_id.hash(h);
         }
+        NodeKind::BuildAccelerationStructure(cmd) => {
+            13u8.hash(h);
+            match cmd {
+                crate::backend::AccelBuildCommand::BlasTriangles {
+                    dest,
+                    vertex_buffer,
+                    vertex_offset,
+                    vertex_count,
+                    vertex_stride,
+                    index_buffer,
+                    index_offset,
+                    index_count,
+                } => {
+                    0u8.hash(h);
+                    dest.hash(h);
+                    vertex_buffer.hash(h);
+                    vertex_offset.hash(h);
+                    vertex_count.hash(h);
+                    vertex_stride.hash(h);
+                    index_buffer.hash(h);
+                    index_offset.hash(h);
+                    index_count.hash(h);
+                }
+                crate::backend::AccelBuildCommand::Tlas { dest, instances } => {
+                    1u8.hash(h);
+                    dest.hash(h);
+                    instances.len().hash(h);
+                    for inst in instances.iter() {
+                        inst.blas.hash(h);
+                        for t in inst.transform {
+                            t.to_bits().hash(h);
+                        }
+                        inst.mask.hash(h);
+                        inst.custom_index.hash(h);
+                    }
+                }
+            }
+        }
+        NodeKind::TraceRays {
+            pipeline,
+            resource_slots,
+            user_slots,
+            width,
+            height,
+            depth,
+        } => {
+            14u8.hash(h);
+            pipeline.hash(h);
+            resource_slots.hash(h);
+            user_slots.hash(h);
+            width.hash(h);
+            height.hash(h);
+            depth.hash(h);
+        }
     }
 }
 
@@ -633,6 +687,16 @@ fn hash_render_command_for_emission(cmd: &crate::backend::RenderCommand, h: &mut
             first_index.hash(h);
             base_vertex.hash(h);
             first_instance.hash(h);
+        }
+        RenderCommand::SetMeshPipeline(p) => {
+            9u8.hash(h);
+            p.hash(h);
+        }
+        RenderCommand::DispatchMesh { x, y, z } => {
+            10u8.hash(h);
+            x.hash(h);
+            y.hash(h);
+            z.hash(h);
         }
     }
 }
@@ -717,6 +781,22 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                         offset.hash(&mut h);
                     }
                 }
+            }
+            NodeKind::TraceRays {
+                pipeline,
+                resource_slots,
+                user_slots,
+                width,
+                height,
+                depth,
+            } => {
+                12u8.hash(&mut h);
+                pipeline.hash(&mut h);
+                hash_resource_slots_for_fingerprint(resource_slots, &mut h);
+                user_slots.hash(&mut h);
+                width.hash(&mut h);
+                height.hash(&mut h);
+                depth.hash(&mut h);
             }
             NodeKind::ClearBuffer { buffer, offset, size } => {
                 1u8.hash(&mut h);
@@ -1868,6 +1948,19 @@ fn submit_resolved_ir_partitions_replay(
                 boundary.last_render_tv,
             );
             let merged = sidecar.merge_sync(sync.as_ref());
+
+            if analysis::partition_waves_are_accel_build(ir, &waves)
+                && ir_clean
+                && replay.partition_last_tv.get(part_idx).copied().flatten().is_some()
+            {
+                last_tv = replay.partition_last_tv[part_idx].unwrap();
+                boundary.record(separate, has_render, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                *partial_tv = last_tv;
+                *partial = result.clone();
+                part_idx += 1;
+                continue;
+            }
 
             if !can_retain {
                 if has_present {

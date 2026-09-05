@@ -37,6 +37,13 @@ pub enum GoldyError {
     #[error("scheme references a dropped retained resource")]
     StaleResource,
 
+    /// Graph or record-time misuse with a diagnosis and a suggested fix.
+    ///
+    /// Raised on [`crate::Scheme::submit`] (and some record helpers) when Goldy can
+    /// explain the problem without waiting for a GPU validation layer.
+    #[error("{0}")]
+    Validation(String),
+
     /// An unexpected backend error that does not map to the typed variants above.
     #[error(transparent)]
     Backend(#[from] anyhow::Error),
@@ -47,6 +54,7 @@ impl GoldyError {
     pub fn detail(&self) -> String {
         match self {
             Self::Backend(e) => format!("{e:#}"),
+            Self::Validation(s) => s.clone(),
             _ => self.to_string(),
         }
     }

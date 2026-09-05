@@ -29,6 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep in-lock compile until they implement `seed_compute_stage`. No
   `PipelineFactory` yet.
 
+- **`MeshPipeline` / `dispatch_mesh`** — mesh (+ optional amplification) graphics
+  pipelines on Vulkan (`VK_EXT_mesh_shader`), DX12 (mesh tier 1), and Metal
+  (`MTLMeshRenderPipelineDescriptor` / `drawMeshThreadgroups`). Record with
+  `SchemeRenderPassBuilder::set_mesh_pipeline` and `dispatch_mesh`. Skip when
+  `DeviceCapabilities::mesh_shaders` is false. WebGPU / CUDA are not wired.
+
+- **`DeviceCapabilities` RT / mesh bits** — `ray_query`, `ray_tracing_pipelines`,
+  `mesh_shaders`, and `amplification_shaders` report adapter hardware (Vulkan
+  extensions + features, DXR / mesh tiers, Metal `supportsRaytracing` / GPU
+  family). Slang compile plumbing accepts RT and mesh stages (`rgen_main`,
+  `mesh_main`, …); reflection maps `RaytracingAccelerationStructure` to
+  `ResourceKind::AccelerationStructure`.
+
+- **`RayTracingPipeline` / `Scheme::trace_rays`** — one raygen, miss, and triangle
+  closest-hit group with a backend-owned shader-binding table. Vulkan
+  `vkCmdTraceRaysKHR` and DX12 `DispatchRays` (DIRECT queue). Bind raygen
+  resources like compute (`Accel`, `Scattered`, `DispatchRaysIndex`). Skip when
+  `DeviceCapabilities::ray_tracing_pipelines` is false. Metal exposes
+  `ray_query` only (no SBT / `TraceRays`).
+
+- **Graph validation (`GoldyError::Validation`)** — `Scheme::submit` always checks
+  dependency cycles, mesh vs vertex command mix-ups, BLAS/TLAS misuse, and
+  `BufferFlags::ACCEL_INPUT` on BLAS geometry, with `hint:` text. `GOLDY_VALIDATION=scheme`
+  (alias `graph`) also requires Accel builds in the same scheme before RayQuery / TraceRays.
+  Examples: `mesh_triangle`, `ray_query`.
+
 - **CPU dispatches in `Scheme`** — `Scheme::cpu_node(label)` records a serial,
   stateless host function as a scheme node. The function's parameter list is
   its virtual main: one `&[T]` / `&mut [T]` (`T: bytemuck::Pod`) per parcel

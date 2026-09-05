@@ -12,6 +12,7 @@
 // Allow isize casts needed for FFI with raw-window-handle and ash
 #![allow(clippy::unnecessary_cast)]
 
+mod accel;
 mod api_log;
 mod buffer;
 mod compute;
@@ -24,6 +25,7 @@ mod pipeline;
 mod present_split;
 mod render_commands;
 mod render_target;
+mod rt_pipeline;
 mod sampler;
 mod shader;
 mod sparse;
@@ -74,6 +76,11 @@ fn render_reflection_data(
     }
 }
 
+/// Highest instance API Goldy is designed to use. Physical devices are still
+/// filtered to Vulkan 1.4+; this value may be lowered to match an older
+/// `VK_LAYER_KHRONOS_validation` so the loader does not warn.
+const VULKAN_TARGET_API: u32 = vk::make_api_version(0, 1, 4, 0);
+
 /// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
 /// `api`, `all`, … — see `validation_env`), or when the loader forces
 /// `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
@@ -84,6 +91,39 @@ fn vulkan_instance_validation_enabled() -> bool {
     std::env::var("VK_INSTANCE_LAYERS")
         .map(|layers| layers.contains("VK_LAYER_KHRONOS_validation"))
         .unwrap_or(false)
+}
+
+fn layer_spec_version(entry: &ash::Entry, layer_name: &[u8]) -> Option<u32> {
+    let layers = unsafe { entry.enumerate_instance_layer_properties() }.ok()?;
+    layers.into_iter().find_map(|layer| {
+        let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+        (name.to_bytes() == layer_name).then_some(layer.spec_version)
+    })
+}
+
+fn api_version_older(a: u32, b: u32) -> bool {
+    let (am, an) = (vk::api_version_major(a), vk::api_version_minor(a));
+    let (bm, bn) = (vk::api_version_major(b), vk::api_version_minor(b));
+    am < bm || (am == bm && an < bn)
+}
+
+/// Instance `apiVersion` to advertise. Clamped to the Khronos validation layer's
+/// spec version when that layer is enabled (VUID loader warning otherwise).
+fn instance_api_version(entry: &ash::Entry, enable_validation: bool) -> u32 {
+    let mut api = VULKAN_TARGET_API;
+    if enable_validation {
+        if let Some(layer_ver) = layer_spec_version(entry, b"VK_LAYER_KHRONOS_validation") {
+            if api_version_older(layer_ver, api) {
+                tracing::info!(
+                    "Vulkan instance apiVersion {}.{} to match Khronos validation (devices still require 1.4+)",
+                    vk::api_version_major(layer_ver),
+                    vk::api_version_minor(layer_ver),
+                );
+                api = vk::make_api_version(0, vk::api_version_major(layer_ver), vk::api_version_minor(layer_ver), 0);
+            }
+        }
+    }
+    api
 }
 
 /// Vulkan backend.
@@ -150,17 +190,15 @@ impl VulkanBackend {
         let minor = vk::api_version_minor(instance_version);
         tracing::info!("Vulkan loader version: {}.{}", major, minor);
 
-        // Note: We request 1.4 from the instance, but the loader may be older.
-        // The actual version check happens per-device when we enumerate physical devices.
-        // Drivers can support 1.4 even if the loader is 1.3.
-
-        // Create instance with Vulkan 1.4 and surface extensions
+        // Create instance with surface extensions. Physical devices are filtered
+        // to 1.4+; instance apiVersion is clamped if Khronos validation is older.
+        let enable_validation = vulkan_instance_validation_enabled();
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"goldy")
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(c"goldy")
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::make_api_version(0, 1, 4, 0));
+            .api_version(instance_api_version(&entry, enable_validation));
 
         // Surface extensions for windowed presentation
         let mut extensions: Vec<*const c_char> = vec![khr::surface::NAME.as_ptr()];
@@ -175,7 +213,6 @@ impl VulkanBackend {
         extensions.push(khr::android_surface::NAME.as_ptr());
 
         // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
-        let enable_validation = vulkan_instance_validation_enabled();
         let mut enabled_layers: Vec<*const c_char> = Vec::new();
         if enable_validation {
             tracing::info!("Vulkan validation layers ENABLED");
@@ -250,13 +287,18 @@ impl VulkanBackend {
                     let pdev_features = unsafe { instance.get_physical_device_features(handle) };
                     let supports_sparse =
                         pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
+                    let rt_mesh = device::query_rt_mesh_features(&instance, handle);
                     tracing::info!(
-                        "  [{}] {} ({:?}) - Vulkan {}.{}",
+                        "  [{}] {} ({:?}) - Vulkan {}.{}; ray_query={} rt_pipe={} mesh={} task={}",
                         id,
                         name.to_string_lossy(),
                         properties.device_type,
                         major,
-                        minor
+                        minor,
+                        rt_mesh.ray_query,
+                        rt_mesh.ray_tracing_pipelines,
+                        rt_mesh.mesh_shaders,
+                        rt_mesh.amplification_shaders
                     );
                     Some(PhysicalDeviceInfo {
                         handle,
@@ -265,6 +307,10 @@ impl VulkanBackend {
                         supports_sparse_buffer: supports_sparse,
                         vk_timestamp_compute_and_graphics: properties.limits.timestamp_compute_and_graphics != 0,
                         vk_timestamp_period_ns: properties.limits.timestamp_period,
+                        ray_query: rt_mesh.ray_query,
+                        ray_tracing_pipelines: rt_mesh.ray_tracing_pipelines,
+                        mesh_shaders: rt_mesh.mesh_shaders,
+                        amplification_shaders: rt_mesh.amplification_shaders,
                     })
                 } else {
                     rejected.push(format!("{}: {}.{}", name.to_string_lossy(), major, minor));
@@ -302,11 +348,13 @@ impl VulkanBackend {
             shaders: Arc::new(RwLock::new(ShaderTable::new())),
             pipelines: Arc::new(RwLock::new(PipelineTable::new())),
             compute_pipelines: Arc::new(RwLock::new(ComputePipelineTable::new())),
+            rt_pipelines: Arc::new(RwLock::new(RayTracingPipelineTable::new())),
             render_targets: Arc::new(RwLock::new(RenderTargetTable::new())),
             surfaces: HashMap::new(),
             next_surface_handle: 1,
             textures: Arc::new(RwLock::new(TextureTable::new())),
             samplers: Arc::new(RwLock::new(SamplerTable::new())),
+            accels: Arc::new(RwLock::new(AccelTable::new())),
             slang_compiler,
             compute_fence_pool: Arc::new(Mutex::new(HashMap::new())),
             device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -890,6 +938,52 @@ impl GpuBackend for VulkanBackend {
         pipeline::destroy(&self.state.devices, &self.state.pipelines, pipeline_handle);
     }
 
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.state.shaders.write().unwrap().entries.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+        }
+    }
+
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        let _ = self.ensure_shader_stage_compiled(shader, stage)?;
+        Ok(())
+    }
+
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let shaders = self.state.shaders.read().unwrap();
+        let reflection = shaders.entries.get(&shader)?.reflection.as_ref()?;
+        let want = match stage {
+            crate::slang::SlangStage::Vertex => "vertex",
+            crate::slang::SlangStage::Fragment => "fragment",
+            crate::slang::SlangStage::Mesh => "mesh",
+            crate::slang::SlangStage::Amplification => "amplification",
+            _ => return None,
+        };
+        reflection.stage_interfaces.iter().find(|s| s.stage == want).cloned()
+    }
+
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&pipeline) {
+            ps.push_constant_categories = contract.categories();
+            if ps.binding_element_strides.len() != contract.resources.len() {
+                ps.binding_element_strides = vec![None; contract.resources.len()];
+            }
+        }
+    }
+
     fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,
@@ -1043,6 +1137,43 @@ impl GpuBackend for VulkanBackend {
         Ok(handle)
     }
 
+    fn create_mesh_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        let mesh_module = self.ensure_shader_stage_compiled(desc.mesh, crate::slang::SlangStage::Mesh)?;
+        let fs_module = self.ensure_shader_stage_compiled(desc.fragment, crate::slang::SlangStage::Fragment)?;
+        let task_module = match desc.amplification {
+            Some(h) => Some(self.ensure_shader_stage_compiled(h, crate::slang::SlangStage::Amplification)?),
+            None => None,
+        };
+        let (cats, strides) =
+            render_reflection_data(&self.state.shaders.read().unwrap().entries, desc.mesh, desc.fragment);
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("mesh_pipeline#{}", desc.mesh));
+        let handle = pipeline::create_mesh(
+            &self.state.devices,
+            &self.state.pipelines,
+            device_handle,
+            mesh_module,
+            fs_module,
+            task_module,
+            raster,
+            depth_stencil,
+            shader_debug_name,
+        )?;
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
+        }
+        Ok(handle)
+    }
+
     fn create_render_target_with_depth(
         &mut self,
         device_handle: DeviceHandle,
@@ -1164,6 +1295,22 @@ impl GpuBackend for VulkanBackend {
         sampler::bindless_index(&self.state.samplers, sampler_handle)
     }
 
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        accel::create(&mut self.state, device, desc)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        accel::destroy(&self.state, accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        accel::bindless_index(&self.state, accel)
+    }
+
     fn create_compute_pipeline(
         &mut self,
         device_handle: DeviceHandle,
@@ -1207,6 +1354,69 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
         compute::destroy(&self.state.devices, &self.state.compute_pipelines, pipeline_handle);
+    }
+
+    fn create_ray_tracing_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuRayTracingPipelineDesc,
+        debug_name: Option<&str>,
+    ) -> Result<RayTracingPipelineHandle> {
+        let rgen = self.ensure_shader_stage_compiled(desc.raygen, crate::slang::SlangStage::RayGeneration)?;
+        let rmiss = self.ensure_shader_stage_compiled(desc.miss, crate::slang::SlangStage::Miss)?;
+        let rchit = self.ensure_shader_stage_compiled(desc.closest_hit, crate::slang::SlangStage::ClosestHit)?;
+        let (cats, strides) = {
+            let shaders = self.state.shaders.read().unwrap();
+            shaders
+                .entries
+                .get(&desc.raygen)
+                .and_then(|s| s.reflection.as_ref())
+                .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+                .unwrap_or_default()
+        };
+        let shader_debug_name = debug_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("rt_pipeline#{}", desc.raygen));
+        let handle = rt_pipeline::create(
+            &self.state.instance,
+            &self.state.devices,
+            &self.state.rt_pipelines,
+            device_handle,
+            rgen,
+            rmiss,
+            rchit,
+            shader_debug_name,
+        )?;
+        if let Some(ps) = self.state.rt_pipelines.write().unwrap().entries.get_mut(&handle) {
+            ps.push_constant_categories = cats;
+            ps.binding_element_strides = strides;
+        }
+        Ok(handle)
+    }
+
+    fn destroy_ray_tracing_pipeline(&mut self, pipeline_handle: RayTracingPipelineHandle) {
+        rt_pipeline::destroy(&self.state.devices, &self.state.rt_pipelines, pipeline_handle);
+    }
+
+    fn ray_tracing_pipeline_slot_access(
+        &self,
+        pipeline: RayTracingPipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        let read = self.state.rt_pipelines.read().unwrap();
+        let Some(ps) = read.entries.get(&pipeline) else {
+            return Vec::new();
+        };
+        ps.push_constant_categories
+            .iter()
+            .map(|cat| {
+                cat.map(|c| match c {
+                    crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
+                        crate::types::ResourceAccess::ReadWrite
+                    }
+                    _ => crate::types::ResourceAccess::Read,
+                })
+            })
+            .collect()
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {

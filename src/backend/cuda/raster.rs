@@ -129,7 +129,7 @@ fn raster_fingerprint(
     for command in commands {
         std::mem::discriminant(command).hash(&mut hash);
         match command {
-            RenderCommand::SetPipeline(handle) => {
+            RenderCommand::SetPipeline(handle) | RenderCommand::SetMeshPipeline(handle) => {
                 backend
                     .pipelines
                     .get(handle)
@@ -177,6 +177,11 @@ fn raster_fingerprint(
                 first_index.hash(&mut hash);
                 base_vertex.hash(&mut hash);
                 first_instance.hash(&mut hash);
+            }
+            RenderCommand::DispatchMesh { x, y, z } => {
+                x.hash(&mut hash);
+                y.hash(&mut hash);
+                z.hash(&mut hash);
             }
             RenderCommand::BindResources { buffers } => {
                 for h in buffers {
@@ -1116,7 +1121,7 @@ pub(super) fn render_to_target(
             RenderCommand::ClearDepth(_) => {
                 // Applied at pass begin (matches shipped DX12).
             }
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 let pipeline = backend
                     .pipelines
                     .get(pipeline_handle)
@@ -1245,6 +1250,9 @@ pub(super) fn render_to_target(
                         *first_instance,
                     );
                 }
+            }
+            RenderCommand::DispatchMesh { .. } => {
+                anyhow::bail!("mesh shaders are not supported on the CUDA/DX12 raster path");
             }
         }
     }

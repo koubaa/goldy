@@ -12,6 +12,9 @@
 //! let device = adapter.request_device(&Default::default()).unwrap();
 //! ```
 
+extern crate self as goldy;
+
+pub mod accel;
 pub(crate) mod backend;
 pub mod buffer;
 pub mod compute;
@@ -59,6 +62,7 @@ pub mod exchange;
 mod heap_tests;
 pub mod parcel;
 pub mod retained_pool;
+pub mod rt_pipeline;
 pub mod scheme;
 pub mod signal;
 #[cfg(feature = "graphics")]
@@ -76,7 +80,7 @@ pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
 pub use scheme::{Lease, ReplayStats, Scheme, SchemeCpuNodeBuilder, Submission};
 #[cfg(feature = "graphics")]
-pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, Transaction};
+pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};
 #[cfg(feature = "graphics")]
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
@@ -86,6 +90,7 @@ pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
+pub use accel::{AccelInstance, AccelKind, AccelerationStructure};
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;
@@ -96,6 +101,7 @@ pub use device::{
     RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
 };
 pub use goldy_derive::compute;
+pub use goldy_derive::GpuType;
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
 pub use kernel::gpu;
@@ -104,12 +110,19 @@ pub use kernel::{
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
 #[cfg(feature = "graphics")]
-pub use pipeline::{RenderPipeline, RenderPipelineDesc};
+pub use pipeline::{
+    MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc,
+};
+pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc, MAX_RAY_PAYLOAD_BYTES};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
-pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
+pub use slang::{
+    layout_validation_enabled, GpuField, GpuFieldType, GpuType, GraphicsPipelineInterface, InterpolationMode,
+    LayoutCheck, PackedGpuField, PackedGpuLayout, PipelineResource, PipelineResourceContract, StageInterface,
+    StageIoField, StructFieldLayout, StructLayout,
+};
 pub use task_graph::NodeAccess;
 pub use texture::TextureCopyFootprint;
 

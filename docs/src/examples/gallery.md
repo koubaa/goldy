@@ -1,6 +1,6 @@
 # Examples Gallery
 
-Goldy ships with **21 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on shipped backends (Vulkan 1.4+, DX12, Metal Tier 2+). CUDA and WebGPU backends are in progress; Tenstorrent is planned.
+Goldy ships with **23 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, ray query, mesh shaders, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on shipped backends (Vulkan 1.4+, DX12, Metal Tier 2+) when the adapter exposes the needed optional caps. CUDA and WebGPU backends are in progress; Tenstorrent is planned.
 
 ## Running Examples
 
@@ -20,6 +20,7 @@ These examples cover fundamental Goldy patterns: vertex buffers, surfaces, unifo
 | Example | What it demonstrates | Source |
 |---------|---------------------|--------|
 | **`triangle`** | Minimal windowed program: retained scheme, offscreen render pass, present via `SurfaceExchange`. | [`triangle.rs`](https://github.com/koubaa/goldy/blob/main/examples/triangle.rs) |
+| **`mesh_triangle`** | Same present path as `triangle`, using `MeshPipeline` + `dispatch_mesh`. Skips when `mesh_shaders` is false. | [`mesh_triangle.rs`](https://github.com/koubaa/goldy/blob/main/examples/mesh_triangle.rs) |
 | **`gradient`** | Animated full-screen gradient driven by a time uniform. Uses vertex-less rendering and optional `GOLDY_VALIDATE_LAYOUTS`. | [`gradient.rs`](https://github.com/koubaa/goldy/blob/main/examples/gradient.rs) |
 | **`checkerboard`** | Procedural animated checkerboard via UV distortion in a fragment shader. | [`checkerboard.rs`](https://github.com/koubaa/goldy/blob/main/examples/checkerboard.rs) |
 
@@ -32,6 +33,7 @@ Examples that use `ComputePipeline` and `Scheme` for GPU-side data processing, i
 | **`compute_particles`** | Compute updates particle positions; graphics renders instanced quads. Retained scheme scheduling. | [`compute_particles.rs`](https://github.com/koubaa/goldy/blob/main/examples/compute_particles.rs) |
 | **`game_of_life`** | Conway's Game of Life on the GPU with ping-pong sub-views in one retained mosaic parcel. | [`game_of_life.rs`](https://github.com/koubaa/goldy/blob/main/examples/game_of_life.rs) |
 | **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`. Writes swapchain via `SurfaceExchange::bind_destination`. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/examples/compute_to_surface.rs) |
+| **`ray_query`** | Triangle BLAS/TLAS + inline `RayQuery` in `[goldy_compute]`, written to the swapchain. Skips when `ray_query` is false. | [`ray_query.rs`](https://github.com/koubaa/goldy/blob/main/examples/ray_query.rs) |
 
 ## Graphics Pipelines
 
@@ -78,4 +80,5 @@ Run all windowed examples interactively:
 
 ```bash
 ./run_all_examples.sh
+ONLY=mesh_triangle,ray_query ./run_all_examples.sh
 ```
