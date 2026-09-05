@@ -14,6 +14,10 @@ Specialization is an implementation detail of the runtime, not an API. Every pro
 submits a retained scheme is a potential beneficiary without changing a line, and the
 only knob is an environment variable that turns the whole thing off.
 
+**Status:** implemented in `src/specialization.rs`, driven from `Scheme::submit` and
+`Scheme::set_node_param`. Sections below describe the shipped behaviour; the closing
+[Follow-ups](#follow-ups) list what was deliberately left out.
+
 ## Why not a flag per feature
 
 The obvious approach is to let the caller name the fact — a `has_tint` boolean on a worker
@@ -78,10 +82,13 @@ void cs_main(uniform uint _bw0, /* ... */ uniform uint _uw0, /* ... */) {
 Defining that macro to a wire-word literal bakes the value. `ShaderModule::variant` already
 merges defines onto a retained module, so a specialized program is
 `variant(&[("_GOLDY_SPEC_CS_MAIN_UW0", "10u")])` and nothing more. The macro is named after
-the entry point so that sources with several entries specialize independently, and the
+the author's `[goldy_compute]` function (`cs_main` above; `_GOLDY_SPEC_TINT_UW0` for
+`void tint(...)`) so that sources with several entries specialize independently, and the
 define always carries the raw `u32` wire word, so the runtime needs no knowledge of the
 param's Slang type — the existing `asfloat` / `asint` / `!= 0u` decode applies to the
-literal exactly as it applied to the push-constant word.
+literal exactly as it applied to the push-constant word. The runtime recovers the function
+name from the retained source (`single_compute_entry_name`); a source with zero or several
+compute entries has no unambiguous macro to define and is left alone.
 
 Two properties make this safe to swap under an already-recorded dispatch:
 
@@ -126,9 +133,22 @@ earn promotion, and a param that is stable is both free to retain and profitable
 | Variant PSO cache | `(shader identity, baked slots and values)` | Compiled pipeline | A recompile |
 | Per-site prediction | Dispatch-site identity | Which slots are baked | A re-record |
 
-Keeping them separate means a site can be demoted (or its scheme dropped) without throwing
-away the compiled pipeline, so re-promotion later is nearly free. The PSO cache is
-device-scoped and bounded; the prediction lives with the scheme node.
+Keeping them separate means a site can be demoted without throwing away the compiled
+pipeline, so re-promotion later is nearly free: a demoted site whose words come back is
+promoted straight from the cache once its streak recovers, with no compile.
+
+The PSO cache is **scheme-scoped** and bounded (16 variants, LRU). A device-scoped cache
+was the first design and does not work as stated: a `ComputePipeline` holds a strong
+`Device`, so a cache inside the device would form a reference cycle and the device would
+never be dropped. Scoping the cache to the scheme also settles ownership — the scheme holds
+an `Arc` to the variant it has promoted, and the cache holds another, so eviction from the
+cache never destroys a pipeline a node still binds. The price is that two schemes running
+the same shader with the same stable words each compile their own variant; the Slang disk
+cache and the driver's PSO cache make the second compile cheap, and device-level sharing is
+listed as a follow-up.
+
+Compile workers write into the cache directly, so a variant that finishes after its site
+lost interest still lands there rather than being dropped.
 
 The Slang bytecode disk cache already sits underneath both, keyed on post-transform source
 plus defines, so a cold process still avoids full recompiles.
@@ -141,25 +161,50 @@ predictor never speculates about the *current* frame — the params for the curr
 already known exactly, and history only decides whether to prepare a specialization for
 *future* frames.
 
-### States
+### Per-slot streaks
+
+Every dispatch node with at least one `with_param` gets a site record when it is declared
+(`Scheme::node`, `ComputeNodeRecord::commit_dispatch_scheme`, or a caller-side
+`set_node_pipeline`, which starts the site over against the new pipeline). The record holds
+the caller's pipeline (the *universal*), the shader's provenance, the words seen at the
+last submit, and per slot:
+
+- a **streak** — consecutive clean submits during which the word held its value. A changed
+  word resets its slot to zero on any submit; an unchanged word advances only when the
+  scheme was otherwise clean, so a scheme that re-records every frame for unrelated
+  reasons keeps its history but does not earn promotions from it. Topology dirtiness
+  (a foreign scheme changing shared-parcel interaction) resets every slot.
+- a **bake threshold** — the streak the slot needs before it is baked. It starts at the
+  warm threshold and grows every time the slot invalidates a compile or a promotion (to
+  the promote threshold, then doubling), so a fact that flips every few frames is baked
+  once, disproved once, and thereafter left dynamic while its neighbours specialize.
+
+The set of slots at or past their threshold is the site's **bake target**. It is per-slot:
+a site with a stable mode flag and a moving counter bakes the flag.
+
+### Stages
 
 Compilation is expensive and uncancellable once started, so promotion is staged. Compiling
 is separated from swapping, with different thresholds:
 
-| State | Entered when | Behaviour |
+| Stage | Entered when | Behaviour |
 |---|---|---|
-| `Observing` | Site recorded, or after a miss | Universal runs; count consecutive frames with unchanged params |
-| `Warming` | 2 consecutive clean submits with unchanged params | Universal still runs; variant compiles on a worker thread |
-| `Promoted` | 10 consecutive matches **and** the compile succeeded | Site's pipeline swapped to the variant |
-| `Pinned` | Repeated failed promotions | Universal only; no further compiles until reset |
+| Observing | Site declared, or after a demotion | Universal runs; streaks accumulate |
+| Warming | Bake target non-empty and not what is already promoted | Universal still runs; a variant baking the target compiles on a worker thread (or is taken from the cache) |
+| Ready | The compile landed | Universal still runs until every baked slot's streak reaches the promote threshold |
+| Promoted | Every baked slot at or past the promote threshold | Node rebound to the variant as a params-only re-record; the site keeps observing the slots it did not bake and may warm a *wider* variant |
+| Pinned | Three failed compiles | Universal only; the site is never consulted again |
 
-The two-hit warm threshold exists to skip the common ping-pong case, where a value
-alternates every frame and no specialization would ever pay off. The ten-hit promotion
-threshold buys confidence that the streak is a scene property rather than a coincidence,
-and it usually gives the compile enough time to finish before the swap is wanted.
+Defaults are warm at 2, promote at 10 (`SpecializationPolicy`). The two-hit warm threshold
+skips the common ping-pong case, where a value alternates every frame and no specialization
+would ever pay off. The ten-hit promotion threshold buys confidence that the streak is a
+scene property rather than a coincidence, and it usually gives the compile enough time to
+finish before the swap is wanted.
 
-Both thresholds are counted only on submits where the scheme was otherwise clean. A frame
-that re-records for unrelated reasons tells us nothing about param stability.
+The predictor runs at the top of `Scheme::submit`, before dirtiness is read for recording,
+so a promotion is recorded by the very submit that decided it and the scheme is clean again
+afterwards. It never touches a node whose current words differ from the variant's baked
+words — a swap is only ever to a program that agrees with the frame.
 
 ### Demotion is mandatory, not optional
 
@@ -175,33 +220,38 @@ inside the runtime rather than in a caller's hands.
 
 ### Cancellation is best-effort
 
-A param change while `Warming` sends a cancel signal. The signal is checked at three
-points: before the Slang compile starts, between Slang and pipeline creation, and before
-the swap. It cannot interrupt work already in flight — Slang compilation runs behind a
-process-global lock and the driver's pipeline creation is not interruptible — so a
+A baked word changing while a compile is in flight — in `set_node_param`, or observed at
+the next submit — drops the job and raises its cancel flag. The flag is honoured before the
+compile starts; it cannot interrupt work already running, because Slang compilation runs
+behind a process-global lock and the driver's pipeline creation is not interruptible, so a
 cancelled compile may still run to completion.
 
 When it does, the resulting pipeline is still inserted into the variant PSO cache. It is
 not swapped in, but it is not wasted either: if those words come back and earn promotion
 later, there is nothing left to compile.
 
-### Cost-aware promotion
+### Cost model
 
-A streak alone is not a reason to specialize. Recording a partition costs CPU time and, on
-backends that require it, a wait for the previous retained command storage to retire.
-Promotion should additionally require that the expected saving — a function of dispatch
-size, since a tiny dispatch cannot repay anything — exceeds the record cost. This is what
-keeps the predictor from recording extra command lists for small or short-lived surfaces.
+A streak alone is not the whole story. Recording a partition costs CPU time and, on
+backends that require it, a wait for the previous retained command storage to retire; a
+tiny dispatch cannot repay that. The shipped predictor has no dispatch-size term — the
+thresholds are the only cost model — so a small, long-lived, stable dispatch pays one
+re-record it may never recoup. That is bounded (one record per promotion, promotions are
+rare by construction) and is listed as a follow-up rather than guessed at without profiles.
 
 ### First frame, oscillation, reset
 
 - **First frames** always run universal. There is no speculation before any history exists.
 - **A miss** demotes immediately, as above.
-- **Oscillation** is absorbed by the two-hit warm gate, and repeated failed promotions move
-  the site to `Pinned` so a pathological caller cannot make Goldy compile forever.
-- **Reset** happens on a topology epoch (a foreign scheme changing shared-parcel
-  interaction topology, which already forces a re-record) or on an explicit purge. Both
-  clear prediction state; neither needs to clear the PSO cache.
+- **Oscillation** is absorbed by the two-hit warm gate and the growing per-slot bake
+  threshold, and three failed compiles move the site to Pinned so a pathological shader
+  cannot make Goldy compile forever.
+- **Reset** happens on topology dirtiness (a foreign scheme changing shared-parcel
+  interaction topology, which already forces a re-record) and on a caller-side
+  `set_node_pipeline`, which replaces the universal. Both clear streaks; neither clears the
+  PSO cache.
+- **Turning the feature off** at runtime (the environment variable is read every submit)
+  demotes every promoted site on the next submit and drops in-flight compiles.
 
 ## Baking must not change the binding layout
 
@@ -222,17 +272,16 @@ so it reflects *usage*. Two consequences, both observed:
   unreferenced, which drops it the same way — so on those backends at least one scalar slot
   has to stay dynamic.
 
-The second constraint costs nothing in practice: the predictor bakes the slots that have
-been stable, not all of them, and a site whose every param is stable can simply leave one
-slot dynamic.
+Neither constraint is enforced by the predictor, because the predictor does not run where
+they apply (next section). On the backends where it does run, the layout follows the
+signature and a variant binds exactly like its universal, so the site's bake target can be
+every stable slot.
 
-The first constraint needs a real check, and `slot_access` is not it — that table is
-derived from the shader signature, so it agrees across a variant that a usage-derived
-layout would reject. The check has to be against the pipeline's actual binding layout,
-which means a backend query; wgpu itself exposes no entry count for a
-`BindGroupLayout`, so the WebGPU backend has to report the count it computed. Until that
-exists, `set_node_pipeline` cannot tell a caller that a swap is unsafe, and an incompatible
-variant surfaces as a bind group mismatch inside the backend instead.
+A caller-side `set_node_pipeline` on WebGPU is a different matter: `slot_access` cannot
+check it — that table is derived from the shader signature, so it agrees across a variant
+that a usage-derived layout would reject — and wgpu exposes no entry count for a
+`BindGroupLayout`, so an incompatible hand swap surfaces as a bind group mismatch inside
+the backend rather than as a `set_node_pipeline` error.
 
 A site that cannot be specialized without moving its bindings must stay universal. That is
 a missed optimization, not a bug — but it has to be detected rather than assumed.
@@ -253,19 +302,24 @@ baking, because a layout may declare bindings the shader does not reference. Unt
 lands, the honest position is that Goldy's WebGPU backend cannot support specialization,
 not that WebGPU cannot.
 
-So promotion is conditional on a backend capability — whether pipeline binding layouts
-follow the shader signature — rather than on a backend allow-list. Vulkan, DX12, Metal, and
-CUDA report yes; WebGPU reports no while it uses auto layouts, and flips on by itself once
-it does not. The predictor stays backend-agnostic either way, and the capability is
+So promotion is conditional on a backend capability —
+`GpuBackend::compute_pipeline_layout_follows_signature` — rather than on a backend
+allow-list. Vulkan, DX12, Metal, CUDA, and the mock backend report yes; WebGPU reports no
+while it uses auto layouts, and flips on by itself once it does not; the CPU backend
+reports no because its host-callable lowering has no bake macros, so a variant would be the
+same kernel. The predictor stays backend-agnostic either way, and the capability is
 internal: specialization is an implementation detail, so it does not belong in
-`DeviceCapabilities` where a program would branch on it.
+`DeviceCapabilities` where a program would branch on it. A scheme queries it once, on its
+first submit.
 
 ## Off switch
 
-`GOLDY_SPECIALIZATION=0` disables prediction entirely: no history, no warm compiles, no
-swaps, and every site stays on the program it was recorded with. The gate follows the
-convention of [`GOLDY_DISABLE_CB_REUSE`](../appendix/environment-variables.md) — read once
-through `validation_env`, with a thread-local override for tests.
+Specialization is on by default. `GOLDY_SPECIALIZATION=0` (or `false` / `no` / `off`)
+disables prediction entirely: no history, no warm compiles, no swaps, and every site stays
+on the program it was recorded with. The gate follows the convention of
+[`GOLDY_DISABLE_CB_REUSE`](../appendix/environment-variables.md) — read through
+`validation_env`, with a thread-local override (`test_support::SpecializationOverride`) so
+tests that count records across many frames can pin it.
 
 This is separate from the backend capability above. The environment variable is a global
 kill switch for when prediction is suspected of causing a problem; the capability decides
@@ -292,22 +346,29 @@ The mechanism depends on runtime properties that are already in place:
 
 ### Shader provenance
 
-One prerequisite is missing. A dispatch node holds a `ComputePipelineHandle`, a
-`ComputePipeline` holds a backend handle, and neither can be traced back to the
-`ShaderModule` that produced it — so the runtime cannot recompile the program a site is
-running. Backend `ShaderState` still holds the source, but only while the caller's
-`ShaderModule` is alive, and nothing links a PSO to it.
-
-Specialization needs `ComputePipeline` to retain its compile inputs (an `Arc` of source,
-search paths, defines, optimization level, and layout checks are all already `Arc`-shaped
-on `ShaderModule`), and it needs the variant cache to own the pipelines it creates. This is
-part of the pipeline-creation work tracked in
-[goldy#175](https://github.com/koubaa/goldy/issues/175).
+A dispatch node holds a `ComputePipelineHandle` and a `ComputePipeline` holds a backend
+handle; neither, on its own, says which program it is. So every `ShaderModule` keeps its
+compile inputs — source, search paths, defines, optimization level, layout checks — in a
+shared `ShaderProvenance` with a process-unique id, and every `ComputePipeline` built from
+the module carries an `Arc` to it. The runtime can therefore compile a variant of the
+program a site is running after the caller has dropped the module
+(`ShaderModule::from_provenance`), and variants are keyed by provenance id plus baked
+words.
 
 Ownership matters more than it looks: on Vulkan, `destroy_compute_pipeline` waits for
-device idle, so evicting a variant is not a background operation. The cache has to be
-bounded and evict rarely, and it must outlive any retained command list that still binds
-the handle.
+device idle, so dropping a variant is not a background operation. The scheme holds the
+variant it has promoted; when a variant is unbound (demotion, a wider promotion, a caller
+swap) it is parked for two further submits before its `Arc` is released, by which point no
+retained command list that bound it is still the one being submitted. The bounded cache
+usually still holds it after that.
+
+### Telemetry
+
+`ReplayStats` gains `specialization_warms`, `specialization_promotions`, and
+`specialization_demotions`; `Scheme::node_is_specialized(NodeId)` answers for one site.
+Demotions are visible in the stats immediately after the `set_node_param` that caused
+them. Each transition also emits a `tracing` event under the `goldy` target (`debug` for
+warm / promote / demote, `warn` for a failed compile or a pinned site).
 
 ### Backend differences
 
@@ -322,6 +383,22 @@ the WebGPU uniform-buffer path, and the CUDA kernel-argument path — each defau
 macro to its own read expression, so baking works the same way everywhere and the launch
 layout is unchanged in all three. Graphics stages lower scalars without the indirection;
 specialization is defined for dispatch sites, so that is deliberate.
+
+## Follow-ups
+
+- **Cost model.** A dispatch-size (or measured-duration) term so tiny dispatches are never
+  promoted. Needs profiles from a real consumer before the threshold is more than a guess.
+- **Device-level variant sharing.** Many schemes running one shader with the same stable
+  words compile it once each today. Sharing needs an owner that does not cycle with
+  `Device`, e.g. variants that hold a weak device reference and a cache that drains on
+  device drop.
+- **WebGPU explicit layouts.** Building the pipeline layout from the signature-derived
+  `WgpuComputeLayout` would let the backend report `compute_pipeline_layout_follows_signature`
+  and enable prediction there with no predictor changes.
+- **Graphics stages.** Draw sites with scalar params lower without the macro indirection;
+  specialization is defined for compute dispatch sites only.
+- **Pipeline creation off the lock.** Warm compiles still take the backend mutex for PSO
+  creation ([goldy#175](https://github.com/koubaa/goldy/issues/175)).
 
 ## Non-goals
 

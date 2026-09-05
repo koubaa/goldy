@@ -52,6 +52,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops the binding. This is the primitive behind
   [shader specialization prediction](docs/src/design/shader-specialization.md).
 
+- **Shader specialization prediction** — retained schemes now specialize their
+  own compute dispatches. Every dispatch node with `with_param` scalars gets a
+  per-site predictor that counts, per slot, the clean submits during which the
+  wire word held its value. After 2 such submits a variant with the stable slots
+  baked (via the macros above) is compiled on a worker thread; after 10 it is
+  bound on the node as a params-only re-record. `set_node_param` on a baked slot
+  puts the node back on the caller's pipeline in the same call, so no submit
+  ever runs a program whose baked value disagrees with the frame. A slot that
+  invalidates a compile or a promotion needs a longer streak before it is baked
+  again, so facts that flip every few frames stay dynamic while their neighbours
+  specialize; three failed compiles pin a site to its universal pipeline.
+  Variants live in a bounded per-scheme LRU and are reused across demotions.
+  Output is byte-identical either way; the visible effects are
+  `ReplayStats::specialization_warms` / `specialization_promotions` /
+  `specialization_demotions` (new fields — exhaustive struct literals must add
+  them), `Scheme::node_is_specialized`, and one extra record per promotion or
+  demotion. On by default; `GOLDY_SPECIALIZATION=0` turns it off
+  (`test_support::SpecializationOverride` pins it for tests). Backends whose
+  compute pipeline layouts do not follow the shader signature decline through a
+  new internal `GpuBackend::compute_pipeline_layout_follows_signature`: WebGPU
+  (wgpu auto layouts drop bindings a baked variant stops reading) and CPU (no
+  bake macros) return `false` and never see the predictor run. Design:
+  [shader specialization prediction](docs/src/design/shader-specialization.md).
+
+- **Shader provenance** — `ShaderModule` keeps its compile inputs (source,
+  search paths, defines, optimization level, layout checks) in a shared
+  `ShaderProvenance` with a process-unique id, and every `ComputePipeline`
+  carries an `Arc` to its module's provenance, so the runtime can compile a
+  variant of the program a dispatch runs after the caller has dropped the
+  module. `ShaderModule::variant` is now a thin wrapper over it.
+
 - **Unlocked compute Slang compile** — `ComputePipeline::new` runs Slang
   outside `device.inner.backend.lock()` on Vulkan and DX12, then seeds the
   stage cache before PSO create (still under the lock). Mock/CPU/Metal/WebGPU/CUDA

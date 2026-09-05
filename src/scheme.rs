@@ -1749,17 +1749,6 @@ impl Scheme {
         &self.specialization
     }
 
-    /// Replace the predictor's thresholds. Call before declaring nodes: the predictor (and
-    /// every registered site) is rebuilt.
-    #[cfg(test)]
-    pub(crate) fn set_specialization_policy(&mut self, policy: crate::specialization::SpecializationPolicy) {
-        debug_assert!(
-            self.ir.nodes.is_empty(),
-            "set_specialization_policy before declaring nodes"
-        );
-        self.specialization = crate::specialization::SchemePredictor::with_policy(policy);
-    }
-
     /// Replace the direct dispatch dimensions on an existing dispatch node.
     ///
     /// Marks the scheme params-dirty. Indirect dispatches become direct.

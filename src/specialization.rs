@@ -229,11 +229,11 @@ impl SitePredictor {
     /// advance only on clean submits: a scheme that re-records every frame for other reasons
     /// keeps its history but does not earn promotions from it.
     fn observe(&mut self, slots: &[u32], ir_clean: bool) {
-        for s in 0..slots.len() {
-            if slots[s] != self.last[s] {
-                self.streak[s] = 0;
+        for ((streak, &now), &before) in self.streak.iter_mut().zip(slots).zip(&self.last) {
+            if now != before {
+                *streak = 0;
             } else if ir_clean {
-                self.streak[s] = self.streak[s].saturating_add(1);
+                *streak = streak.saturating_add(1);
             }
         }
         self.last.copy_from_slice(slots);
