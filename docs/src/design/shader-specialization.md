@@ -161,7 +161,11 @@ The mechanism depends on runtime properties that are already in place:
 - **`ShaderModule::variant`.** A new module with merged defines, reusing retained source,
   search paths, optimization level, and layout checks.
 - **Compile off the device lock.** `ComputePipeline::new` runs Slang outside the backend
-  mutex, which is what makes an off-thread warm compile possible without stalling submits.
+  mutex on Vulkan and DX12, which is what makes an off-thread warm compile possible
+  without stalling submits. Pipeline creation itself still holds the lock, and on Vulkan
+  that is the expensive half (see
+  [goldy#175](https://github.com/koubaa/goldy/issues/175)), so a warm compile can still
+  contend with unrelated submits until pipeline creation moves out too.
 
 ### Backend differences
 
