@@ -402,6 +402,17 @@ pub struct SlangCompiler {
     shader_disk_cache: std::sync::Mutex<crate::shader_cache::ShaderBytecodeDiskCache>,
     /// Compile keys already run through the opt-in bounds analysis (one report per shader).
     bounds_analyzed: std::sync::Mutex<std::collections::HashSet<u64>>,
+    /// IR containers of imported library modules, keyed by module name, source and defines.
+    ir_library_cache: std::sync::Mutex<std::collections::HashMap<u64, Arc<Vec<u8>>>>,
+}
+
+/// What a Slang compile request is asked to produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestOutput {
+    /// Target code for the requested [`ShaderTarget`].
+    Code,
+    /// The front-end IR container (`.slang-module`) with standard debug info; no target code.
+    IrContainer,
 }
 
 // SlangCompiler is Send + Sync because each compilation creates its own request
@@ -443,6 +454,7 @@ impl SlangCompiler {
             global_session,
             shader_disk_cache: std::sync::Mutex::new(crate::shader_cache::ShaderBytecodeDiskCache::new_load_or_empty()),
             bounds_analyzed: std::sync::Mutex::new(std::collections::HashSet::new()),
+            ir_library_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -535,16 +547,16 @@ impl SlangCompiler {
             search_paths,
             defines,
             optimization_level,
-            false,
+            RequestOutput::Code,
             f,
         )
     }
 
-    /// [`Self::with_compiled_request`] with an explicit debug-info switch.
+    /// [`Self::with_compiled_request`] with an explicit choice of request output.
     ///
-    /// `debug_info` requests `SLANG_DEBUG_INFO_LEVEL_STANDARD`, which for SPIR-V embeds
-    /// `NonSemantic.Shader.DebugInfo.100` line tables. Production compiles leave it off;
-    /// the bounds analysis turns it on so diagnostics can cite Slang source locations.
+    /// [`RequestOutput::IrContainer`] requests `SLANG_DEBUG_INFO_LEVEL_STANDARD` so the
+    /// serialized IR carries source locations, and adds no code-generation target; `target`
+    /// then only selects the preprocessor defines.
     #[allow(clippy::too_many_arguments)]
     fn with_compiled_request_opts<R>(
         &self,
@@ -554,9 +566,10 @@ impl SlangCompiler {
         search_paths: &[&str],
         defines: &[(&str, &str)],
         optimization_level: OptimizationLevel,
-        debug_info: bool,
+        output: RequestOutput,
         f: impl FnOnce(&Self, *mut SlangCompileRequest, i32) -> Result<R>,
     ) -> Result<R> {
+        let debug_info = output == RequestOutput::IrContainer;
         let _guard = SLANG_PROCESS_LOCK.lock().unwrap();
 
         // Create session with session-level preprocessor macros.
@@ -634,12 +647,18 @@ impl SlangCompiler {
             unsafe { (library.destroy_compile_request)(req) };
         });
 
-        let target_index = unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
-        if target_index < 0 {
-            anyhow::bail!("Failed to add code generation target");
-        }
+        let target_index = if output == RequestOutput::IrContainer {
+            unsafe { (self.library.set_output_container_format)(request, SLANG_CONTAINER_FORMAT_SLANG_MODULE) };
+            -1
+        } else {
+            let target_index = unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
+            if target_index < 0 {
+                anyhow::bail!("Failed to add code generation target");
+            }
+            target_index
+        };
 
-        if target == ShaderTarget::Dxil {
+        if output == RequestOutput::Code && target == ShaderTarget::Dxil {
             let profile_name = CString::new("sm_6_6").unwrap();
             let profile_id = unsafe { global_session_find_profile(self.global_session, profile_name.as_ptr()) };
             if profile_id > 0 {
@@ -692,6 +711,16 @@ impl SlangCompiler {
             };
             unsafe { (self.library.set_optimization_level)(request, ffi_level) };
             tracing::info!("Slang optimization level set to {:?}", optimization_level);
+        }
+
+        if output == RequestOutput::IrContainer {
+            // Slang only emits the IR container when its option parser ran and saw neither a
+            // code-gen target nor an output path (`slangc -emit-ir` behavior); an empty
+            // argument list is enough to trigger that.
+            let result = unsafe { (self.library.process_command_line_arguments)(request, ptr::null(), 0) };
+            if !slang_succeeded(result) {
+                anyhow::bail!("Failed to configure Slang request for IR output (result={result})");
+            }
         }
 
         let result = unsafe { (self.library.compile)(request) };
@@ -848,14 +877,8 @@ impl SlangCompiler {
                 drop(disk);
                 // Diagnostics are opt-in and independent of the cached bytecode, so a cache
                 // hit must still surface them.
-                if target == ShaderTarget::Spirv && crate::validation_env::bounds_validation_enabled() {
-                    self.report_bounds_analysis(
-                        effective_source,
-                        entry_points,
-                        search_paths,
-                        defines,
-                        optimization_level,
-                    );
+                if crate::validation_env::bounds_validation_enabled() {
+                    self.report_bounds_analysis(effective_source, target, entry_points, search_paths, defines);
                 }
                 return hit.with_context(|| "decode shader disk cache");
             }
@@ -916,73 +939,148 @@ impl SlangCompiler {
             }
         }
 
-        if target == ShaderTarget::Spirv && crate::validation_env::bounds_validation_enabled() {
-            self.report_bounds_analysis(
-                effective_source,
-                entry_points,
-                search_paths,
-                defines,
-                optimization_level,
-            );
+        if crate::validation_env::bounds_validation_enabled() {
+            self.report_bounds_analysis(effective_source, target, entry_points, search_paths, defines);
         }
 
         Ok(out)
     }
 
-    /// Compile `source` to SPIR-V with standard debug info and run the static bounds analysis.
-    ///
-    /// This is a separate Slang request from the production compile so the bytecode handed
-    /// to the driver is unchanged; the debug-info build only feeds the analysis. Returns the
-    /// report, or the compile/analysis error.
-    pub fn analyze_spirv_bounds(
+    /// Compile `source` to Slang's front-end IR container (`.slang-module` bytes) with standard
+    /// debug info. No target code is generated; `target` only selects the preprocessor defines.
+    fn compile_ir_container(
         &self,
         source: &str,
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
         defines: &[(&str, &str)],
-        optimization_level: OptimizationLevel,
+    ) -> Result<Vec<u8>> {
+        self.with_compiled_request_opts(
+            source,
+            ShaderTarget::Spirv,
+            entry_points,
+            search_paths,
+            defines,
+            OptimizationLevel::Default,
+            RequestOutput::IrContainer,
+            |slf, request, _| {
+                let mut blob: *mut ISlangBlob = ptr::null_mut();
+                let result = unsafe { (slf.library.get_container_code)(request, &mut blob) };
+                if !slang_succeeded(result) || blob.is_null() {
+                    anyhow::bail!("Slang produced no IR container (result={result})");
+                }
+                let (data_ptr, data_size) = unsafe { blob_get_data(blob) };
+                let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) }.to_vec();
+                unsafe { blob_release(blob) };
+                Ok(data)
+            },
+        )
+    }
+
+    /// IR containers of the modules `container` imports (transitively), compiled from
+    /// `<name>.slang` on `search_paths` with the same defines and cached by source content.
+    /// Modules that cannot be found or compiled are skipped with a debug log; the analysis
+    /// then treats calls into them as unknown.
+    fn imported_library_containers(
+        &self,
+        container: &[u8],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+    ) -> Vec<Arc<Vec<u8>>> {
+        let mut out: Vec<Arc<Vec<u8>>> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending = match super::bounds_analysis::imported_modules(container) {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::debug!(?e, "could not list imported modules");
+                return out;
+            }
+        };
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some((path, source)) = search_paths.iter().find_map(|sp| {
+                let path = std::path::Path::new(sp).join(format!("{name}.slang"));
+                std::fs::read_to_string(&path).ok().map(|src| (path, src))
+            }) else {
+                tracing::debug!(module = %name, "imported module not found on search paths");
+                continue;
+            };
+            let mut key = crate::shader_cache::compile_cache_key(
+                &source,
+                ShaderTarget::Spirv,
+                &[],
+                search_paths,
+                defines,
+                &[],
+                OptimizationLevel::Default,
+            );
+            for b in name.bytes() {
+                key = key.wrapping_mul(0x0100_0000_01b3) ^ u64::from(b);
+            }
+            let cached = {
+                let cache = self.ir_library_cache.lock().unwrap_or_else(|p| p.into_inner());
+                cache.get(&key).cloned()
+            };
+            let lib = match cached {
+                Some(lib) => lib,
+                None => match self.compile_ir_container(&source, &[], search_paths, defines) {
+                    Ok(bytes) => {
+                        let lib = Arc::new(bytes);
+                        let mut cache = self.ir_library_cache.lock().unwrap_or_else(|p| p.into_inner());
+                        cache.insert(key, Arc::clone(&lib));
+                        lib
+                    }
+                    Err(e) => {
+                        tracing::debug!(module = %name, path = %path.display(), ?e, "imported module failed to compile for analysis");
+                        continue;
+                    }
+                },
+            };
+            if let Ok(more) = super::bounds_analysis::imported_modules(&lib) {
+                pending.extend(more);
+            }
+            out.push(lib);
+        }
+        out
+    }
+
+    /// Compile `source` to Slang IR (with standard debug info) and run the static bounds
+    /// analysis over it and the modules it imports.
+    ///
+    /// This is a separate Slang request from the production compile so the bytecode handed
+    /// to the driver is unchanged; the IR build only feeds the analysis. `target` selects the
+    /// preprocessor defines the shader is analyzed under. Returns the report, or the
+    /// compile/analysis error.
+    pub fn analyze_bounds(
+        &self,
+        source: &str,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        target: ShaderTarget,
     ) -> Result<super::bounds_analysis::BoundsReport> {
-        let mut all_defines = Self::bindless_defines_for_target(ShaderTarget::Spirv);
+        let mut all_defines = Self::bindless_defines_for_target(target);
         for d in defines {
             if !all_defines.contains(d) {
                 all_defines.push(*d);
             }
         }
         let effective = effective_slang_source_for_compile(source);
-        let spirv = self.with_compiled_request_opts(
-            effective.as_ref(),
-            ShaderTarget::Spirv,
-            entry_points,
-            search_paths,
-            &all_defines,
-            optimization_level,
-            true,
-            |slf, request, target_index| {
-                let ep_count = entry_points.len().max(1);
-                let mut blobs = Vec::with_capacity(ep_count);
-                for i in 0..ep_count {
-                    blobs.push(entry_point_code_blob(&slf.library, request, i as i32, target_index)?);
-                }
-                Ok(blobs)
-            },
-        )?;
-        let mut report = super::bounds_analysis::BoundsReport::default();
-        for (i, blob) in spirv.iter().enumerate() {
-            if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
-                let dir = std::path::Path::new(&dump_dir);
-                let _ = std::fs::create_dir_all(dir);
-                let name = entry_points.get(i).map(|(n, _)| *n).unwrap_or("entry");
-                let path = dir.join(format!("{name}_bounds_debug.spv"));
-                if std::fs::write(&path, blob).is_ok() {
-                    tracing::info!("Dumped debug-info SPIR-V for bounds analysis to {}", path.display());
-                }
+        let container = self.compile_ir_container(effective.as_ref(), entry_points, search_paths, &all_defines)?;
+        if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
+            let dir = std::path::Path::new(&dump_dir);
+            let _ = std::fs::create_dir_all(dir);
+            let name = entry_points.first().map(|(n, _)| *n).unwrap_or("shader");
+            let path = dir.join(format!("{name}_bounds.slang-module"));
+            if std::fs::write(&path, &container).is_ok() {
+                tracing::info!("Dumped Slang IR container for bounds analysis to {}", path.display());
             }
-            let r = super::bounds_analysis::analyze_spirv_bytes(blob)?;
-            report.checked_accesses += r.checked_accesses;
-            report.proven_safe += r.proven_safe;
-            report.diagnostics.extend(r.diagnostics);
         }
-        Ok(report)
+        let libraries = self.imported_library_containers(&container, search_paths, &all_defines);
+        let library_refs: Vec<&[u8]> = libraries.iter().map(|l| l.as_slice()).collect();
+        Ok(super::bounds_analysis::analyze_container(&container, &library_refs)?)
     }
 
     /// Opt-in (`GOLDY_VALIDATION=bounds`) hook: analyze once per distinct compile and log
@@ -990,19 +1088,19 @@ impl SlangCompiler {
     fn report_bounds_analysis(
         &self,
         effective_source: &str,
+        target: ShaderTarget,
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
         defines: &[(&str, &str)],
-        optimization_level: OptimizationLevel,
     ) {
         let key = crate::shader_cache::compile_cache_key(
             effective_source,
-            ShaderTarget::Spirv,
+            target,
             entry_points,
             search_paths,
             defines,
             &[],
-            optimization_level,
+            OptimizationLevel::Default,
         );
         {
             let mut seen = self.bounds_analyzed.lock().unwrap_or_else(|p| p.into_inner());
@@ -1011,17 +1109,9 @@ impl SlangCompiler {
             }
         }
         let t0 = std::time::Instant::now();
-        // At `OptimizationLevel::None` Slang keeps aggregates in memory and inlines nothing, and
-        // the analysis only reconstructs SSA for scalar integer locals, so nearly every index
-        // would be reported as untracked. The analysis compile is separate from the production
-        // one, so analyze at least at `Default`.
-        let analysis_level = match optimization_level {
-            OptimizationLevel::None => OptimizationLevel::Default,
-            other => other,
-        };
-        // `analyze_spirv_bounds` re-applies the virtual-main rewrite; on already-effective
-        // source that is a no-op, so pass it straight through.
-        match self.analyze_spirv_bounds(effective_source, entry_points, search_paths, defines, analysis_level) {
+        // `analyze_bounds` re-applies the virtual-main rewrite; on already-effective source
+        // that is a no-op, so pass it straight through.
+        match self.analyze_bounds(effective_source, entry_points, search_paths, defines, target) {
             Ok(report) => {
                 crate::shader_timing::record("slang.bounds_analysis", "", t0.elapsed());
                 tracing::debug!(

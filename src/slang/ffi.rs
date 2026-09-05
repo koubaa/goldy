@@ -495,6 +495,17 @@ pub type FnSpGetTargetCodeBlob = unsafe extern "C" fn(
     target_index: c_int,
     out_blob: *mut *mut ISlangBlob,
 ) -> SlangResult;
+/// Container formats for `spSetOutputContainerFormat` (matches `SlangContainerFormat`).
+pub const SLANG_CONTAINER_FORMAT_NONE: c_int = 0;
+pub const SLANG_CONTAINER_FORMAT_SLANG_MODULE: c_int = 1;
+pub type FnSpSetOutputContainerFormat = unsafe extern "C" fn(request: *mut SlangCompileRequest, format: c_int);
+/// The serialized `.slang-module` container (front-end IR + debug info) after `spCompile`.
+pub type FnSpGetContainerCode =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, out_blob: *mut *mut ISlangBlob) -> SlangResult;
+/// Apply `slangc`-style options to a request. Even an empty argument list matters: the
+/// option parser's finalization enables IR emission when the request has no code-gen target.
+pub type FnSpProcessCommandLineArguments =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, args: *const *const c_char, arg_count: c_int) -> SlangResult;
 pub type FnSpSetTargetFlags = unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, flags: u32);
 pub type FnSpGetEntryPointHostCallable = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
