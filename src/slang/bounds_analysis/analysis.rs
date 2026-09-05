@@ -187,7 +187,7 @@ impl Abs {
 }
 
 /// Values that fit the type keep their interval; anything that may wrap collapses to the type range.
-fn wrap(i: Interval, ty: IntTy) -> Interval {
+pub(super) fn wrap(i: Interval, ty: IntTy) -> Interval {
     let r = ty_range(ty);
     if r.contains(i) {
         i
@@ -356,12 +356,30 @@ struct FnRef {
     func: u32,
 }
 
-/// Calling context: function plus argument abstractions and generic substitution.
+/// Calling context: function plus argument abstractions and generic substitution. For
+/// pointer (`out`/`inout`/`ref`) parameters the argument abstraction is the pointee's value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallKey {
     f: FnRef,
     args: Vec<Abs>,
     subst: Vec<(u32, u32)>,
+}
+
+/// What a function does to its caller in one context.
+#[derive(Debug, Clone)]
+struct Summary {
+    ret: Abs,
+    /// Value stored through each pointer parameter (`None` for value parameters).
+    outs: Vec<Option<Abs>>,
+}
+
+impl Summary {
+    fn unknown(ret: Abs, nparams: usize) -> Summary {
+        Summary {
+            ret,
+            outs: vec![None; nparams],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -375,7 +393,7 @@ pub(super) struct Analyzer<'m> {
     /// Linkage name -> defining instruction (functions with bodies, struct keys, types).
     exports: HashMap<&'m str, (usize, u32)>,
     field_keys: RefCell<HashMap<String, FieldKey>>,
-    summaries: RefCell<HashMap<CallKey, Abs>>,
+    summaries: RefCell<HashMap<CallKey, Summary>>,
     in_progress: RefCell<Vec<FnRef>>,
     contexts_per_fn: RefCell<HashMap<FnRef, usize>>,
     reported: RefCell<HashSet<CallKey>>,
@@ -539,9 +557,9 @@ impl<'m> Analyzer<'m> {
         }
     }
 
-    /// Return-value abstraction of `key`'s function in that context. When `report_path` is
-    /// given, the callee's accesses are checked and the callee's own calls are reported.
-    fn analyze(&self, key: &CallKey, report_path: Option<Vec<String>>) -> Abs {
+    /// Summary of `key`'s function in that context. When `report_path` is given, the
+    /// callee's accesses are checked and the callee's own calls are reported.
+    fn analyze(&self, key: &CallKey, report_path: Option<Vec<String>>) -> Summary {
         let m = &self.modules[key.f.module];
         let name = m.name_hint(key.f.func).unwrap_or("<anonymous>").to_string();
         let mut key = key.clone();
@@ -554,7 +572,8 @@ impl<'m> Analyzer<'m> {
             .type_of(key.f.func)
             .and_then(|t| m.inst(t).operand(0))
             .and_then(|r| m.int_shape(r));
-        let top = || ret_shape.map_or(Abs::Opaque, Abs::top);
+        let nparams = key.args.len();
+        let top = move || Summary::unknown(ret_shape.map_or(Abs::Opaque, Abs::top), nparams);
         {
             let mut per_fn = self.contexts_per_fn.borrow_mut();
             let n = per_fn.entry(key.f).or_insert(0);
@@ -583,14 +602,17 @@ impl<'m> Analyzer<'m> {
         }
         let mut fa = FunctionAnalysis::new(self, m, key.f.module, key.f.func, &key.args, &key.subst, name);
         fa.fixpoint();
-        let ret = fa.return_range();
+        let summary = Summary {
+            ret: fa.return_range(),
+            outs: fa.out_param_values(),
+        };
         if let Some(path) = report_path {
             fa.check_accesses(&path);
             fa.check_calls(&path);
         }
         self.in_progress.borrow_mut().pop();
-        self.summaries.borrow_mut().insert(key, ret.clone());
-        ret
+        self.summaries.borrow_mut().insert(key, summary.clone());
+        summary
     }
 
     fn record_check(&self, mi: usize, inst: u32) {
@@ -642,13 +664,34 @@ impl Block {
     }
 }
 
-/// Where a pointer points: a local `var` plus the field path taken from it.
+/// Where a pointer points: a local `var` (or a pointer-typed parameter of this function)
+/// plus the field path taken from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VarPath {
     var: u32,
     fields: Vec<FieldKey>,
     /// A dynamic element index was taken somewhere along the path.
     indexed: bool,
+}
+
+impl VarPath {
+    fn root(var: u32) -> VarPath {
+        VarPath {
+            var,
+            fields: Vec::new(),
+            indexed: false,
+        }
+    }
+}
+
+/// Something written through a pointer into a tracked variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    /// `store(ptr, value)`.
+    Value(u32),
+    /// The variable's address was passed as argument `arg` of `call`; the callee's summary
+    /// tells what it wrote.
+    CallOut { call: u32, arg: usize },
 }
 
 struct FunctionAnalysis<'a, 'm> {
@@ -670,8 +713,13 @@ struct FunctionAnalysis<'a, 'm> {
     idom: Vec<Option<usize>>,
     rpo: Vec<usize>,
     /// Stores into non-escaping locals, keyed by variable.
-    var_stores: HashMap<u32, Vec<(VarPath, u32)>>,
+    var_stores: HashMap<u32, Vec<(VarPath, Stored)>>,
     escaping_vars: HashSet<u32>,
+    /// Structurally equal pure instructions map to one representative (Slang's front-end IR
+    /// has no CSE, so `i + 1` in a guard and in the index are different instructions).
+    value_number: HashMap<u32, u32>,
+    /// `call` instructions whose out-parameter summary is being computed (cycle guard).
+    active_call_outs: RefCell<Vec<u32>>,
     ranges: HashMap<u32, Abs>,
     widened: HashSet<u32>,
     block_facts: RefCell<HashMap<usize, Vec<Fact>>>,
@@ -767,11 +815,13 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         }
         let (idom, rpo) = dominators(&blocks);
         let params = blocks.first().map(|b| b.params.clone()).unwrap_or_default();
-        let mut param_abs: Vec<Abs> = params
+        // For pointer parameters this is the abstraction of the pointee at the call site.
+        let param_abs: Vec<Abs> = params
             .iter()
             .enumerate()
             .map(|(k, &p)| {
-                let shape = m.type_of(p).and_then(|t| m.int_shape(t));
+                let value_ty = m.type_of(p).map(|t| m.pointee(t).unwrap_or(t));
+                let shape = value_ty.and_then(|t| m.int_shape(t));
                 match args.get(k) {
                     Some(Abs::Ints(v)) if shape.is_some() => Abs::Ints(v.clone()),
                     Some(a @ Abs::Struct(_)) => a.clone(),
@@ -779,14 +829,6 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 }
             })
             .collect();
-        for (k, &p) in params.iter().enumerate() {
-            // Entry-block parameters of a block-param phi never exist, but keep shapes sane.
-            if let Some(shape) = m.type_of(p).and_then(|t| m.int_shape(t)) {
-                if !matches!(param_abs[k], Abs::Ints(_)) {
-                    param_abs[k] = Abs::top(shape);
-                }
-            }
-        }
         let mut fa = FunctionAnalysis {
             ctx,
             m,
@@ -804,12 +846,63 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             rpo,
             var_stores: HashMap::new(),
             escaping_vars: HashSet::new(),
+            value_number: HashMap::new(),
+            active_call_outs: RefCell::new(Vec::new()),
             ranges: HashMap::new(),
             widened: HashSet::new(),
             block_facts: RefCell::new(HashMap::new()),
         };
+        fa.compute_value_numbers();
         fa.collect_var_stores();
         fa
+    }
+
+    /// Representative of `id`'s value-number class (after generic substitution).
+    fn canon(&self, id: u32) -> u32 {
+        let id = self.resolve(id);
+        self.value_number.get(&id).copied().unwrap_or(id)
+    }
+
+    fn compute_value_numbers(&mut self) {
+        let mut table: HashMap<(u32, Option<u32>, Vec<Option<u32>>), u32> = HashMap::new();
+        let mut numbers = HashMap::new();
+        for &bi in &self.rpo {
+            for &i in &self.blocks[bi].body {
+                let inst = self.inst(i);
+                if !is_pure(inst.op) {
+                    continue;
+                }
+                let key = (
+                    inst.op,
+                    inst.ty.map(|t| self.resolve(t)),
+                    inst.operands
+                        .iter()
+                        .map(|o| {
+                            o.map(|x| {
+                                let x = self.resolve(x);
+                                numbers.get(&x).copied().unwrap_or(x)
+                            })
+                        })
+                        .collect(),
+                );
+                let rep = *table.entry(key).or_insert(i);
+                if rep != i {
+                    numbers.insert(i, rep);
+                }
+            }
+        }
+        self.value_number = numbers;
+    }
+
+    /// Whether `p` is a pointer-typed (`out`/`inout`/`ref`) parameter of this function.
+    fn is_pointer_param(&self, p: u32) -> bool {
+        self.params.contains(&p) && self.type_of(p).is_some_and(|t| self.m.is_pointer_type(t))
+    }
+
+    /// Whether the pointer parameter carries a value in from the caller (`inout`/`ref`, not `out`).
+    fn param_has_incoming(&self, p: u32) -> bool {
+        self.type_of(p)
+            .is_some_and(|t| self.inst(self.m.unqualified(t)).op != op::TYPE_OUT_PARAM)
     }
 
     fn inst(&self, id: u32) -> &'m Inst {
@@ -851,6 +944,14 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                         indexed,
                     });
                 }
+                op::PARAM if self.is_pointer_param(ptr) => {
+                    fields.reverse();
+                    return Some(VarPath {
+                        var: ptr,
+                        fields,
+                        indexed,
+                    });
+                }
                 op::GET_FIELD_ADDR => {
                     fields.push(self.ctx.field_key(self.m, self.mi, inst.operand(1)?));
                     ptr = inst.operand(0)?;
@@ -866,43 +967,46 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     }
 
     fn collect_var_stores(&mut self) {
-        let mut stores: HashMap<u32, Vec<(VarPath, u32)>> = HashMap::new();
+        let mut stores: HashMap<u32, Vec<(VarPath, Stored)>> = HashMap::new();
         let mut escaping = HashSet::new();
-        let mut vars: Vec<u32> = Vec::new();
         for b in &self.blocks {
             for &i in &b.body {
                 let inst = self.inst(i);
-                match inst.op {
-                    op::VAR => vars.push(i),
-                    op::STORE => {
-                        if let (Some(ptr), Some(v)) = (inst.operand(0), inst.operand(1)) {
-                            if let Some(path) = self.var_path(ptr) {
-                                stores.entry(path.var).or_default().push((path, v));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // A variable escapes when its address (or a derived address) is used by anything
-        // other than a load, a store into it, or further address computation.
-        for b in &self.blocks {
-            for &i in &b.body {
-                let inst = self.inst(i);
-                let uses_ptr = |k: usize| inst.operand(k).and_then(|p| self.var_path(p)).map(|p| p.var);
+                let uses_ptr = |k: usize| inst.operand(k).and_then(|p| self.var_path(p));
                 match inst.op {
                     op::LOAD | op::GET_FIELD_ADDR | op::GET_ELEMENT_PTR => {}
                     op::STORE => {
+                        if let (Some(path), Some(v)) = (uses_ptr(0), inst.operand(1)) {
+                            stores.entry(path.var).or_default().push((path, Stored::Value(v)));
+                        }
                         // The stored *value* may itself be a pointer to a local.
-                        if let Some(v) = uses_ptr(1) {
-                            escaping.insert(v);
+                        if let Some(p) = uses_ptr(1) {
+                            escaping.insert(p.var);
+                        }
+                    }
+                    op::CALL => {
+                        // Passing the address to a function with a body is modeled through
+                        // its summary; anything else (intrinsics, no body) makes it escape.
+                        let modeled = inst
+                            .operand(0)
+                            .is_some_and(|c| self.intrinsic_name(c).is_none() && self.ctx.resolve_callee(self.mi, c).is_some());
+                        for k in 1..inst.operands.len() {
+                            let Some(path) = uses_ptr(k) else { continue };
+                            if modeled {
+                                stores
+                                    .entry(path.var)
+                                    .or_default()
+                                    .push((path, Stored::CallOut { call: i, arg: k - 1 }));
+                            } else {
+                                escaping.insert(path.var);
+                            }
                         }
                     }
                     _ => {
+                        // Any other use of the address (or a derived address) is an escape.
                         for k in 0..inst.operands.len() {
-                            if let Some(v) = uses_ptr(k) {
-                                escaping.insert(v);
+                            if let Some(p) = uses_ptr(k) {
+                                escaping.insert(p.var);
                             }
                         }
                     }
@@ -913,30 +1017,51 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         self.escaping_vars = escaping;
     }
 
-    /// Value read through `path` from a non-escaping local, from the stores recorded for it.
-    fn load_local(&self, path: &VarPath, get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Abs> {
+    /// Value read through `path` from a non-escaping local (or pointer parameter): the join of
+    /// everything stored into it, flow-insensitively. `skip_call` leaves out what one call
+    /// wrote, to compute the value that call received.
+    fn load_local(&self, path: &VarPath, get: &mut dyn FnMut(u32) -> Option<Abs>, skip_call: Option<u32>) -> Option<Abs> {
         if path.indexed || self.escaping_vars.contains(&path.var) {
             return None;
         }
-        let stores = self.var_stores.get(&path.var)?;
         let mut out: Option<Abs> = None;
         let mut any = false;
-        for (sp, v) in stores {
+        let mut whole: Vec<Abs> = Vec::new();
+        if let Some(k) = self.params.iter().position(|&p| p == path.var) {
+            if self.param_has_incoming(path.var) {
+                whole.push(self.param_abs[k].clone());
+            }
+        }
+        let stores = self.var_stores.get(&path.var).map(Vec::as_slice).unwrap_or(&[]);
+        let mut resolved: Vec<(&VarPath, Abs)> = Vec::new();
+        for (sp, stored) in stores {
             if sp.indexed {
                 return None;
             }
+            let v = match *stored {
+                Stored::Value(v) => get(v)?,
+                Stored::CallOut { call, .. } if Some(call) == skip_call => continue,
+                Stored::CallOut { call, arg } => self.call_out(call, arg, get)?,
+            };
+            resolved.push((sp, v));
+        }
+        let root = VarPath::root(path.var);
+        for w in whole {
+            resolved.push((&root, w));
+        }
+        for (sp, v) in resolved {
             let val = if sp.fields == path.fields {
-                get(*v)?
+                v
             } else if sp.fields.len() < path.fields.len() && path.fields.starts_with(&sp.fields) {
                 // Whole aggregate stored, field loaded: project.
-                let mut cur = get(*v)?;
+                let mut cur = v;
                 for k in &path.fields[sp.fields.len()..] {
                     cur = cur.field(*k).cloned().unwrap_or(Abs::Opaque);
                 }
                 cur
             } else if sp.fields.len() > path.fields.len() && sp.fields.starts_with(&path.fields) {
                 // Field stored, aggregate loaded: contribute one field of a struct.
-                let mut cur = get(*v)?;
+                let mut cur = v;
                 for k in sp.fields[path.fields.len()..].iter().rev() {
                     cur = Abs::Struct(BTreeMap::from([(*k, cur)]));
                 }
@@ -957,6 +1082,54 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             });
         }
         any.then_some(out.unwrap_or(Abs::Opaque))
+    }
+
+    /// Argument abstractions of `call`: values as evaluated by `get`, pointers to tracked
+    /// variables as the pointee's value before the call.
+    fn call_args(&self, call: u32, get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Vec<Abs>> {
+        let inst = self.inst(call);
+        let mut out = Vec::with_capacity(inst.operands.len().saturating_sub(1));
+        for a in inst.operands.iter().skip(1).flatten() {
+            let a = self.resolve(*a);
+            let v = match self.var_path(a) {
+                Some(path) => self.load_local(&path, get, Some(call)).unwrap_or(Abs::Opaque),
+                None => get(a)?,
+            };
+            out.push(v);
+        }
+        Some(out)
+    }
+
+    /// What `call` wrote through its `arg`-th argument, from the callee's summary.
+    fn call_out(&self, call: u32, arg: usize, get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Abs> {
+        if self.active_call_outs.borrow().contains(&call) {
+            return None;
+        }
+        let callee = self.inst(call).operand(0)?;
+        let (target, subst) = self.ctx.resolve_callee(self.mi, callee)?;
+        self.active_call_outs.borrow_mut().push(call);
+        let args = self.call_args(call, get);
+        self.active_call_outs.borrow_mut().pop();
+        let key = CallKey {
+            f: target,
+            args: args?,
+            subst,
+        };
+        self.ctx.analyze(&key, None).outs.get(arg).cloned().flatten()
+    }
+
+    /// Final value of every pointer parameter (what the caller observes after the call).
+    fn out_param_values(&self) -> Vec<Option<Abs>> {
+        self.params
+            .iter()
+            .map(|&p| {
+                if !self.is_pointer_param(p) {
+                    return None;
+                }
+                let mut get = |o: u32| self.lookup(o);
+                Some(self.load_local(&VarPath::root(p), &mut get, None).unwrap_or(Abs::Opaque))
+            })
+            .collect()
     }
 
     // ------------------------------------------------------------------
@@ -1236,6 +1409,9 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     /// Entry-block parameter (from the calling context) or block parameter (phi join).
     fn param_or_phi(&self, id: u32, get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Abs> {
         if let Some(k) = self.params.iter().position(|&p| p == id) {
+            if self.is_pointer_param(id) {
+                return Some(Abs::Opaque);
+            }
             return Some(self.param_abs[k].clone());
         }
         let incoming = self.phis.get(&id)?;
@@ -1250,7 +1426,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     fn load(&self, ptr: Option<u32>, get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Abs> {
         let path = self.var_path(ptr?)?;
-        self.load_local(&path, get)
+        self.load_local(&path, get, None)
     }
 
     fn make_struct(&self, id: u32, ops: &[Option<u32>], get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Abs> {
@@ -1291,16 +1467,12 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             return None;
         }
         let (target, subst) = self.ctx.resolve_callee(self.mi, callee)?;
-        let mut arg_abs = Vec::with_capacity(args.len());
-        for a in &args {
-            arg_abs.push(get(*a)?);
-        }
         let key = CallKey {
             f: target,
-            args: arg_abs,
+            args: self.call_args(id, get)?,
             subst,
         };
-        Some(self.ctx.analyze(&key, None))
+        Some(self.ctx.analyze(&key, None).ret)
     }
 
     // ------------------------------------------------------------------
@@ -1482,9 +1654,9 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 let rel = if polarity { rel } else { rel.negate() };
                 let signed = self.int_shape_of(a).is_some_and(|s| s.ty.signed);
                 out.push(Fact {
-                    a: self.resolve(a),
+                    a: self.canon(a),
                     rel,
-                    b: self.resolve(b),
+                    b: self.canon(b),
                     signed,
                 });
             }
@@ -1557,9 +1729,9 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 if let [Some(v)] = values[..] {
                     let signed = self.int_shape_of(c).is_some_and(|s| s.ty.signed);
                     out.push(Fact {
-                        a: self.resolve(c),
+                        a: self.canon(c),
                         rel: Rel::Eq,
-                        b: self.resolve(v),
+                        b: self.canon(v),
                         signed,
                     });
                 }
@@ -1686,8 +1858,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 }
                 op::SUB if inst.operands.len() >= 2 => {
                     if let (Some(a_id), Some(b_id)) = (inst.operand(0), inst.operand(1)) {
-                        let a_id = self.resolve(a_id);
-                        let b_id = self.resolve(b_id);
+                        let a_id = self.canon(a_id);
+                        let b_id = self.canon(b_id);
                         let a = self.eval(a_id, facts, depth + 1, ctx);
                         let b = self.eval(b_id, facts, depth + 1, ctx);
                         // Relational rule: a >= b makes a - b non-negative and bounded by
@@ -1744,6 +1916,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         if shape.lanes != 1 || depth > REFINE_DEPTH_LIMIT {
             return value;
         }
+        let id = self.canon(id);
         for f in facts {
             let (other, rel) = if f.a == id {
                 (f.b, f.rel)
@@ -1807,11 +1980,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 };
                 let facts = self.facts_for_block(bi);
                 let mut ctx = EvalCtx::default();
-                let args: Vec<Abs> = inst.operands[1..]
-                    .iter()
-                    .flatten()
-                    .map(|&a| self.eval(a, &facts, 0, &mut ctx))
-                    .collect();
+                let mut get = |a: u32| Some(self.eval(a, &facts, 0, &mut ctx));
+                let Some(args) = self.call_args(i, &mut get) else { continue };
                 let key = CallKey {
                     f: target,
                     args,
@@ -1928,13 +2098,15 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 }
                 op::CALL => {
                     let callee = inst.operand(0);
+                    let name = callee.and_then(|c| self.callee_display_name(c)).unwrap_or_default();
                     if let Some(name) = callee.and_then(|c| self.intrinsic_name(c)) {
                         push(format!("the result of `{name}()`"), &mut out);
                     } else if callee.is_some_and(|c| self.ctx.resolve_callee(self.mi, c).is_some()) {
-                        let name = callee.and_then(|c| self.callee_display_name(c)).unwrap_or_default();
-                        push(format!("the result of calling `{name}`"), &mut out);
+                        // Analyzed in context: only worth naming when that gave nothing.
+                        if self.global(id).is_top_for(self.int_shape_of(id)) {
+                            push(format!("the result of calling `{name}`"), &mut out);
+                        }
                     } else {
-                        let name = callee.and_then(|c| self.callee_display_name(c)).unwrap_or_default();
                         push(format!("the result of calling `{name}` (no body available)"), &mut out);
                     }
                 }
@@ -1961,10 +2133,18 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 }
                 op::SELECT => work.extend(inst.operands.iter().skip(1).flatten().copied()),
                 op::SWIZZLE | op::GET_ELEMENT => work.extend(inst.operand(0)),
-                _ if inst.op >= 328 && self.m.op_name(id).starts_with("wave") => {
-                    push("a wave intrinsic result".into(), &mut out);
+                _ => {
+                    let name = self.m.op_name(id).to_ascii_lowercase();
+                    if name.contains("buffer") {
+                        push("a buffer load".into(), &mut out);
+                    } else if name.contains("texture") || name.contains("image") || name.contains("sample") {
+                        push("a texture read".into(), &mut out);
+                    } else if name.starts_with("wave") {
+                        push("a wave intrinsic result".into(), &mut out);
+                    } else {
+                        work.extend(inst.operands.iter().flatten().copied());
+                    }
                 }
-                _ => work.extend(inst.operands.iter().flatten().copied()),
             }
         }
         out
@@ -2087,6 +2267,42 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             }
         }
     }
+}
+
+/// Side-effect-free instructions whose value is a function of their operands alone.
+fn is_pure(opcode: u32) -> bool {
+    matches!(
+        opcode,
+        op::ADD
+            | op::SUB
+            | op::MUL
+            | op::DIV
+            | op::IREM
+            | op::SHL
+            | op::SHR
+            | op::AND
+            | op::OR
+            | op::XOR
+            | op::NEG
+            | op::NOT
+            | op::BIT_NOT
+            | op::CMP_EQ
+            | op::CMP_NE
+            | op::CMP_GT
+            | op::CMP_LT
+            | op::CMP_GE
+            | op::CMP_LE
+            | op::LOGICAL_AND
+            | op::LOGICAL_OR
+            | op::SELECT
+            | op::SWIZZLE
+            | op::GET_FIELD
+            | op::GET_ELEMENT
+            | op::MAKE_VECTOR
+            | op::INT_CAST
+            | op::BIT_CAST
+            | op::CAST_FLOAT_TO_INT
+    )
 }
 
 // ============================================================================
