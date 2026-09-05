@@ -74,6 +74,10 @@ pub(crate) struct MockBackend {
     pub(crate) retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     /// Count of zero-record resubmits served from `retained_graphs`.
     pub retained_resubmit_count: usize,
+    /// Shader creates that carried a `_GOLDY_SPEC_*` define (specialization variant compiles).
+    pub specialized_shader_creates: usize,
+    /// When true, shader creates that carry a `_GOLDY_SPEC_*` define fail (predictor pinning tests).
+    pub fail_specialized_shader_creates: bool,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
     pub wait_until_count: usize,
     /// Count of withdraw staging staging buffer allocations
@@ -292,6 +296,8 @@ impl MockBackend {
             #[cfg(feature = "graphics")]
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             fuse_upload_with_compute_partitions: false,
+            specialized_shader_creates: 0,
+            fail_specialized_shader_creates: false,
             device_retired_floor: HashMap::new(),
             #[cfg(feature = "graphics")]
             surface_pending_acquire: HashMap::new(),
@@ -1137,6 +1143,12 @@ impl GpuBackend for MockBackend {
     ) -> Result<ShaderHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
+        }
+        if _defines.iter().any(|(k, _)| k.starts_with("_GOLDY_SPEC_")) {
+            self.specialized_shader_creates += 1;
+            if self.fail_specialized_shader_creates {
+                anyhow::bail!("mock: specialized shader creation forced to fail");
+            }
         }
 
         let handle = self.next_shader_handle;

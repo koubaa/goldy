@@ -170,8 +170,8 @@ impl<'a> RenderPipelineBuilder<'a> {
         );
 
         let mut linked = crate::slang::graphics_link::link_raster_pipeline(
-            &vertex_shader.source,
-            &fragment_shader.source,
+            vertex_shader.source(),
+            fragment_shader.source(),
             Some(&desc.vertex_layout),
         )?;
 
@@ -390,9 +390,9 @@ impl<'a> MeshPipelineBuilder<'a> {
         tracing::debug!(?self.label, "Creating mesh pipeline");
 
         let mut linked = crate::slang::graphics_link::link_mesh_pipeline(
-            &mesh.source,
-            &fragment.source,
-            self.amplification.map(|s| s.source.as_ref()),
+            mesh.source(),
+            fragment.source(),
+            self.amplification.map(|s| s.source()),
         )?;
 
         let vertex_layout = crate::types::VertexBufferLayout::default();
@@ -472,7 +472,7 @@ fn apply_stage_remap(
     vm_stage: Stage,
     remap: &SlotRemap,
 ) {
-    let local_names: Vec<String> = crate::slang::virtual_main::find_all_entries(&shader.source)
+    let local_names: Vec<String> = crate::slang::virtual_main::find_all_entries(shader.source())
         .into_iter()
         .find(|e| e.stage == vm_stage)
         .map(|e| {

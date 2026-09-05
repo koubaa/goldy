@@ -160,6 +160,42 @@ use std::cell::Cell;
 thread_local! {
     static TEST_CB_REUSE_DISABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST_HOST_ACCESS_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_SPECIALIZATION_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Install a thread-local override for [`specialization_enabled`].
+///
+/// Prefer [`crate::test_support::SpecializationOverride`] — it clears on drop.
+#[doc(hidden)]
+pub fn set_specialization_override(enabled: bool) {
+    TEST_SPECIALIZATION_OVERRIDE.with(|c| c.set(Some(enabled)));
+}
+
+/// Clear the override installed by [`set_specialization_override`].
+#[doc(hidden)]
+pub fn clear_specialization_override() {
+    TEST_SPECIALIZATION_OVERRIDE.with(|c| c.set(None));
+}
+
+/// Whether retained schemes may predict and swap in specialized compute pipelines.
+///
+/// On by default. Set `GOLDY_SPECIALIZATION=0` (or `false` / `no` / `off`) to keep every
+/// dispatch on the pipeline the caller bound; the predictor then records no history and
+/// compiles nothing. Backends whose pipeline layouts do not follow the shader signature
+/// (WebGPU today) are excluded regardless of this variable — see
+/// `docs/src/design/shader-specialization.md`.
+///
+/// Tests that assert exact record counts across many frames pin this with
+/// [`crate::test_support::SpecializationOverride`] so a developer shell cannot flip them.
+#[must_use]
+pub(crate) fn specialization_enabled() -> bool {
+    if let Some(enabled) = TEST_SPECIALIZATION_OVERRIDE.with(|c| c.get()) {
+        return enabled;
+    }
+    match std::env::var("GOLDY_SPECIALIZATION") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Install a thread-local override for CB reuse (see [`retained_cb_reuse_disabled`]).

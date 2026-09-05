@@ -308,6 +308,8 @@ pub struct ComputeNodeRecord {
     stamp_targets: Vec<Arc<ParcelStamp>>,
     /// Per-slot descriptor access from pipeline reflection (shader-signature order).
     slot_access: Vec<Option<ResourceAccess>>,
+    /// Shader provenance of `pipeline`, for the scheme's specialization predictor.
+    provenance: Arc<crate::shader::ShaderProvenance>,
 }
 
 impl ComputeNodeRecord {
@@ -320,6 +322,7 @@ impl ComputeNodeRecord {
             user_slots: Vec::new(),
             stamp_targets: Vec::new(),
             slot_access: pipeline.slot_access.clone(),
+            provenance: Arc::clone(&pipeline.provenance),
         }
     }
 
@@ -407,6 +410,7 @@ impl ComputeNodeRecord {
         scheme.commit_compute_dispatch(
             self.label,
             self.pipeline,
+            &self.provenance,
             self.bindings,
             self.resource_slots,
             self.user_slots,

@@ -1707,6 +1707,20 @@ pub(crate) trait GpuBackend:
     /// Destroy a compute pipeline.
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
 
+    /// Whether a compute pipeline's binding layout is fixed by its shader signature.
+    ///
+    /// The retained-scheme specialization predictor swaps a dispatch's pipeline for a
+    /// variant with scalar params baked in. That is only transparent when the variant
+    /// binds exactly like the original, which holds when the layout follows the
+    /// signature (Vulkan/DX12/Metal/CUDA pipeline layouts, mock). WebGPU derives bind
+    /// group layouts from what the compiled WGSL actually *uses*, so a variant that
+    /// dead-strips a binding changes the layout and the recorded bind groups no longer
+    /// match; it returns `false` until it builds explicit layouts. Backends that return
+    /// `false` never see the predictor run.
+    fn compute_pipeline_layout_follows_signature(&self) -> bool {
+        true
+    }
+
     /// Slang target for compute-stage compilation performed *outside* the backend mutex.
     ///
     /// `None` (the default) means the frontend must not compile: the mock backend reports

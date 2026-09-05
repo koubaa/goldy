@@ -47,6 +47,9 @@ pub struct ComputePipeline {
     /// pick the correct SRV/UAV descriptor independent of the graph access (which
     /// only drives barriers). Empty when the backend reports no reflection.
     pub(crate) slot_access: Vec<Option<crate::types::ResourceAccess>>,
+    /// Compile inputs of the shader this pipeline was built from, so a scheme can compile
+    /// specialized variants of it without the caller keeping the [`ShaderModule`] alive.
+    pub(crate) provenance: Arc<crate::shader::ShaderProvenance>,
 }
 
 impl ComputePipeline {
@@ -89,6 +92,7 @@ impl ComputePipeline {
             backend: Arc::clone(&device.inner.backend),
             handle,
             slot_access,
+            provenance: Arc::clone(compute_shader.provenance()),
         })
     }
 }

@@ -768,6 +768,12 @@ impl GpuBackend for CpuBackend {
         self
     }
 
+    /// The host-callable lowering does not route scalar params through the bake macros,
+    /// so a variant would compile to the same kernel; nothing to gain.
+    fn compute_pipeline_layout_follows_signature(&self) -> bool {
+        false
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Cpu
     }

@@ -3162,6 +3162,22 @@ pub fn scalar_specialization_macro(entry_fn_name: &str, slot: u32) -> String {
     format!("_GOLDY_SPEC_{sanitized}_UW{slot}")
 }
 
+/// User function name of the `[goldy_compute]` entry when `source` declares exactly one.
+///
+/// Callers that want to define [`scalar_specialization_macro`] for a compute pipeline need
+/// the entry the macro is scoped to; with zero or several compute entries there is no
+/// single answer and the caller should not specialize.
+pub fn single_compute_entry_name(source: &str) -> Option<String> {
+    let mut compute = find_all_entries(source)
+        .into_iter()
+        .filter(|e| e.stage == Stage::Compute);
+    let first = compute.next()?;
+    if compute.next().is_some() {
+        return None;
+    }
+    Some(first.fn_name)
+}
+
 fn goldy_callee_name(entry: &EntryDef) -> String {
     match entry.stage {
         Stage::Mesh => "goldy_mesh".into(),

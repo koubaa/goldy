@@ -65,6 +65,7 @@ pub mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
 pub mod signal;
+pub(crate) mod specialization;
 #[cfg(feature = "graphics")]
 pub mod swapchain_pool;
 pub(crate) mod timeline;
@@ -535,6 +536,43 @@ pub mod test_support {
         fn drop(&mut self) {
             crate::validation_env::clear_cb_reuse_override();
         }
+    }
+
+    /// Thread-local pin for retained-scheme shader specialization (`GOLDY_SPECIALIZATION`).
+    ///
+    /// Tests that count records across many frames force it off so an automatic
+    /// promotion re-record cannot perturb them; tests of the predictor force it on.
+    pub struct SpecializationOverride {
+        _private: (),
+    }
+
+    impl SpecializationOverride {
+        /// Force specialization on for this thread (ignores the environment).
+        pub fn force_enabled() -> Self {
+            crate::validation_env::set_specialization_override(true);
+            Self { _private: () }
+        }
+
+        /// Force specialization off for this thread (ignores the environment).
+        pub fn force_disabled() -> Self {
+            crate::validation_env::set_specialization_override(false);
+            Self { _private: () }
+        }
+    }
+
+    impl Drop for SpecializationOverride {
+        fn drop(&mut self) {
+            crate::validation_env::clear_specialization_override();
+        }
+    }
+
+    /// Block until every in-flight specialization compile owned by `scheme` has finished.
+    ///
+    /// The predictor compiles variants on worker threads and only swaps them in on a later
+    /// submit; tests that assert a promotion happened by frame N need the compile to have
+    /// landed first.
+    pub fn wait_for_specialization_compiles(scheme: &mut crate::Scheme) {
+        scheme.wait_for_specialization_compiles();
     }
 
     /// Thread-local pin for `GOLDY_VALIDATION=host_access`.
