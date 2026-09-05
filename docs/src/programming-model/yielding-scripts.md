@@ -75,7 +75,9 @@ The scheme sees one node. Inside it the runtime runs as many rounds as the scrip
 
 ## The Slang side
 
-Three constructs, all auto-included with `import goldy_exp`:
+Three constructs. `import goldy_exp` pulls in `Resolved<T>` and the petition helpers
+when Goldy sets `GOLDY_YIELD` — automatically, for yielding scripts and for GPU
+handlers that call `goldy_resolve` / `goldy_reject`:
 
 | Construct | Meaning |
 |---|---|

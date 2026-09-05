@@ -346,10 +346,15 @@ impl ShaderModule {
             .chain(extra_paths.iter().map(|s| s.to_string()))
             .collect();
 
-        let owned_defines: Vec<(String, String)> = defines
+        let mut owned_defines: Vec<(String, String)> = defines
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
+        if crate::slang::yielding::needs_petition_prelude(source)
+            && owned_defines.iter().all(|(k, _)| k != "GOLDY_YIELD")
+        {
+            owned_defines.push(("GOLDY_YIELD".into(), "1".into()));
+        }
         let mut owned_checks = generated_checks;
         if validate_authored {
             owned_checks.extend(layout_checks.iter().map(OwnedLayoutCheck::from_layout_check));

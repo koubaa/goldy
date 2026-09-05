@@ -1,5 +1,5 @@
 // Yielding scripts: petitions, continuations, and resolved promises.
-// Auto-included when you import goldy_exp.
+// Included from goldy_exp when GOLDY_YIELD is defined.
 //
 // A `[goldy_compute]` entry point may suspend a lane at a *yield point*:
 //
@@ -22,8 +22,9 @@
 //
 // The Goldy compiler lowers `$yield` into an append onto a dispatch-private
 // mailbox, and each `[goldy_resume]` function into its own compute entry point
-// that reads one record per lane. The host side (`Scheme::node(..).yield_point`)
-// drives the yield/service/resume rounds; see docs/src/programming-model/yielding-scripts.md.
+// that reads one record per lane. `goldy_exp` includes this file when the
+// compile defines `GOLDY_YIELD` (set automatically for yielding scripts and
+// for shaders that call `goldy_resolve` / `goldy_reject`).
 
 implementing goldy_exp;
 

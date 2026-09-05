@@ -163,6 +163,13 @@ pub fn has_yield_constructs(source: &str) -> bool {
     source.contains("$yield") || source.contains("[goldy_resume") || source.contains("[goldy_petition")
 }
 
+/// `true` when compiling `source` should pull `goldy_exp/petition` into `goldy_exp`
+/// (`GOLDY_YIELD`). Yielding scripts and GPU handlers that call `goldy_resolve`
+/// / `goldy_reject` both need it; ordinary `import goldy_exp` shaders do not.
+pub fn needs_petition_prelude(source: &str) -> bool {
+    has_yield_constructs(source) || source.contains("goldy_resolve(") || source.contains("goldy_reject(")
+}
+
 /// Reflect the yielding-script structure of `source`, or `Ok(None)` when it has none.
 pub fn reflect(source: &str) -> Result<Option<YieldReflection>, String> {
     if !has_yield_constructs(source) {
@@ -1092,6 +1099,22 @@ fn keep_program_buffers(c: &ContinuationDecl) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn petition_prelude_only_when_needed() {
+        assert!(!needs_petition_prelude(
+            "import goldy_exp;\n[goldy_compute] void cs_main() {}"
+        ));
+        assert!(needs_petition_prelude("$yield(ra, p, s)"));
+        assert!(needs_petition_prelude("[goldy_resume] void ra() {}"));
+        assert!(needs_petition_prelude(
+            "[goldy_petition(Result = BufRO<uint>)] struct P { uint k; };"
+        ));
+        assert!(needs_petition_prelude("goldy_resolve(tid.x, v);"));
+        assert!(needs_petition_prelude("goldy_reject(tid.x, 1u);"));
+        assert!(!needs_petition_prelude("uint goldy_resolve_count = 0;"));
+        assert!(!needs_petition_prelude("void goldy_reject_helper() {}"));
+    }
 
     const SRC: &str = r#"
 import goldy_exp;
