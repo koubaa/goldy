@@ -4,6 +4,9 @@ Rendering with no `RenderPipeline` at all. The compute shader writes the swapcha
 obtained from `SurfaceExchange::bind_destination`, and the frame is settled by claiming the
 present transaction. This is the shortest path from a dispatch to the screen.
 
+<video src="../assets/examples/compute_to_surface.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example compute_to_surface
 ```

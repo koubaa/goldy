@@ -10,10 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Examples in the book** — every `[[example]]` target now has a page under
-  Examples in the mdBook, with its description, run command, controls, and full
-  Rust plus Slang source inlined from `examples/` and `shaders/` via mdBook
-  includes. The gallery becomes the index and its two phantom entries
-  (`headless_triangle`, `scheme_screenshot`) are gone.
+  Examples in the mdBook, with its description, run command, controls, a
+  recording of it running, and full Rust plus Slang source inlined from
+  `examples/` and `shaders/` via mdBook includes. The gallery becomes the index
+  and its two phantom entries (`headless_triangle`, `scheme_screenshot`) are
+  gone.
+
+- **`scripts/record_example_captures.sh`** — builds the examples, runs each one
+  on a virtual X11 display, and grabs the window with ffmpeg into
+  `docs/src/assets/examples/*.webm`. Defaults to the WebGPU backend, the only
+  one whose surface path reaches X11 on Linux.
 
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
@@ -147,6 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`mandelbrot` ignored the run limit** — the example sets
+  `ControlFlow::Wait`, so with no input it idled past `GOLDY_EXAMPLE_TIMEOUT` /
+  `EXAMPLE_TIMEOUT` forever and hung `run_all_examples.sh`. It now polls when a
+  run limit is set.
 - WebGPU bind-group cache keys include the exclusive pipeline identity so
   structurally identical layouts from different PSOs are not reused.
 - Tight (`src_row_pitch == 0`) `copy_buffer_to_texture_parcel` resubmits are

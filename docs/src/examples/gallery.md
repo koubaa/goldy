@@ -1,8 +1,12 @@
 # Examples Gallery
 
 Goldy ships **23 Rust examples**, each a complete runnable program. Every example has a page
-here that inlines its Rust and Slang source straight from the repository, so what you read is
-always what compiles.
+here with a recording of it running, plus its Rust and Slang source inlined straight from the
+repository — so what you watch is what the code does, and what you read is what compiles.
+
+The clips are not screen-captured by hand. `scripts/record_example_captures.sh` builds the
+examples, runs each one against a real backend on a virtual display, and grabs the window with
+ffmpeg. Rerun it after changing an example's visuals.
 
 ## Running Examples
 
@@ -31,9 +35,12 @@ GOLDY_BACKEND=webgpu cargo run --no-default-features --features webgpu,examples 
 
 Two examples probe capabilities and exit cleanly when they are missing:
 [`mesh_triangle`](./mesh_triangle.md) needs mesh shaders and [`ray_query`](./ray_query.md) needs
-ray query, neither of which the WebGPU backend implements. The WebGPU backend runs the examples
-natively through `wgpu` — Goldy does not build for `wasm32` yet, so these pages carry source
-rather than in-browser canvases.
+ray query, neither of which the WebGPU backend implements. Those two pages carry source but no
+recording.
+
+WebGPU is what the recordings run on, because it is the one backend that can present to X11 on
+Linux — Goldy's Vulkan surface path is Wayland-only. Software rendering (lavapipe) is enough:
+the clips are wall-clock captures, not benchmarks.
 
 ## Bindless Basics
 

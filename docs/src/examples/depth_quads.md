@@ -4,6 +4,9 @@ Two fullscreen quads whose depths cross periodically. Because depth testing deci
 visibility, the picture is independent of the order the quads are drawn in — which is exactly
 what the animation makes visible.
 
+<video src="../assets/examples/depth_quads.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example depth_quads
 ```

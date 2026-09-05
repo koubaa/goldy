@@ -5,6 +5,9 @@ fields `"a"` and `"b"`, so ping-pong is a sub-view swap rather than two separate
 Each simulation step runs an ephemeral compute scheme; the display scheme is re-recorded
 when the active field flips.
 
+<video src="../assets/examples/game_of_life.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example game_of_life
 ```

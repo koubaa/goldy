@@ -3,6 +3,9 @@
 A rain and snow particle system. The compute pass integrates positions and wraps particles
 at the window edges; pressing `Space` swaps the simulation mode at runtime.
 
+<video src="../assets/examples/particles.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example particles
 ```

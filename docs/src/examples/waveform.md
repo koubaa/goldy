@@ -3,6 +3,9 @@
 An animated waveform visualizer built from a `LINE_STRIP` whose vertices are recomputed on
 the CPU and uploaded each frame.
 
+<video src="../assets/examples/waveform.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example waveform
 ```

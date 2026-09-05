@@ -4,6 +4,9 @@ A compute shader integrates particle positions in place, and a graphics pass dra
 instanced quads from the same buffer. Both nodes live in one retained scheme, so Goldy
 derives the compute-to-raster barrier from the declared parcel accesses.
 
+<video src="../assets/examples/compute_particles.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example compute_particles
 ```

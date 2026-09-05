@@ -5,6 +5,9 @@ The smallest complete Goldy program: three coloured vertices in a retained
 render target, then handed to the swapchain through a `SurfaceExchange` transaction.
 Every other windowed example is a variation on this skeleton.
 
+<video src="../assets/examples/triangle.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example triangle
 ```

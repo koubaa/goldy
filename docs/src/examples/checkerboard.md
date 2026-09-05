@@ -3,6 +3,9 @@
 A procedural checkerboard whose UVs are distorted over time in the fragment shader — no
 texture and no vertex buffer, just a time uniform and arithmetic.
 
+<video src="../assets/examples/checkerboard.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example checkerboard
 ```

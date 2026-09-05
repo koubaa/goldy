@@ -4,6 +4,8 @@ Builds a BLAS for one triangle plus a TLAS, then traces primary rays with inline
 from a `[goldy_compute]` entry point and writes hits straight into the swapchain. No ray
 tracing pipeline or shader binding table is involved.
 
+*No recording: the capture runs on the WebGPU backend, which has no inline ray query, so the example skips.*
+
 ```bash
 cargo run --features examples --example ray_query
 ```

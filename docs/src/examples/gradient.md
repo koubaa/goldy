@@ -4,6 +4,9 @@ An animated full-screen gradient driven by a single time uniform. Rendering is v
 the vertex stage synthesizes a fullscreen triangle from `SV_VertexID`, which is the
 Goldy-native way to write screen-space effects.
 
+<video src="../assets/examples/gradient.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example gradient
 ```

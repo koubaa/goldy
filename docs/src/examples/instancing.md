@@ -4,6 +4,9 @@ GPU-driven instancing: a compute pass updates per-instance transforms in a stora
 and one instanced draw renders them all. The per-instance layout lives in
 `examples/instance2d.rs` and mirrors `QuadInstance` in the Slang shaders.
 
+<video src="../assets/examples/instancing.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example instancing
 ```

@@ -3,6 +3,9 @@
 A seven-segment clock. Segment geometry is generated on the CPU in
 `examples/digital_clock_shared.rs` and drawn as coloured triangles each frame.
 
+<video src="../assets/examples/digital_clock.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example digital_clock
 ```

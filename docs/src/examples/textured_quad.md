@@ -4,6 +4,9 @@ A procedurally generated checkerboard texture sampled onto a quad. The vertex st
 no bindless resources at all; only the fragment stage takes `tex` and `smp`, and Goldy binds
 them by pipeline name.
 
+<video src="../assets/examples/textured_quad.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example textured_quad
 ```

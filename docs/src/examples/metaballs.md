@@ -3,6 +3,9 @@
 Organic blobs rendered by summing an inverse-square field from several moving centres and
 thresholding it in the fragment shader.
 
+<video src="../assets/examples/metaballs.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example metaballs
 ```

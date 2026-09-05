@@ -3,6 +3,9 @@
 Line segments bouncing off the window edges. A compute pass integrates the simple physics;
 a `LINE_LIST` pipeline draws the result.
 
+<video src="../assets/examples/bouncing_lines.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example bouncing_lines
 ```

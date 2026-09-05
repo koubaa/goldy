@@ -3,6 +3,9 @@
 A solid 3D cube with per-face colours, indexed geometry, and a depth attachment on the
 scheme-leased render target.
 
+<video src="../assets/examples/solid_cube.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example solid_cube
 ```

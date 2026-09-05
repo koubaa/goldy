@@ -3,6 +3,9 @@
 An interactive Mandelbrot explorer. Pan and zoom update a uniform that the fragment shader
 uses as its complex-plane window, so navigation costs nothing but a deposit.
 
+<video src="../assets/examples/mandelbrot.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example mandelbrot
 ```

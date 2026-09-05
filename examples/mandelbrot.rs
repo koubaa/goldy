@@ -309,7 +309,13 @@ fn main() -> anyhow::Result<()> {
     println!("  R - Reset view");
     println!("  Escape - Exit");
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
+    // `Wait` idles until input arrives, which would also idle straight past a
+    // configured run limit, so poll when one is set.
+    event_loop.set_control_flow(if common::run_limit_secs().is_some() {
+        ControlFlow::Poll
+    } else {
+        ControlFlow::Wait
+    });
     event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }

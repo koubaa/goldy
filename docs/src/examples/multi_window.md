@@ -4,6 +4,9 @@ Three windows — plasma, tunnel, and starfield — sharing one `Device`. Each w
 own `SurfaceExchange`, `Context`, and `Scheme`, which is the pattern for any multi-surface
 application.
 
+<video src="../assets/examples/multi_window.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example multi_window
 ```

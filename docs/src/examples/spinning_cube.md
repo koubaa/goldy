@@ -3,6 +3,9 @@
 A wireframe cube drawn with `LINE_LIST` topology and a hand-rolled 3D projection, which
 keeps the example free of any matrix library.
 
+<video src="../assets/examples/spinning_cube.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
+
 ```bash
 cargo run --features examples --example spinning_cube
 ```
