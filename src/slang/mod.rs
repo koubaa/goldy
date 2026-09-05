@@ -48,6 +48,7 @@ mod gpu_type;
 pub mod graphics_link;
 pub mod loader;
 pub mod virtual_main;
+pub mod yielding;
 
 pub use compiler::{
     layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout, LayoutCheck,

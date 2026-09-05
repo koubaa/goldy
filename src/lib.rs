@@ -61,6 +61,7 @@ pub mod exchange;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
+pub mod petition;
 pub mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
@@ -78,8 +79,9 @@ pub use exchange::{Claim, SurfaceExchange};
 pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
+pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use retained_pool::RetainedPool;
-pub use scheme::{Lease, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, Submission};
+pub use scheme::{Lease, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission};
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};
