@@ -237,12 +237,39 @@ variant surfaces as a bind group mismatch inside the backend instead.
 A site that cannot be specialized without moving its bindings must stay universal. That is
 a missed optimization, not a bug — but it has to be detected rather than assumed.
 
+### Gate the backend, do not tier the feature
+
+The awkward part is that the specializations most worth having are the ones that drop a
+binding. `if (has_tint) { read the tint buffer; blend }` is the motivating case, and baking
+`has_tint` to zero is exactly what makes that buffer unreachable. On a backend with
+usage-derived layouts, the predictor would decline promotion precisely where it would have
+paid off most.
+
+That is a reason to gate WebGPU, not to make specialization a property of "better"
+backends. Usage-derived layouts are not a WebGPU limitation: the backend passes
+`layout: None` and takes wgpu's auto layout. An explicit pipeline layout built from the
+signature-derived `WgpuComputeLayout` the backend already computes would be stable under
+baking, because a layout may declare bindings the shader does not reference. Until that
+lands, the honest position is that Goldy's WebGPU backend cannot support specialization,
+not that WebGPU cannot.
+
+So promotion is conditional on a backend capability — whether pipeline binding layouts
+follow the shader signature — rather than on a backend allow-list. Vulkan, DX12, Metal, and
+CUDA report yes; WebGPU reports no while it uses auto layouts, and flips on by itself once
+it does not. The predictor stays backend-agnostic either way, and the capability is
+internal: specialization is an implementation detail, so it does not belong in
+`DeviceCapabilities` where a program would branch on it.
+
 ## Off switch
 
 `GOLDY_SPECIALIZATION=0` disables prediction entirely: no history, no warm compiles, no
 swaps, and every site stays on the program it was recorded with. The gate follows the
 convention of [`GOLDY_DISABLE_CB_REUSE`](../appendix/environment-variables.md) — read once
 through `validation_env`, with a thread-local override for tests.
+
+This is separate from the backend capability above. The environment variable is a global
+kill switch for when prediction is suspected of causing a problem; the capability decides
+where prediction can be correct at all.
 
 ## What this rests on
 
