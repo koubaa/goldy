@@ -95,8 +95,9 @@ impl RetainedPool {
         access: BufferKind,
         flags: crate::types::BufferFlags,
     ) -> Result<Buffer> {
-        let stride = std::mem::size_of::<T>() as u32;
-        let bytes = bytemuck::cast_slice(data);
+        let encoded = T::gpu_encode_slice(data);
+        let stride = T::gpu_element_stride() as u32;
+        let bytes = encoded.as_ref();
         self.acquire_buffer(bytes.len() as u64, access, Some(stride), flags, Some(bytes))
     }
 
@@ -107,7 +108,7 @@ impl RetainedPool {
         access: BufferKind,
         flags: crate::types::BufferFlags,
     ) -> Result<Buffer> {
-        let stride = std::mem::size_of::<T>() as u32;
+        let stride = T::gpu_element_stride() as u32;
         self.acquire_buffer(element_count * stride as u64, access, Some(stride), flags, None)
     }
 

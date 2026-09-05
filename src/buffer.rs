@@ -5,6 +5,7 @@ use crate::device::Device;
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
 use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 fn bindless_cache_from_backend(
@@ -33,7 +34,20 @@ fn bindless_cache_from_backend(
 /// element stride or a typed slice instead.
 ///
 /// Unit type `()` is included so empty slices type-check.
-pub trait StructuredBufferElement: bytemuck::Pod {}
+///
+/// [`GpuType`](crate::GpuType) types pack into the Slang structured-buffer ABI in
+/// [`Self::gpu_encode_slice`] / [`Self::gpu_element_stride`]. Other types memcpy as `repr(C)`.
+pub trait StructuredBufferElement: bytemuck::Pod {
+    /// Element stride used for structured-buffer views.
+    fn gpu_element_stride() -> usize {
+        std::mem::size_of::<Self>()
+    }
+
+    /// Host slice encoded for GPU upload.
+    fn gpu_encode_slice(items: &[Self]) -> Cow<'_, [u8]> {
+        Cow::Borrowed(bytemuck::cast_slice(items))
+    }
+}
 
 macro_rules! impl_structured_buffer_element_for_primitives {
     ($($t:ty),+ $(,)?) => {
@@ -222,8 +236,9 @@ impl Allocation {
         access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Self> {
-        let bytes = bytemuck::cast_slice(data);
-        let element_stride = std::mem::size_of::<T>() as u32;
+        let encoded = T::gpu_encode_slice(data);
+        let bytes = encoded.as_ref();
+        let element_stride = T::gpu_element_stride() as u32;
         let mut backend = device.inner.backend.lock().unwrap();
         let handle = backend.create_buffer(
             device.inner.handle,
@@ -334,9 +349,10 @@ impl Allocation {
         backend.write_buffer(self.handle, offset, data)
     }
 
-    /// Write typed data to the buffer.
-    pub fn write_data<T: bytemuck::Pod>(&self, offset: u64, data: &[T]) -> Result<()> {
-        self.write(offset, bytemuck::cast_slice(data))
+    /// Write typed data to the buffer (packed for [`crate::GpuType`] elements).
+    pub fn write_data<T: StructuredBufferElement>(&self, offset: u64, data: &[T]) -> Result<()> {
+        let encoded = T::gpu_encode_slice(data);
+        self.write(offset, encoded.as_ref())
     }
 
     /// Logical byte size (may be less than reserved capacity; see [`Self::allocated_size`]).

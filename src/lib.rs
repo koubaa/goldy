@@ -115,7 +115,8 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
 pub use slang::{
-    layout_validation_enabled, GpuField, GpuFieldType, GpuType, LayoutCheck, StructFieldLayout, StructLayout,
+    layout_validation_enabled, GpuField, GpuFieldType, GpuType, LayoutCheck, PackedGpuField, PackedGpuLayout,
+    StructFieldLayout, StructLayout,
 };
 pub use task_graph::NodeAccess;
 pub use texture::TextureCopyFootprint;

@@ -135,10 +135,11 @@ pub fn derive_layout_checkable(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// Derive an exact Rust layout descriptor from which Goldy generates a Slang struct.
+/// Derive a GPU type from logical `#[repr(C)]` fields.
 ///
-/// The authored shader references the Rust type name but must not redeclare it.
-#[proc_macro_derive(GpuType, attributes(gpu))]
+/// Goldy packs the type into the Slang structured-buffer ABI at upload and when
+/// generating the matching Slang struct. Do not declare padding fields.
+#[proc_macro_derive(GpuType)]
 pub fn derive_gpu_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_gpu_type(&input) {
@@ -179,16 +180,6 @@ fn expand_gpu_type(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
         let field_name = ident.to_string();
-        let is_padding = field.attrs.iter().any(|attr| {
-            attr.path().is_ident("gpu")
-                && attr
-                    .parse_args::<syn::Ident>()
-                    .map(|arg| arg == "padding")
-                    .unwrap_or(false)
-        });
-        if is_padding {
-            continue;
-        }
         if field_name.starts_with("__goldy_pad") {
             return Err(syn::Error::new_spanned(
                 ident,
@@ -222,6 +213,24 @@ fn expand_gpu_type(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     &FIELDS
                 },
             };
+        }
+
+        impl ::goldy::StructuredBufferElement for #name {
+            fn gpu_element_stride() -> usize {
+                #name::GPU_TYPE
+                    .storage_stride()
+                    .expect("GpuType storage stride")
+            }
+
+            fn gpu_encode_slice(items: &[Self]) -> ::std::borrow::Cow<'_, [u8]> {
+                if items.is_empty() {
+                    return ::std::borrow::Cow::Borrowed(&[]);
+                }
+                match #name::GPU_TYPE.encode_pod_slice(items) {
+                    Ok(bytes) => ::std::borrow::Cow::Owned(bytes),
+                    Err(err) => panic!("{err}"),
+                }
+            }
         }
     })
 }
@@ -362,20 +371,18 @@ mod gpu_type_tests {
     }
 
     #[test]
-    fn padding_fields_are_omitted_from_logical_schema() {
+    fn all_named_fields_are_logical() {
         let input: DeriveInput = syn::parse_quote! {
             #[repr(C)]
             struct Example {
                 value: [f32; 3],
-                #[gpu(padding)]
-                _padding: f32,
                 uv: [f32; 2],
             }
         };
         let expanded = expand_gpu_type(&input).unwrap().to_string();
-        assert!(!expanded.contains("\"_padding\""));
         assert!(expanded.contains("\"value\""));
         assert!(expanded.contains("\"uv\""));
+        assert!(expanded.contains("StructuredBufferElement"));
     }
 
     #[test]

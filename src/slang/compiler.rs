@@ -1609,7 +1609,7 @@ mod struct_layout_validate_tests {
 
     #[test]
     fn gpu_type_derive_generates_portable_field_metadata() {
-        #[derive(goldy_derive::GpuType)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy_derive::GpuType)]
         #[repr(C)]
         struct GeneratedVertex {
             pos: [f32; 3],

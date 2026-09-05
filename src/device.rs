@@ -777,8 +777,9 @@ impl Device {
         data: &[T],
         access: BufferKind,
     ) -> anyhow::Result<crate::buffer::Allocation> {
-        let bytes = bytemuck::cast_slice(data);
-        let stride = std::mem::size_of::<T>() as u32;
+        let encoded = T::gpu_encode_slice(data);
+        let bytes = encoded.as_ref();
+        let stride = T::gpu_element_stride() as u32;
         self.alloc_buffer_with_bytes_stride(bytes, access, stride)
     }
 
