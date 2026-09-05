@@ -234,6 +234,14 @@ impl Context {
         self.wait_until_context(self.inner.handle, value)
     }
 
+    /// Block until the producer context named by `epoch` has retired `epoch.value`.
+    ///
+    /// Used by CPU dispatches to retire cross-context dependencies on the host before
+    /// the host function runs (there is no GPU queue to carry the wait).
+    pub(crate) fn wait_until_epoch(&self, epoch: crate::timeline::Epoch) -> Result<(), GoldyError> {
+        self.wait_until_context(epoch.context, epoch.value)
+    }
+
     fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("context.wait_until");
         let progress = self.gpu_progress();

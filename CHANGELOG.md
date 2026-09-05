@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CPU dispatches in `Scheme`** — `Scheme::cpu_node(label)` records a serial,
+  stateless host function as a scheme node. The function's parameter list is
+  its virtual main: one `&[T]` / `&mut [T]` (`T: bytemuck::Pod`) per parcel
+  bound with `with_parcel` / `with_lease`, followed by `u32` / `i32` / `f32` /
+  `bool` scalars from `with_param`. Host visibility is a property of the node:
+  every binding is staged through a device→host readback copy before the call
+  and a host→device upload copy after it (`Overwrite` skips the download and
+  arrives zeroed), so parcels keep their device-resident allocation on every
+  backend. A CPU dispatch is a full pipeline drain and never retains; GPU
+  partitions around it retain as before. New `goldy::cpu_dispatch` module
+  (`CpuArg`, `CpuMain`), `SchemeCpuNodeBuilder`, and
+  `NodeKind::CpuDispatch`. Textures are not accepted as CPU parameters yet.
+
 - **`GOLDY_VALIDATION=host_access`** — page-protect CPU-backend parcel storage
   (page-aligned, unshared mapping + guard page). Stray host pointers fault
   outside legal CPU windows (upload, dispatch, withdraw). Included in `all`.
