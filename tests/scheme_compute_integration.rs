@@ -252,24 +252,23 @@ mod imp {
     }
     "#;
 
-    /// One source, two programs: the universal path loads the tint factor from a parcel at
-    /// runtime, and defining `TINT_FACTOR` bakes it instead.
+    /// One source, two programs: the universal path reads the tint factor at runtime, and
+    /// baking slot 0 turns it into a compile-time constant.
     ///
     /// This is the shape a specialization predictor promotes — see
-    /// `docs/src/design/shader-specialization.md`. The parameter list is identical in both
-    /// variants so a recorded node can swap between them without rebinding.
+    /// `docs/src/design/shader-specialization.md`. `offset` stays dynamic, which is both the
+    /// realistic case (the predictor bakes the slots that have been stable, not all of them)
+    /// and a requirement on backends that derive bind group layouts from shader *usage*
+    /// rather than from the signature: on WebGPU, baking every scalar leaves the user-params
+    /// uniform unreferenced, and wgpu's auto layout then stops expecting a binding the
+    /// recorded dispatch still supplies.
     const TINT_SPECIALIZABLE_SHADER: &str = r#"
     import goldy_exp;
 
     [goldy_compute]
     [numthreads(64, 1, 1)]
-    void cs_main(Scattered<uint> factor, Scattered<uint> data, ThreadId id) {
-    #ifdef TINT_FACTOR
-        uint f = TINT_FACTOR;
-    #else
-        uint f = factor[0];
-    #endif
-        data[id.x] = id.x * f;
+    void cs_main(Scattered<uint> data, ThreadId id, uint factor, uint offset) {
+        data[id.x] = id.x * factor + offset;
     }
     "#;
 
@@ -361,22 +360,22 @@ mod imp {
 
     /// End-to-end specialization: compile a variant from one module, swap it onto a recorded
     /// dispatch node, and confirm the GPU runs the new program while the rest of the scheme
-    /// stays retained.
+    /// stays retained and keeps its record count.
     fn scheme_specialized_variant_swap(device: &Device) {
         let ctx = submission_context(&device);
 
         let universal_module = ShaderModule::from_slang(device, TINT_SPECIALIZABLE_SHADER).expect("universal shader");
         let specialized_module = universal_module
-            .variant(&[("TINT_FACTOR", "10")])
+            .variant(&[(
+                goldy::slang::virtual_main::scalar_specialization_macro("cs_main", 0).as_str(),
+                "10u",
+            )])
             .expect("specialized variant");
         let universal = ComputePipeline::new(device, &universal_module).expect("universal pipeline");
         let specialized = ComputePipeline::new(device, &specialized_module).expect("specialized pipeline");
         let fill_42 = ComputePipeline::new(device, &ShaderModule::from_slang(device, FILL_42_SHADER).unwrap()).unwrap();
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
-        let factor = pool
-            .acquire_buffer_with_data(&[3u32], BufferKind::Scattered)
-            .expect("factor buffer");
         let tinted = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("tinted buffer");
@@ -387,8 +386,9 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         let tint_node = scheme
             .node("tint", &universal)
-            .with_parcel(&factor, NodeAccess::Read)
             .with_parcel(&tinted, NodeAccess::Write)
+            .with_param(3)
+            .with_param(0)
             .dispatch(1, 1, 1);
         scheme
             .node("fill_untouched", &fill_42)
@@ -404,7 +404,11 @@ mod imp {
         let mut frame = scheme.submit().expect("second submit");
         let universal_out = read_grant_u32(&tinted_grant, &mut frame, 64);
         for (i, &val) in universal_out.iter().enumerate() {
-            assert_eq!(val, i as u32 * 3, "universal element {i} must use the runtime factor");
+            assert_eq!(
+                val,
+                i as u32 * 3,
+                "universal element {i} must read the param at runtime"
+            );
         }
         let records_before = scheme.replay_stats().records;
         assert_eq!(

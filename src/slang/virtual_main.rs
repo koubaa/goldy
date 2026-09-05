@@ -1021,6 +1021,7 @@ pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &st
         let mut body = String::new();
         let mut call_args = Vec::new();
         let mut resource_decls = String::new();
+        let mut scalar_macros = Vec::new();
 
         for param in resolve_cuda_params(&entry.params, defines) {
             match &param.kind {
@@ -1048,8 +1049,9 @@ pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &st
                     sv_index += 1;
                 }
                 ParamKind::Scalar => {
-                    let word = format!("_goldy_wgpu_user._uw{user}");
-                    let init = hlsl_scalar_from_uint_word(&param.ty, &word)?;
+                    let macro_name = scalar_specialization_macro(&entry.fn_name, user);
+                    scalar_macros.push((macro_name.clone(), format!("_goldy_wgpu_user._uw{user}")));
+                    let init = hlsl_scalar_from_uint_word(&param.ty, &macro_name)?;
                     body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, init));
                     call_args.push(param.name.clone());
                     user += 1;
@@ -1080,6 +1082,11 @@ pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &st
                  \tuint _uw7;\n\
                  }};\n\
                  ConstantBuffer<_GoldyWgpuUserParams> _goldy_wgpu_user : register(b{binding}, space0);\n"
+            ));
+        }
+        for (macro_name, default_expr) in &scalar_macros {
+            generated.push_str(&format!(
+                "#ifndef {macro_name}\n#define {macro_name} {default_expr}\n#endif\n"
             ));
         }
 
@@ -1588,6 +1595,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
         let mut binding = 0u32;
         let mut user = 0u32;
         let mut storage_spec_i = 0usize;
+        let mut scalar_macros = Vec::new();
         let user_fn = format!("_goldy_user_{}", entry.fn_name);
 
         for param in resolve_cuda_params(&entry.params, defines) {
@@ -1668,7 +1676,11 @@ pub fn transform_virtual_main_cuda_compute_specialized(
                 }
                 ParamKind::Scalar => {
                     let word = format!("_goldy_cuda_user_{user}");
-                    let init = hlsl_scalar_from_uint_word(&param.ty, &word)?;
+                    let macro_name = scalar_specialization_macro(&entry.fn_name, user);
+                    scalar_macros.push((macro_name.clone(), word.clone()));
+                    let init = hlsl_scalar_from_uint_word(&param.ty, &macro_name)?;
+                    // The kernel argument stays in the signature even when the value is baked,
+                    // so the launch layout is unchanged and unbaked slots keep their positions.
                     signature.push(format!("uniform uint {word}"));
                     body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, init));
                     call_args.push(param.name.clone());
@@ -1690,6 +1702,11 @@ pub fn transform_virtual_main_cuda_compute_specialized(
             ));
         }
 
+        for (macro_name, default_expr) in &scalar_macros {
+            generated.push_str(&format!(
+                "#ifndef {macro_name}\n#define {macro_name} {default_expr}\n#endif\n"
+            ));
+        }
         generated.push_str(entry.stage.shader_attr());
         generated.push('\n');
         if let Some((x, y, z)) = entry.numthreads {
@@ -4554,7 +4571,11 @@ void cs_main(Scattered<uint> values, uint base, ThreadId id) {
             result.contains("ConstantBuffer<_GoldyWgpuUserParams> _goldy_wgpu_user : register(b1, space0);"),
             "{result}"
         );
-        assert!(result.contains("uint base = _goldy_wgpu_user._uw0;"), "{result}");
+        assert!(
+            result.contains("#define _GOLDY_SPEC_CS_MAIN_UW0 _goldy_wgpu_user._uw0"),
+            "{result}"
+        );
+        assert!(result.contains("uint base = _GOLDY_SPEC_CS_MAIN_UW0;"), "{result}");
         assert!(
             result.contains("_goldy_user_cs_main(_goldy_wgpu_binding_0, base, id)"),
             "{result}"
@@ -4580,7 +4601,7 @@ void cs_main(Scattered<float> values, float scale, ThreadId id) {
 "#;
         let result = transform_virtual_main_webgpu_compute(src, &[]).unwrap();
         assert!(
-            result.contains("float scale = asfloat(_goldy_wgpu_user._uw0);"),
+            result.contains("float scale = asfloat(_GOLDY_SPEC_CS_MAIN_UW0);"),
             "{result}"
         );
     }
@@ -4900,7 +4921,11 @@ void cs_main(Scattered<uint> values, uint base, ThreadId id) {
             "{result}"
         );
         assert!(result.contains("uniform uint _goldy_cuda_user_0"), "{result}");
-        assert!(result.contains("uint base = _goldy_cuda_user_0;"), "{result}");
+        assert!(
+            result.contains("#define _GOLDY_SPEC_CS_MAIN_UW0 _goldy_cuda_user_0"),
+            "{result}"
+        );
+        assert!(result.contains("uint base = _GOLDY_SPEC_CS_MAIN_UW0;"), "{result}");
         assert!(
             result.contains("_goldy_user_cs_main(_goldy_cuda_binding_0, base, id)"),
             "{result}"
@@ -4957,7 +4982,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
 "#;
         let result = transform_virtual_main_cuda_compute(src, &[]).unwrap();
         assert!(
-            result.contains("float value = asfloat(_goldy_cuda_user_0);"),
+            result.contains("float value = asfloat(_GOLDY_SPEC_CS_MAIN_UW0);"),
             "{result}"
         );
     }

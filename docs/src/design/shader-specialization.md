@@ -85,12 +85,17 @@ literal exactly as it applied to the push-constant word.
 
 Two properties make this safe to swap under an already-recorded dispatch:
 
-- **The push-constant ABI does not move.** The wrapper's signature always declares all
-  eight `_uw` words regardless of use, so baking one leaves the others at their original
-  offsets. A site with a baked `factor` and a runtime `bias` still reads `bias` correctly.
+- **The parameter ABI does not move.** The wrapper's signature always declares all eight
+  `_uw` words regardless of use, so baking one leaves the others at their original offsets.
+  A site with a baked `factor` and a runtime `bias` still reads `bias` correctly. The
+  WebGPU and CUDA lowerings keep their uniform field and kernel argument for the same
+  reason.
 - **The recorded payload does not change.** Baking rewrites the program, not the command
   list. The same wire words stay baked into the partition; the specialized program simply
   stops reading them.
+
+What baking must not do is change the pipeline's *binding* layout, which is a real
+constraint on some backends and is covered below.
 
 What the driver receives is a statically decidable branch. Slang does not run its
 dead-code pass at the default optimization level, so the unreachable block survives into
@@ -198,17 +203,39 @@ keeps the predictor from recording extra command lists for small or short-lived 
   interaction topology, which already forces a re-record) or on an explicit purge. Both
   clear prediction state; neither needs to clear the PSO cache.
 
-## Reflection compatibility
+## Baking must not change the binding layout
 
-Baking can make a bound resource unreachable, and a shader compiler is entitled to drop an
-unused binding from reflection. A dispatch node captures `slot_access` from its pipeline
-when the node is built, and swapping a pipeline does not refresh it, so a variant whose
-reflection disagrees with the universal program would leave the node choosing descriptors
-by a stale table.
+A specialized variant is swapped under bindings that were already resolved when the node
+was recorded, so it has to agree with the universal program about what those bindings are.
+Baking can break that agreement, because making a value constant can make a *resource*
+unreachable, and a compiler is entitled to stop expecting a binding nothing reads.
 
-Promotion therefore compares the variant's `slot_access` against the universal program's
-and refuses to promote when they differ. A site that cannot be specialized without moving
-its bindings stays universal; that is a missed optimization, not a bug.
+This is not hypothetical, and it is not uniform across backends. Vulkan, DX12, and Metal
+bind through a bindless heap, so a pipeline's expectations follow the shader signature and
+survive baking. WebGPU does not: wgpu derives the bind group layout from the compiled WGSL,
+so it reflects *usage*. Two consequences, both observed:
+
+- Baking a value that was the only reason a bound buffer was read drops that buffer from
+  the layout, and the recorded dispatch then supplies a binding the pipeline no longer
+  declares.
+- Baking **every** scalar of an entry point leaves the generated user-params uniform buffer
+  unreferenced, which drops it the same way — so on those backends at least one scalar slot
+  has to stay dynamic.
+
+The second constraint costs nothing in practice: the predictor bakes the slots that have
+been stable, not all of them, and a site whose every param is stable can simply leave one
+slot dynamic.
+
+The first constraint needs a real check, and `slot_access` is not it — that table is
+derived from the shader signature, so it agrees across a variant that a usage-derived
+layout would reject. The check has to be against the pipeline's actual binding layout,
+which means a backend query; wgpu itself exposes no entry count for a
+`BindGroupLayout`, so the WebGPU backend has to report the count it computed. Until that
+exists, `set_node_pipeline` cannot tell a caller that a swap is unsafe, and an incompatible
+variant surfaces as a bind group mismatch inside the backend instead.
+
+A site that cannot be specialized without moving its bindings must stay universal. That is
+a missed optimization, not a bug — but it has to be detected rather than assumed.
 
 ## Off switch
 
@@ -263,9 +290,11 @@ a usable predictor signal there. Scheme cleanliness is: whether a submit found t
 counts. The specialization mechanism therefore behaves the same everywhere; only the size
 of the saving differs.
 
-The overridable macro is emitted by the native transform. CUDA and WebGPU lower scalars
-through their own paths (`_goldy_cuda_user_N`, a uniform buffer field), so prediction is a
-no-op there until those paths grow the same indirection.
+The overridable macro is emitted by every compute lowering — the native push-constant path,
+the WebGPU uniform-buffer path, and the CUDA kernel-argument path — each defaulting the
+macro to its own read expression, so baking works the same way everywhere and the launch
+layout is unchanged in all three. Graphics stages lower scalars without the indirection;
+specialization is defined for dispatch sites, so that is deliberate.
 
 ## Non-goals
 
