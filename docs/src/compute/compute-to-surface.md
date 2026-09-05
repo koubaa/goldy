@@ -154,4 +154,4 @@ let mut submission = scheme.submit()?;
 present.claim(&mut submission)?.consume()?;
 ```
 
-See [`examples/compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) for the complete winit application.
+See [`examples/compute_to_surface.rs`](../examples/compute_to_surface.md) for the complete winit application.

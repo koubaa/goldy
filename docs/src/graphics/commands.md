@@ -118,7 +118,7 @@ let mut submission = scheme.submit()?;
 present.claim(&mut submission)?.consume()?;
 ```
 
-The graph is recorded once; every frame just resubmits it and settles the present claim. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the full loop, including resize handling (rebuild the scheme and transaction when the surface size changes).
+The graph is recorded once; every frame just resubmits it and settles the present claim. See [`examples/triangle.rs`](../examples/triangle.md) for the full loop, including resize handling (rebuild the scheme and transaction when the surface size changes).
 
 ## Compute and Graphics in One Scheme
 

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Examples in the book** — every `[[example]]` target now has a page under
+  Examples in the mdBook, with its description, run command, controls, and full
+  Rust plus Slang source inlined from `examples/` and `shaders/` via mdBook
+  includes. The gallery becomes the index and its two phantom entries
+  (`headless_triangle`, `scheme_screenshot`) are gone.
+
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
   of structurally dirty. The next submit recomputes partition fingerprints and
