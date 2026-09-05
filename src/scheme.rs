@@ -760,7 +760,7 @@ pub struct ReplayStats {
     pub topology_records: u64,
     /// Submissions that found the scheme clean: no structural, params, or topology dirtiness.
     ///
-    /// Unlike [`Self::resubmit_hits`], this counts the scheme's own state rather than backend
+    /// Unlike `resubmit_hits`, this counts the scheme's own state rather than backend
     /// command-list retention, so it means the same thing on Metal and WebGPU (which re-encode
     /// every frame) as it does on Vulkan and DX12. That makes it the portable signal for
     /// per-site history across frames.
