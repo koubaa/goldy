@@ -930,19 +930,19 @@ fn emit(source: &str, analysis: &Analysis, variant: Option<&str>) -> Result<Stri
         }
         // Touch every program buffer so WebGPU/WGSL DCE cannot drop a storage
         // binding the host still fills (continuation-only parcels on the prologue).
-        for p in refl.prologue_params.iter().filter(|p| !p.is_scalar) {
-            if p.ty.starts_with("Scattered<") {
-                prefix.push_str(&format!(
-                    " if ({BASE_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep({}); }}",
-                    p.name
-                ));
-            } else if p.ty.starts_with("BufRO<") {
-                prefix.push_str(&format!(
-                    " if ({BASE_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep_ro({}); }}",
-                    p.name
-                ));
-            }
-        }
+        let sink = refl
+            .prologue_params
+            .iter()
+            .find(|p| p.ty.starts_with("Scattered<"))
+            .map(|p| p.name.as_str())
+            .map(str::to_string)
+            .or_else(|| refl.prologue_yields_to.first().map(|t| pay_param(t)));
+        prefix.push_str(&touch_program_buffers(
+            refl.prologue_params.iter(),
+            BASE_PARAM,
+            sink.as_deref(),
+            "",
+        ));
         if !prefix.is_empty() {
             let insert_at = pro.body.start + 1;
             edits.push((insert_at..insert_at, prefix));
@@ -996,10 +996,6 @@ fn emit(source: &str, analysis: &Analysis, variant: Option<&str>) -> Result<Stri
             s = c.state_ty,
         ));
     }
-    out.push_str(
-        "void __goldy_keep<T>(Scattered<T> buf) { T _k = buf[0]; }\n\
-         void __goldy_keep_ro<T>(BufRO<T> buf) { T _k = buf[0]; }\n",
-    );
     if let Some(idx) = variant_idx {
         out.push_str(&continuation_entry(refl, &refl.continuations[idx]));
     }
@@ -1062,8 +1058,8 @@ fn continuation_entry(refl: &YieldReflection, c: &ContinuationDecl) -> String {
 
     format!(
         "\n[goldy_compute]\n[numthreads({x}, {y}, {z})]\nvoid cs_main({sig}) {{\n\
-         \x20   if ({HIDDEN_PREFIX}tid.x >= {COUNT_PARAM}) return;\n\
          {keep}\
+         \x20   if ({HIDDEN_PREFIX}tid.x >= {COUNT_PARAM}) return;\n\
          \x20   {state} {HIDDEN_PREFIX}s = {HIDDEN_PREFIX}st[{HIDDEN_PREFIX}tid.x];\n\
          \x20   uint2 {HIDDEN_PREFIX}r = {HIDDEN_PREFIX}res[{HIDDEN_PREFIX}tid.x];\n\
          \x20   Resolved<{elem}> {HIDDEN_PREFIX}rv = Resolved<{elem}>({HIDDEN_PREFIX}arena, {HIDDEN_PREFIX}r.x, {HIDDEN_PREFIX}r.y);\n\
@@ -1079,18 +1075,44 @@ fn continuation_entry(refl: &YieldReflection, c: &ContinuationDecl) -> String {
 }
 
 fn keep_program_buffers(c: &ContinuationDecl) -> String {
+    let st = format!("{HIDDEN_PREFIX}st");
+    let sink = c
+        .program_params
+        .iter()
+        .find(|p| p.ty.starts_with("Scattered<"))
+        .map(|p| p.name.as_str())
+        .unwrap_or(st.as_str());
+    touch_program_buffers(c.program_params.iter(), COUNT_PARAM, Some(sink), "    ")
+}
+
+/// Never-taken stores so WebGPU's WGSL auto-layout cannot drop a host-bound slot.
+/// A load into an unused local is not enough: Naga deletes it, then the binding.
+fn touch_program_buffers<'a>(
+    params: impl IntoIterator<Item = &'a ProgramParam>,
+    sentinel: &str,
+    ro_sink: Option<&str>,
+    indent: &str,
+) -> String {
     let mut s = String::new();
-    for p in c.program_params.iter().filter(|p| !p.is_scalar) {
-        if p.ty.starts_with("Scattered<") {
-            s.push_str(&format!(
-                "    if ({COUNT_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep({}); }}\n",
-                p.name
-            ));
+    for p in params.into_iter().filter(|p| !p.is_scalar) {
+        let stmt = if p.ty.starts_with("Scattered<") {
+            format!("if ({sentinel} == 0xFFFFFFFFu) {{ {n}[0] = {n}[0]; }}", n = p.name)
         } else if p.ty.starts_with("BufRO<") {
-            s.push_str(&format!(
-                "    if ({COUNT_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep_ro({}); }}\n",
-                p.name
-            ));
+            let Some(sink) = ro_sink else {
+                continue;
+            };
+            format!(
+                "if ({sentinel} == 0xFFFFFFFFu && goldy_buf_len({n}) == 0xFFFFFFFFu) {{ {sink}[0] = {sink}[0]; }}",
+                n = p.name
+            )
+        } else {
+            continue;
+        };
+        s.push(' ');
+        s.push_str(indent);
+        s.push_str(&stmt);
+        if !indent.is_empty() {
+            s.push('\n');
         }
     }
     s
@@ -1178,9 +1200,11 @@ void cs_resume(Scattered<uint> data, Resolved<uint> r, St s, ThreadId tid) {
         assert!(!out.contains("$yield"));
         assert!(!out.contains("[goldy_petition"));
         assert!(!out.contains("[goldy_resume"));
+        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { data[0] = data[0]; }"));
+        assert!(!out.contains("__goldy_keep"));
         assert!(out.contains(
             "void cs_main(Scattered<uint> data, uint scale, ThreadId tid, Scattered<Fetch> __gy_pay_cs_resume, \
-             Scattered<St> __gy_st_cs_resume, Scattered<Interlocked<uint>> __gy_cnt, uint __gy_cap_cs_resume, uint __gy_base) { tid.x += __gy_base; if (__gy_base == 0xFFFFFFFFu) { __goldy_keep(data); }"
+             Scattered<St> __gy_st_cs_resume, Scattered<Interlocked<uint>> __gy_cnt, uint __gy_cap_cs_resume, uint __gy_base)"
         ));
         assert!(out.contains(
             "{ Fetch __gy_p = { v }; St __gy_s = { tid.x, v * scale }; __goldy_yield_cs_resume(__gy_cnt, \
@@ -1198,11 +1222,27 @@ void cs_resume(Scattered<uint> data, Resolved<uint> r, St s, ThreadId tid) {
     }
 
     #[test]
+    fn prologue_stores_keep_unused_program_buffers() {
+        let src = r#"
+[goldy_petition(Result = BufRO<uint>)] struct P { uint k; };
+struct S { uint x; };
+[goldy_compute] void cs_main(Scattered<uint> out, Scattered<float> fout, ThreadId t) {
+    $yield(got, P{t.x}, S{t.x});
+}
+[goldy_resume] void got(Scattered<uint> out, Resolved<uint> r, S s) { out[s.x] = 1u; }
+"#;
+        let out = lower(src, None).unwrap();
+        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { out[0] = out[0]; }"));
+        assert!(out.contains("if (__gy_base == 0xFFFFFFFFu) { fout[0] = fout[0]; }"));
+    }
+
+    #[test]
     fn lowers_continuation_variant() {
         let out = lower(SRC, Some("cs_resume")).unwrap();
         assert_eq!(out.matches("[goldy_compute]").count(), 1);
         assert!(out.contains("void __goldy_prologue_cs_main("));
         assert!(out.contains("[numthreads(32, 1, 1)]\nvoid cs_main(Scattered<uint> data, Scattered<St> __gy_st, Scattered<uint2> __gy_res, Scattered<uint> __gy_arena, ThreadId __gy_tid, uint __gy_count) {"));
+        assert!(out.contains("if (__gy_count == 0xFFFFFFFFu) { data[0] = data[0]; }"));
         assert!(out.contains("cs_resume(data, __gy_rv, __gy_s, __gy_tid);"));
         assert!(lower(SRC, Some("nope")).is_err());
     }
