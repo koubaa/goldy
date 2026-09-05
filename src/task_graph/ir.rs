@@ -136,7 +136,7 @@ pub struct ResourceBinding {
 }
 
 /// Dispatch dimensions for a compute task node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchDim {
     /// Fixed workgroup counts known at graph construction time.
     Direct { x: u32, y: u32, z: u32 },

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
+  `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
+  of structurally dirty. The next submit recomputes partition fingerprints and
+  re-records only partitions whose baked payload changed; other retained
+  partitions resubmit. The schedule cache keys on bindings only; emitted
+  command lists key on a separate emission fingerprint so a pipeline swap
+  cannot reuse a stale `SetPipeline`. Structural mutations (new nodes,
+  bindings) still drop all retained command lists.
+
 - **CPU dispatches in `Scheme`** — `Scheme::cpu_node(label)` records a serial,
   stateless host function as a scheme node. The function's parameter list is
   its virtual main: one `&[T]` / `&mut [T]` (`T: bytemuck::Pod`) per parcel
