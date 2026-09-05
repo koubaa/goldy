@@ -917,9 +917,28 @@ fn emit(source: &str, analysis: &Analysis, variant: Option<&str>) -> Result<Stri
         let mut hidden = hidden_yield_params(refl, &refl.prologue_yields_to);
         hidden.push(format!("uint {BASE_PARAM}"));
         edits.push((pro.params_close..pro.params_close, format!(", {}", hidden.join(", "))));
+        let mut prefix = String::new();
         if let Some(tid) = &pro.thread_id_name {
+            prefix.push_str(&format!(" {tid}.x += {BASE_PARAM};"));
+        }
+        // Touch every program buffer so WebGPU/WGSL DCE cannot drop a storage
+        // binding the host still fills (continuation-only parcels on the prologue).
+        for p in refl.prologue_params.iter().filter(|p| !p.is_scalar) {
+            if p.ty.starts_with("Scattered<") {
+                prefix.push_str(&format!(
+                    " if ({BASE_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep({}); }}",
+                    p.name
+                ));
+            } else if p.ty.starts_with("BufRO<") {
+                prefix.push_str(&format!(
+                    " if ({BASE_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep_ro({}); }}",
+                    p.name
+                ));
+            }
+        }
+        if !prefix.is_empty() {
             let insert_at = pro.body.start + 1;
-            edits.push((insert_at..insert_at, format!(" {tid}.x += {BASE_PARAM};")));
+            edits.push((insert_at..insert_at, prefix));
         }
         if variant_idx.is_some() {
             edits.push((pro.attr_range.clone(), String::new()));
@@ -970,6 +989,10 @@ fn emit(source: &str, analysis: &Analysis, variant: Option<&str>) -> Result<Stri
             s = c.state_ty,
         ));
     }
+    out.push_str(
+        "void __goldy_keep<T>(Scattered<T> buf) { T _k = buf[0]; }\n\
+         void __goldy_keep_ro<T>(BufRO<T> buf) { T _k = buf[0]; }\n",
+    );
     if let Some(idx) = variant_idx {
         out.push_str(&continuation_entry(refl, &refl.continuations[idx]));
     }
@@ -1033,17 +1056,37 @@ fn continuation_entry(refl: &YieldReflection, c: &ContinuationDecl) -> String {
     format!(
         "\n[goldy_compute]\n[numthreads({x}, {y}, {z})]\nvoid cs_main({sig}) {{\n\
          \x20   if ({HIDDEN_PREFIX}tid.x >= {COUNT_PARAM}) return;\n\
+         {keep}\
          \x20   {state} {HIDDEN_PREFIX}s = {HIDDEN_PREFIX}st[{HIDDEN_PREFIX}tid.x];\n\
          \x20   uint2 {HIDDEN_PREFIX}r = {HIDDEN_PREFIX}res[{HIDDEN_PREFIX}tid.x];\n\
          \x20   Resolved<{elem}> {HIDDEN_PREFIX}rv = Resolved<{elem}>({HIDDEN_PREFIX}arena, {HIDDEN_PREFIX}r.x, {HIDDEN_PREFIX}r.y);\n\
          \x20   {body}({call});\n\
          }}\n",
         sig = sig.join(", "),
+        keep = keep_program_buffers(c),
         state = c.state_ty,
         elem = c.result_elem,
         body = c.fn_name,
         call = call.join(", "),
     )
+}
+
+fn keep_program_buffers(c: &ContinuationDecl) -> String {
+    let mut s = String::new();
+    for p in c.program_params.iter().filter(|p| !p.is_scalar) {
+        if p.ty.starts_with("Scattered<") {
+            s.push_str(&format!(
+                "    if ({COUNT_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep({}); }}\n",
+                p.name
+            ));
+        } else if p.ty.starts_with("BufRO<") {
+            s.push_str(&format!(
+                "    if ({COUNT_PARAM} == 0xFFFFFFFFu) {{ __goldy_keep_ro({}); }}\n",
+                p.name
+            ));
+        }
+    }
+    s
 }
 
 #[cfg(test)]
@@ -1114,7 +1157,7 @@ void cs_resume(Scattered<uint> data, Resolved<uint> r, St s, ThreadId tid) {
         assert!(!out.contains("[goldy_resume"));
         assert!(out.contains(
             "void cs_main(Scattered<uint> data, uint scale, ThreadId tid, Scattered<Fetch> __gy_pay_cs_resume, \
-             Scattered<St> __gy_st_cs_resume, Scattered<Interlocked<uint>> __gy_cnt, uint __gy_cap_cs_resume, uint __gy_base) { tid.x += __gy_base;"
+             Scattered<St> __gy_st_cs_resume, Scattered<Interlocked<uint>> __gy_cnt, uint __gy_cap_cs_resume, uint __gy_base) { tid.x += __gy_base; if (__gy_base == 0xFFFFFFFFu) { __goldy_keep(data); }"
         ));
         assert!(out.contains(
             "{ Fetch __gy_p = { v }; St __gy_s = { tid.x, v * scale }; __goldy_yield_cs_resume(__gy_cnt, \
