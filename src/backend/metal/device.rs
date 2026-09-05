@@ -75,9 +75,13 @@ pub(super) fn adapter_capabilities(
         caps.ray_query = rt;
         // Metal has no SBT / TraceRays; inline RayQuery is the RT path.
         caps.ray_tracing_pipelines = false;
-        let mesh = device.supports_family(mtl::MTLGPUFamily::Apple7)
-            || device.supports_family(mtl::MTLGPUFamily::Mac2)
-            || device.supports_family(mtl::MTLGPUFamily::Metal3);
+        // Mesh shaders need Apple GPU family 7+ (A14 / M1 and later) or Mac GPU
+        // family 2. `Metal3` is too broad: GitHub macos-15's "Apple Paravirtual
+        // device" reports Metal3 but debug validation asserts
+        // "device does not support mesh shaders" and aborts.
+        let paravirtual = device.name().to_lowercase().contains("paravirtual");
+        let mesh = !paravirtual
+            && (device.supports_family(mtl::MTLGPUFamily::Apple7) || device.supports_family(mtl::MTLGPUFamily::Mac2));
         caps.mesh_shaders = mesh;
         caps.amplification_shaders = mesh;
     }
