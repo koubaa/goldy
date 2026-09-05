@@ -285,8 +285,7 @@ mod imp {
             .expect("specialized variant");
         let universal = ComputePipeline::new(device, &universal_module).expect("universal pipeline");
         let specialized = ComputePipeline::new(device, &specialized_module).expect("specialized pipeline");
-        let fill_42 =
-            ComputePipeline::new(device, &ShaderModule::from_slang(device, FILL_42_SHADER).unwrap()).unwrap();
+        let fill_42 = ComputePipeline::new(device, &ShaderModule::from_slang(device, FILL_42_SHADER).unwrap()).unwrap();
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let factor = pool

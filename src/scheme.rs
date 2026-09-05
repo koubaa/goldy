@@ -4322,10 +4322,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 &pipeline,
             )
             .expect_err("foreign node id must be rejected");
-        assert!(
-            err.to_string().contains("belongs to scheme"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("belongs to scheme"), "unexpected error: {err}");
         assert!(!scheme_a.is_dirty(), "a rejected id must not dirty the scheme");
     }
 
