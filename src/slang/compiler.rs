@@ -845,6 +845,18 @@ impl SlangCompiler {
             let mut disk = self.shader_disk_cache.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(hit) = disk.get(cache_key) {
                 crate::shader_timing::record("slang.disk_hit", "", t2.elapsed());
+                drop(disk);
+                // Diagnostics are opt-in and independent of the cached bytecode, so a cache
+                // hit must still surface them.
+                if target == ShaderTarget::Spirv && crate::validation_env::bounds_validation_enabled() {
+                    self.report_bounds_analysis(
+                        effective_source,
+                        entry_points,
+                        search_paths,
+                        defines,
+                        optimization_level,
+                    );
+                }
                 return hit.with_context(|| "decode shader disk cache");
             }
             crate::shader_timing::record("slang.disk_miss_lookup", "", t2.elapsed());
@@ -999,15 +1011,17 @@ impl SlangCompiler {
             }
         }
         let t0 = std::time::Instant::now();
+        // At `OptimizationLevel::None` Slang keeps aggregates in memory and inlines nothing, and
+        // the analysis only reconstructs SSA for scalar integer locals, so nearly every index
+        // would be reported as untracked. The analysis compile is separate from the production
+        // one, so analyze at least at `Default`.
+        let analysis_level = match optimization_level {
+            OptimizationLevel::None => OptimizationLevel::Default,
+            other => other,
+        };
         // `analyze_spirv_bounds` re-applies the virtual-main rewrite; on already-effective
         // source that is a no-op, so pass it straight through.
-        match self.analyze_spirv_bounds(
-            effective_source,
-            entry_points,
-            search_paths,
-            defines,
-            optimization_level,
-        ) {
+        match self.analyze_spirv_bounds(effective_source, entry_points, search_paths, defines, analysis_level) {
             Ok(report) => {
                 crate::shader_timing::record("slang.bounds_analysis", "", t0.elapsed());
                 tracing::debug!(

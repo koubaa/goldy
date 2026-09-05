@@ -66,6 +66,10 @@ pub struct BoundsDiagnostic {
     pub index_range: Option<(i128, i128)>,
     /// Slang source location, when the module carries debug info.
     pub location: Option<SourceLocation>,
+    /// What the index ultimately depends on that the analysis cannot bound (system values,
+    /// buffer loads, float conversions, uninlined calls, ...). Empty when the range is known
+    /// but simply too wide. Deduplicated, at most a few entries.
+    pub depends_on: Vec<String>,
 }
 
 impl fmt::Display for BoundsDiagnostic {
@@ -86,6 +90,9 @@ impl fmt::Display for BoundsDiagnostic {
                 }
             }
             None => write!(f, ": index range unknown")?,
+        }
+        if !self.depends_on.is_empty() {
+            write!(f, " (depends on {})", self.depends_on.join(", "))?;
         }
         if let Some(loc) = &self.location {
             write!(f, " at {loc}")?;
@@ -231,6 +238,9 @@ mod op {
     pub const LOGICAL_AND: u16 = 167;
     pub const LOGICAL_NOT: u16 = 168;
     pub const SELECT: u16 = 169;
+    /// `OpGroupNonUniformElect` .. `OpGroupNonUniformQuadSwap`: the subgroup (wave) ops.
+    pub const GROUP_NON_UNIFORM_FIRST: u16 = 333;
+    pub const GROUP_NON_UNIFORM_LAST: u16 = 366;
     pub const I_EQUAL: u16 = 170;
     pub const I_NOT_EQUAL: u16 = 171;
     pub const U_GREATER_THAN: u16 = 172;
@@ -276,19 +286,31 @@ mod op {
     pub const SC_UNIFORM_CONSTANT: u32 = 0;
     pub const SC_INPUT: u32 = 1;
     pub const SC_UNIFORM: u32 = 2;
-    pub const SC_PUSH_CONSTANT: u32 = 9;
+    pub const SC_WORKGROUP: u32 = 4;
+    pub const SC_PRIVATE: u32 = 6;
     pub const SC_FUNCTION: u32 = 7;
+    pub const SC_PUSH_CONSTANT: u32 = 9;
+    pub const SC_STORAGE_BUFFER: u32 = 12;
+    pub const SC_PHYSICAL_STORAGE_BUFFER: u32 = 5349;
 
     // Decorations / built-ins / execution modes
     pub const DECORATION_BUILTIN: u32 = 11;
+    pub const BUILTIN_PRIMITIVE_ID: u32 = 7;
+    pub const BUILTIN_NUM_WORKGROUPS: u32 = 24;
     pub const BUILTIN_WORKGROUP_SIZE: u32 = 25;
     pub const BUILTIN_WORKGROUP_ID: u32 = 26;
     pub const BUILTIN_LOCAL_INVOCATION_ID: u32 = 27;
+    pub const BUILTIN_GLOBAL_INVOCATION_ID: u32 = 28;
     pub const BUILTIN_LOCAL_INVOCATION_INDEX: u32 = 29;
     pub const BUILTIN_SUBGROUP_SIZE: u32 = 36;
     pub const BUILTIN_NUM_SUBGROUPS: u32 = 38;
     pub const BUILTIN_SUBGROUP_ID: u32 = 40;
     pub const BUILTIN_SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
+    pub const BUILTIN_VERTEX_INDEX: u32 = 42;
+    pub const BUILTIN_INSTANCE_INDEX: u32 = 43;
+    pub const BUILTIN_BASE_VERTEX: u32 = 4424;
+    pub const BUILTIN_BASE_INSTANCE: u32 = 4425;
+    pub const BUILTIN_DRAW_INDEX: u32 = 4426;
     pub const EXEC_MODE_LOCAL_SIZE: u32 = 17;
     pub const EXEC_MODE_LOCAL_SIZE_ID: u32 = 38;
 }
@@ -301,6 +323,12 @@ const REFINE_DEPTH_LIMIT: u32 = 24;
 
 /// Number of times a phi may grow before its moving bound is widened to the type bound.
 const WIDEN_AFTER: u32 = 3;
+/// Cap on ascending fixpoint passes; from [`ASCEND_FORCE_TOP_AT`] every phi is forced to top so
+/// the loop is guaranteed to converge.
+const ASCEND_PASSES: u32 = 64;
+const ASCEND_FORCE_TOP_AT: u32 = 48;
+/// Cap on narrowing passes after the ascending phase converges.
+const NARROW_PASSES: u32 = 8;
 
 // ============================================================================
 // Parsing
@@ -848,6 +876,32 @@ impl Module {
         }
     }
 
+    /// HLSL-style spelling of a type for diagnostics (`float2`, `uint[4]`, `float4x4`, ...).
+    fn type_name(&self, ty: u32) -> String {
+        match self.types.get(&ty) {
+            Some(Ty::Bool) => "bool".into(),
+            Some(Ty::Int(t)) => match (t.signed, t.bits) {
+                (true, 32) => "int".into(),
+                (false, 32) => "uint".into(),
+                (true, b) => format!("int{b}_t"),
+                (false, b) => format!("uint{b}_t"),
+            },
+            Some(Ty::Float) => "float".into(),
+            Some(Ty::Vector { elem, count }) => format!("{}{count}", self.type_name(*elem)),
+            Some(Ty::Matrix { column, count }) => match self.types.get(column) {
+                Some(Ty::Vector { elem, count: rows }) => format!("{}{count}x{rows}", self.type_name(*elem)),
+                _ => format!("{}[{count}]", self.type_name(*column)),
+            },
+            Some(Ty::Array { elem, length: Some(n) }) => format!("{}[{n}]", self.type_name(*elem)),
+            Some(Ty::Array { elem, length: None }) | Some(Ty::RuntimeArray { elem }) => {
+                format!("{}[]", self.type_name(*elem))
+            }
+            Some(Ty::Struct { .. }) => self.names.get(&ty).cloned().unwrap_or_else(|| "struct".into()),
+            Some(Ty::Pointer { pointee, .. }) => format!("{}*", self.type_name(*pointee)),
+            Some(Ty::Other) | None => "?".into(),
+        }
+    }
+
     fn pointee(&self, ptr_ty: u32) -> Option<(u32, u32)> {
         match self.types.get(&ptr_ty)? {
             Ty::Pointer { storage_class, pointee } => Some((*storage_class, *pointee)),
@@ -1268,6 +1322,8 @@ struct FunctionAnalysis<'m> {
     ranges: HashMap<u32, Abs>,
     /// Cached dominating facts per block.
     block_facts: HashMap<usize, Vec<Fact>>,
+    /// Values whose range was widened during the ascending fixpoint.
+    widened: HashSet<u32>,
 }
 
 impl<'m> FunctionAnalysis<'m> {
@@ -1275,6 +1331,14 @@ impl<'m> FunctionAnalysis<'m> {
         let name = m.names.get(&f.id).cloned().unwrap_or_else(|| format!("fn%{}", f.id));
         let mut def = HashMap::new();
         let mut inst_block = vec![0; f.insts.len()];
+        // `OpFunctionParameter`s precede the first label; attribute them to the entry block so
+        // their types resolve (an untyped parameter would otherwise be treated as opaque).
+        let first_block_start = f.blocks.first().map_or(f.insts.len(), |b| b.start);
+        for (k, inst) in f.insts.iter().enumerate().take(first_block_start) {
+            if let Some(id) = inst.result_id {
+                def.insert(id, k);
+            }
+        }
         for (bi, b) in f.blocks.iter().enumerate() {
             for (k, (slot, inst)) in inst_block
                 .iter_mut()
@@ -1315,6 +1379,7 @@ impl<'m> FunctionAnalysis<'m> {
             vn: HashMap::new(),
             ranges: HashMap::new(),
             block_facts: HashMap::new(),
+            widened: HashSet::new(),
         }
     }
 
@@ -2073,74 +2138,154 @@ impl<'m> FunctionAnalysis<'m> {
         }
         let mut phi_ids: Vec<u32> = self.phis.keys().copied().collect();
         phi_ids.sort_unstable(); // deterministic widening behaviour
+        let all: Vec<u32> = phi_ids.iter().chain(order.iter()).copied().collect();
         let mut grow_count: HashMap<u32, u32> = HashMap::new();
-        let mut ranges: HashMap<u32, Abs> = HashMap::new();
+        // Computed in place so `eval` can consult the in-progress ranges.
+        self.ranges = HashMap::new();
 
-        for pass in 0..64 {
+        // Ascending phase: join with the previous value, widening anything that keeps
+        // growing, until nothing changes (or everything is forced to top).
+        for pass in 0..ASCEND_PASSES {
             let mut changed = false;
-            let force_top = pass >= 48;
-            let all: Vec<u32> = phi_ids.iter().chain(order.iter()).copied().collect();
-            for id in all {
-                let new = if let Some(phi) = self.phis.get(&id) {
-                    let shape = self.m.int_shape(phi.ty);
-                    let Some(shape) = shape else {
-                        ranges.insert(id, Abs::Opaque);
-                        continue;
-                    };
-                    if force_top {
-                        Some(Abs::top(shape))
-                    } else {
-                        let mut out: Option<Abs> = None;
-                        for &(_, v) in &phi.incoming {
-                            if let Some(v) = self.lookup(&ranges, v) {
-                                out = Some(out.map_or(v.clone(), |o| o.join(&v)));
-                            }
-                        }
-                        out
-                    }
-                } else {
-                    let inst = self.inst_of(id).unwrap();
-                    let mut get = |o: u32| self.lookup(&ranges, o);
-                    self.transfer(inst, &mut get)
+            let force_top = pass >= ASCEND_FORCE_TOP_AT;
+            for &id in &all {
+                let Some(mut new) = self.recompute(id, force_top) else {
+                    continue;
                 };
-                let Some(mut new) = new else { continue };
-                if let Some(old) = ranges.get(&id) {
+                if let Some(old) = self.ranges.get(&id) {
                     if *old == new {
                         continue;
                     }
-                    // Widen values that keep growing (loop-carried phis and what depends on them).
                     let n = grow_count.entry(id).or_insert(0);
                     *n += 1;
                     if *n > WIDEN_AFTER {
-                        if let (Abs::Ints(o), Abs::Ints(nv)) = (old, &new) {
-                            let shape = self.int_shape_of(id).map(|s| s.ty);
-                            if let Some(ty) = shape {
-                                let r = ty.range();
-                                new = Abs::Ints(
-                                    nv.iter()
-                                        .enumerate()
-                                        .map(|(k, x)| {
-                                            let ox = o.get(k).copied().unwrap_or(*x);
-                                            Interval::new(
-                                                if x.lo < ox.lo { r.lo } else { x.lo },
-                                                if x.hi > ox.hi { r.hi } else { x.hi },
-                                            )
-                                        })
-                                        .collect(),
-                                );
-                            }
-                        }
+                        new = self.widen(id, old, &new);
+                        self.widened.insert(id);
                     }
                     new = old.join(&new);
+                    if *old == new {
+                        continue;
+                    }
                 }
-                ranges.insert(id, new);
+                self.ranges.insert(id, new);
                 changed = true;
             }
             if !changed {
                 break;
             }
         }
-        self.ranges = ranges;
+
+        // Descending (narrowing) phase: from the post-fixpoint, recompute each value and keep
+        // the intersection. Recovers the precision widening gave away, e.g. a counted loop's
+        // `[0, n]` after the header was widened to `[0, MAX]`. Every input is a sound
+        // over-approximation, so each recomputed value (and its meet with the old one) is too.
+        for _ in 0..NARROW_PASSES {
+            let mut changed = false;
+            for &id in &all {
+                let Some(new) = self.recompute(id, false) else { continue };
+                let Some(old) = self.ranges.get(&id) else { continue };
+                let narrowed = new.meet(old);
+                if narrowed != *old {
+                    self.ranges.insert(id, narrowed);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// One transfer step for `id` from the current `self.ranges`; `None` is bottom.
+    fn recompute(&self, id: u32, force_top: bool) -> Option<Abs> {
+        if let Some(phi) = self.phis.get(&id) {
+            let Some(shape) = self.m.int_shape(phi.ty) else {
+                return Some(Abs::Opaque);
+            };
+            if force_top {
+                return Some(Abs::top(shape));
+            }
+            return self.phi_incoming_join(id, self.f.blocks[phi.block].label, &phi.incoming);
+        }
+        let inst = self.inst_of(id)?;
+        if inst.opcode == op::PHI {
+            // Native phi (Slang emits these at higher optimization levels): same edge-refined
+            // join as the synthetic ones.
+            if let Some(shape) = self.int_shape_of(id) {
+                if force_top {
+                    return Some(Abs::top(shape));
+                }
+                let mut incoming = Vec::new();
+                let mut k = 0;
+                while k + 1 < inst.operands.len() {
+                    if let Some(&pred) = self.f.label_to_block.get(&inst.operands[k + 1]) {
+                        incoming.push((pred, inst.operands[k]));
+                    }
+                    k += 2;
+                }
+                let block_label = self.f.blocks[self.inst_block[self.def[&id]]].label;
+                return self.phi_incoming_join(id, block_label, &incoming);
+            }
+        }
+        let mut get = |o: u32| self.lookup(&self.ranges, o);
+        self.transfer(inst, &mut get)
+    }
+
+    /// Standard interval widening: a bound that moved since the previous pass jumps to the
+    /// type's limit in that direction.
+    fn widen(&self, id: u32, old: &Abs, new: &Abs) -> Abs {
+        let (Abs::Ints(o), Abs::Ints(nv)) = (old, new) else {
+            return new.clone();
+        };
+        let Some(ty) = self.int_shape_of(id).map(|s| s.ty) else {
+            return new.clone();
+        };
+        let r = ty.range();
+        Abs::Ints(
+            nv.iter()
+                .enumerate()
+                .map(|(k, x)| {
+                    let ox = o.get(k).copied().unwrap_or(*x);
+                    Interval::new(
+                        if x.lo < ox.lo { r.lo } else { x.lo },
+                        if x.hi > ox.hi { r.hi } else { x.hi },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Join of a phi's incoming values, each evaluated under the facts that hold on its edge.
+    ///
+    /// For a counted loop `for (i = 0; i < n; i++)` the back-edge operand `i + 1` is only
+    /// reached when `i < n`, so evaluating it under that fact keeps the header value at
+    /// `[0, n]` instead of widening to the type's range and then wrapping on the increment.
+    /// The phi itself is marked as visiting so the recursion bottoms out at its current
+    /// (fact-refined) range. Incoming values not yet computed in this pass are bottom and
+    /// contribute nothing.
+    fn phi_incoming_join(&self, id: u32, block_label: u32, incoming: &[(usize, u32)]) -> Option<Abs> {
+        let mut out: Option<Abs> = None;
+        for &(pred, v) in incoming {
+            let Some(flat) = self.lookup(&self.ranges, v) else {
+                continue;
+            };
+            let val = if matches!(flat, Abs::Ints(_)) && !self.ranges.contains_key(&id) {
+                // First visit: nothing to refine against yet.
+                flat
+            } else if let Abs::Ints(_) = flat {
+                let mut edge = Vec::new();
+                self.edge_facts(pred, block_label, &mut edge);
+                let mut ctx = EvalCtx {
+                    visiting: vec![id],
+                    ..Default::default()
+                };
+                self.eval(v, &edge, 0, &mut ctx).meet(&flat)
+            } else {
+                flat
+            };
+            out = Some(out.map_or(val.clone(), |o| o.join(&val)));
+        }
+        out
     }
 
     fn lookup(&self, ranges: &HashMap<u32, Abs>, id: u32) -> Option<Abs> {
@@ -2558,12 +2703,157 @@ impl<'m> FunctionAnalysis<'m> {
         None
     }
 
-    fn array_name(&self, base: u32, path: &[String]) -> String {
+    /// Values the index expression ultimately depends on that the analysis treats as (nearly)
+    /// unknown, spelled for a shader author. Bounded backwards walk over the SSA graph.
+    fn unknown_sources(&self, idx: u32) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut work = vec![self.resolve(idx)];
+        let mut budget = 256;
+        while let Some(id) = work.pop() {
+            budget -= 1;
+            if budget == 0 || out.len() >= 4 {
+                break;
+            }
+            let id = self.resolve(id);
+            if !seen.insert(id) || self.constant_abs(id).is_some() || self.m.const_types.contains_key(&id) {
+                continue;
+            }
+            let push = |s: String, out: &mut Vec<String>| {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            };
+            if let Some(phi) = self.phis.get(&id) {
+                if self.is_widened(id) {
+                    push("a loop-carried value the analysis could not bound".into(), &mut out);
+                }
+                work.extend(phi.incoming.iter().map(|&(_, v)| v));
+                continue;
+            }
+            if self.undefs.contains(&id) {
+                push("an undefined value".into(), &mut out);
+                continue;
+            }
+            let Some(inst) = self.inst_of(id) else {
+                if self.m.global_vars.contains_key(&id) {
+                    push(self.describe_global(id), &mut out);
+                } else {
+                    push("a value from another scope".into(), &mut out);
+                }
+                continue;
+            };
+            match inst.opcode {
+                op::FUNCTION_PARAMETER => push("a function parameter".into(), &mut out),
+                op::FUNCTION_CALL => {
+                    let callee = inst
+                        .operands
+                        .first()
+                        .and_then(|c| self.m.names.get(c))
+                        .map_or("a function".to_string(), |n| format!("`{n}`"));
+                    push(format!("the result of calling {callee} (not inlined)"), &mut out);
+                }
+                op::CONVERT_F_TO_S | op::CONVERT_F_TO_U => {
+                    push("a float-to-int conversion".into(), &mut out);
+                }
+                op::LOAD => {
+                    let Some(&ptr) = inst.operands.first() else { continue };
+                    match self.pointer_base(ptr) {
+                        Some(base) if self.m.global_vars.contains_key(&base) => {
+                            push(self.describe_global(base), &mut out);
+                        }
+                        Some(local) => {
+                            let name = self.m.names.get(&local).map(|n| format!(" `{n}`")).unwrap_or_default();
+                            push(format!("an untracked local variable{name}"), &mut out);
+                        }
+                        None => push("an untracked memory load".into(), &mut out),
+                    }
+                }
+                op::PHI => {
+                    if self.is_widened(id) {
+                        push("a loop-carried value the analysis could not bound".into(), &mut out);
+                    }
+                    let mut k = 0;
+                    while k + 1 < inst.operands.len() {
+                        work.push(inst.operands[k]);
+                        k += 2;
+                    }
+                }
+                op::SELECT => work.extend(inst.operands.iter().skip(1).copied()),
+                // Trailing operands are literal component indices, not ids.
+                op::COMPOSITE_EXTRACT => work.extend(inst.operands.first().copied()),
+                op::COMPOSITE_INSERT | op::VECTOR_SHUFFLE => work.extend(inst.operands.iter().take(2).copied()),
+                op::EXT_INST => {
+                    if Some(inst.operands[0]) == self.m.glsl_ext {
+                        work.extend(inst.operands.iter().skip(2).copied());
+                    } else {
+                        push("an extended-instruction result".into(), &mut out);
+                    }
+                }
+                _ if (op::GROUP_NON_UNIFORM_FIRST..=op::GROUP_NON_UNIFORM_LAST).contains(&inst.opcode) => {
+                    push("a wave intrinsic result".into(), &mut out);
+                }
+                _ => work.extend(inst.operands.iter().copied()),
+            }
+        }
+        out
+    }
+
+    /// A phi that was widened and that narrowing did not pull back from the type bound.
+    fn is_widened(&self, phi: u32) -> bool {
+        if !self.widened.contains(&phi) {
+            return false;
+        }
+        match (self.global(phi).as_scalar(), self.int_shape_of(phi)) {
+            (Some(r), Some(s)) => {
+                let t = s.ty.range();
+                r.hi == t.hi || (s.ty.signed && r.lo == t.lo)
+            }
+            _ => false,
+        }
+    }
+
+    fn describe_global(&self, var: u32) -> String {
+        if let Some(&b) = self.m.builtins.get(&var) {
+            return match b {
+                // Slang materializes `SV_VertexID` as `VertexIndex - BaseVertex` (likewise for
+                // instances), so both halves are reported under the HLSL name.
+                op::BUILTIN_VERTEX_INDEX | op::BUILTIN_BASE_VERTEX => "SV_VertexID".into(),
+                op::BUILTIN_INSTANCE_INDEX | op::BUILTIN_BASE_INSTANCE => "SV_InstanceID".into(),
+                op::BUILTIN_DRAW_INDEX => "the draw index".into(),
+                op::BUILTIN_PRIMITIVE_ID => "SV_PrimitiveID".into(),
+                op::BUILTIN_GLOBAL_INVOCATION_ID => "SV_DispatchThreadID".into(),
+                op::BUILTIN_WORKGROUP_ID => "SV_GroupID".into(),
+                op::BUILTIN_NUM_WORKGROUPS => "the dispatch size".into(),
+                op::BUILTIN_LOCAL_INVOCATION_ID => "SV_GroupThreadID".into(),
+                op::BUILTIN_LOCAL_INVOCATION_INDEX => "SV_GroupIndex".into(),
+                op::BUILTIN_SUBGROUP_SIZE => "WaveGetLaneCount()".into(),
+                op::BUILTIN_SUBGROUP_LOCAL_INVOCATION_ID => "WaveGetLaneIndex()".into(),
+                op::BUILTIN_SUBGROUP_ID | op::BUILTIN_NUM_SUBGROUPS => "the wave index/count".into(),
+                other => format!("built-in #{other}"),
+            };
+        }
+        let name = self.m.names.get(&var).map(|n| format!(" `{n}`")).unwrap_or_default();
+        match self.m.global_vars.get(&var).map(|&(sc, _)| sc) {
+            Some(op::SC_STORAGE_BUFFER) | Some(op::SC_PHYSICAL_STORAGE_BUFFER) => format!("a buffer load{name}"),
+            Some(op::SC_UNIFORM) | Some(op::SC_PUSH_CONSTANT) | Some(op::SC_UNIFORM_CONSTANT) => {
+                format!("a uniform{name}")
+            }
+            Some(op::SC_WORKGROUP) => format!("groupshared memory{name}"),
+            Some(op::SC_INPUT) => format!("a stage input{name}"),
+            Some(op::SC_PRIVATE) => format!("a global{name}"),
+            _ => format!("a global{name}"),
+        }
+    }
+
+    /// Source-level name of the indexed aggregate, or `<unnamed T>` when no name survived
+    /// lowering (Slang folds `static const` tables into anonymous temporaries).
+    fn array_name(&self, base: u32, path: &[String], fallback: &str) -> String {
         let base = self.resolve(base);
         let mut name = self
             .pointer_base(base)
             .and_then(|b| self.m.names.get(&b).cloned())
-            .unwrap_or_else(|| format!("%{base}"));
+            .unwrap_or_else(|| format!("<unnamed {fallback}>"));
         for p in path {
             name.push('.');
             name.push_str(p);
@@ -2572,7 +2862,8 @@ impl<'m> FunctionAnalysis<'m> {
     }
 
     fn check_accesses(&mut self, report: &mut BoundsReport) {
-        let mut checks: Vec<(usize, u32, u64, u32, Vec<String>)> = Vec::new(); // (inst idx, index id, len, base, path)
+        // (inst idx, index id, len, base, path, fallback description of the indexed aggregate)
+        let mut checks: Vec<(usize, u32, u64, u32, Vec<String>, String)> = Vec::new();
         for &bi in &self.rpo {
             let b = &self.f.blocks[bi];
             for k in b.start..b.end {
@@ -2596,7 +2887,8 @@ impl<'m> FunctionAnalysis<'m> {
                         Ty::Array { elem, length } => {
                             if let Some(len) = length {
                                 if !self.m.int_consts.contains_key(&self.resolve(idx)) {
-                                    checks.push((k, idx, *len, base, path.clone()));
+                                    let desc = format!("{} array", self.m.type_name(*elem));
+                                    checks.push((k, idx, *len, base, path.clone(), desc));
                                 }
                             }
                             cur = *elem;
@@ -2604,13 +2896,13 @@ impl<'m> FunctionAnalysis<'m> {
                         Ty::RuntimeArray { elem } => cur = *elem,
                         Ty::Vector { elem, count } => {
                             if !self.m.int_consts.contains_key(&self.resolve(idx)) {
-                                checks.push((k, idx, u64::from(*count), base, path.clone()));
+                                checks.push((k, idx, u64::from(*count), base, path.clone(), self.m.type_name(cur)));
                             }
                             cur = *elem;
                         }
                         Ty::Matrix { column, count } => {
                             if !self.m.int_consts.contains_key(&self.resolve(idx)) {
-                                checks.push((k, idx, u64::from(*count), base, path.clone()));
+                                checks.push((k, idx, u64::from(*count), base, path.clone(), self.m.type_name(cur)));
                             }
                             cur = *column;
                         }
@@ -2635,22 +2927,12 @@ impl<'m> FunctionAnalysis<'m> {
             }
         }
 
-        for (k, idx, len, base, path) in checks {
+        for (k, idx, len, base, path, desc) in checks {
             report.checked_accesses += 1;
             let block = self.inst_block[k];
             let facts = self.facts_for_block(block);
             let mut ctx = EvalCtx::default();
             let value = self.eval(idx, &facts, 0, &mut ctx);
-            if std::env::var("GOLDY_BOUNDS_TRACE").is_ok() {
-                eprintln!(
-                    "TRACE idx %{} resolved %{} global {:?} facts {:?} refined {:?}",
-                    idx,
-                    self.resolve(idx),
-                    self.global(idx),
-                    facts,
-                    value
-                );
-            }
             let shape = self.int_shape_of(self.resolve(idx));
             let valid = Interval::new(0, i128::from(len) - 1);
             let range = value.as_scalar();
@@ -2662,10 +2944,11 @@ impl<'m> FunctionAnalysis<'m> {
                 Some(r) if valid.contains(r) => report.proven_safe += 1,
                 _ => report.diagnostics.push(BoundsDiagnostic {
                     function: self.name.clone(),
-                    array: self.array_name(base, &path),
+                    array: self.array_name(base, &path, &desc),
                     array_length: len,
                     index_range: if is_top { None } else { range.map(|r| (r.lo, r.hi)) },
                     location: self.location_for(k),
+                    depends_on: self.unknown_sources(idx),
                 }),
             }
         }

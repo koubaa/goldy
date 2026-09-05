@@ -14,9 +14,13 @@ fn analyze(source: &str) -> BoundsReport {
 }
 
 fn analyze_opt(source: &str, opt: OptimizationLevel) -> BoundsReport {
+    analyze_stage(source, "cs_main", SlangStage::Compute, opt)
+}
+
+fn analyze_stage(source: &str, entry: &str, stage: SlangStage, opt: OptimizationLevel) -> BoundsReport {
     let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
     compiler
-        .analyze_spirv_bounds(source, &[("cs_main", SlangStage::Compute)], &[], &[], opt)
+        .analyze_spirv_bounds(source, &[(entry, stage)], &[], &[], opt)
         .expect("compile + analyze")
 }
 
@@ -671,6 +675,140 @@ void cs_main(uint3 gtid : SV_GroupThreadID, RWStructuredBuffer<uint> out_buf)
 // Other storage classes and names
 // ---------------------------------------------------------------------------
 
+/// The `spinning_cube` example: a counted loop over a function-local array. The header phi
+/// is widened to `[0, MAX]` during the ascending fixpoint; evaluating the back edge under the
+/// loop guard plus the narrowing phase must bring it back to `[0, 8]` so `verts[i]` is proven.
+#[test]
+fn counted_loop_over_local_array_is_clean() {
+    let source = r#"
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 gtid : SV_GroupThreadID, RWStructuredBuffer<float3> out_buf)
+{
+    float3 verts[8];
+    for (int i = 0; i < 8; i++) {
+        verts[i] = float3(i, 0, 0);
+    }
+    for (int i = 0; i < 8; i++) {
+        verts[i] = verts[i] * 2.0;
+    }
+    out_buf[gtid.x] = verts[gtid.x & 7];
+}
+"#;
+    for opt in [
+        OptimizationLevel::None,
+        OptimizationLevel::Default,
+        OptimizationLevel::High,
+    ] {
+        let report = analyze_opt(source, opt);
+        assert_clean(&report);
+    }
+}
+
+/// A loop whose trip count is itself only known as a range (`nw = 256 / lanes`).
+#[test]
+fn counted_loop_with_ranged_bound_is_clean() {
+    let source = r#"
+groupshared uint totals[64];
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void cs_main(uint3 gtid : SV_GroupThreadID, RWStructuredBuffer<uint> out_buf)
+{
+    uint nw = 256 / max(WaveGetLaneCount(), 4u);
+    if (gtid.x == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = totals[i];
+            totals[i] = run;
+            run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    out_buf[gtid.x] = totals[gtid.x & 63];
+}
+"#;
+    assert_clean(&analyze(source));
+}
+
+// ---------------------------------------------------------------------------
+// Provenance notes
+// ---------------------------------------------------------------------------
+
+/// `SV_VertexID` indexing a `static const` table: unprovable from the shader alone (the draw
+/// call decides), reported with the system value named and the folded table described by type.
+#[test]
+fn vertex_id_into_static_table_names_the_system_value() {
+    let source = r#"
+static const float2 positions[3] = { float2(0, 0), float2(1, 0), float2(0, 1) };
+
+[shader("vertex")]
+float4 vs_main(uint vertex_id : SV_VertexID) : SV_Position
+{
+    return float4(positions[vertex_id], 0, 1);
+}
+"#;
+    let report = analyze_stage(source, "vs_main", SlangStage::Vertex, OptimizationLevel::Default);
+    assert_eq!(report.diagnostics.len(), 1, "{report:?}");
+    let d = &report.diagnostics[0];
+    assert_eq!(d.array_length, 3);
+    assert_eq!(d.array, "<unnamed float2 array>", "{d}");
+    assert_eq!(d.depends_on, vec!["SV_VertexID".to_string()], "{d}");
+    assert_eq!(d.index_range, None);
+
+    // The idiomatic fix is provable.
+    let fixed = source.replace("positions[vertex_id]", "positions[vertex_id % 3]");
+    assert_clean(&analyze_stage(
+        &fixed,
+        "vs_main",
+        SlangStage::Vertex,
+        OptimizationLevel::Default,
+    ));
+}
+
+#[test]
+fn float_to_int_index_names_the_conversion() {
+    let source = r#"
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 gtid : SV_GroupThreadID, StructuredBuffer<float> hues, RWStructuredBuffer<float3> out_buf)
+{
+    float3 palette[7] = {
+        float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0),
+        float3(0, 1, 1), float3(1, 0, 1), float3(1, 1, 1)
+    };
+    int idx = int(hues[gtid.x] * 6.0);
+    out_buf[gtid.x] = palette[idx];
+}
+"#;
+    let report = analyze(source);
+    assert_eq!(report.diagnostics.len(), 1, "{report:?}");
+    let d = &report.diagnostics[0];
+    assert!(d.array.contains("palette"), "{d}");
+    assert_eq!(d.depends_on, vec!["a float-to-int conversion".to_string()], "{d}");
+}
+
+#[test]
+fn groupshared_indexed_by_dispatch_thread_id_names_the_system_value() {
+    let source = r#"
+groupshared uint sh[64];
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID, RWStructuredBuffer<uint> out_buf)
+{
+    sh[id.x] = id.x;
+    GroupMemoryBarrierWithGroupSync();
+    out_buf[id.x] = sh[id.x ^ 1];
+}
+"#;
+    let report = analyze(source);
+    assert_eq!(report.diagnostics.len(), 2, "{report:?}");
+    for d in &report.diagnostics {
+        assert_eq!(d.depends_on, vec!["SV_DispatchThreadID".to_string()], "{d}");
+    }
+}
+
 #[test]
 fn function_local_array_is_checked_and_named() {
     let source = r#"
@@ -762,6 +900,7 @@ fn diagnostic_display_is_actionable() {
             line: 16,
             column: 5,
         }),
+        depends_on: Vec::new(),
     };
     assert_eq!(
         d.to_string(),
@@ -771,11 +910,13 @@ fn diagnostic_display_is_actionable() {
     let unknown = BoundsDiagnostic {
         index_range: None,
         location: None,
+        depends_on: vec!["SV_VertexID".into(), "a buffer load `indices`".into()],
         ..d
     };
     assert_eq!(
         unknown.to_string(),
-        "possible out-of-bounds index into `links[256]`: index range unknown in `cs_main`"
+        "possible out-of-bounds index into `links[256]`: index range unknown \
+         (depends on SV_VertexID, a buffer load `indices`) in `cs_main`"
     );
 }
 
