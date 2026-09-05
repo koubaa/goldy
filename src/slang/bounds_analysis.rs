@@ -17,10 +17,13 @@
 //!    (not `OpPhi`). Non-escaping scalar integer locals are promoted to SSA (phis at the
 //!    iterated dominance frontier) so that a guard on one load refines every other load of
 //!    the same variable in the guarded region.
-//! 2. **Interval propagation.** Every integer SSA value gets a flow-insensitive interval via a
-//!    fixpoint with widening. Built-ins such as `SV_GroupThreadID` use `LocalSize`, wave
-//!    built-ins use their Vulkan minimum/maximum, everything else starts at the type range.
-//!    Arithmetic that can wrap collapses to the type range (sound, not precise).
+//! 2. **Interval propagation.** Every integer SSA value gets a flow-insensitive interval via an
+//!    ascending fixpoint with widening followed by a narrowing pass. Phi operands are
+//!    evaluated under the facts that hold on their incoming edge, so the back edge of
+//!    `for (i = 0; i < n; i++)` contributes `[1, n]` rather than a wrapped increment. Built-ins
+//!    such as `SV_GroupThreadID` use `LocalSize`, wave built-ins use their Vulkan
+//!    minimum/maximum, everything else starts at the type range. Arithmetic that can wrap
+//!    collapses to the type range (sound, not precise).
 //! 3. **Path-sensitive refinement.** For each dynamic index the analysis walks the dominator
 //!    tree collecting conditions from `OpBranchConditional` edges that dominate the access
 //!    (`index >= 0`, `index < N`, `a >= b`, `LogicalAnd` conjuncts, ...). The index expression

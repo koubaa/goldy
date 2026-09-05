@@ -17,7 +17,8 @@ or whitespace-separated list of categories:
 | `layout` | Enable Rust ↔ Slang struct layout checks and buffer stride checks |
 | `host_access` | Page-protect CPU-visible GPU copies (CPU backend parcels; stray host pointers fault) |
 | `scheme`, `graph`, `readback` | Retained withdraw-staging checks, plus strict Accel build-before-trace in the same scheme |
-| `all` | Enable `api`, `layout`, timeline, scheme, and `host_access` |
+| `bounds` | [Static bounds analysis](../design/shader-bounds-analysis.md) of dynamic array indices in Slang-generated SPIR-V; unproven accesses are logged as warnings with their Slang source location |
+| `all` | Enable `api`, `layout`, timeline, scheme, `host_access`, and `bounds` |
 | `1`, `true`, `yes` | GPU API validation only (legacy shorthand; does **not** enable layout checks) |
 
 Categories can be combined:

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Static shader bounds analysis** (`GOLDY_VALIDATION=bounds`, also part of
+  `all`) — an opt-in interval analysis over Slang-generated SPIR-V that
+  reports every dynamic index into a fixed-length array / vector it cannot
+  prove to satisfy `0 <= index < length`, with the Slang source location and a
+  note on what the index depends on (`SV_VertexID`, `WaveGetLaneCount()`, a
+  buffer load, a float conversion, ...). Understands dominating guards
+  (`if (i >= 0)`, `&&` conjunctions), clamps (`max`/`min`/`&`/`%`), workgroup
+  scan patterns, padded-dispatch early-outs and counted loops; flags the eager
+  `select(cond, arr[i], x)` form. Warnings only; never fails a compile. Public
+  entry point: `SlangCompiler::analyze_spirv_bounds` → `BoundsReport`. See
+  `docs/src/design/shader-bounds-analysis.md` for the integration decision
+  (SPIR-V in Goldy vs. Slang IR upstream), the corpus evaluation over
+  `shaders/`, and known limitations.
+
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
   of structurally dirty. The next submit recomputes partition fingerprints and
@@ -140,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not set `GOLDY_VALIDATION_FATAL` (it is Vulkan-only).
 
 ### Fixed
+
+- **Slang diagnostics pointed one or two lines early in virtual-main shaders.**
+  Stripping `[goldy_*]` / `[numthreads]` / `[outputtopology]` from the user
+  function dropped their newlines, shifting every line after them relative to
+  the `#line 1` directive. The removed spans now keep their newlines.
 
 - WebGPU bind-group cache keys include the exclusive pipeline identity so
   structurally identical layouts from different PSOs are not reused.
