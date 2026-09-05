@@ -2,7 +2,8 @@
 //!
 //! Always-on checks catch cycles, mesh/raster command mix-ups, and BLAS/TLAS
 //! misuse. [`crate::validation_env::scheme_validation_enabled`] adds stricter
-//! lifetime/access hints (unused Accel builds, missing `ACCEL_INPUT`).
+//! lifetime/access hints (Accel must be GPU-built on this object before RayQuery /
+//! TraceRays; missing `ACCEL_INPUT`).
 
 use super::analysis::build_edges;
 use super::ir::{GraphIR, NodeAccess, NodeKind};
@@ -13,13 +14,22 @@ use crate::error::GoldyError;
 use std::collections::{HashMap, HashSet};
 
 /// Fail submit when the IR cannot be executed as recorded.
+#[cfg(test)]
 pub(crate) fn validate_graph(ir: &GraphIR) -> Result<(), GoldyError> {
+    validate_graph_with_prior_built_accels(ir, &HashSet::new())
+}
+
+/// Like [`validate_graph`], accepting Accel handles GPU-built on this object in an earlier scheme.
+pub(crate) fn validate_graph_with_prior_built_accels(
+    ir: &GraphIR,
+    prior_built_accels: &HashSet<u64>,
+) -> Result<(), GoldyError> {
     let edges = build_edges(ir);
     validate_acyclic(ir, &edges)?;
     validate_render_pass_commands(ir)?;
     validate_accel_kind_uses(ir)?;
     if crate::validation_env::scheme_validation_enabled() {
-        validate_scheme_strict(ir)?;
+        validate_scheme_strict(ir, prior_built_accels)?;
     }
     Ok(())
 }
@@ -183,8 +193,8 @@ fn validate_accel_kind_uses(ir: &GraphIR) -> Result<(), GoldyError> {
     Ok(())
 }
 
-fn validate_scheme_strict(ir: &GraphIR) -> Result<(), GoldyError> {
-    let mut built: HashSet<u64> = HashSet::new();
+fn validate_scheme_strict(ir: &GraphIR, prior_built_accels: &HashSet<u64>) -> Result<(), GoldyError> {
+    let mut built: HashSet<u64> = prior_built_accels.clone();
     for node in &ir.nodes {
         if let NodeKind::BuildAccelerationStructure(cmd) = &node.kind {
             let dest = match cmd {
@@ -204,9 +214,8 @@ fn validate_scheme_strict(ir: &GraphIR) -> Result<(), GoldyError> {
             if b.access == NodeAccess::Read && !built.contains(&h) {
                 return Err(validation(format!(
                     "node \"{}\" reads an acceleration structure that is not built in this scheme. \
-                     hint: record Scheme::build_blas / build_tlas before the dispatch or trace_rays \
-                     that binds Accel, or disable GOLDY_VALIDATION=scheme if the AS was built in an \
-                     earlier submit on the same GPU object.",
+                     hint: record Scheme::build_blas / build_tlas on this GPU object before the first \
+                     dispatch or trace_rays that binds Accel (a later scheme may read it after that).",
                     node.label
                 )));
             }
@@ -316,5 +325,24 @@ mod tests {
         let err = validate_graph(&ir).expect_err("draw after mesh");
         let s = err.to_string();
         assert!(s.contains("dispatch_mesh"), "{s}");
+    }
+
+    #[test]
+    fn scheme_strict_rejects_unbuilt_accel_read() {
+        let ir = GraphIR {
+            nodes: vec![dispatch_reading_accel("rays", 9)],
+        };
+        let err = validate_scheme_strict(&ir, &HashSet::new()).expect_err("unbuilt");
+        let s = err.to_string();
+        assert!(s.contains("not built"), "{s}");
+    }
+
+    #[test]
+    fn scheme_strict_accepts_prior_built_accel_read() {
+        let ir = GraphIR {
+            nodes: vec![dispatch_reading_accel("rays", 9)],
+        };
+        let prior = HashSet::from([9u64]);
+        validate_scheme_strict(&ir, &prior).expect("prior built");
     }
 }

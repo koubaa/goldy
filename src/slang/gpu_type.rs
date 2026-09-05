@@ -176,6 +176,16 @@ impl GpuType<'_> {
             if field.ty.align() >= 16 {
                 struct_align = 16;
             }
+            // SPIR-V structured buffers give 3-vectors 16-byte *struct* alignment, so
+            // ArrayStride is rounded to 16 even when the last field ends at 4-byte granularity
+            // (e.g. float3+…+uint at 60 → 64). Vulkan SSBOs use that ArrayStride; DX12 SRVs
+            // that follow `gpu_element_stride` must match.
+            if matches!(
+                field.ty,
+                GpuFieldType::F32x3 | GpuFieldType::U32x3 | GpuFieldType::I32x3
+            ) {
+                struct_align = struct_align.max(16);
+            }
             fields.push(PackedGpuField {
                 host_offset: field.offset,
                 storage_offset,
@@ -374,7 +384,7 @@ mod tests {
         .packed()
         .unwrap();
         assert_eq!(packed.fields[1].storage_offset, 16);
-        assert_eq!(packed.stride, 24);
+        assert_eq!(packed.stride, 32);
     }
 
     #[test]
@@ -410,9 +420,11 @@ mod tests {
                 ("position".into(), 0, 12),
                 ("__goldy_pad0".into(), 12, 4),
                 ("uv".into(), 16, 8),
+                ("__goldy_pad1".into(), 24, 4),
+                ("__goldy_pad2".into(), 28, 4),
             ]
         );
-        assert_eq!(generated.check.rust_size, 24);
+        assert_eq!(generated.check.rust_size, 32);
     }
 
     #[test]
@@ -448,12 +460,13 @@ mod tests {
             uv: [4.0, 5.0],
         };
         let bytes = TightVertex::GPU_TYPE.encode_pod_slice(&[host]).unwrap();
-        assert_eq!(bytes.len(), 24);
+        assert_eq!(bytes.len(), 32);
         let pos: [f32; 3] = bytemuck::pod_read_unaligned(&bytes[0..12]);
         let uv: [f32; 2] = bytemuck::pod_read_unaligned(&bytes[16..24]);
         assert_eq!(pos, [1.0, 2.0, 3.0]);
         assert_eq!(uv, [4.0, 5.0]);
         assert_eq!(&bytes[12..16], &[0, 0, 0, 0]);
+        assert_eq!(&bytes[24..32], &[0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -501,7 +514,7 @@ mod tests {
                 OptimizationLevel::None,
             )
             .expect("generated struct must compile and reflect");
-        assert_eq!(result.reflection.binding_element_strides[0], Some(28));
+        assert_eq!(result.reflection.binding_element_strides[0], Some(32));
 
         #[cfg(windows)]
         {
@@ -517,7 +530,7 @@ mod tests {
                     OptimizationLevel::None,
                 )
                 .expect("generated struct must compile and reflect for DXIL");
-            assert_eq!(result.reflection.binding_element_strides[0], Some(28));
+            assert_eq!(result.reflection.binding_element_strides[0], Some(32));
         }
     }
 
@@ -552,14 +565,14 @@ mod tests {
 
         assert_eq!(std::mem::size_of::<MeshVertex>(), 24);
         assert_eq!(MeshVertex::GPU_TYPE.fields[1].offset, 12);
-        assert_eq!(MeshVertex::gpu_element_stride(), 28);
+        assert_eq!(MeshVertex::gpu_element_stride(), 32);
 
         let packed = MeshVertex::GPU_TYPE.packed().unwrap();
-        assert_eq!(packed.stride, 28);
+        assert_eq!(packed.stride, 32);
         assert_eq!(packed.fields[1].storage_offset, 16);
 
         let layout = MeshVertex::GPU_TYPE.vertex_buffer_layout().unwrap();
-        assert_eq!(layout.stride, 28);
+        assert_eq!(layout.stride, 32);
         assert_eq!(
             layout
                 .attributes
@@ -568,5 +581,88 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 0), (1, 16), (2, 24)]
         );
+    }
+
+    #[test]
+    fn doom_static_vertex_spirv_bufro_stride_matches_array_stride() {
+        use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy_derive::GpuType)]
+        #[repr(C)]
+        struct StaticVertex {
+            pos: [f32; 3],
+            atlas_uv: [f32; 2],
+            tile_uv: [f32; 2],
+            tile_size: [f32; 2],
+            scroll_rate: f32,
+            row_height: f32,
+            num_frames: u32,
+            light: u32,
+            use_flat_atlas: u32,
+        }
+
+        assert_eq!(StaticVertex::GPU_TYPE.storage_stride().unwrap(), 64);
+        let generated = StaticVertex::GPU_TYPE.generate().unwrap();
+        let source = format!(
+            "{}\nimport goldy_exp;\n\
+             [goldy_compute]\n[numthreads(1, 1, 1)]\n\
+             void cs_main(BufRO<StaticVertex> verts, Scattered<uint> output, ThreadId id) {{\n\
+                 StaticVertex v = verts[id.x];\n\
+                 output[id.x] = asuint(v.atlas_uv.x) + v.use_flat_atlas;\n\
+             }}",
+            generated.source
+        );
+        let compiler = SlangCompiler::new().expect("Slang compiler");
+        let shader_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("shaders")
+            .to_string_lossy()
+            .into_owned();
+        let result = compiler
+            .compile_with_reflection(
+                &source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&shader_path],
+                &[("__SPIRV__", "1")],
+                &[generated.check],
+                OptimizationLevel::None,
+            )
+            .expect("StaticVertex BufRO SPIR-V");
+        assert_eq!(
+            result.reflection.binding_element_strides[0],
+            Some(64),
+            "Slang reflection BufRO<StaticVertex> stride"
+        );
+        let spirv_strides = spirv_array_strides(&result.shader.data);
+        assert!(
+            spirv_strides.contains(&64),
+            "SPIR-V ArrayStride must include packed 64, got {spirv_strides:?}"
+        );
+    }
+
+    fn spirv_array_strides(spirv: &[u8]) -> Vec<u32> {
+        let words: Vec<u32> = spirv
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        if words.first().copied() != Some(0x0723_0203) {
+            return Vec::new();
+        }
+        let mut strides = Vec::new();
+        let mut i = 5usize;
+        while i < words.len() {
+            let wc = (words[i] >> 16) as usize;
+            let op = words[i] & 0xffff;
+            if wc == 0 {
+                break;
+            }
+            // OpDecorate = 71, Decoration ArrayStride = 6
+            if op == 71 && wc >= 4 && words.get(i + 2) == Some(&6) {
+                strides.push(words[i + 3]);
+            }
+            i += wc;
+        }
+        strides
     }
 }

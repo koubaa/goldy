@@ -45,6 +45,7 @@ use crate::types::{
 #[cfg(feature = "graphics")]
 use crate::types::{DepthFormat, IndexFormat};
 use crate::validation_env;
+use std::collections::HashSet;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -768,6 +769,8 @@ pub struct Scheme {
     present_transactions: Vec<PresentTransactionInfo>,
     /// Record-time diagnostics flushed on [`Self::submit`].
     record_errors: Vec<String>,
+    /// Accel handles already GPU-built on this object (`build_blas` / `build_tlas`).
+    prior_built_accels: HashSet<u64>,
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -810,6 +813,7 @@ impl Scheme {
             #[cfg(feature = "graphics")]
             present_transactions: Vec::new(),
             record_errors: Vec::new(),
+            prior_built_accels: HashSet::new(),
         }
     }
 
@@ -1010,6 +1014,7 @@ impl Scheme {
                 index_count,
             }),
         });
+        dest.mark_gpu_built();
         Ok(())
     }
 
@@ -1067,6 +1072,7 @@ impl Scheme {
                 instances: rec.into(),
             }),
         });
+        dest.mark_gpu_built();
         Ok(())
     }
     ///
@@ -1635,7 +1641,10 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph(&self.ir)?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(
+            &self.ir,
+            &self.prior_built_accels,
+        )?;
 
         let submit_result = {
             let grant_count = self.present_transactions.len();
@@ -1900,7 +1909,10 @@ impl Scheme {
             self.submit_state.invalidate_retention();
         }
 
-        crate::task_graph::validate::validate_graph(&self.ir)?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(
+            &self.ir,
+            &self.prior_built_accels,
+        )?;
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
@@ -2886,6 +2898,10 @@ pub(crate) trait SchemeBindable {
     fn accel_kind(&self) -> Option<crate::accel::AccelKind> {
         None
     }
+
+    fn prior_built_accel_handle(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl SchemeBindable for Parcel {
@@ -2951,6 +2967,10 @@ impl SchemeBindable for crate::AccelerationStructure {
     fn accel_kind(&self) -> Option<crate::accel::AccelKind> {
         Some(self.kind)
     }
+
+    fn prior_built_accel_handle(&self) -> Option<u64> {
+        self.is_gpu_built().then_some(self.handle)
+    }
 }
 
 impl SchemeBindable for crate::Texture {
@@ -3013,6 +3033,9 @@ impl<'a> SchemeNodeBuilder<'a> {
                  and bind the TLAS."
                     .into(),
             );
+        }
+        if let Some(h) = bindable.prior_built_accel_handle() {
+            self.scheme.prior_built_accels.insert(h);
         }
         let slot = slot.unwrap_or_else(|| {
             panic!(

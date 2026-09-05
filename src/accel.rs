@@ -10,6 +10,7 @@ use crate::handles::AccelerationStructureHandle;
 use crate::task_graph::ResourceId;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle};
 use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct AccelerationStructureInner {
@@ -19,6 +20,8 @@ struct AccelerationStructureInner {
     bindless: Option<u32>,
     /// BLASes this TLAS still needs on the GPU. Empty for BLAS objects.
     held_blases: Mutex<Vec<AccelerationStructure>>,
+    /// Set when [`crate::Scheme::build_blas`] / [`crate::Scheme::build_tlas`] records a GPU build.
+    gpu_built: AtomicBool,
 }
 
 impl Drop for AccelerationStructureInner {
@@ -101,6 +104,7 @@ impl AccelerationStructure {
                 handle,
                 bindless,
                 held_blases: Mutex::new(Vec::new()),
+                gpu_built: AtomicBool::new(false),
             }),
             handle,
             kind: AccelKind::Blas,
@@ -132,6 +136,7 @@ impl AccelerationStructure {
                 handle,
                 bindless,
                 held_blases: Mutex::new(Vec::new()),
+                gpu_built: AtomicBool::new(false),
             }),
             handle,
             kind: AccelKind::Tlas,
@@ -151,6 +156,14 @@ impl AccelerationStructure {
 
     pub(crate) fn resource_id(&self) -> ResourceId {
         ResourceId::Accel(self.handle)
+    }
+
+    pub(crate) fn mark_gpu_built(&self) {
+        self.inner.gpu_built.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_gpu_built(&self) -> bool {
+        self.inner.gpu_built.load(Ordering::Acquire)
     }
 
     /// Keep the BLASes referenced by this TLAS alive for as long as `self` lives.
