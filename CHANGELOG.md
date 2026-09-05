@@ -9,6 +9,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
+  `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
+  of structurally dirty. The next submit recomputes partition fingerprints and
+  re-records only partitions whose baked payload changed; other retained
+  partitions resubmit. The schedule cache keys on bindings only; emitted
+  command lists key on a separate emission fingerprint so a pipeline swap
+  cannot reuse a stale `SetPipeline`. Structural mutations (new nodes,
+  bindings) still drop all retained command lists.
+
+- **`NodeId`** — finalizing a dispatch (`dispatch`, `dispatch_shape_parcel`)
+  returns the recorded node's identity, which is what `set_node_pipeline`,
+  `set_node_dispatch`, and `set_node_param` now take instead of a raw index.
+  Ids carry their originating scheme, so a node id from another scheme is
+  rejected rather than silently addressing an unrelated node. Nodes are only
+  appended, so an id keeps pointing at the same dispatch site for the life of
+  the scheme and can key per-site history across frames.
+
+- **`ReplayStats::clean_submits`** — submissions that found the scheme clean
+  (no structural, params, or topology dirtiness). Unlike `resubmit_hits`, it
+  reflects scheme state rather than backend command-list retention, so it is
+  present and meaningful on every backend including Metal and WebGPU.
+
+- **`ShaderModule::variant`** — frontend-retained source, search paths, and
+  preprocessor defines. `variant(extra_defines)` merges/overrides defines and
+  allocates a new backend shader handle without a per-backend trait method.
+  Post-virtual-main source is cached once per module (`OnceLock`).
+
+- **Bakeable scalar params** — every generated compute wrapper reads each scalar
+  `with_param` slot through a macro that defaults to that backend's own read
+  expression (`_GOLDY_SPEC_<ENTRY>_UW<slot>`, named by
+  `slang::virtual_main::scalar_specialization_macro`; the push-constant word on
+  Vulkan/DX12/Metal, the user-params uniform field on WebGPU, the kernel
+  argument on CUDA). Defining it to a `u32` wire-word literal bakes the value
+  into the compiled program, so the shader compiler sees a constant instead of a
+  load, with no change to the shader source and no change to the parameter
+  layout — unbaked slots keep their positions and the recorded command list is
+  untouched, so a baked pipeline can be swapped onto an already-recorded
+  dispatch node. Note that baking must not change the pipeline's *binding*
+  layout: WebGPU derives bind group layouts from compiled WGSL usage, so baking
+  every scalar of an entry point leaves the user-params uniform unreferenced and
+  drops the binding. This is the primitive behind
+  [shader specialization prediction](docs/src/design/shader-specialization.md).
+
+- **Shader specialization prediction** — retained schemes now specialize their
+  own compute dispatches. Every dispatch node with `with_param` scalars gets a
+  per-site predictor that counts, per slot, the clean submits during which the
+  wire word held its value. After 2 such submits a variant with the stable slots
+  baked (via the macros above) is compiled on a worker thread; after 10 it is
+  bound on the node as a params-only re-record. `set_node_param` on a baked slot
+  puts the node back on the caller's pipeline in the same call, so no submit
+  ever runs a program whose baked value disagrees with the frame. A slot that
+  invalidates a compile or a promotion needs a longer streak before it is baked
+  again, so facts that flip every few frames stay dynamic while their neighbours
+  specialize; three failed compiles pin a site to its universal pipeline.
+  Variants live in a bounded per-scheme LRU and are reused across demotions.
+  Output is byte-identical either way; the visible effects are
+  `ReplayStats::specialization_warms` / `specialization_promotions` /
+  `specialization_demotions` (new fields — exhaustive struct literals must add
+  them), `Scheme::node_is_specialized`, and one extra record per promotion or
+  demotion. On by default; `GOLDY_SPECIALIZATION=0` turns it off
+  (`test_support::SpecializationOverride` pins it for tests). Backends whose
+  compute pipeline layouts do not follow the shader signature decline through a
+  new internal `GpuBackend::compute_pipeline_layout_follows_signature`: WebGPU
+  (wgpu auto layouts drop bindings a baked variant stops reading) and CPU (no
+  bake macros) return `false` and never see the predictor run. Design:
+  [shader specialization prediction](docs/src/design/shader-specialization.md).
+
+- **Shader provenance** — `ShaderModule` keeps its compile inputs (source,
+  search paths, defines, optimization level, layout checks) in a shared
+  `ShaderProvenance` with a process-unique id, and every `ComputePipeline`
+  carries an `Arc` to its module's provenance, so the runtime can compile a
+  variant of the program a dispatch runs after the caller has dropped the
+  module. `ShaderModule::variant` is now a thin wrapper over it.
+
+- **Unlocked compute Slang compile** — `ComputePipeline::new` runs Slang
+  outside `device.inner.backend.lock()` on Vulkan and DX12, then seeds the
+  stage cache before PSO create (still under the lock). Mock/CPU/Metal/WebGPU/CUDA
+  keep in-lock compile until they implement `seed_compute_stage`. No
+  `PipelineFactory` yet.
+
 - **`MeshPipeline` / `dispatch_mesh`** — mesh (+ optional amplification) graphics
   pipelines on Vulkan (`VK_EXT_mesh_shader`), DX12 (mesh tier 1), and Metal
   (`MTLMeshRenderPipelineDescriptor` / `drawMeshThreadgroups`). Record with

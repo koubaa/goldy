@@ -4136,6 +4136,13 @@ impl GpuBackend for WebGpuBackend {
         self
     }
 
+    /// wgpu derives bind group layouts from the WGSL's actual resource usage, so a baked
+    /// variant that dead-strips a binding changes the layout out from under recorded
+    /// bind groups. Off until this backend builds explicit layouts from the signature.
+    fn compute_pipeline_layout_follows_signature(&self) -> bool {
+        false
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::WebGpu
     }

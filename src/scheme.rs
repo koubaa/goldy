@@ -1,8 +1,10 @@
 //! Retained scheme — goldy's primary submission unit.
 //!
 //! A [`Scheme`] is a set of dispatches and precedences, first-class, retained across
-//! submissions. Schemes persist across frames; structural mutation sets a COW dirty
-//! bit, and a clean scheme resubmits with zero recording cost.
+//! submissions. Schemes persist across frames. Structural mutation (new nodes, bindings)
+//! drops retained command lists. Params-only mutation (pipeline, user slots, dispatch
+//! dims) keeps other partitions' retained lists and re-records only partitions whose
+//! baked payload changed. A clean scheme resubmits with zero recording cost.
 //!
 //! **Construction**: `Scheme::new(&ctx)` — bound to one context for its lifetime.
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
@@ -618,6 +620,29 @@ struct WithdrawInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LeaseId(pub(crate) u32);
 
+/// Stable identity of one recorded scheme node, returned when the node is finalized.
+///
+/// Nodes are only ever appended to a scheme, so an id stays valid — and keeps pointing at
+/// the same dispatch site — for the life of the scheme it came from. That makes it usable
+/// as a key for per-site history across frames (see
+/// [Shader Specialization Prediction](https://koubaa.github.io/goldy/design/shader-specialization.html)),
+/// not just as an argument to [`Scheme::set_node_pipeline`] and its siblings.
+///
+/// Ids carry the originating scheme's identity, so passing one to a different scheme is
+/// rejected instead of silently addressing an unrelated node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId {
+    scheme_id: u64,
+    index: u32,
+}
+
+impl NodeId {
+    /// Position of this node in its scheme's recording order.
+    pub fn index(&self) -> usize {
+        self.index as usize
+    }
+}
+
 /// Marker type for texture leases acquired via [`Scheme::lease_texture`].
 pub struct LeaseTexture;
 
@@ -733,6 +758,45 @@ pub struct ReplayStats {
     pub records: u64,
     /// Re-records caused by a foreign scheme changing shared-parcel topology.
     pub topology_records: u64,
+    /// Submissions that found the scheme clean: no structural, params, or topology dirtiness.
+    ///
+    /// Unlike `resubmit_hits`, this counts the scheme's own state rather than backend
+    /// command-list retention, so it means the same thing on Metal and WebGPU (which re-encode
+    /// every frame) as it does on Vulkan and DX12. That makes it the portable signal for
+    /// per-site history across frames.
+    pub clean_submits: u64,
+    /// Specialized-variant compiles the predictor started (one per warm; cache hits do not count).
+    pub specialization_warms: u64,
+    /// Dispatch sites switched from the caller's pipeline to a variant with stable scalar
+    /// params baked in (each is a params-only re-record of that partition).
+    pub specialization_promotions: u64,
+    /// Promoted sites switched back to the caller's pipeline because a baked param changed
+    /// (or specialization was turned off).
+    pub specialization_demotions: u64,
+}
+
+/// How much of a retained scheme the next [`Scheme::submit`] must rebuild.
+///
+/// Ordered so [`SchemeDirty::Structure`] wins over [`SchemeDirty::Params`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SchemeDirty {
+    /// Resubmit retained command lists; skip fingerprint hashing.
+    Clean,
+    /// Bindings unchanged. Recompute partition fingerprints and re-record only
+    /// partitions whose baked payload (pipeline, user slots, dispatch dims) changed.
+    Params,
+    /// Nodes or bindings changed. Drop all retained CBs and rebuild the schedule.
+    Structure,
+}
+
+/// Snapshot of dirty/replay state taken at the start of [`Scheme::submit`].
+struct IrSubmitPrep {
+    topo_dirty: bool,
+    structurally_dirty: bool,
+    params_dirty: bool,
+    ir_clean: bool,
+    had_replay: bool,
+    deposit_resolutions: std::collections::HashMap<u32, crate::task_graph::ResolvedDeposit>,
 }
 
 /// A retained scheme: a set of dispatches held across submissions with COW dirty tracking.
@@ -754,8 +818,8 @@ pub struct Scheme {
     deposits: Vec<DepositPool>,
     /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
     cpu_dispatches: Vec<CpuDispatchExec>,
-    /// COW dirty bit: set by every structural mutation, cleared by a successful record.
-    dirty: bool,
+    /// COW dirty level: structural vs params-only vs clean. Cleared by a successful submit.
+    dirty: SchemeDirty,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
     topology_dirty: Arc<AtomicBool>,
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
@@ -776,6 +840,8 @@ pub struct Scheme {
     record_errors: Vec<String>,
     /// Accel handles already GPU-built on this object (`build_blas` / `build_tlas`).
     prior_built_accels: HashSet<u64>,
+    /// Per-dispatch-site shader specialization predictor (see `specialization.rs`).
+    specialization: crate::specialization::SchemePredictor,
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -807,11 +873,12 @@ impl Scheme {
             rt_leases: Vec::new(),
             deposits: Vec::new(),
             cpu_dispatches: Vec::new(),
-            dirty: true,
+            dirty: SchemeDirty::Structure,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
             next_withdraw_id: 0,
+            specialization: crate::specialization::SchemePredictor::new(),
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             withdraws: Vec::new(),
             #[cfg(feature = "graphics")]
@@ -828,9 +895,19 @@ impl Scheme {
         &self.ctx
     }
 
-    /// True when the next [`Self::submit`] must re-record.
+    /// True when the next [`Self::submit`] must re-record at least one partition.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.dirty != SchemeDirty::Clean
+    }
+
+    fn mark_structure_dirty(&mut self) {
+        self.dirty = SchemeDirty::Structure;
+    }
+
+    fn mark_params_dirty(&mut self) {
+        if self.dirty < SchemeDirty::Params {
+            self.dirty = SchemeDirty::Params;
+        }
     }
 
     /// True when a foreign scheme changed shared-parcel topology since the last record.
@@ -841,7 +918,13 @@ impl Scheme {
 
     /// Submission outcome counters.
     pub fn replay_stats(&self) -> ReplayStats {
-        self.stats
+        let spec = self.specialization.events();
+        ReplayStats {
+            specialization_warms: spec.warms,
+            specialization_promotions: spec.promotions,
+            specialization_demotions: spec.demotions,
+            ..self.stats
+        }
     }
 
     /// Per-partition timeline values from the most recent successful submit (diagnostics/tests).
@@ -869,7 +952,7 @@ impl Scheme {
         dst_offset: u64,
         size: u64,
     ) -> Result<(), GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let src_resource = src.resource_id();
         let dst_resource = dst.resource_id();
         if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. })
@@ -921,7 +1004,7 @@ impl Scheme {
         vertex_stride: u32,
         indices: Option<(&Parcel, u32)>,
     ) -> Result<(), GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         if dest.kind != crate::accel::AccelKind::Blas {
             return Err(GoldyError::Validation(
                 "build_blas requires a triangle BLAS, but the destination is a TLAS. \
@@ -1030,7 +1113,7 @@ impl Scheme {
         dest: &crate::AccelerationStructure,
         instances: &[crate::AccelInstance<'_>],
     ) -> Result<(), GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         if dest.kind != crate::accel::AccelKind::Tlas {
             return Err(GoldyError::Validation(
                 "build_tlas requires a TLAS, but the destination is a BLAS. \
@@ -1095,7 +1178,7 @@ impl Scheme {
                 "bind_deposit_buffer requires non-zero capacity"
             )));
         }
-        self.dirty = true;
+        self.mark_structure_dirty();
         let dst_resource = destination.resource_id();
         if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -1164,7 +1247,7 @@ impl Scheme {
                 "bind_deposit_texture requires non-zero capacity"
             )));
         }
-        self.dirty = true;
+        self.mark_structure_dirty();
         let x_end = x
             .checked_add(width)
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: x+width overflow")))?;
@@ -1274,7 +1357,7 @@ impl Scheme {
         width: u32,
         height: u32,
     ) -> Result<(), GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let src_resource = src.resource_id();
         if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -1335,7 +1418,7 @@ impl Scheme {
     ///
     /// Zero-fill a buffer region via an upload micro-scheme.
     pub fn clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let buffer = parcel
             .buffer_handle()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("clear_parcel: requires a buffer parcel")))?;
@@ -1365,16 +1448,20 @@ impl Scheme {
     }
 
     /// Append a compute dispatch node to the scheme IR.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_compute_dispatch(
         &mut self,
         label: &'static str,
         pipeline: crate::backend::ComputePipelineHandle,
+        provenance: &Arc<crate::shader::ShaderProvenance>,
         bindings: Vec<ResourceBinding>,
         resource_slots: Vec<u32>,
         user_slots: Vec<u32>,
         dispatch: DispatchDim,
     ) {
-        self.dirty = true;
+        self.mark_structure_dirty();
+        self.specialization
+            .register_site(self.ir.nodes.len() as u32, pipeline, provenance, label, &user_slots);
         self.ir.nodes.push(TaskNode {
             label,
             bindings,
@@ -1399,7 +1486,7 @@ impl Scheme {
         stamp_targets: &[std::sync::Arc<crate::parcel::ParcelStamp>],
     ) {
         self.apply_compute_stamps(stamp_targets);
-        self.dirty = true;
+        self.mark_structure_dirty();
         self.ir.nodes.push(TaskNode {
             label,
             bindings,
@@ -1422,7 +1509,7 @@ impl Scheme {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Lease<LeaseTexture>, GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let texture = self
             .ctx
             .with_transient_pool(|pool| pool.acquire_texture(&self.ctx, width, height, format, access, flags))
@@ -1470,7 +1557,7 @@ impl Scheme {
         kind: crate::types::BufferKind,
         flags: crate::types::BufferFlags,
     ) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let backing = self
             .ctx
             .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags, None))
@@ -1494,7 +1581,7 @@ impl Scheme {
         format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<Lease<LeaseRenderTarget>, GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let rt = RenderTarget::new_with_depth(self.ctx.device(), width, height, format, depth_format)
             .map_err(|e| self.ctx.classify(e))?;
         let handle = rt.backend_handle();
@@ -1533,7 +1620,7 @@ impl Scheme {
         label: &'static str,
         pipeline: &crate::compute::ComputePipeline,
     ) -> SchemeNodeBuilder<'a> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         SchemeNodeBuilder {
             scheme: self,
             label,
@@ -1543,6 +1630,7 @@ impl Scheme {
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
             slot_access: pipeline.slot_access.clone(),
+            provenance: Some(std::sync::Arc::clone(&pipeline.provenance)),
         }
     }
 
@@ -1556,7 +1644,7 @@ impl Scheme {
         label: &'static str,
         pipeline: &crate::rt_pipeline::RayTracingPipeline,
     ) -> SchemeNodeBuilder<'a> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         SchemeNodeBuilder {
             scheme: self,
             label,
@@ -1566,7 +1654,155 @@ impl Scheme {
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
             slot_access: pipeline.slot_access.clone(),
+            provenance: None,
         }
+    }
+
+    /// Identity of the node appended most recently. Call sites push first, then ask.
+    fn last_node_id(&self) -> NodeId {
+        debug_assert!(!self.ir.nodes.is_empty(), "last_node_id after a push");
+        NodeId {
+            scheme_id: self.scheme_id,
+            index: (self.ir.nodes.len() - 1) as u32,
+        }
+    }
+
+    /// Borrow a recorded compute dispatch node for in-place payload mutation.
+    ///
+    /// `api` names the caller for error text.
+    fn dispatch_node_mut(&mut self, node: NodeId, api: &str) -> Result<&mut NodeKind, GoldyError> {
+        if node.scheme_id != self.scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "{api}: node id belongs to scheme {}, not scheme {}",
+                node.scheme_id,
+                self.scheme_id
+            )));
+        }
+        let index = node.index();
+        let kind = self
+            .ir
+            .nodes
+            .get_mut(index)
+            .map(|n| &mut n.kind)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("{api}: node {index} out of range")))?;
+        if !matches!(kind, NodeKind::Dispatch { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "{api}: node {index} is not a compute dispatch"
+            )));
+        }
+        Ok(kind)
+    }
+
+    /// Replace the compute pipeline on an existing dispatch node.
+    ///
+    /// Bindings stay as recorded. Marks the scheme params-dirty: the next submit
+    /// recomputes partition fingerprints and re-records only partitions whose baked
+    /// pipeline (or other payload) changed. Other retained partitions resubmit.
+    ///
+    /// The new pipeline becomes the node's universal pipeline: any specialized variant the
+    /// predictor had swapped in is dropped and the site's history starts over.
+    pub fn set_node_pipeline(
+        &mut self,
+        node: NodeId,
+        pipeline: &crate::compute::ComputePipeline,
+    ) -> Result<(), GoldyError> {
+        let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
+            NodeKind::Dispatch {
+                pipeline: slot,
+                user_slots,
+                ..
+            } => {
+                let changed = *slot != pipeline.handle;
+                *slot = pipeline.handle;
+                (changed, user_slots.clone())
+            }
+            _ => (false, Vec::new()),
+        };
+        let label = self.ir.nodes[node.index()].label;
+        self.specialization.register_site(
+            node.index() as u32,
+            pipeline.handle,
+            &pipeline.provenance,
+            label,
+            &slots,
+        );
+        if changed {
+            self.mark_params_dirty();
+        }
+        Ok(())
+    }
+
+    /// Whether the predictor currently runs `node` on a specialized variant rather than the
+    /// pipeline the caller bound. Observable only through stats and this query; the dispatch
+    /// computes the same thing either way.
+    pub fn node_is_specialized(&self, node: NodeId) -> bool {
+        node.scheme_id == self.scheme_id && self.specialization.is_promoted(node.index() as u32)
+    }
+
+    /// Block until every in-flight specialization compile has finished (test support).
+    pub(crate) fn wait_for_specialization_compiles(&mut self) {
+        self.specialization.wait_for_compiles();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn specialization(&self) -> &crate::specialization::SchemePredictor {
+        &self.specialization
+    }
+
+    /// Replace the direct dispatch dimensions on an existing dispatch node.
+    ///
+    /// Marks the scheme params-dirty. Indirect dispatches become direct.
+    pub fn set_node_dispatch(&mut self, node: NodeId, x: u32, y: u32, z: u32) -> Result<(), GoldyError> {
+        let next = DispatchDim::Direct { x, y, z };
+        let changed = match self.dispatch_node_mut(node, "set_node_dispatch")? {
+            NodeKind::Dispatch { dispatch, .. } if *dispatch != next => {
+                *dispatch = next;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.mark_params_dirty();
+        }
+        Ok(())
+    }
+
+    /// Replace one virtual-main scalar parameter (`with_param` slot) on a dispatch node.
+    ///
+    /// `param_index` is the nth recorded `with_param` value. Marks the scheme params-dirty.
+    ///
+    /// Scalar params are baked into the emitted command list, so a value that changes every
+    /// frame re-records its partition every frame. Facts that flip often belong in a bound
+    /// parcel instead.
+    ///
+    /// If the predictor had specialized this node on the old value of `param_index`, the
+    /// node returns to the caller's pipeline in the same call, so the next submit runs the
+    /// new value through the universal shader. That is what keeps specialization invisible.
+    pub fn set_node_param(&mut self, node: NodeId, param_index: usize, value: u32) -> Result<(), GoldyError> {
+        let changed = match self.dispatch_node_mut(node, "set_node_param")? {
+            NodeKind::Dispatch { user_slots, .. } => {
+                if param_index >= user_slots.len() {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "set_node_param: param_index {param_index} out of range (node has {} params)",
+                        user_slots.len()
+                    )));
+                }
+                let changed = user_slots[param_index] != value;
+                user_slots[param_index] = value;
+                changed
+            }
+            _ => false,
+        };
+        if changed {
+            let index = node.index();
+            if let Some(universal) = self.specialization.on_param_changed(index as u32, param_index) {
+                if let NodeKind::Dispatch { pipeline, .. } = &mut self.ir.nodes[index].kind {
+                    *pipeline = universal;
+                }
+            }
+            self.mark_params_dirty();
+        }
+        Ok(())
     }
 
     /// Begin recording a CPU dispatch: a serial host function over whole buffer parcels.
@@ -1579,7 +1815,7 @@ impl Scheme {
     /// followed by one scalar per `with_param`. See [`crate::cpu_dispatch`] for the
     /// execution model and its cost.
     pub fn cpu_node<'a>(&'a mut self, label: &'static str) -> SchemeCpuNodeBuilder<'a> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         SchemeCpuNodeBuilder {
             scheme: self,
             label,
@@ -1631,6 +1867,173 @@ impl Scheme {
             .defer_host_write(&ready_after.last_referenced(), buffer, offset, data);
     }
 
+    fn prepare_ir_submit(&mut self) -> Result<IrSubmitPrep, GoldyError> {
+        if !self.submit_state.all_stamps_alive() {
+            // Dropping a retained-pool resource invalidates schemes that still bind it.
+            self.submit_state.invalidate_retention();
+            return Err(GoldyError::StaleResource);
+        }
+
+        let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
+        {
+            // The predictor sees the scheme as the caller left it (clean or not) and may
+            // rebind a node to a specialized variant; that rebind is a params-only mutation
+            // this same submit records.
+            let _tz = crate::tracy_zone!("scheme.submit.specialization");
+            let was_clean = self.dirty == SchemeDirty::Clean && !topo_dirty;
+            let device = self.ctx.device().clone();
+            if self
+                .specialization
+                .begin_submit(&device, &mut self.ir, was_clean, topo_dirty)
+            {
+                self.mark_params_dirty();
+            }
+        }
+        let structurally_dirty = self.dirty == SchemeDirty::Structure;
+        let params_dirty = self.dirty == SchemeDirty::Params;
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.dirty_check");
+            if structurally_dirty || topo_dirty {
+                self.submit_state.invalidate_retention();
+            }
+        }
+
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
+            use crate::task_graph::cross_submit::net_access_per_resource;
+            let net = net_access_per_resource(&self.ir);
+            let ctx = self.ctx.backend_handle();
+            for (key, access) in &net {
+                if access.writes {
+                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
+                        stamp.drain_pending_for_submit_gate(ctx);
+                    }
+                }
+            }
+        }
+
+        Ok(IrSubmitPrep {
+            topo_dirty,
+            structurally_dirty,
+            params_dirty,
+            ir_clean: self.dirty == SchemeDirty::Clean && !topo_dirty,
+            had_replay: self.submit_state.has_cb_replay(),
+            deposit_resolutions: self.resolve_deposits_for_submit()?,
+        })
+    }
+
+    fn teardown_replay_if_disabled(&mut self, had_replay: bool) {
+        if had_replay && !self.submit_state.has_cb_replay() {
+            use crate::task_graph::cross_submit::clear_scheme_topology_registration;
+            clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
+            self.prev_topology_parcels.clear();
+            self.topology_dirty.store(false, Ordering::Release);
+        }
+    }
+
+    fn stamp_deposits_and_cpu(&mut self, tv: TimelineValue) {
+        let ctx_h = self.ctx.backend_handle();
+        for pool in &mut self.deposits {
+            pool.stamp_pending(ctx_h, tv);
+        }
+        self.stamp_cpu_dispatches(tv);
+    }
+
+    fn finish_ir_submit_bookkeeping(
+        &mut self,
+        tv: TimelineValue,
+        part_result: &crate::task_graph::PartitionSubmitResult,
+        prep: &IrSubmitPrep,
+    ) {
+        self.ctx.advance_high_water_timeline(tv);
+        self.dirty = SchemeDirty::Clean;
+
+        let structurally_dirty = prep.structurally_dirty;
+        let params_dirty = prep.params_dirty;
+        let topo_dirty = prep.topo_dirty;
+        if prep.ir_clean {
+            self.stats.clean_submits += 1;
+        }
+        self.specialization.end_submit();
+        // Standalone upload partitions never increment `PartitionSubmitResult.records`,
+        // but the first submit after IR mutation still counts as a scheme record.
+        // Params-only mutation also counts: at least one partition typically re-records,
+        // and Metal (no CB retention) still needs a visible records bump.
+        let retention_recorded = part_result.records > 0;
+        let recorded = retention_recorded || structurally_dirty || params_dirty;
+        // Topology edges exist to invalidate baked barriers in retained CBs — only
+        // (re)register when CB replay is enabled and we actually recorded.
+        let on_record_path =
+            self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
+
+        if on_record_path {
+            use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
+            let net = net_access_per_resource(&self.ir);
+            self.prev_topology_parcels = reregister_scheme_topology(
+                &net,
+                self.submit_state.resource_stamps(),
+                &self.prev_topology_parcels,
+                self.scheme_id,
+                self.ctx.backend_handle(),
+                &self.topology_dirty,
+            );
+        }
+
+        if recorded {
+            self.stats.records += 1;
+            if topo_dirty && !structurally_dirty {
+                self.stats.topology_records += 1;
+            }
+            if topo_dirty {
+                self.topology_dirty.store(false, Ordering::Release);
+            }
+        }
+        // Params-dirty submits often mix a re-record with retained-partition hits.
+        // Count those hits even when `recorded` is true (`params_dirty` always is).
+        // Require an actual partition-level cache hit. `all_from_cache()` is also
+        // true when CB replay is disabled (fresh encodes leave `records == 0`),
+        // and those must not count as retention hits.
+        if part_result.resubmit_hits > 0 {
+            #[cfg(not(feature = "metal"))]
+            {
+                self.stats.resubmit_hits += 1;
+            }
+        }
+
+        if structurally_dirty || topo_dirty || params_dirty {
+            tracing::debug!(
+                target: "goldy::scheme",
+                scheme_id = self.scheme_id,
+                structurally_dirty,
+                params_dirty,
+                topo_dirty,
+                partition_records = part_result.records,
+                partition_resubmits = part_result.resubmit_hits,
+                scheme_recorded = recorded,
+                "submit dirty"
+            );
+        } else {
+            tracing::debug!(
+                target: "goldy::scheme",
+                scheme_id = self.scheme_id,
+                partition_records = part_result.records,
+                partition_resubmits = part_result.resubmit_hits,
+                scheme_recorded = recorded,
+                all_partitions_from_cache = {
+                    #[cfg(feature = "graphics")]
+                    {
+                        part_result.all_from_cache()
+                    }
+                    #[cfg(not(feature = "graphics"))]
+                    {
+                        part_result.records == 0
+                    }
+                },
+                "submit clean (not dirty)"
+            );
+        }
+    }
+
     /// Submit the scheme: resubmit the retained command list when clean, re-record when dirty.
     ///
     /// On a clean resubmit, bound parcels' reference tables are stamped with the new
@@ -1664,20 +2067,7 @@ impl Scheme {
         &mut self,
         mut acquired: Vec<AcquiredPresent>,
     ) -> Result<Submission, GoldyError> {
-        if !self.submit_state.all_stamps_alive() {
-            // Dropping a retained-pool resource invalidates schemes that still bind it.
-            self.submit_state.invalidate_retention();
-            return Err(GoldyError::StaleResource);
-        }
-
-        let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
-        let structurally_dirty = self.dirty;
-        {
-            let _tz = crate::tracy_zone!("scheme.submit.dirty_check");
-            if structurally_dirty || topo_dirty {
-                self.submit_state.invalidate_retention();
-            }
-        }
+        let prep = self.prepare_ir_submit()?;
 
         validate_present_exchange_bindings(&self.ir, &self.present_transactions)?;
         if let Some(msg) = self.record_errors.first() {
@@ -1745,24 +2135,7 @@ impl Scheme {
                 }
             }
 
-            {
-                let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
-                use crate::task_graph::cross_submit::net_access_per_resource;
-                let net = net_access_per_resource(&self.ir);
-                let ctx = self.ctx.backend_handle();
-                for (key, access) in &net {
-                    if access.writes {
-                        if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
-                            stamp.drain_pending_for_submit_gate(ctx);
-                        }
-                    }
-                }
-            }
-
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
-            let ir_clean = !structurally_dirty && !topo_dirty;
-            let had_replay = self.submit_state.has_cb_replay();
-            let deposit_resolutions = self.resolve_deposits_for_submit()?;
             let mut partial = crate::task_graph::PartitionSubmitResult::default();
             let mut partial_tv = self.ctx.gpu_progress();
             let result = {
@@ -1801,21 +2174,14 @@ impl Scheme {
                     &self.ir,
                     &mut present_slots,
                     deferred,
-                    &deposit_resolutions,
-                    ir_clean,
+                    &prep.deposit_resolutions,
+                    prep.ir_clean,
                     &mut partial,
                     &mut partial_tv,
                     &self.cpu_dispatches,
                 )
             };
-            // When CB replay was torn down (env / profiler), drop topology edges that only
-            // existed to invalidate baked retained barriers.
-            if had_replay && !self.submit_state.has_cb_replay() {
-                use crate::task_graph::cross_submit::clear_scheme_topology_registration;
-                clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
-                self.prev_topology_parcels.clear();
-                self.topology_dirty.store(false, Ordering::Release);
-            }
+            self.teardown_replay_if_disabled(prep.had_replay);
             match result {
                 Ok(ok) => Ok((ok, surface_frames, surface_generations, partial)),
                 Err(e) => Err((e, surface_frames, partial, partial_tv)),
@@ -1830,15 +2196,7 @@ impl Scheme {
             }
         };
 
-        // Stamp selected deposit parcels with the submit timeline so they cannot be
-        // reselected until the GPU copy retires.
-        {
-            let ctx_h = self.ctx.backend_handle();
-            for pool in &mut self.deposits {
-                pool.stamp_pending(ctx_h, tv);
-            }
-        }
-        self.stamp_cpu_dispatches(tv);
+        self.stamp_deposits_and_cpu(tv);
 
         // Stamp each acquired frame with the timeline of the partition that wrote it.
         for (binding_id, binding_tv) in &part_result.present_binding_tvs {
@@ -1855,75 +2213,7 @@ impl Scheme {
             }
         }
 
-        self.ctx.advance_high_water_timeline(tv);
-
-        self.dirty = false;
-
-        // Standalone upload partitions (WriteTexture, etc.) never increment
-        // `PartitionSubmitResult.records`, but the first submit after IR mutation still
-        // counts as a scheme record when `structurally_dirty`.
-        // With CB replay disabled, `records` stays 0 on clean submits (fresh encodes are
-        // not retention records), so topology reregistration stays gated on IR dirtiness.
-        let retention_recorded = part_result.records > 0;
-        let recorded = retention_recorded || structurally_dirty;
-        // Topology edges exist to invalidate baked barriers in retained CBs — only
-        // (re)register when CB replay is enabled and we actually recorded.
-        let on_record_path =
-            self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
-
-        if on_record_path {
-            use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
-            let net = net_access_per_resource(&self.ir);
-            self.prev_topology_parcels = reregister_scheme_topology(
-                &net,
-                self.submit_state.resource_stamps(),
-                &self.prev_topology_parcels,
-                self.scheme_id,
-                self.ctx.backend_handle(),
-                &self.topology_dirty,
-            );
-        }
-
-        if recorded {
-            self.stats.records += 1;
-            if topo_dirty && !structurally_dirty {
-                self.stats.topology_records += 1;
-            }
-            if topo_dirty {
-                self.topology_dirty.store(false, Ordering::Release);
-            }
-        } else if part_result.resubmit_hits > 0 {
-            // Require an actual partition-level cache hit. `all_from_cache()` is also
-            // true when CB replay is disabled (fresh encodes leave `records == 0`),
-            // and those must not count as retention hits.
-            #[cfg(not(feature = "metal"))]
-            {
-                self.stats.resubmit_hits += 1;
-            }
-        }
-
-        if structurally_dirty || topo_dirty {
-            tracing::debug!(
-                target: "goldy::scheme",
-                scheme_id = self.scheme_id,
-                structurally_dirty,
-                topo_dirty,
-                partition_records = part_result.records,
-                partition_resubmits = part_result.resubmit_hits,
-                scheme_recorded = recorded,
-                "submit dirty"
-            );
-        } else {
-            tracing::debug!(
-                target: "goldy::scheme",
-                scheme_id = self.scheme_id,
-                partition_records = part_result.records,
-                partition_resubmits = part_result.resubmit_hits,
-                scheme_recorded = recorded,
-                all_partitions_from_cache = part_result.all_from_cache(),
-                "submit clean (not dirty)"
-            );
-        }
+        self.finish_ir_submit_bookkeeping(tv, &part_result, &prep);
 
         let present_resolvers = claim_present_easement_promises(
             &self.ir,
@@ -1940,37 +2230,11 @@ impl Scheme {
 
     #[cfg(not(feature = "graphics"))]
     fn submit_without_presents(&mut self) -> Result<Submission, GoldyError> {
-        if !self.submit_state.all_stamps_alive() {
-            self.submit_state.invalidate_retention();
-            return Err(GoldyError::StaleResource);
-        }
-
-        let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
-        let structurally_dirty = self.dirty;
-        if structurally_dirty || topo_dirty {
-            self.submit_state.invalidate_retention();
-        }
-
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.ir, &self.prior_built_accels)?;
+        let prep = self.prepare_ir_submit()?;
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        {
-            use crate::task_graph::cross_submit::net_access_per_resource;
-            let net = net_access_per_resource(&self.ir);
-            let ctx = self.ctx.backend_handle();
-            for (key, access) in &net {
-                if access.writes {
-                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
-                        stamp.drain_pending_for_submit_gate(ctx);
-                    }
-                }
-            }
-        }
-
-        let ir_clean = !structurally_dirty && !topo_dirty;
-        let had_replay = self.submit_state.has_cb_replay();
-        let deposit_resolutions = self.resolve_deposits_for_submit()?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.ir, &self.prior_built_accels)?;
         let mut present_slots = Vec::new();
         let mut partial = crate::task_graph::PartitionSubmitResult::default();
         let mut partial_tv = self.ctx.gpu_progress();
@@ -1981,8 +2245,8 @@ impl Scheme {
                 &self.ir,
                 &mut present_slots,
                 None,
-                &deposit_resolutions,
-                ir_clean,
+                &prep.deposit_resolutions,
+                prep.ir_clean,
                 &mut partial,
                 &mut partial_tv,
                 &self.cpu_dispatches,
@@ -1993,53 +2257,9 @@ impl Scheme {
                 self.ctx.classify(e)
             })?;
 
-        if had_replay && !self.submit_state.has_cb_replay() {
-            use crate::task_graph::cross_submit::clear_scheme_topology_registration;
-            clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
-            self.prev_topology_parcels.clear();
-            self.topology_dirty.store(false, Ordering::Release);
-        }
-
-        let ctx_h = self.ctx.backend_handle();
-        for pool in &mut self.deposits {
-            pool.stamp_pending(ctx_h, tv);
-        }
-        self.stamp_cpu_dispatches(tv);
-        self.ctx.advance_high_water_timeline(tv);
-        self.dirty = false;
-
-        let retention_recorded = part_result.records > 0;
-        let recorded = retention_recorded || structurally_dirty;
-        let on_record_path =
-            self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
-        if on_record_path {
-            use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
-            let net = net_access_per_resource(&self.ir);
-            self.prev_topology_parcels = reregister_scheme_topology(
-                &net,
-                self.submit_state.resource_stamps(),
-                &self.prev_topology_parcels,
-                self.scheme_id,
-                self.ctx.backend_handle(),
-                &self.topology_dirty,
-            );
-        }
-
-        if recorded {
-            self.stats.records += 1;
-            if topo_dirty && !structurally_dirty {
-                self.stats.topology_records += 1;
-            }
-            if topo_dirty {
-                self.topology_dirty.store(false, Ordering::Release);
-            }
-        } else if part_result.resubmit_hits > 0 {
-            #[cfg(not(feature = "metal"))]
-            {
-                self.stats.resubmit_hits += 1;
-            }
-        }
-
+        self.teardown_replay_if_disabled(prep.had_replay);
+        self.stamp_deposits_and_cpu(tv);
+        self.finish_ir_submit_bookkeeping(tv, &part_result, &prep);
         self.finish_submit(tv)
     }
 
@@ -2281,7 +2501,7 @@ impl Scheme {
         {
             idx as u32
         } else {
-            self.dirty = true;
+            self.mark_structure_dirty();
             let present_idx = self.present_transactions.len() as u32;
             self.present_transactions.push(PresentTransactionInfo {
                 binding_id,
@@ -2301,7 +2521,7 @@ impl Scheme {
     /// Copy an offscreen render target into a present lease drawable.
     #[cfg(feature = "graphics")]
     pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let binding_id = self.intern_present_binding(dst);
         let handle = self.rt_leases[src.id.0 as usize].backend_handle();
         self.ir.nodes.push(TaskNode {
@@ -2333,7 +2553,7 @@ impl Scheme {
     /// mechanism used by [`Self::copy_to_present`].
     #[cfg(feature = "graphics")]
     pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let binding_id = self.intern_present_binding(dst);
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
@@ -2467,7 +2687,7 @@ impl Scheme {
             }
         }
 
-        self.dirty = true;
+        self.mark_structure_dirty();
         self.submit_state
             .register_stamp_parts(ResourceId::Texture(src_h), src.whole().stamp_handle());
         self.submit_state
@@ -2569,9 +2789,9 @@ impl Scheme {
             )));
         }
 
-        self.dirty = true;
-        self.submit_state.register_parcel_stamp(dst);
         let src_handle = src_rt.backend_handle();
+        self.mark_structure_dirty();
+        self.submit_state.register_parcel_stamp(dst);
         let dst_resource = dst.resource_id();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_texture",
@@ -2601,7 +2821,7 @@ impl Scheme {
         rt: &Lease<LeaseRenderTarget>,
         color_load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         let handle = self.rt_leases[rt.id.0 as usize].backend_handle();
         let access = if color_load.overwrites() {
             NodeAccess::Overwrite
@@ -2778,7 +2998,7 @@ impl Scheme {
         &mut self,
         parcel: &Parcel,
     ) -> Result<crate::exchange::WithdrawTransaction, GoldyError> {
-        self.dirty = true;
+        self.mark_structure_dirty();
         self.submit_state.register_parcel_stamp(parcel);
         if !parcel.is_homed_on(&self.ctx) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -3051,6 +3271,9 @@ pub struct SchemeNodeBuilder<'a> {
     /// reflection), in shader-signature order. Lets [`Self::with_parcel`] pick the
     /// correct SRV/UAV descriptor independent of the graph [`NodeAccess`].
     slot_access: Vec<Option<ResourceAccess>>,
+    /// Shader provenance of `pipeline`, so the pushed node can register with the
+    /// specialization predictor. `None` for ray-tracing dispatches.
+    provenance: Option<std::sync::Arc<crate::shader::ShaderProvenance>>,
 }
 
 impl<'a> SchemeNodeBuilder<'a> {
@@ -3171,15 +3394,18 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     /// Finalize the node with fixed workgroup dimensions.
-    pub fn dispatch(self, x: u32, y: u32, z: u32) {
-        self.push_dispatch_node(DispatchDim::Direct { x, y, z });
+    ///
+    /// The returned [`NodeId`] addresses this node in [`Scheme::set_node_pipeline`],
+    /// [`Scheme::set_node_dispatch`], and [`Scheme::set_node_param`].
+    pub fn dispatch(self, x: u32, y: u32, z: u32) -> NodeId {
+        self.push_dispatch_node(DispatchDim::Direct { x, y, z })
     }
 
     /// Finalize the node with a device-resident [`DispatchShape`] parcel (indirect dispatch).
     ///
     /// The shape parcel's ordering dependency is registered automatically and is not a shader
     /// resource slot. Fixed workgroup counts use [`Self::dispatch`] instead.
-    pub fn dispatch_shape_parcel(self, parcel: &Parcel) -> Result<(), GoldyError> {
+    pub fn dispatch_shape_parcel(mut self, parcel: &Parcel) -> Result<NodeId, GoldyError> {
         if self.rt_pipeline.is_some() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "trace_rays does not support indirect DispatchShape parcels; use dispatch(width, height, depth)"
@@ -3190,6 +3416,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         self.scheme
             .submit_state
             .register_stamp_parts(resource, parcel.stamp_handle());
+        self.register_specialization_site();
         let mut bindings = self.bindings;
         bindings.push(ResourceBinding {
             resource,
@@ -3208,10 +3435,20 @@ impl<'a> SchemeNodeBuilder<'a> {
                 dispatch: DispatchDim::Indirect { buffer, offset },
             },
         });
-        Ok(())
+        Ok(self.scheme.last_node_id())
     }
 
-    fn push_dispatch_node(self, dispatch: DispatchDim) {
+    /// Hand the node about to be pushed to the specialization predictor.
+    fn register_specialization_site(&mut self) {
+        if let Some(provenance) = self.provenance.as_ref() {
+            let node = self.scheme.ir.nodes.len() as u32;
+            self.scheme
+                .specialization
+                .register_site(node, self.pipeline, provenance, self.label, &self.user_slots);
+        }
+    }
+
+    fn push_dispatch_node(mut self, dispatch: DispatchDim) -> NodeId {
         #[cfg(feature = "graphics")]
         {
             let present_bindings = self
@@ -3233,6 +3470,9 @@ impl<'a> SchemeNodeBuilder<'a> {
         // Do not assert resource_slots.len() >= bindings.len(): samplers add slots
         // without bindings, and with_buffer_dependency adds bindings without slots.
         // Present placeholders are resolved by declaration order, not binding index.
+        if self.rt_pipeline.is_none() {
+            self.register_specialization_site();
+        }
         self.scheme.ir.nodes.push(TaskNode {
             label: self.label,
             bindings: self.bindings,
@@ -3260,6 +3500,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 }
             },
         });
+        self.scheme.last_node_id()
     }
 }
 
@@ -3479,6 +3720,7 @@ impl SchemeCpuNodeBuilder<'_> {
         scheme
             .cpu_dispatches
             .push(CpuDispatchExec::new(label, main, execs, params));
+        scheme.mark_structure_dirty();
         scheme.ir.nodes.push(TaskNode {
             label,
             bindings: ir_bindings,
@@ -3929,7 +4171,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn clean_scheme(
         device: &Arc<Device>,
         pool: &mut RetainedPool,
-    ) -> (Scheme, crate::Buffer, crate::test_support::CbReuseOverride) {
+    ) -> (Scheme, NodeId, crate::Buffer, crate::test_support::CbReuseOverride) {
         let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
@@ -3938,7 +4180,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
-        scheme
+        let node = scheme
             .node("a", &pipeline)
             .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
@@ -3950,7 +4192,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
         // Keep `parcel` alive: dropping a retained buffer bound to the scheme marks its
         // stamp dead and subsequent submits return `StaleResource`.
-        (scheme, parcel, cb)
+        (scheme, node, parcel, cb)
     }
 
     fn leased_texture_scheme(
@@ -4016,12 +4258,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn clean_submits_resubmit_without_rerecord() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
 
         assert_eq!(scheme.replay_stats().records, 1, "only the first submit records");
+        // Counted on every backend, including those without command-list retention.
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            2,
+            "both post-record submits found the scheme clean"
+        );
         #[cfg(not(feature = "metal"))]
         assert_eq!(
             scheme.replay_stats().resubmit_hits,
@@ -4031,11 +4279,37 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    fn params_dirty_submit_is_not_a_clean_submit() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        scheme.submit().unwrap();
+        assert_eq!(scheme.replay_stats().clean_submits, 1);
+
+        let shader = mock_shader(&device);
+        let swapped = mock_pipeline(&device, &shader);
+        scheme.set_node_pipeline(node0, &swapped).unwrap();
+        scheme.submit().unwrap();
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            1,
+            "a params-dirty submit breaks the clean streak"
+        );
+
+        scheme.submit().unwrap();
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            2,
+            "the streak resumes once the swap is recorded"
+        );
+    }
+
+    #[test]
     #[cfg(not(feature = "metal"))]
     fn clean_resubmit_performs_no_cpu_wait() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -4056,7 +4330,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -4066,6 +4340,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 records: 1,
                 resubmit_hits: 1,
                 topology_records: 0,
+                clean_submits: 1,
+                specialization_warms: 0,
+                specialization_promotions: 0,
+                specialization_demotions: 0,
             }
         );
         #[cfg(feature = "metal")]
@@ -4090,10 +4368,133 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 records: 2,
                 resubmit_hits: 2,
                 topology_records: 0,
+                clean_submits: 2,
+                specialization_warms: 0,
+                specialization_promotions: 0,
+                specialization_demotions: 0,
             }
         );
         #[cfg(feature = "metal")]
         assert_eq!(scheme.replay_stats().records, 2);
+    }
+
+    #[test]
+    fn set_node_pipeline_rerecords_once_then_resubmits() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        scheme.submit().unwrap();
+
+        let shader = mock_shader(&device);
+        let pipeline2 = mock_pipeline(&device, &shader);
+        scheme.set_node_pipeline(node0, &pipeline2).unwrap();
+        assert!(scheme.is_dirty());
+        scheme.submit().unwrap();
+        assert!(!scheme.is_dirty());
+        scheme.submit().unwrap();
+
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats(),
+            ReplayStats {
+                records: 2,
+                resubmit_hits: 2,
+                topology_records: 0,
+                // Submits 2 and 4: the swap makes 3 params-dirty.
+                clean_submits: 2,
+                specialization_warms: 0,
+                specialization_promotions: 0,
+                specialization_demotions: 0,
+            }
+        );
+        #[cfg(feature = "metal")]
+        assert_eq!(scheme.replay_stats().records, 2);
+    }
+
+    #[test]
+    fn node_id_from_another_scheme_is_rejected() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (mut scheme_a, node_a, _buf_a, _cb) = clean_scheme(&device, &mut pool);
+        let (scheme_b, _node_b, _buf_b, _cb_b) = clean_scheme(&device, &mut pool);
+
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let err = scheme_a
+            .set_node_pipeline(
+                NodeId {
+                    scheme_id: scheme_b.scheme_id,
+                    index: node_a.index as u32,
+                },
+                &pipeline,
+            )
+            .expect_err("foreign node id must be rejected");
+        assert!(err.to_string().contains("belongs to scheme"), "unexpected error: {err}");
+        assert!(!scheme_a.is_dirty(), "a rejected id must not dirty the scheme");
+    }
+
+    #[test]
+    fn set_node_pipeline_keeps_other_partition_retained() {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_a2 = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = retained_buffer(&mut pool);
+        let buf1 = retained_buffer(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let node_a = scheme
+            .node("a", &p_a)
+            .with_parcel(&buf0, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("b", &p_b)
+            .with_parcel(&buf0, NodeAccess::Read)
+            .with_parcel(&buf1, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("c", &p_c)
+            .with_parcel(&buf1, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        scheme.submit().unwrap();
+        scheme.submit().unwrap();
+        let records_after_warmup = scheme.replay_stats().records;
+        #[cfg(not(feature = "metal"))]
+        let resubmits_after_warmup = scheme.replay_stats().resubmit_hits;
+
+        scheme.set_node_pipeline(node_a, &p_a2).unwrap();
+        scheme.submit().unwrap();
+
+        assert_eq!(
+            scheme.replay_stats().records,
+            records_after_warmup + 1,
+            "params-only pipeline swap must record once"
+        );
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            resubmits_after_warmup + 1,
+            "unchanged partition must resubmit instead of a full scheme re-record"
+        );
+
+        device.with_mock(|m| {
+            let saw_new = m.retained_graphs.values().any(|cmds| {
+                cmds.iter().any(|c| {
+                    matches!(
+                        c,
+                        crate::backend::GraphCommand::Compute(crate::backend::GpuCommand::SetPipeline(p))
+                            if *p == p_a2.handle
+                    )
+                })
+            });
+            assert!(saw_new, "re-recorded partition must bake the swapped pipeline");
+        });
     }
 
     #[test]
@@ -7308,5 +7709,396 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             0,
             "fresh path must not count retention hits"
         );
+    }
+}
+
+#[cfg(test)]
+mod specialization_tests {
+    use super::*;
+    use crate::compute::ComputePipeline;
+    use crate::device::Device;
+    use crate::retained_pool::RetainedPool;
+    use crate::shader::ShaderModule;
+    use crate::specialization::SpecializationPolicy;
+    use crate::task_graph::{NodeAccess, NodeKind};
+    use crate::test_support::{mock_device, with_mock, SpecializationOverride};
+    use std::sync::Arc;
+
+    const WARM: u32 = SpecializationPolicy::DEFAULT_WARM_AFTER;
+    const PROMOTE: u32 = SpecializationPolicy::DEFAULT_PROMOTE_AFTER;
+
+    fn scalar_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(
+            device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1,1,1)]
+void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
+"#,
+        )
+        .expect("compile shader")
+    }
+
+    fn buffer(pool: &mut RetainedPool) -> crate::Buffer {
+        pool.acquire_buffer(
+            32,
+            crate::types::BufferKind::Scattered,
+            None,
+            crate::types::BufferFlags::empty(),
+            None,
+        )
+        .expect("alloc buffer")
+    }
+
+    struct Fixture {
+        scheme: Scheme,
+        node: NodeId,
+        universal: ComputePipeline,
+        _buf: crate::Buffer,
+        _cb: crate::test_support::CbReuseOverride,
+        _spec: SpecializationOverride,
+    }
+
+    /// A scheme with one dispatch carrying `params`, recorded once (first submit done).
+    fn fixture(device: &Arc<Device>, pool: &mut RetainedPool, params: &[u32]) -> Fixture {
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let _spec = SpecializationOverride::force_enabled();
+        let ctx = device.create_context().unwrap();
+        let shader = scalar_shader(device);
+        let universal = ComputePipeline::new(device, &shader).expect("pipeline");
+        let buf = buffer(pool);
+        let mut scheme = Scheme::new(&ctx);
+        let mut builder = scheme.node("tint", &universal).with_parcel(&buf, NodeAccess::Write);
+        for &p in params {
+            builder = builder.with_param(p);
+        }
+        let node = builder.dispatch(1, 1, 1);
+        scheme.submit().unwrap();
+        Fixture {
+            scheme,
+            node,
+            universal,
+            _buf: buf,
+            _cb,
+            _spec,
+        }
+    }
+
+    fn bound_pipeline(scheme: &Scheme, node: NodeId) -> crate::backend::ComputePipelineHandle {
+        match &scheme.ir.nodes[node.index()].kind {
+            NodeKind::Dispatch { pipeline, .. } => *pipeline,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Submit once and let any compile the predictor started finish before the next frame.
+    fn frame(scheme: &mut Scheme) {
+        scheme.submit().unwrap();
+        scheme.wait_for_specialization_compiles();
+    }
+
+    fn frames(scheme: &mut Scheme, n: u32) {
+        for _ in 0..n {
+            frame(scheme);
+        }
+    }
+
+    fn variant_compiles(device: &Device) -> usize {
+        with_mock(device, |m| m.specialized_shader_creates)
+    }
+
+    #[test]
+    fn promotes_after_the_streak_and_rebinds_the_node() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let node = f.node;
+        let universal = f.universal.handle;
+
+        // Frame 1 recorded; streaks start counting on the clean frames after it.
+        // Streak reaches WARM on clean frame WARM (submit WARM+1) -> compile starts.
+        frames(&mut f.scheme, WARM);
+        assert_eq!(f.scheme.replay_stats().specialization_warms, 1);
+        assert_eq!(variant_compiles(&device), 1);
+        assert_eq!(f.scheme.replay_stats().specialization_promotions, 0);
+
+        // Streak reaches PROMOTE on clean frame PROMOTE (submit PROMOTE+1).
+        frames(&mut f.scheme, PROMOTE - WARM - 1);
+        assert_eq!(f.scheme.replay_stats().specialization_promotions, 0);
+        assert!(!f.scheme.node_is_specialized(node));
+        assert_eq!(bound_pipeline(&f.scheme, node), universal);
+
+        frame(&mut f.scheme);
+        let stats = f.scheme.replay_stats();
+        assert_eq!(stats.specialization_promotions, 1);
+        assert!(f.scheme.node_is_specialized(node));
+        assert_ne!(bound_pipeline(&f.scheme, node), universal, "node now runs the variant");
+        // The promotion is a params-only re-record: the initial record plus one.
+        assert_eq!(stats.records, 2);
+        assert!(!f.scheme.is_dirty(), "the promoting submit left the scheme clean");
+
+        // Steady state: nothing else happens.
+        frames(&mut f.scheme, 5);
+        let stats = f.scheme.replay_stats();
+        assert_eq!(stats.records, 2);
+        assert_eq!(stats.specialization_warms, 1);
+        assert_eq!(stats.specialization_promotions, 1);
+        assert_eq!(variant_compiles(&device), 1);
+    }
+
+    #[test]
+    fn demotes_in_set_node_param_when_a_baked_word_changes() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let node = f.node;
+        let universal = f.universal.handle;
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert!(f.scheme.node_is_specialized(node));
+
+        f.scheme.set_node_param(node, 0, 8).unwrap();
+        assert!(!f.scheme.node_is_specialized(node), "demoted before the next submit");
+        assert_eq!(bound_pipeline(&f.scheme, node), universal);
+        assert_eq!(f.scheme.replay_stats().specialization_demotions, 1);
+        assert!(f.scheme.is_dirty());
+
+        // Same value again: nothing to demote, and the predictor is not consulted.
+        frame(&mut f.scheme);
+        f.scheme.set_node_param(node, 0, 8).unwrap();
+        assert_eq!(f.scheme.replay_stats().specialization_demotions, 1);
+        assert!(!f.scheme.is_dirty());
+    }
+
+    #[test]
+    fn a_changed_slot_needs_a_longer_streak_before_it_is_baked_again() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let node = f.node;
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert!(f.scheme.node_is_specialized(node));
+        assert_eq!(variant_compiles(&device), 1);
+
+        f.scheme.set_node_param(node, 0, 8).unwrap();
+        // Slot 1 is still stable and long past PROMOTE: a variant baking only slot 1 is
+        // compiled and promoted while slot 0 re-earns trust.
+        frames(&mut f.scheme, 3);
+        assert_eq!(variant_compiles(&device), 2, "variant for {{slot 1}} alone");
+        assert!(f.scheme.node_is_specialized(node));
+        assert_eq!(f.scheme.replay_stats().specialization_promotions, 2);
+
+        // Slot 0 now needs PROMOTE clean frames (not WARM) before it is baked; once it is,
+        // the site widens to both slots.
+        frames(&mut f.scheme, PROMOTE);
+        assert_eq!(variant_compiles(&device), 3, "widened variant for both slots");
+        assert_eq!(f.scheme.replay_stats().specialization_promotions, 3);
+        assert!(f.scheme.node_is_specialized(node));
+    }
+
+    #[test]
+    fn a_word_that_flips_every_frame_never_warms() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[0]);
+        let node = f.node;
+        for i in 1..=30u32 {
+            f.scheme.set_node_param(node, 0, i % 2).unwrap();
+            frame(&mut f.scheme);
+        }
+        let stats = f.scheme.replay_stats();
+        assert_eq!(stats.specialization_warms, 0);
+        assert_eq!(stats.specialization_promotions, 0);
+        assert_eq!(variant_compiles(&device), 0);
+    }
+
+    #[test]
+    fn a_word_that_flips_every_few_frames_is_burned_and_left_dynamic() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7, 0]);
+        let node = f.node;
+        // Slot 1 changes every 4th frame: enough to pass WARM once, never PROMOTE.
+        for i in 1..=60u32 {
+            if i % 4 == 0 {
+                f.scheme.set_node_param(node, 1, i).unwrap();
+            }
+            frame(&mut f.scheme);
+        }
+        let stats = f.scheme.replay_stats();
+        assert!(f.scheme.node_is_specialized(node), "slot 0 alone still gets promoted");
+        // One compile for {0,1} (cancelled by the first flip), one for {0}; after the burn
+        // slot 1 needs PROMOTE consecutive clean frames it never gets.
+        assert_eq!(variant_compiles(&device), 2, "warms: {}", stats.specialization_warms);
+        assert_eq!(stats.specialization_promotions, 1);
+        assert_eq!(stats.specialization_demotions, 0);
+    }
+
+    #[test]
+    fn a_cached_variant_is_promoted_without_recompiling() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let node = f.node;
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert_eq!(variant_compiles(&device), 1);
+
+        f.scheme.set_node_param(node, 0, 8).unwrap();
+        frames(&mut f.scheme, PROMOTE + 2);
+        assert_eq!(variant_compiles(&device), 2);
+        assert_eq!(f.scheme.replay_stats().specialization_promotions, 2);
+
+        // Back to 7: the slot's threshold doubled again, but the variant is cached.
+        f.scheme.set_node_param(node, 0, 7).unwrap();
+        frames(&mut f.scheme, 2 * PROMOTE + 2);
+        let stats = f.scheme.replay_stats();
+        assert_eq!(stats.specialization_promotions, 3);
+        assert_eq!(variant_compiles(&device), 2, "third promotion came from the cache");
+        assert_eq!(stats.specialization_warms, 2);
+        assert!(f.scheme.node_is_specialized(node));
+    }
+
+    #[test]
+    fn repeated_compile_failures_pin_the_site() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        with_mock(&device, |m| m.fail_specialized_shader_creates = true);
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let node = f.node;
+        let universal = f.universal.handle;
+        frames(&mut f.scheme, 3 * PROMOTE);
+        let stats = f.scheme.replay_stats();
+        assert_eq!(
+            stats.specialization_warms,
+            u64::from(SpecializationPolicy::DEFAULT_MAX_FAILURES)
+        );
+        assert_eq!(stats.specialization_promotions, 0);
+        assert!(f.scheme.specialization().site_is_pinned(node.index() as u32));
+        assert!(!f.scheme.specialization().site_has_job(node.index() as u32));
+        assert_eq!(bound_pipeline(&f.scheme, node), universal);
+        assert_eq!(stats.records, 1, "a pinned site never re-records");
+    }
+
+    #[test]
+    fn nodes_without_scalar_params_are_not_tracked() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[]);
+        frames(&mut f.scheme, 2 * PROMOTE);
+        assert_eq!(f.scheme.replay_stats().specialization_warms, 0);
+        assert_eq!(variant_compiles(&device), 0);
+        assert!(!f.scheme.node_is_specialized(f.node));
+    }
+
+    #[test]
+    fn off_switch_keeps_every_node_on_the_callers_pipeline() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let _off = SpecializationOverride::force_disabled();
+        frames(&mut f.scheme, 2 * PROMOTE);
+        let stats = f.scheme.replay_stats();
+        assert_eq!(stats.specialization_warms, 0);
+        assert_eq!(variant_compiles(&device), 0);
+        assert_eq!(stats.records, 1);
+    }
+
+    #[test]
+    fn turning_specialization_off_at_runtime_demotes_promoted_sites() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let node = f.node;
+        let universal = f.universal.handle;
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert!(f.scheme.node_is_specialized(node));
+
+        let _off = SpecializationOverride::force_disabled();
+        frame(&mut f.scheme);
+        assert!(!f.scheme.node_is_specialized(node));
+        assert_eq!(bound_pipeline(&f.scheme, node), universal);
+        assert_eq!(f.scheme.replay_stats().specialization_demotions, 1);
+        assert_eq!(f.scheme.replay_stats().records, 3, "record, promotion, demotion");
+    }
+
+    #[test]
+    fn caller_set_node_pipeline_replaces_the_universal_and_restarts_history() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let node = f.node;
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert!(f.scheme.node_is_specialized(node));
+
+        let shader = scalar_shader(&device);
+        let replacement = ComputePipeline::new(&device, &shader).unwrap();
+        f.scheme.set_node_pipeline(node, &replacement).unwrap();
+        assert!(!f.scheme.node_is_specialized(node));
+        assert_eq!(bound_pipeline(&f.scheme, node), replacement.handle);
+        assert_eq!(
+            f.scheme.specialization().site_streaks(node.index() as u32),
+            Some(vec![0])
+        );
+
+        // History restarts against the new universal and promotes a variant of *it*.
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert!(f.scheme.node_is_specialized(node));
+        assert_eq!(variant_compiles(&device), 2);
+        assert_ne!(bound_pipeline(&f.scheme, node), replacement.handle);
+    }
+
+    #[test]
+    fn topology_dirtiness_resets_streaks() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let node = f.node;
+        frames(&mut f.scheme, 1);
+        assert_eq!(
+            f.scheme.specialization().site_streaks(node.index() as u32),
+            Some(vec![1, 1])
+        );
+        f.scheme.topology_dirty.store(true, Ordering::Release);
+        frame(&mut f.scheme);
+        assert_eq!(
+            f.scheme.specialization().site_streaks(node.index() as u32),
+            Some(vec![0, 0])
+        );
+    }
+
+    #[test]
+    fn a_job_is_cancelled_when_its_baked_word_moves_before_it_lands() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let node = f.node;
+        // Do not wait for the compile: the job is in flight (or done) when the word changes.
+        for _ in 0..WARM {
+            f.scheme.submit().unwrap();
+        }
+        assert!(f.scheme.specialization().site_has_job(node.index() as u32));
+        f.scheme.set_node_param(node, 0, 8).unwrap();
+        assert!(
+            !f.scheme.specialization().site_has_job(node.index() as u32),
+            "cancelled on the spot"
+        );
+        frames(&mut f.scheme, PROMOTE + 2);
+        // The burned slot needs PROMOTE frames before it is baked again, then lands.
+        assert!(f.scheme.node_is_specialized(node));
+        assert_eq!(f.scheme.replay_stats().specialization_promotions, 1);
+    }
+
+    #[test]
+    fn variants_are_scheme_owned_and_bounded() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut f = fixture(&device, &mut pool, &[7]);
+        let node = f.node;
+        frames(&mut f.scheme, PROMOTE + 1);
+        assert_eq!(f.scheme.specialization().cached_variants(), 1);
+        f.scheme.set_node_param(node, 0, 8).unwrap();
+        frames(&mut f.scheme, PROMOTE + 2);
+        assert_eq!(f.scheme.specialization().cached_variants(), 2);
+        assert!(f.scheme.specialization().cached_variants() <= SpecializationPolicy::default().max_cached_variants);
     }
 }

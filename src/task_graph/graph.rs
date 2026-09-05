@@ -376,6 +376,331 @@ pub(crate) fn binding_fingerprint(ir: &GraphIR) -> u64 {
     h.finish()
 }
 
+/// Fingerprint of per-node payload baked into emitted commands.
+///
+/// Independent of [`binding_fingerprint`]: swapping a dispatch pipeline, user slots,
+/// or dispatch dims must rebuild `partitioned_commands` even when the schedule cache
+/// (bindings / wave order) is still valid. Upload `Arc<[u8]>` payloads are excluded so
+/// deposit byte refreshes keep using the upload-remap hit path.
+fn emission_fingerprint(ir: &GraphIR) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    ir.nodes.len().hash(&mut h);
+    for node in &ir.nodes {
+        hash_node_kind_for_emission(&node.kind, &mut h);
+    }
+    h.finish()
+}
+
+fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) {
+    match kind {
+        NodeKind::Dispatch {
+            pipeline,
+            resource_slots,
+            user_slots,
+            dispatch,
+        } => {
+            0u8.hash(h);
+            pipeline.hash(h);
+            resource_slots.hash(h);
+            user_slots.hash(h);
+            match dispatch {
+                DispatchDim::Direct { x, y, z } => {
+                    0u8.hash(h);
+                    x.hash(h);
+                    y.hash(h);
+                    z.hash(h);
+                }
+                DispatchDim::Indirect { buffer, offset } => {
+                    1u8.hash(h);
+                    buffer.hash(h);
+                    offset.hash(h);
+                }
+            }
+        }
+        NodeKind::ClearBuffer { buffer, offset, size } => {
+            1u8.hash(h);
+            buffer.hash(h);
+            offset.hash(h);
+            size.hash(h);
+        }
+        NodeKind::WriteBuffer { buffer, offset, .. } => {
+            2u8.hash(h);
+            buffer.hash(h);
+            offset.hash(h);
+        }
+        NodeKind::CopyBuffer {
+            src,
+            src_offset,
+            dst,
+            dst_offset,
+            size,
+        } => {
+            3u8.hash(h);
+            src.hash(h);
+            src_offset.hash(h);
+            dst.hash(h);
+            dst_offset.hash(h);
+            size.hash(h);
+        }
+        NodeKind::CopyBufferToTexture {
+            src,
+            src_offset,
+            src_row_pitch,
+            dst,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            4u8.hash(h);
+            src.hash(h);
+            src_offset.hash(h);
+            src_row_pitch.hash(h);
+            dst.hash(h);
+            x.hash(h);
+            y.hash(h);
+            width.hash(h);
+            height.hash(h);
+        }
+        NodeKind::WriteTexture {
+            texture, width, height, ..
+        } => {
+            5u8.hash(h);
+            texture.hash(h);
+            width.hash(h);
+            height.hash(h);
+        }
+        NodeKind::WriteTextureRegion {
+            texture,
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            6u8.hash(h);
+            texture.hash(h);
+            x.hash(h);
+            y.hash(h);
+            width.hash(h);
+            height.hash(h);
+        }
+        NodeKind::CopyTexture {
+            src,
+            dst,
+            dst_buffer_layout,
+        } => {
+            7u8.hash(h);
+            src.hash(h);
+            dst.hash(h);
+            match dst_buffer_layout {
+                None => 0u8.hash(h),
+                Some(fp) => {
+                    1u8.hash(h);
+                    fp.width.hash(h);
+                    fp.height.hash(h);
+                    fp.format.hash(h);
+                    fp.logical_bytes.hash(h);
+                    fp.staging_bytes.hash(h);
+                    fp.row_pitch.hash(h);
+                    fp.footprint_offset.hash(h);
+                }
+            }
+        }
+        NodeKind::CopyTextureRegion {
+            src,
+            dst,
+            src_x,
+            src_y,
+            dst_x,
+            dst_y,
+            width,
+            height,
+        } => {
+            8u8.hash(h);
+            src.hash(h);
+            dst.hash(h);
+            src_x.hash(h);
+            src_y.hash(h);
+            dst_x.hash(h);
+            dst_y.hash(h);
+            width.hash(h);
+            height.hash(h);
+        }
+        NodeKind::CopyRenderTarget { src, dst } => {
+            9u8.hash(h);
+            src.hash(h);
+            dst.hash(h);
+        }
+        NodeKind::RenderPass {
+            target,
+            color_load,
+            commands,
+        } => {
+            10u8.hash(h);
+            target.hash(h);
+            match color_load {
+                crate::types::TargetLoad::Load => 0u8.hash(h),
+                crate::types::TargetLoad::Discard => 1u8.hash(h),
+                crate::types::TargetLoad::Clear(c) => {
+                    2u8.hash(h);
+                    c.r.to_bits().hash(h);
+                    c.g.to_bits().hash(h);
+                    c.b.to_bits().hash(h);
+                    c.a.to_bits().hash(h);
+                }
+            }
+            commands.len().hash(h);
+            for cmd in commands {
+                hash_render_command_for_emission(cmd, h);
+            }
+        }
+        NodeKind::WithdrawRead { withdraw_id } => {
+            11u8.hash(h);
+            withdraw_id.hash(h);
+        }
+        NodeKind::CpuDispatch { cpu_id } => {
+            12u8.hash(h);
+            cpu_id.hash(h);
+        }
+        NodeKind::BuildAccelerationStructure(cmd) => {
+            13u8.hash(h);
+            match cmd {
+                crate::backend::AccelBuildCommand::BlasTriangles {
+                    dest,
+                    vertex_buffer,
+                    vertex_offset,
+                    vertex_count,
+                    vertex_stride,
+                    index_buffer,
+                    index_offset,
+                    index_count,
+                } => {
+                    0u8.hash(h);
+                    dest.hash(h);
+                    vertex_buffer.hash(h);
+                    vertex_offset.hash(h);
+                    vertex_count.hash(h);
+                    vertex_stride.hash(h);
+                    index_buffer.hash(h);
+                    index_offset.hash(h);
+                    index_count.hash(h);
+                }
+                crate::backend::AccelBuildCommand::Tlas { dest, instances } => {
+                    1u8.hash(h);
+                    dest.hash(h);
+                    instances.len().hash(h);
+                    for inst in instances.iter() {
+                        inst.blas.hash(h);
+                        for t in inst.transform {
+                            t.to_bits().hash(h);
+                        }
+                        inst.mask.hash(h);
+                        inst.custom_index.hash(h);
+                    }
+                }
+            }
+        }
+        NodeKind::TraceRays {
+            pipeline,
+            resource_slots,
+            user_slots,
+            width,
+            height,
+            depth,
+        } => {
+            14u8.hash(h);
+            pipeline.hash(h);
+            resource_slots.hash(h);
+            user_slots.hash(h);
+            width.hash(h);
+            height.hash(h);
+            depth.hash(h);
+        }
+    }
+}
+
+fn hash_render_command_for_emission(cmd: &crate::backend::RenderCommand, h: &mut impl std::hash::Hasher) {
+    use crate::backend::RenderCommand;
+    match cmd {
+        RenderCommand::ClearDepth(d) => {
+            0u8.hash(h);
+            d.to_bits().hash(h);
+        }
+        RenderCommand::SetPipeline(p) => {
+            1u8.hash(h);
+            p.hash(h);
+        }
+        RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
+            2u8.hash(h);
+            slot.hash(h);
+            buffer.hash(h);
+            offset.hash(h);
+        }
+        RenderCommand::SetIndexBuffer { buffer, offset, format } => {
+            3u8.hash(h);
+            buffer.hash(h);
+            offset.hash(h);
+            format.hash(h);
+        }
+        RenderCommand::BindResources { buffers } => {
+            4u8.hash(h);
+            buffers.hash(h);
+        }
+        RenderCommand::BindResourcesRaw {
+            indices,
+            user,
+            frame_table_base,
+        } => {
+            5u8.hash(h);
+            indices.hash(h);
+            user.hash(h);
+            frame_table_base.hash(h);
+        }
+        RenderCommand::BindResourcesTyped { handles } => {
+            6u8.hash(h);
+            handles.hash(h);
+        }
+        RenderCommand::Draw {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => {
+            7u8.hash(h);
+            vertex_count.hash(h);
+            instance_count.hash(h);
+            first_vertex.hash(h);
+            first_instance.hash(h);
+        }
+        RenderCommand::DrawIndexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => {
+            8u8.hash(h);
+            index_count.hash(h);
+            instance_count.hash(h);
+            first_index.hash(h);
+            base_vertex.hash(h);
+            first_instance.hash(h);
+        }
+        RenderCommand::SetMeshPipeline(p) => {
+            9u8.hash(h);
+            p.hash(h);
+        }
+        RenderCommand::DispatchMesh { x, y, z } => {
+            10u8.hash(h);
+            x.hash(h);
+            y.hash(h);
+            z.hash(h);
+        }
+    }
+}
+
 /// Hash dispatch `resource_slots` for retention fingerprints.
 ///
 /// Late-bound present/swapchain placeholders are normalized to a single sentinel
@@ -2003,6 +2328,9 @@ impl IrSubmitState {
 /// CB retention keys / TVs live in [`super::cb_replay::CbReplayState`], not here.
 pub(crate) struct CompiledCacheEntry {
     fp: u64,
+    /// Payload baked into emitted commands (pipelines, slots, dispatch dims).
+    /// Distinct from [`Self::fp`] so a params-only IR change can keep the schedule.
+    emission_fp: u64,
     schedule: CompiledSchedule,
     /// Cached partitioned emission output.  Populated on first call to
     /// `get_or_build_partitioned_commands`.
@@ -2042,6 +2370,7 @@ fn get_or_build_schedule<'c>(cache: &'c mut Option<CompiledCacheEntry>, ir: &Gra
         let schedule = analysis::schedule_waves(ir, &edges);
         *cache = Some(CompiledCacheEntry {
             fp,
+            emission_fp: 0,
             schedule,
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
@@ -2117,6 +2446,7 @@ fn get_or_build_partitioned_commands(
         let schedule = analysis::schedule_waves(ir, &edges);
         *cache = Some(CompiledCacheEntry {
             fp,
+            emission_fp: 0,
             schedule,
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
@@ -2125,7 +2455,10 @@ fn get_or_build_partitioned_commands(
         });
     }
 
-    let needs_build = cache.as_ref().is_none_or(|e| e.partitioned_commands.is_none());
+    let emission_fp = emission_fingerprint(ir);
+    let needs_build = cache
+        .as_ref()
+        .is_none_or(|e| e.partitioned_commands.is_none() || e.emission_fp != emission_fp);
 
     tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "partitioned_commands");
 
@@ -2194,6 +2527,7 @@ fn get_or_build_partitioned_commands(
     entry.partitioned_commands = Some(compute_partitions);
     entry.partitioned_upload_remap = remap;
     entry.partitioned_graph_commands = graph_partitions;
+    entry.emission_fp = emission_fp;
 }
 
 /// One bindless push-constant slot in shader virtual-main parameter order.
@@ -3746,6 +4080,20 @@ mod slice_retention_tests {
             1,
             "partition 1 resubmits; partition 0 re-records"
         );
+        device.with_mock(|m| {
+            let saw_new = m.retained_graphs.values().any(|cmds| {
+                cmds.iter().any(|c| {
+                    matches!(
+                        c,
+                        GraphCommand::Compute(GpuCommand::SetPipeline(p)) if *p == p_a2.handle
+                    )
+                })
+            });
+            assert!(
+                saw_new,
+                "re-recorded partition must bake the new pipeline, not a stale emission cache"
+            );
+        });
     }
 
     // ------------------------------------------------------------------

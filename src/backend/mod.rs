@@ -1707,6 +1707,45 @@ pub(crate) trait GpuBackend:
     /// Destroy a compute pipeline.
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
 
+    /// Whether a compute pipeline's binding layout is fixed by its shader signature.
+    ///
+    /// The retained-scheme specialization predictor swaps a dispatch's pipeline for a
+    /// variant with scalar params baked in. That is only transparent when the variant
+    /// binds exactly like the original, which holds when the layout follows the
+    /// signature (Vulkan/DX12/Metal/CUDA pipeline layouts, mock). WebGPU derives bind
+    /// group layouts from what the compiled WGSL actually *uses*, so a variant that
+    /// dead-strips a binding changes the layout and the recorded bind groups no longer
+    /// match; it returns `false` until it builds explicit layouts. Backends that return
+    /// `false` never see the predictor run.
+    fn compute_pipeline_layout_follows_signature(&self) -> bool {
+        true
+    }
+
+    /// Slang target for compute-stage compilation performed *outside* the backend mutex.
+    ///
+    /// `None` (the default) means the frontend must not compile: the mock backend reports
+    /// [`BackendType::Vulkan`] but does not run Slang, and CPU host-callable uses a different
+    /// path. Vulkan and DX12 return [`ShaderTarget::Spirv`] / [`ShaderTarget::Dxil`] and
+    /// implement [`Self::seed_compute_stage`] so `ensure_stage_compiled` can skip Slang
+    /// while PSO creation still holds the lock.
+    fn compute_shader_target(&self) -> Option<crate::slang::ShaderTarget> {
+        None
+    }
+
+    /// Install frontend-compiled compute bytecode and reflection so the next
+    /// [`Self::create_compute_pipeline`] hits the stage cache.
+    ///
+    /// Default is a no-op. Callers still invoke this after an unlocked compile; backends
+    /// that do not implement it recompile under the lock.
+    fn seed_compute_stage(
+        &mut self,
+        _shader: ShaderHandle,
+        _bytecode: &[u8],
+        _reflection: crate::slang::ShaderReflection,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Per push-constant resource slot (in shader-signature order), the descriptor
     /// access the shader *signature* requires — independent of the graph access used
     /// for barriers.

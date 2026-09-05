@@ -162,7 +162,7 @@ pub fn lower_render_pass_commands(
             }
             crate::backend::RenderCommand::BindResourcesRaw {
                 indices,
-                user,
+                user: _,
                 frame_table_base: _,
             } if indices.is_empty() => cmd.clone(),
             crate::backend::RenderCommand::BindResourcesRaw {

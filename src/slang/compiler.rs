@@ -722,14 +722,69 @@ impl SlangCompiler {
         if target == ShaderTarget::HostCallable {
             anyhow::bail!("ShaderTarget::HostCallable does not produce bytecode; use goldy::cpu_shaders::compile");
         }
-        // Hash the same string Slang compiles (post virtual-main transform). This runs on cache
-        // hits too; a micro-optimization could cache keys per `(Arc<str>, …)` if needed.
         let t0 = std::time::Instant::now();
         let effective = effective_slang_source_for_compile(source);
         crate::shader_timing::record("slang.transform", "", t0.elapsed());
+        self.compile_with_reflection_effective(
+            source,
+            effective.as_ref(),
+            target,
+            entry_points,
+            search_paths,
+            defines,
+            layout_checks,
+            optimization_level,
+        )
+    }
+
+    /// Like [`Self::compile_bindless_with_reflection_and_defines`], but uses a pre-transformed
+    /// translation unit so virtual-main rewrite can be cached on the frontend module.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compile_bindless_with_reflection_effective(
+        &self,
+        original_source: &str,
+        effective_source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        extra_defines: &[(&str, &str)],
+        layout_checks: &[OwnedLayoutCheck],
+        optimization_level: OptimizationLevel,
+    ) -> Result<CompiledShaderWithReflection> {
+        let mut defines = Self::bindless_defines_for_target(target);
+        defines.extend_from_slice(extra_defines);
+        self.compile_with_reflection_effective(
+            original_source,
+            effective_source,
+            target,
+            entry_points,
+            search_paths,
+            &defines,
+            layout_checks,
+            optimization_level,
+        )
+    }
+
+    /// Compile already-rewritten Slang. `original_source` is used for `[goldy_*]` binding
+    /// analysis; `effective_source` is hashed and passed to Slang.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compile_with_reflection_effective(
+        &self,
+        original_source: &str,
+        effective_source: &str,
+        target: ShaderTarget,
+        entry_points: &[(&str, SlangStage)],
+        search_paths: &[&str],
+        defines: &[(&str, &str)],
+        layout_checks: &[OwnedLayoutCheck],
+        optimization_level: OptimizationLevel,
+    ) -> Result<CompiledShaderWithReflection> {
+        if target == ShaderTarget::HostCallable {
+            anyhow::bail!("ShaderTarget::HostCallable does not produce bytecode; use goldy::cpu_shaders::compile");
+        }
         let t1 = std::time::Instant::now();
         let cache_key = crate::shader_cache::compile_cache_key(
-            effective.as_ref(),
+            effective_source,
             target,
             entry_points,
             search_paths,
@@ -750,11 +805,11 @@ impl SlangCompiler {
         }
 
         let t_compile = std::time::Instant::now();
-        let binding_type_names = super::virtual_main::extract_binding_element_type_names(source);
-        let binding_categories = super::virtual_main::extract_push_constant_categories(source);
+        let binding_type_names = super::virtual_main::extract_binding_element_type_names(original_source);
+        let binding_categories = super::virtual_main::extract_push_constant_categories(original_source);
 
         let out = self.with_compiled_request(
-            effective.as_ref(),
+            effective_source,
             target,
             entry_points,
             search_paths,
@@ -2343,6 +2398,41 @@ mod uniform_entry_point_param_binding_tests {
     fn shader_path() -> String {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         manifest_dir.join("shaders").to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn pretransformed_source_matches_default_spirv_compile() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let effective = crate::slang::virtual_main::effective_slang_source_for_compile(TEST_SHADER);
+        let via_default = compiler
+            .compile_bindless_with_reflection_and_defines(
+                TEST_SHADER,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("default SPIR-V compile");
+        let via_effective = compiler
+            .compile_bindless_with_reflection_effective(
+                TEST_SHADER,
+                effective.as_ref(),
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("effective SPIR-V compile");
+        assert_eq!(via_default.shader.data, via_effective.shader.data);
+        assert_eq!(
+            via_default.reflection.push_constant_categories,
+            via_effective.reflection.push_constant_categories
+        );
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub struct ComputePipeline {
     /// pick the correct SRV/UAV descriptor independent of the graph access (which
     /// only drives barriers). Empty when the backend reports no reflection.
     pub(crate) slot_access: Vec<Option<crate::types::ResourceAccess>>,
+    /// Compile inputs of the shader this pipeline was built from, so a scheme can compile
+    /// specialized variants of it without the caller keeping the [`ShaderModule`] alive.
+    pub(crate) provenance: Arc<crate::shader::ShaderProvenance>,
 }
 
 impl ComputePipeline {
@@ -63,7 +66,17 @@ impl ComputePipeline {
     /// diagnostics.
     pub fn new_with_label(device: &Device, compute_shader: &ShaderModule, label: Option<&str>) -> Result<Self> {
         tracing::debug!(?label, "Creating compute pipeline");
+
+        let seeded = {
+            #[cfg(any(feature = "vulkan", feature = "dx12"))]
+            let _st = crate::shader_timing::scope("compute.slang_unlocked", label.unwrap_or(""));
+            compile_compute_stage_unlocked(device, compute_shader)?
+        };
+
         let mut backend = device.inner.backend.lock().unwrap();
+        if let Some((bytecode, reflection)) = seeded {
+            backend.seed_compute_stage(compute_shader.handle, &bytecode, reflection)?;
+        }
 
         let handle = {
             let _tz = crate::tracy_zone!("goldy.compute_pipeline.create_pso");
@@ -79,8 +92,75 @@ impl ComputePipeline {
             backend: Arc::clone(&device.inner.backend),
             handle,
             slot_access,
+            provenance: Arc::clone(compute_shader.provenance()),
         })
     }
+}
+
+/// Compile the compute stage without holding `device.inner.backend`.
+///
+/// Returns `None` when the backend has no Slang compute target (mock, CPU, Metal/WebGPU/CUDA
+/// until those implement [`GpuBackend::seed_compute_stage`]) or when a frontend Slang session
+/// cannot be created; PSO creation then compiles under the lock as before.
+fn compile_compute_stage_unlocked(
+    device: &Device,
+    shader: &ShaderModule,
+) -> Result<Option<(Vec<u8>, crate::slang::ShaderReflection)>> {
+    let target = {
+        let backend = device.inner.backend.lock().unwrap();
+        backend.compute_shader_target()
+    };
+    let Some(target) = target else {
+        return Ok(None);
+    };
+
+    let compiler = match device.inner.slang.get() {
+        Some(compiler) => Arc::clone(compiler),
+        None => {
+            let created = match crate::slang::SlangCompiler::new() {
+                Ok(compiler) => Arc::new(compiler),
+                Err(err) => {
+                    tracing::debug!(
+                        ?err,
+                        "frontend Slang init failed; compute compile stays under the backend lock"
+                    );
+                    return Ok(None);
+                }
+            };
+            let _ = device.inner.slang.set(Arc::clone(&created));
+            device.inner.slang.get().cloned().unwrap_or(created)
+        }
+    };
+
+    let path_refs: Vec<&str> = shader.search_paths().iter().map(|s| s.as_str()).collect();
+    let mut extra_defines: Vec<(&str, &str)> = shader.defines().iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let caps = device.capabilities();
+    if (caps.ray_query || caps.ray_tracing_pipelines) && extra_defines.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY") {
+        extra_defines.push(("GOLDY_RAY_QUERY", "1"));
+    }
+    let result = compiler.compile_bindless_with_reflection_effective(
+        shader.source(),
+        shader.effective_source(),
+        target,
+        &[("cs_main", crate::slang::SlangStage::Compute)],
+        &path_refs,
+        &extra_defines,
+        shader.layout_checks(),
+        shader.optimization_level(),
+    )?;
+
+    let mut reflection = result.reflection;
+    if reflection.push_constant_categories.is_empty() {
+        reflection.push_constant_categories =
+            crate::slang::virtual_main::extract_push_constant_categories(shader.source());
+    }
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    if reflection.push_constant_slot_kinds.is_empty() {
+        reflection.push_constant_slot_kinds =
+            crate::slang::virtual_main::extract_push_constant_slot_kinds(shader.source());
+    }
+
+    Ok(Some((result.shader.data, reflection)))
 }
 
 impl Drop for ComputePipeline {

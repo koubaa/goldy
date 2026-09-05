@@ -34,7 +34,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Unique ID generator for temp directories
 static REGISTRY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -355,6 +355,7 @@ impl Adapter {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 owns_backend_device: true,
+                slang: Arc::new(OnceLock::new()),
             }),
         })
     }
@@ -539,6 +540,8 @@ pub(crate) struct DeviceInner {
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
+    /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
+    pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
 }
 
 impl Clone for Device {
@@ -689,6 +692,7 @@ impl Device {
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
                 owns_backend_device: false,
+                slang: Arc::clone(&self.inner.slang),
             }),
         }
     }
@@ -1238,6 +1242,7 @@ impl Device {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 owns_backend_device: true,
+                slang: Arc::new(OnceLock::new()),
             }),
         })
     }

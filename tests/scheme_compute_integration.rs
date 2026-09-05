@@ -252,6 +252,310 @@ mod imp {
     }
     "#;
 
+    /// One source, two programs: the universal path reads the tint factor at runtime, and
+    /// baking slot 0 turns it into a compile-time constant.
+    ///
+    /// This is the shape a specialization predictor promotes — see
+    /// `docs/src/design/shader-specialization.md`. `offset` stays dynamic, which is both the
+    /// realistic case (the predictor bakes the slots that have been stable, not all of them)
+    /// and a requirement on backends that derive bind group layouts from shader *usage*
+    /// rather than from the signature: on WebGPU, baking every scalar leaves the user-params
+    /// uniform unreferenced, and wgpu's auto layout then stops expecting a binding the
+    /// recorded dispatch still supplies.
+    const TINT_SPECIALIZABLE_SHADER: &str = r#"
+    import goldy_exp;
+
+    [goldy_compute]
+    [numthreads(64, 1, 1)]
+    void cs_main(Scattered<uint> data, ThreadId id, uint factor, uint offset) {
+        data[id.x] = id.x * factor + offset;
+    }
+    "#;
+
+    /// A shader with two ordinary `with_param` scalars and no specialization plumbing of its
+    /// own. Baking either one is something the runtime can do without the author's help.
+    const SCALED_BIAS_SHADER: &str = r#"
+    import goldy_exp;
+
+    [goldy_compute]
+    [numthreads(64, 1, 1)]
+    void cs_main(Scattered<uint> data, ThreadId id, uint factor, uint bias) {
+        data[id.x] = id.x * factor + bias;
+    }
+    "#;
+
+    /// Bake a scalar param into the program without touching the shader source.
+    ///
+    /// The runtime can do this for any dispatch site because it already holds the wire words.
+    /// `bias` stays a runtime read, and it has to keep arriving correctly after `factor` is
+    /// baked — that is what proves the push-constant layout is unchanged, and therefore that a
+    /// baked pipeline can be swapped under an already-recorded dispatch.
+    fn scheme_bakes_scalar_param_without_shader_cooperation(device: &Device) {
+        use goldy::slang::virtual_main::scalar_specialization_macro;
+
+        // This test swaps pipelines by hand and counts records; keep the predictor out of it.
+        let _spec = goldy::test_support::SpecializationOverride::force_disabled();
+        let ctx = submission_context(&device);
+
+        let universal_module = ShaderModule::from_slang(device, SCALED_BIAS_SHADER).expect("universal shader");
+        let baked_factor = scalar_specialization_macro("cs_main", 0);
+        let baked_module = universal_module
+            .variant(&[(baked_factor.as_str(), "10u")])
+            .expect("variant with the factor baked");
+        let universal = ComputePipeline::new(device, &universal_module).expect("universal pipeline");
+        let baked = ComputePipeline::new(device, &baked_module).expect("baked pipeline");
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let data = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("data buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        let node = scheme
+            .node("scaled_bias", &universal)
+            .with_parcel(&data, NodeAccess::Write)
+            .with_param(3)
+            .with_param(7)
+            .dispatch(1, 1, 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &data)
+            .expect("withdraw data");
+
+        let mut frame = scheme.submit().expect("universal submit");
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+            let i = i as u32;
+            assert_eq!(val, i * 3 + 7, "universal element {i} reads both params at runtime");
+        }
+        let records_before = scheme.replay_stats().records;
+
+        // The recorded push payload is untouched: the same (3, 7) wire words are still baked
+        // into the command list. Only the program the site binds changes.
+        scheme
+            .set_node_pipeline(node, &baked)
+            .expect("swap in the baked pipeline");
+        let mut frame = scheme.submit().expect("baked submit");
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+            let i = i as u32;
+            assert_eq!(
+                val,
+                i * 10 + 7,
+                "element {i} must use the baked factor and the runtime bias"
+            );
+        }
+        assert_eq!(
+            scheme.replay_stats().records,
+            records_before + 1,
+            "baking costs exactly one re-record"
+        );
+
+        // Reverting to the universal program restores the runtime read, so a mispredicted
+        // site can always be walked back.
+        scheme
+            .set_node_pipeline(node, &universal)
+            .expect("revert to the universal pipeline");
+        let mut frame = scheme.submit().expect("reverted submit");
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+            let i = i as u32;
+            assert_eq!(val, i * 3 + 7, "reverted element {i} reads the runtime factor again");
+        }
+    }
+
+    /// The predictor, end to end: a dispatch whose scalar params hold still is moved onto a
+    /// specialized program without anyone asking, computes exactly what it did before, and
+    /// comes back to the caller's program the moment a baked param changes.
+    fn scheme_predictor_specializes_stable_params_transparently(device: &Device) {
+        let _spec = goldy::test_support::SpecializationOverride::force_enabled();
+        let ctx = submission_context(&device);
+        // WebGPU derives bind group layouts from shader usage, so goldy declines to predict
+        // there (`compute_pipeline_layout_follows_signature`); CPU has no bake macros.
+        let predicts = !matches!(device.backend_type(), BackendType::WebGpu | BackendType::Cpu);
+
+        let module = ShaderModule::from_slang(device, SCALED_BIAS_SHADER).expect("shader");
+        let universal = ComputePipeline::new(device, &module).expect("pipeline");
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let data = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("data buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        let node = scheme
+            .node("scaled_bias", &universal)
+            .with_parcel(&data, NodeAccess::Write)
+            .with_param(3)
+            .with_param(7)
+            .dispatch(1, 1, 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &data)
+            .expect("withdraw data");
+
+        // Submit once, check every element, and let any compile the predictor started land
+        // before the next frame polls for it.
+        let mut frame_and_check = |scheme: &mut Scheme, factor: u32, bias: u32, what: &str| {
+            let mut frame = scheme.submit().expect(what);
+            for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+                let i = i as u32;
+                assert_eq!(val, i * factor + bias, "{what}: element {i}");
+            }
+            goldy::test_support::wait_for_specialization_compiles(scheme);
+        };
+
+        // Frame 1 records; frames 2..=11 are clean. Streak 2 (frame 3) starts the compile,
+        // streak 10 (frame 11) swaps the variant in as a params-only re-record.
+        for f in 1..=11 {
+            frame_and_check(&mut scheme, 3, 7, &format!("frame {f} (universal or variant)"));
+        }
+        let stats = scheme.replay_stats();
+        if predicts {
+            assert_eq!(
+                stats.specialization_warms, 1,
+                "one compile for the stable (factor, bias) pair"
+            );
+            assert_eq!(stats.specialization_promotions, 1, "promoted on the 10th clean frame");
+            assert!(scheme.node_is_specialized(node));
+            assert_eq!(stats.records, 2, "initial record plus the promotion re-record");
+        } else {
+            assert_eq!(stats.specialization_warms, 0, "this backend declines to predict");
+            assert!(!scheme.node_is_specialized(node));
+        }
+
+        // The specialized program is indistinguishable from the universal one.
+        frame_and_check(&mut scheme, 3, 7, "steady state on the variant");
+        assert_eq!(scheme.replay_stats().records, stats.records, "no further records");
+
+        // A baked fact changes: the node is back on the caller's pipeline before the next
+        // submit, so the new value is read at runtime and the output follows it.
+        scheme.set_node_param(node, 0, 5).expect("set factor");
+        assert!(!scheme.node_is_specialized(node), "demoted inside set_node_param");
+        if predicts {
+            assert_eq!(scheme.replay_stats().specialization_demotions, 1);
+        }
+        frame_and_check(&mut scheme, 5, 7, "first frame after the factor changed");
+
+        // Left alone again, the site re-earns a specialization for the new facts (bias first,
+        // since it never moved; factor once it has held long enough) and still computes the
+        // same thing.
+        for f in 1..=25 {
+            frame_and_check(&mut scheme, 5, 7, &format!("post-demotion frame {f}"));
+        }
+        let stats = scheme.replay_stats();
+        if predicts {
+            assert!(scheme.node_is_specialized(node), "re-promoted on the new facts");
+            assert!(
+                stats.specialization_promotions >= 2,
+                "promotions: {}",
+                stats.specialization_promotions
+            );
+            assert_eq!(stats.specialization_demotions, 1, "no spurious demotions");
+        } else {
+            assert_eq!(stats.specialization_promotions, 0);
+        }
+
+        // And the way back always works, whichever slot is baked at the time.
+        scheme.set_node_param(node, 1, 100).expect("set bias");
+        assert!(!scheme.node_is_specialized(node));
+        frame_and_check(&mut scheme, 5, 100, "first frame after the bias changed");
+    }
+
+    /// End-to-end specialization: compile a variant from one module, swap it onto a recorded
+    /// dispatch node, and confirm the GPU runs the new program while the rest of the scheme
+    /// stays retained and keeps its record count.
+    fn scheme_specialized_variant_swap(device: &Device) {
+        // This test swaps pipelines by hand and counts records; keep the predictor out of it.
+        let _spec = goldy::test_support::SpecializationOverride::force_disabled();
+        let ctx = submission_context(&device);
+
+        let universal_module = ShaderModule::from_slang(device, TINT_SPECIALIZABLE_SHADER).expect("universal shader");
+        let specialized_module = universal_module
+            .variant(&[(
+                goldy::slang::virtual_main::scalar_specialization_macro("cs_main", 0).as_str(),
+                "10u",
+            )])
+            .expect("specialized variant");
+        let universal = ComputePipeline::new(device, &universal_module).expect("universal pipeline");
+        let specialized = ComputePipeline::new(device, &specialized_module).expect("specialized pipeline");
+        let fill_42 = ComputePipeline::new(device, &ShaderModule::from_slang(device, FILL_42_SHADER).unwrap()).unwrap();
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let tinted = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("tinted buffer");
+        let untouched = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("untouched buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        let tint_node = scheme
+            .node("tint", &universal)
+            .with_parcel(&tinted, NodeAccess::Write)
+            .with_param(3)
+            .with_param(0)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("fill_untouched", &fill_42)
+            .with_parcel(&untouched, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let exchange = MemoryExchange::new(scheme.context());
+        let tinted_grant = exchange.bind_withdraw(&mut scheme, &tinted).expect("withdraw tinted");
+        let untouched_grant = exchange
+            .bind_withdraw(&mut scheme, &untouched)
+            .expect("withdraw untouched");
+
+        scheme.submit().expect("first submit");
+        let mut frame = scheme.submit().expect("second submit");
+        let universal_out = read_grant_u32(&tinted_grant, &mut frame, 64);
+        for (i, &val) in universal_out.iter().enumerate() {
+            assert_eq!(
+                val,
+                i as u32 * 3,
+                "universal element {i} must read the param at runtime"
+            );
+        }
+        let records_before = scheme.replay_stats().records;
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            1,
+            "the second submit found the scheme clean"
+        );
+
+        scheme
+            .set_node_pipeline(tint_node, &specialized)
+            .expect("swap in the specialized pipeline");
+        assert!(scheme.is_dirty(), "a pipeline swap must dirty the scheme");
+
+        let mut frame = scheme.submit().expect("submit after swap");
+        let specialized_out = read_grant_u32(&tinted_grant, &mut frame, 64);
+        for (i, &val) in specialized_out.iter().enumerate() {
+            assert_eq!(val, i as u32 * 10, "specialized element {i} must use the baked factor");
+        }
+        let untouched_out = read_grant_u32(&untouched_grant, &mut frame, 64);
+        assert!(
+            untouched_out.iter().all(|&v| v == 42),
+            "the unswapped node must keep producing its own output"
+        );
+        assert_eq!(
+            scheme.replay_stats().records,
+            records_before + 1,
+            "the swap must cost exactly one record"
+        );
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            1,
+            "the params-dirty submit is not a clean submit"
+        );
+
+        scheme.submit().expect("submit after the swap is recorded");
+        assert_eq!(
+            scheme.replay_stats().records,
+            records_before + 1,
+            "the specialized scheme is retained like any other"
+        );
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            2,
+            "the clean streak resumes on the next frame"
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // Migrated from task_graph_integration.rs
     // ---------------------------------------------------------------------------
@@ -5011,6 +5315,9 @@ mod imp {
             };
         }
 
+        trial_retain!(scheme_specialized_variant_swap);
+        trial_retain!(scheme_bakes_scalar_param_without_shader_cooperation);
+        trial_retain!(scheme_predictor_specializes_stable_params_transparently);
         trial_retain!(scheme_graph_linear_chain);
         trial!(scheme_graph_independent_dispatches);
         trial!(scheme_graph_diamond_dependency);

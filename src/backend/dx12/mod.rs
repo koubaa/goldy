@@ -567,6 +567,19 @@ impl GpuBackend for Dx12Backend {
         BackendType::Dx12
     }
 
+    fn compute_shader_target(&self) -> Option<crate::slang::ShaderTarget> {
+        Some(crate::slang::ShaderTarget::Dxil)
+    }
+
+    fn seed_compute_stage(
+        &mut self,
+        shader: ShaderHandle,
+        bytecode: &[u8],
+        reflection: crate::slang::ShaderReflection,
+    ) -> Result<()> {
+        shader::seed_compute_stage(&mut self.state, shader, bytecode, reflection)
+    }
+
     fn enumerate_adapters(&self) -> Vec<super::AdapterInfo> {
         device::enumerate(&self.state.adapters)
     }
