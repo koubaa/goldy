@@ -271,6 +271,16 @@ pub enum NodeKind {
     /// Emits no GPU commands in v1; exists so the analyzer can eventually
     /// choose host-visible backing vs an inserted device→host blit per backend.
     WithdrawRead { withdraw_id: u32 },
+    /// Serial host function over whole buffer parcels (see [`crate::cpu_dispatch`]).
+    ///
+    /// The closure and its staging buffers live in a side table owned by
+    /// [`crate::Scheme`], indexed by `cpu_id`. The node binds the *device* parcels with
+    /// the declared access; the submit engine lowers it into a device→host readback copy,
+    /// a CPU wait, the host call, and a host→device upload copy. Its device-side
+    /// footprint is therefore transfer work, which is how the barrier analysis sees it.
+    ///
+    /// A CPU dispatch always occupies its own wave and its own submit partition.
+    CpuDispatch { cpu_id: u32 },
 }
 
 /// A single node in the task graph.

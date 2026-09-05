@@ -183,6 +183,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyTextureRegion { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
+        // The device-visible footprint of a CPU dispatch is its staging copies.
+        NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
     }
 }
 
