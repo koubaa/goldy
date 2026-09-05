@@ -118,7 +118,7 @@ pub(super) fn render_to(
         &state.buffers,
         render_target.device_handle,
         is_mesh,
-    );
+    )?;
 
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
@@ -143,7 +143,11 @@ pub(super) fn render_to(
         prologue_row,
     )?;
 
-    encoder.end_encoding();
+    if is_mesh {
+        super::objc_catch::catch_objc("end_encoding(mesh)", || encoder.end_encoding())?;
+    } else {
+        encoder.end_encoding();
+    }
     command_buffer.commit();
     command_buffer.wait_until_completed();
 

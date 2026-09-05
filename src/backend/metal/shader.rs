@@ -447,6 +447,20 @@ fn compile_stage_with_reflection(
         .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
         .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
 
+    if matches!(desc.stage, SlangStage::Mesh | SlangStage::Amplification) {
+        eprintln!(
+            "[goldy-mesh] compiled {} ({} bytes) contains_max_total_threads={} functions={:?}",
+            desc.entry_point,
+            msl_source.len(),
+            msl_source.contains("max_total_threads_per_threadgroup"),
+            library.function_names()
+        );
+        eprintln!(
+            "[goldy-mesh] ---- MSL {} begin ----\n{}\n[goldy-mesh] ---- MSL {} end ----",
+            desc.entry_point, msl_source, desc.entry_point
+        );
+    }
+
     Ok((library, Some(result.reflection)))
 }
 

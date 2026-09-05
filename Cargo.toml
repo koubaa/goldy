@@ -112,7 +112,8 @@ libc = "0.2"
 # Metal dependencies (macOS / iOS). `cocoa` is AppKit-only.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 metal = { version = "0.33", optional = true }
-objc = { version = "0.2", optional = true }
+objc = { version = "0.2", optional = true, features = ["exception"] }
+objc_exception = { version = "0.1", optional = true }
 core-graphics-types = { version = "0.2", optional = true }
 foreign-types = { version = "0.5", optional = true }
 block = { version = "0.1", optional = true }
@@ -140,7 +141,7 @@ graphics = ["dep:raw-window-handle"]
 gpu = []
 vulkan = ["dep:ash", "graphics", "gpu"]
 dx12 = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics", "gpu"]
-metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:core-graphics-types", "dep:foreign-types", "dep:block", "graphics", "gpu"]
+metal = ["dep:metal", "dep:cocoa", "dep:objc", "dep:objc_exception", "dep:core-graphics-types", "dep:foreign-types", "dep:block", "graphics", "gpu"]
 webgpu = ["dep:wgpu", "dep:pollster", "graphics", "gpu", "dep:objc"]
 # NVIDIA CUDA compute-only prototype (Slang → PTX → Driver API)
 cuda = ["dep:cudarc", "gpu"]

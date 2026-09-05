@@ -202,6 +202,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-metal-
 
+      - name: Debug mesh_dispatch (Metal)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_DUMP_SHADERS: ${{ runner.temp }}/goldy-mesh-msl
+          MTL_DEBUG_LAYER: "1"
+          MTL_SHADER_VALIDATION: "1"
+          RUST_BACKTRACE: "1"
+        run: |
+          echo "=== host ==="
+          sw_vers
+          system_profiler SPDisplaysDataType || true
+          cargo test --test mesh_dispatch -- --nocapture
+          echo "=== dumped MSL ==="
+          ls -la "${GOLDY_DUMP_SHADERS}" || true
+          if [ -d "${GOLDY_DUMP_SHADERS}" ]; then
+            for f in "${GOLDY_DUMP_SHADERS}"/*; do
+              echo "----- $f -----"
+              cat "$f"
+            done
+          fi
+
       - name: Run all tests
         env:
           # Point to downloaded Slang library

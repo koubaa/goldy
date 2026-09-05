@@ -169,9 +169,15 @@ pub(super) fn create_mesh(
         .get(&mesh_shader)
         .and_then(|s| super::shader::stage_library(s, SlangStage::Mesh))
         .context("mesh library missing after compile")?;
-    let mesh_function = mesh_lib
-        .get_function("mesh_main", None)
-        .map_err(|e| anyhow::anyhow!("Failed to get mesh function: {e}"))?;
+    eprintln!(
+        "[goldy-mesh] mesh library functions: {:?}",
+        mesh_lib.function_names()
+    );
+    let mesh_function = super::objc_catch::catch_objc("get_function(mesh_main)", || {
+        mesh_lib
+            .get_function("mesh_main", None)
+            .map_err(|e| anyhow::anyhow!("Failed to get mesh function: {e}"))
+    })??;
 
     let fs_shader = state.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
     let fs_library = super::shader::stage_library(fs_shader, SlangStage::Fragment)
@@ -218,10 +224,17 @@ pub(super) fn create_mesh(
         None
     };
 
-    let pipeline = logical_device
-        .device
-        .new_mesh_render_pipeline_state(&descriptor)
-        .map_err(|e| anyhow::anyhow!("Failed to create mesh render pipeline: {e}"))?;
+    eprintln!(
+        "[goldy-mesh] new_mesh_render_pipeline_state target_format={:?} has_object={}",
+        raster.target_format,
+        object_function.is_some()
+    );
+    let pipeline = super::objc_catch::catch_objc("new_mesh_render_pipeline_state", || {
+        logical_device
+            .device
+            .new_mesh_render_pipeline_state(&descriptor)
+            .map_err(|e| anyhow::anyhow!("Failed to create mesh render pipeline: {e}"))
+    })??;
 
     let mesh_threadgroup = state
         .shaders
@@ -271,6 +284,10 @@ pub(super) fn create_mesh(
         },
     );
 
+    eprintln!(
+        "[goldy-mesh] created mesh PSO {handle} mesh_tg={:?} object_tg={:?}",
+        mesh_threadgroup, object_threadgroup
+    );
     tracing::debug!("Created mesh render pipeline {handle}");
     Ok(handle)
 }

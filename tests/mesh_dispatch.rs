@@ -63,8 +63,25 @@ float4 fs_main(FsIn input) : SV_Target {
 
     #[test]
     fn mesh_fullscreen_triangle_is_red() {
+        struct DropLog(&'static str);
+        impl Drop for DropLog {
+            fn drop(&mut self) {
+                eprintln!("[mesh_dispatch] drop {}", self.0);
+            }
+        }
+        let _scope = DropLog("test scope");
+
         let _gpu = gpu_lock();
+        eprintln!("[mesh_dispatch] requesting device");
         let device = make_device();
+        let _dev_drop = DropLog("device");
+        eprintln!(
+            "[mesh_dispatch] backend={:?} name={} mesh_shaders={} amp={}",
+            device.backend_type(),
+            device.adapter().name(),
+            device.capabilities().mesh_shaders,
+            device.capabilities().amplification_shaders,
+        );
         if !device.capabilities().mesh_shaders {
             eprintln!("skip: DeviceCapabilities::mesh_shaders is false on this adapter");
             return;
@@ -79,7 +96,9 @@ float4 fs_main(FsIn input) : SV_Target {
 
         let ctx = submission_context(&device);
         let format = device.capabilities().preferred_render_target_format;
+        eprintln!("[mesh_dispatch] compiling slang target_format={format:?}");
         let shader = ShaderModule::from_slang(&device, MESH_SLANG).expect("compile mesh shader");
+        eprintln!("[mesh_dispatch] MeshPipeline::new");
         let pipeline = MeshPipeline::new(
             &device,
             &MeshPipelineDesc {
@@ -91,11 +110,13 @@ float4 fs_main(FsIn input) : SV_Target {
             },
         )
         .expect("mesh pipeline");
+        eprintln!("[mesh_dispatch] pipeline ok");
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let width = 16u32;
         let height = 16u32;
         let readback = acquire_readback_texture(&mut pool, width, height, format);
+        eprintln!("[mesh_dispatch] scheme submit+readback");
         let raw = scheme_render_and_readback(
             &ctx,
             width,
@@ -110,6 +131,7 @@ float4 fs_main(FsIn input) : SV_Target {
                 pass.dispatch_mesh(1, 1, 1);
             },
         );
+        eprintln!("[mesh_dispatch] readback {} bytes", raw.len());
 
         let center = ((height / 2) * width + (width / 2)) as usize;
         match format {

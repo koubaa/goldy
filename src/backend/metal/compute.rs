@@ -2020,10 +2020,18 @@ fn record_render_pass_to_buffer(
         clear_depth,
     );
 
-    let encoder = command_buffer.new_render_command_encoder(render_pass);
-
     let is_mesh = super::render_commands::commands_use_mesh(commands);
-    super::render_commands::declare_pass_resources(encoder, logical_device, &state.buffers, device_handle, is_mesh);
+    if is_mesh {
+        eprintln!("[goldy-mesh] record_render_pass_to_buffer is_mesh=true");
+    }
+    let encoder = if is_mesh {
+        super::objc_catch::catch_objc("new_render_command_encoder(mesh)", || {
+            command_buffer.new_render_command_encoder(render_pass)
+        })?
+    } else {
+        command_buffer.new_render_command_encoder(render_pass)
+    };
+    super::render_commands::declare_pass_resources(encoder, logical_device, &state.buffers, device_handle, is_mesh)?;
 
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
@@ -2042,7 +2050,11 @@ fn record_render_pass_to_buffer(
 
     super::render_commands::record(encoder, commands, &state.pipelines, &state.buffers, prologue_row)?;
 
-    encoder.end_encoding();
+    if is_mesh {
+        super::objc_catch::catch_objc("end_encoding(mesh)", || encoder.end_encoding())?;
+    } else {
+        encoder.end_encoding();
+    }
     Ok(())
 }
 
