@@ -1169,11 +1169,13 @@ pub enum Init {
 
 impl Init {
     /// Upload a typed slice at acquisition (copied; not aliased).
+    ///
+    /// [`GpuType`](crate::GpuType) values are packed to the Slang structured-buffer ABI.
     pub fn data<T: StructuredBufferElement>(data: &[T]) -> Self {
         Self::Data {
-            bytes: bytemuck::cast_slice(data).to_vec(),
+            bytes: T::gpu_encode_slice(data).into_owned(),
             count: data.len() as u64,
-            stride: std::mem::size_of::<T>() as u32,
+            stride: T::gpu_element_stride() as u32,
         }
     }
 
@@ -1181,13 +1183,13 @@ impl Init {
     pub fn reserve<T: StructuredBufferElement>(count: u64) -> Self {
         Self::Reserve {
             count,
-            stride: std::mem::size_of::<T>() as u32,
+            stride: T::gpu_element_stride() as u32,
         }
     }
 
     /// Reserve zero-initialized space for `count` elements of type `T`.
     pub fn zeros<T: StructuredBufferElement>(count: u64) -> Self {
-        let stride = std::mem::size_of::<T>() as u32;
+        let stride = T::gpu_element_stride() as u32;
         let bytes_len = count.saturating_mul(stride as u64);
         let bytes = vec![0u8; bytes_len as usize];
         Self::Data { bytes, count, stride }
