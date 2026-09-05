@@ -66,6 +66,21 @@ pub(crate) struct ShaderProvenance {
     pub(crate) layout_checks: Arc<[OwnedLayoutCheck]>,
     /// User function name of the single `[goldy_compute]` entry, if the source has exactly one.
     compute_entry: OnceLock<Option<String>>,
+    /// Present when the author's source is a yielding script; `source` is then the
+    /// lowered *prologue* translation unit.
+    pub(crate) yielding: Option<Arc<YieldScript>>,
+}
+
+/// The yielding-script structure of a [`ShaderModule`] whose source used
+/// `[goldy_petition]` / `[goldy_resume]` / `$yield`.
+///
+/// Kept on the module's provenance so [`ComputePipeline`](crate::ComputePipeline)
+/// can compile the continuation entry points and the scheme driver can validate
+/// handlers against the script.
+pub(crate) struct YieldScript {
+    pub(crate) reflection: crate::slang::yielding::YieldReflection,
+    /// Author-facing source before lowering (with any GpuType preamble).
+    pub(crate) original: Arc<str>,
 }
 
 impl ShaderProvenance {
@@ -75,6 +90,7 @@ impl ShaderProvenance {
         defines: Arc<[(String, String)]>,
         optimization_level: crate::types::OptimizationLevel,
         layout_checks: Arc<[OwnedLayoutCheck]>,
+        yielding: Option<Arc<YieldScript>>,
     ) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
@@ -85,7 +101,13 @@ impl ShaderProvenance {
             optimization_level,
             layout_checks,
             compute_entry: OnceLock::new(),
+            yielding,
         }
+    }
+
+    /// Yielding-script structure, when this module's source is a yielding script.
+    pub(crate) fn yielding(&self) -> Option<&Arc<YieldScript>> {
+        self.yielding.as_ref()
     }
 
     /// Process-unique identity of the module these inputs produced.
@@ -333,13 +355,53 @@ impl ShaderModule {
             owned_checks.extend(layout_checks.iter().map(OwnedLayoutCheck::from_layout_check));
         }
 
+        // Yielding scripts are lowered to plain `[goldy_compute]` Slang before the backend
+        // sees them; the original stays on the provenance for the continuation variants.
+        let (source, yielding): (Arc<str>, Option<Arc<YieldScript>>) =
+            if crate::slang::yielding::has_yield_constructs(source) {
+                let reflection = crate::slang::yielding::reflect(source)
+                    .map_err(|e| anyhow::anyhow!(e))?
+                    .expect("has_yield_constructs implies a reflection");
+                let lowered = crate::slang::yielding::lower(source, None).map_err(|e| anyhow::anyhow!(e))?;
+                (
+                    Arc::from(lowered),
+                    Some(Arc::new(YieldScript {
+                        reflection,
+                        original: Arc::from(source),
+                    })),
+                )
+            } else {
+                (Arc::from(source), None)
+            };
+
         Self::create_retained(
             device,
-            Arc::from(source),
+            source,
             all_paths.into(),
             owned_defines.into(),
             optimization_level,
             owned_checks.into(),
+            yielding,
+        )
+    }
+
+    /// Compile the translation unit whose `cs_main` is continuation `name` of this
+    /// yielding script.
+    ///
+    /// Errors when this module is not a yielding script or has no such continuation.
+    pub(crate) fn continuation_module(&self, name: &str) -> Result<Self> {
+        let Some(script) = self.provenance.yielding() else {
+            bail!("continuation_module: shader is not a yielding script");
+        };
+        let lowered = crate::slang::yielding::lower(&script.original, Some(name)).map_err(|e| anyhow::anyhow!(e))?;
+        Self::create_retained(
+            &self._device,
+            Arc::from(lowered),
+            Arc::clone(&self.provenance.search_paths),
+            Arc::clone(&self.provenance.defines),
+            self.provenance.optimization_level,
+            Arc::clone(&self.provenance.layout_checks),
+            None,
         )
     }
 
@@ -370,6 +432,7 @@ impl ShaderModule {
             provenance.merged_defines(extra_defines).into(),
             provenance.optimization_level,
             Arc::clone(&provenance.layout_checks),
+            provenance.yielding.clone(),
         )
     }
 
@@ -380,6 +443,7 @@ impl ShaderModule {
         defines: Arc<[(String, String)]>,
         optimization_level: crate::types::OptimizationLevel,
         layout_checks: Arc<[OwnedLayoutCheck]>,
+        yielding: Option<Arc<YieldScript>>,
     ) -> Result<Self> {
         let path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
         let define_refs: Vec<(&str, &str)> = defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -417,6 +481,7 @@ impl ShaderModule {
                 defines,
                 optimization_level,
                 layout_checks,
+                yielding,
             )),
             effective_source: OnceLock::new(),
         })
