@@ -100,8 +100,8 @@ pub(super) fn ensure_stage_compiled(
             .get(&shader_handle)
             .context("Invalid shader handle")?;
         let remap = shader.stage_slot_remaps.get(&stage);
-        let source = crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap)
-            .into_owned();
+        let source =
+            crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap).into_owned();
         (
             source,
             shader.search_paths.clone(),
@@ -182,7 +182,9 @@ pub(super) fn ensure_stage_compiled(
         let mut shaders_write = state.shaders.write().unwrap();
         let shader = shaders_write.entries.get_mut(&shader_handle).unwrap();
         if remap_fp != 0 {
-            shader.remapped_bytecode.insert((stage as u32, remap_fp), bytecode.clone());
+            shader
+                .remapped_bytecode
+                .insert((stage as u32, remap_fp), bytecode.clone());
         } else {
             match stage {
                 crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
@@ -223,7 +225,10 @@ pub(super) fn ensure_stage_compiled(
                 existing.binding_element_strides = new_reflection.binding_element_strides;
             }
             for iface in new_reflection.stage_interfaces {
-                if !existing.stage_interfaces.iter().any(|s| s.entry_name == iface.entry_name && s.stage == iface.stage)
+                if !existing
+                    .stage_interfaces
+                    .iter()
+                    .any(|s| s.entry_name == iface.entry_name && s.stage == iface.stage)
                 {
                     existing.stage_interfaces.push(iface);
                 }

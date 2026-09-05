@@ -134,10 +134,14 @@ impl PipelineResource {
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     pub(crate) fn slot_kind(&self) -> Option<crate::types::BindlessSlotKind> {
         use crate::types::BindlessSlotKind;
-        if self.ty.starts_with("BufRO<") || (self.category == ResourceCategory::Scattered && self.access == ResourceAccess::Read)
+        if self.ty.starts_with("BufRO<")
+            || (self.category == ResourceCategory::Scattered && self.access == ResourceAccess::Read)
         {
             Some(BindlessSlotKind::ReadOnlySrv)
-        } else if matches!(self.category, ResourceCategory::Scattered | ResourceCategory::StorageImage) {
+        } else if matches!(
+            self.category,
+            ResourceCategory::Scattered | ResourceCategory::StorageImage
+        ) {
             Some(BindlessSlotKind::StorageUav)
         } else if self.category == ResourceCategory::Accel {
             Some(BindlessSlotKind::ReadOnlySrv)
@@ -251,13 +255,25 @@ fn category_and_access(param: &Param) -> Option<(ResourceCategory, ResourceAcces
         ParamKind::Resource => {
             let ty = param.ty.trim();
             if ty.starts_with("Scattered<") {
-                Some((ResourceCategory::Scattered, ResourceAccess::ReadWrite, inner_type(ty, "Scattered<")))
+                Some((
+                    ResourceCategory::Scattered,
+                    ResourceAccess::ReadWrite,
+                    inner_type(ty, "Scattered<"),
+                ))
             } else if ty.starts_with("BufRO<") {
-                Some((ResourceCategory::Scattered, ResourceAccess::Read, inner_type(ty, "BufRO<")))
+                Some((
+                    ResourceCategory::Scattered,
+                    ResourceAccess::Read,
+                    inner_type(ty, "BufRO<"),
+                ))
             } else if ty == "ByteAddress" {
                 Some((ResourceCategory::Scattered, ResourceAccess::ReadWrite, None))
             } else if ty.starts_with("Interpolated<") {
-                Some((ResourceCategory::Texture, ResourceAccess::Read, inner_type(ty, "Interpolated<")))
+                Some((
+                    ResourceCategory::Texture,
+                    ResourceAccess::Read,
+                    inner_type(ty, "Interpolated<"),
+                ))
             } else if ty.starts_with("DirectSpatial<") {
                 Some((
                     ResourceCategory::StorageImage,
@@ -272,7 +288,11 @@ fn category_and_access(param: &Param) -> Option<(ResourceCategory, ResourceAcces
                 None
             }
         }
-        ParamKind::Broadcast => Some((ResourceCategory::Broadcast, ResourceAccess::Read, Some(param.ty.clone()))),
+        ParamKind::Broadcast => Some((
+            ResourceCategory::Broadcast,
+            ResourceAccess::Read,
+            Some(param.ty.clone()),
+        )),
         _ => None,
     }
 }
@@ -425,7 +445,10 @@ pub fn parse_struct_fields(source: &str, struct_name: &str) -> Option<Vec<StageI
 }
 
 fn is_in_line_comment(source: &str, pos: usize) -> bool {
-    source[..pos].rfind('\n').map(|n| source[n + 1..pos].contains("//")).unwrap_or(source[..pos].contains("//"))
+    source[..pos]
+        .rfind('\n')
+        .map(|n| source[n + 1..pos].contains("//"))
+        .unwrap_or(source[..pos].contains("//"))
 }
 
 fn find_matching_brace(source: &str, open: usize) -> Option<usize> {
@@ -710,7 +733,10 @@ pub fn validate_vertex_layout(layout: &VertexBufferLayout, vertex_inputs: &[Stag
         }
     }
     if !errors.is_empty() {
-        bail!("vertex input layout does not match the vertex stage:\n  {}", errors.join("\n  "));
+        bail!(
+            "vertex input layout does not match the vertex stage:\n  {}",
+            errors.join("\n  ")
+        );
     }
     Ok(())
 }
@@ -828,14 +854,7 @@ pub fn link_raster_pipeline(
 
     let vs_out_ty = Some(vs.return_type.trim());
     let fs_in_ty = stage_input_payload_type(&fs);
-    let payload_links = link_or_same_type(
-        "vertex",
-        "fragment",
-        vs_out_ty,
-        fs_in_ty.as_deref(),
-        &vs_out,
-        &fs_in,
-    )?;
+    let payload_links = link_or_same_type("vertex", "fragment", vs_out_ty, fs_in_ty.as_deref(), &vs_out, &fs_in)?;
 
     if let Some(layout) = vertex_layout {
         validate_vertex_layout(layout, &vs_in)?;
@@ -1096,7 +1115,10 @@ struct FsIn { float4 position : SV_Position; nointerpolation float2 uv : TEXCOOR
 float4 fs_main(FsIn input) : SV_Target { return float4(1,0,0,1); }
 "#;
         let err = link_raster_pipeline(vs, fs, None).unwrap_err().to_string();
-        assert!(err.contains("nointerpolation") || err.contains("interpolation"), "{err}");
+        assert!(
+            err.contains("nointerpolation") || err.contains("interpolation"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1155,7 +1177,10 @@ struct MeshOut { float4 pos : SV_Position; };
 float4 fs_main(MeshOut input) : SV_Target { return float4(1,0,0,1); }
 "#;
         let err = link_mesh_pipeline(mesh, fs, Some(amp)).unwrap_err().to_string();
-        assert!(err.contains("amplification") || err.contains("payload") || err.contains("AmpOut"), "{err}");
+        assert!(
+            err.contains("amplification") || err.contains("payload") || err.contains("AmpOut"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1194,7 +1219,13 @@ float4 fs_main(MeshOut input) : SV_Target { return float4(1,0,0,1); }
     #[test]
     fn positional_fragment_first_then_unique_vertex() {
         let linked = link_raster_pipeline(VS_FS, VS_FS, None).unwrap().unwrap();
-        let names: Vec<&str> = linked.interface.resources.resources.iter().map(|r| r.name.as_str()).collect();
+        let names: Vec<&str> = linked
+            .interface
+            .resources
+            .resources
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
         assert_eq!(names, vec!["tex", "smp", "scene"]);
     }
 

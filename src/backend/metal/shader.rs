@@ -250,9 +250,7 @@ pub(super) fn patch_mesh_msl_user_semantics(msl: &str) -> String {
     while let Some(rel) = rest.find(PREFIX) {
         out.push_str(&rest[..rel]);
         let after = &rest[rel + PREFIX.len()..];
-        let ident_end = after
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .unwrap_or(after.len());
+        let ident_end = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
         let ident = &after[..ident_end];
         let digits_end = ident_end
             + after[ident_end..]
@@ -422,10 +420,7 @@ fn compile_stage_with_reflection(
     } else if desc.stage == SlangStage::Mesh {
         let patched = patch_mesh_msl_user_semantics(&raw_msl);
         if patched != raw_msl {
-            tracing::debug!(
-                "Applied mesh [[user]] semantic rename patch for {}",
-                desc.entry_point
-            );
+            tracing::debug!("Applied mesh [[user]] semantic rename patch for {}", desc.entry_point);
         }
         patched
     } else {
@@ -514,8 +509,8 @@ pub(super) fn ensure_stage_compiled(
         }
         let entry_point = crate::slang::canonical_entry_point(stage)
             .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
-        let source = crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap)
-            .into_owned();
+        let source =
+            crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap).into_owned();
         Some(CompileScratch {
             device_handle: shader.device_handle,
             slang_source: source,

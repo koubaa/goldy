@@ -1281,8 +1281,7 @@ impl SlangCompiler {
                     type_name
                 };
                 for i in 0..field_count {
-                    let field =
-                        unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
+                    let field = unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
                     if !field.is_null() {
                         self.collect_io_fields(field, &struct_name, out);
                     }
@@ -1292,8 +1291,7 @@ impl SlangCompiler {
         }
 
         if kind == SlangTypeKind::Array as i32 {
-            let elem_layout =
-                unsafe { (self.library.reflection_type_layout_get_element_type_layout)(type_layout) };
+            let elem_layout = unsafe { (self.library.reflection_type_layout_get_element_type_layout)(type_layout) };
             if !elem_layout.is_null() {
                 let elem_ty = unsafe { (self.library.reflection_type_layout_get_type)(elem_layout) };
                 if !elem_ty.is_null() {
@@ -1307,12 +1305,10 @@ impl SlangCompiler {
                                 CStr::from_ptr(ptr).to_string_lossy().into_owned()
                             }
                         };
-                        let field_count =
-                            unsafe { (self.library.reflection_type_layout_get_field_count)(elem_layout) };
+                        let field_count = unsafe { (self.library.reflection_type_layout_get_field_count)(elem_layout) };
                         for i in 0..field_count {
-                            let field = unsafe {
-                                (self.library.reflection_type_layout_get_field_by_index)(elem_layout, i)
-                            };
+                            let field =
+                                unsafe { (self.library.reflection_type_layout_get_field_by_index)(elem_layout, i) };
                             if !field.is_null() {
                                 self.collect_io_fields(field, &elem_name, out);
                             }
@@ -1339,7 +1335,11 @@ impl SlangCompiler {
             let (n, i) = parse_semantic(&semantic_raw);
             (n, i)
         };
-        let semantic_index = if parsed_index != 0 { parsed_index } else { semantic_index };
+        let semantic_index = if parsed_index != 0 {
+            parsed_index
+        } else {
+            semantic_index
+        };
 
         let (scalar_type, vector_size) = io_type_shape(&self.library, type_ptr, kind, &type_name);
         let _ = SlangScalarType::None;
@@ -1456,7 +1456,6 @@ fn scalar_type_name(scalar: i32) -> String {
 }
 
 impl SlangCompiler {
-
     /// Extract layout information for a ParameterBlock.
     fn extract_parameter_block_layout(
         &self,
@@ -2899,7 +2898,10 @@ float4 fs_main(FsIn input) : SV_Target { return input.color; }
             .find(|s| s.stage == "fragment")
             .expect("fragment interface");
         assert!(
-            fs_io.payload_inputs.iter().any(|f| f.semantic.eq_ignore_ascii_case("SV_POSITION")),
+            fs_io
+                .payload_inputs
+                .iter()
+                .any(|f| f.semantic.eq_ignore_ascii_case("SV_POSITION")),
             "expected fragment payload SV_Position, got {fs_io:?}"
         );
         let mesh_io = mesh
@@ -2913,7 +2915,10 @@ float4 fs_main(FsIn input) : SV_Target { return input.color; }
         } else {
             &mesh_io.payload_outputs
         };
-        if producer_outs.iter().any(|f| f.semantic.eq_ignore_ascii_case("SV_POSITION")) {
+        if producer_outs
+            .iter()
+            .any(|f| f.semantic.eq_ignore_ascii_case("SV_POSITION"))
+        {
             let mut producer = mesh_io.clone();
             producer.payload_outputs = producer_outs.clone();
             crate::slang::graphics_link::refine_payload_link("mesh", "fragment", &producer, fs_io)

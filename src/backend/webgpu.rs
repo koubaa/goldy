@@ -46,9 +46,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(feature = "graphics")]
-fn graphics_vm_remaps(
-    shader: &WebGpuShader,
-) -> HashMap<crate::slang::virtual_main::Stage, HashMap<String, u32>> {
+fn graphics_vm_remaps(shader: &WebGpuShader) -> HashMap<crate::slang::virtual_main::Stage, HashMap<String, u32>> {
     let mut out = HashMap::new();
     for (stage, remap) in &shader.stage_slot_remaps {
         if remap.is_empty() {
@@ -1899,11 +1897,9 @@ impl WebGpuBackend {
         let (lowered, layout) = if has_goldy {
             let remaps = graphics_vm_remaps(shader);
             let remaps_ref = (!remaps.is_empty()).then_some(&remaps);
-            let layout = crate::slang::virtual_main::extract_webgpu_graphics_layout_with_remaps(
-                &shader.source,
-                remaps_ref,
-            )
-            .map_err(|error| anyhow::anyhow!("WebGPU graphics shader layout failed: {error}"))?;
+            let layout =
+                crate::slang::virtual_main::extract_webgpu_graphics_layout_with_remaps(&shader.source, remaps_ref)
+                    .map_err(|error| anyhow::anyhow!("WebGPU graphics shader layout failed: {error}"))?;
             let lowered = crate::slang::virtual_main::transform_virtual_main_webgpu_graphics_with_remaps(
                 &shader.source,
                 remaps_ref,

@@ -177,7 +177,13 @@ impl<'a> RenderPipelineBuilder<'a> {
 
         let mut backend = self.device.inner.backend.lock().unwrap();
         if let Some(ref mut link) = linked {
-            apply_stage_remap(&mut **backend, vertex_shader, SlangStage::Vertex, Stage::Vertex, &link.vs_remap);
+            apply_stage_remap(
+                &mut **backend,
+                vertex_shader,
+                SlangStage::Vertex,
+                Stage::Vertex,
+                &link.vs_remap,
+            );
             apply_stage_remap(
                 &mut **backend,
                 fragment_shader,
@@ -187,7 +193,13 @@ impl<'a> RenderPipelineBuilder<'a> {
             );
             let _ = backend.compile_shader_stage(vertex_shader.handle, SlangStage::Vertex);
             let _ = backend.compile_shader_stage(fragment_shader.handle, SlangStage::Fragment);
-            refine_raster_from_reflection(&mut **backend, vertex_shader, fragment_shader, &desc.vertex_layout, link)?;
+            refine_raster_from_reflection(
+                &mut **backend,
+                vertex_shader,
+                fragment_shader,
+                &desc.vertex_layout,
+                link,
+            )?;
         }
 
         let handle = if desc.depth_stencil.is_some() {
@@ -398,7 +410,13 @@ impl<'a> MeshPipelineBuilder<'a> {
         let mut backend = self.device.inner.backend.lock().unwrap();
         if let Some(ref mut link) = linked {
             apply_stage_remap(&mut **backend, mesh, SlangStage::Mesh, Stage::Mesh, &link.mesh_remap);
-            apply_stage_remap(&mut **backend, fragment, SlangStage::Fragment, Stage::Fragment, &link.fs_remap);
+            apply_stage_remap(
+                &mut **backend,
+                fragment,
+                SlangStage::Fragment,
+                Stage::Fragment,
+                &link.fs_remap,
+            );
             if let Some(amp) = self.amplification {
                 apply_stage_remap(
                     &mut **backend,

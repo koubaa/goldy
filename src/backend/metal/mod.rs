@@ -675,11 +675,7 @@ impl GpuBackend for MetalBackend {
             crate::slang::SlangStage::Amplification => "amplification",
             _ => return None,
         };
-        reflection
-            .stage_interfaces
-            .iter()
-            .find(|s| s.stage == want)
-            .cloned()
+        reflection.stage_interfaces.iter().find(|s| s.stage == want).cloned()
     }
 
     fn apply_graphics_resource_contract(

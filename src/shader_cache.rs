@@ -428,7 +428,9 @@ mod tests {
     use super::*;
     use crate::slang::{
         ffi::SlangStage,
-        virtual_main::{effective_slang_source_for_compile, transform_virtual_main, transform_virtual_main_with_remaps, Stage},
+        virtual_main::{
+            effective_slang_source_for_compile, transform_virtual_main, transform_virtual_main_with_remaps, Stage,
+        },
         CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck, ShaderReflection, ShaderTarget,
     };
     use crate::types::OptimizationLevel;
@@ -911,7 +913,7 @@ float4 fs_main(Interpolated<float4> tex, Filter smp, Varying input) : SV_Target 
         maps.insert(Stage::Fragment, fs);
         let remapped = transform_virtual_main_with_remaps(src, Some(&maps));
         assert_ne!(identity, remapped);
-        let ( _src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let (_src, tgt, eps, defs, layouts, opt) = base_compile_args();
         let k1 = compile_cache_key(&identity, tgt, &eps, &[], &defs, &layouts, opt);
         let k2 = compile_cache_key(&remapped, tgt, &eps, &[], &defs, &layouts, opt);
         assert_ne!(k1, k2);

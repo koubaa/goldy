@@ -127,8 +127,8 @@ pub(super) fn ensure_stage_compiled(
             .get(&shader_handle)
             .context("Invalid shader handle")?;
         let remap = shader.stage_slot_remaps.get(&stage);
-        let source = crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap)
-            .into_owned();
+        let source =
+            crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap).into_owned();
         (
             source,
             shader.search_paths.clone(),

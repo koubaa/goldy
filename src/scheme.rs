@@ -1641,10 +1641,7 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(
-            &self.ir,
-            &self.prior_built_accels,
-        )?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.ir, &self.prior_built_accels)?;
 
         let submit_result = {
             let grant_count = self.present_transactions.len();
@@ -1909,10 +1906,7 @@ impl Scheme {
             self.submit_state.invalidate_retention();
         }
 
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(
-            &self.ir,
-            &self.prior_built_accels,
-        )?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.ir, &self.prior_built_accels)?;
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
@@ -3424,11 +3418,9 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     pub fn set_pipeline(&mut self, pipeline: &crate::RenderPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
-        if let Some(handles) = self.resolve_graphics_bindings(
-            pipeline.resource_contract(),
-            &pipeline.slot_access,
-            "render pipeline",
-        ) {
+        if let Some(handles) =
+            self.resolve_graphics_bindings(pipeline.resource_contract(), &pipeline.slot_access, "render pipeline")
+        {
             self.commands.push(RenderCommand::BindResourcesTyped { handles });
         }
         self
@@ -3485,11 +3477,9 @@ impl<'a> SchemeRenderPassBuilder<'a> {
     /// Bind a [`crate::MeshPipeline`] and typed push-constant resources, like [`Self::set_pipeline`].
     pub fn set_mesh_pipeline(&mut self, pipeline: &crate::MeshPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetMeshPipeline(pipeline.handle));
-        if let Some(handles) = self.resolve_graphics_bindings(
-            pipeline.resource_contract(),
-            &pipeline.slot_access,
-            "mesh pipeline",
-        ) {
+        if let Some(handles) =
+            self.resolve_graphics_bindings(pipeline.resource_contract(), &pipeline.slot_access, "mesh pipeline")
+        {
             self.commands.push(RenderCommand::BindResourcesTyped { handles });
         }
         self

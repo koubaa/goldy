@@ -44,8 +44,8 @@
 
 pub mod compiler;
 pub mod ffi;
-pub mod graphics_link;
 mod gpu_type;
+pub mod graphics_link;
 pub mod loader;
 pub mod virtual_main;
 

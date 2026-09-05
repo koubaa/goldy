@@ -594,14 +594,10 @@ pub enum SlangScalarType {
 pub type FnSpReflectionGetEntryPointCount = unsafe extern "C" fn(reflection: *mut SlangReflection) -> usize;
 pub type FnSpReflectionGetEntryPointByIndex =
     unsafe extern "C" fn(reflection: *mut SlangReflection, index: usize) -> *mut SlangReflectionEntryPoint;
-pub type FnSpReflectionEntryPointGetName =
-    unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> *const c_char;
-pub type FnSpReflectionEntryPointGetParameterCount =
-    unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> u32;
-pub type FnSpReflectionEntryPointGetParameterByIndex = unsafe extern "C" fn(
-    entry: *mut SlangReflectionEntryPoint,
-    index: u32,
-) -> *mut SlangReflectionVariableLayout;
+pub type FnSpReflectionEntryPointGetName = unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> *const c_char;
+pub type FnSpReflectionEntryPointGetParameterCount = unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> u32;
+pub type FnSpReflectionEntryPointGetParameterByIndex =
+    unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint, index: u32) -> *mut SlangReflectionVariableLayout;
 pub type FnSpReflectionEntryPointGetResultVarLayout =
     unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> *mut SlangReflectionVariableLayout;
 pub type FnSpReflectionEntryPointGetStage = unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> c_int;

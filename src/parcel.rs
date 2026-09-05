@@ -1170,7 +1170,7 @@ pub enum Init {
 impl Init {
     /// Upload a typed slice at acquisition (copied; not aliased).
     ///
-    /// [`GpuType`](crate::GpuType) values are packed to the Slang structured-buffer ABI.
+    /// [`GpuType`](struct@crate::GpuType) values are packed to the Slang structured-buffer ABI.
     pub fn data<T: StructuredBufferElement>(data: &[T]) -> Self {
         Self::Data {
             bytes: T::gpu_encode_slice(data).into_owned(),

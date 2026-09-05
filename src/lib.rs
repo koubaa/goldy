@@ -108,7 +108,9 @@ pub use kernel::{
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
 #[cfg(feature = "graphics")]
-pub use pipeline::{MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc};
+pub use pipeline::{
+    MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc,
+};
 pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc, MAX_RAY_PAYLOAD_BYTES};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};

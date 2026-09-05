@@ -35,7 +35,7 @@ fn bindless_cache_from_backend(
 ///
 /// Unit type `()` is included so empty slices type-check.
 ///
-/// [`GpuType`](crate::GpuType) types pack into the Slang structured-buffer ABI in
+/// [`GpuType`](struct@crate::GpuType) types pack into the Slang structured-buffer ABI in
 /// [`Self::gpu_encode_slice`] / [`Self::gpu_element_stride`]. Other types memcpy as `repr(C)`.
 pub trait StructuredBufferElement: bytemuck::Pod {
     /// Element stride used for structured-buffer views.
