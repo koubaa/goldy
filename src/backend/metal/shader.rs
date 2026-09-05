@@ -236,6 +236,47 @@ pub(super) fn patch_vertex_stage_in_pointer(msl: &str) -> String {
     result
 }
 
+/// Rewrite mesh-shader `[[user(...)]]` names to match fragment `[[stage_in]]`.
+///
+/// Slang's Metal mesh path emits `[[user(TEXCOORD0)]]`, `[[user(TEXCOORD1)]]`, …
+/// while the fragment path (shared with vertex) emits `[[user(TEXCOORD)]]` and
+/// `[[user(TEXCOORD_1)]]`. Metal requires the strings to match exactly or PSO
+/// creation fails with "Fragment input(s) `user(TEXCOORD),…` … not written by
+/// mesh shader".
+pub(super) fn patch_mesh_msl_user_semantics(msl: &str) -> String {
+    const PREFIX: &str = "[[user(";
+    let mut out = String::with_capacity(msl.len() + 8);
+    let mut rest = msl;
+    while let Some(rel) = rest.find(PREFIX) {
+        out.push_str(&rest[..rel]);
+        let after = &rest[rel + PREFIX.len()..];
+        let ident_end = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
+        let ident = &after[..ident_end];
+        let digits_end = ident_end
+            + after[ident_end..]
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after[ident_end..].len());
+        let digits = &after[ident_end..digits_end];
+        if !ident.is_empty() && !digits.is_empty() && after[digits_end..].starts_with(")]]") {
+            out.push_str(PREFIX);
+            out.push_str(ident);
+            if digits != "0" {
+                out.push('_');
+                out.push_str(digits);
+            }
+            out.push_str(")]]");
+            rest = &after[digits_end + 3..];
+        } else {
+            out.push_str(PREFIX);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Patch vertex-shader MSL to inject the missing EntryPointParams [[buffer(1)]] binding.
 ///
 /// Slang's Metal backend generates `EntryPointParams_0` inside `KernelContext_0` for
@@ -374,6 +415,15 @@ fn compile_stage_with_reflection(
         if patched != raw_msl {
             tracing::debug!(
                 "Applied compute MSL patches (EntryPointParams / threadgroup copy) for {}",
+                desc.entry_point
+            );
+        }
+        patched
+    } else if desc.stage == SlangStage::Mesh {
+        let patched = patch_mesh_msl_user_semantics(&raw_msl);
+        if patched != raw_msl {
+            tracing::debug!(
+                "Applied mesh [[user]] semantic rename patch for {}",
                 desc.entry_point
             );
         }
@@ -589,8 +639,8 @@ pub(super) fn destroy(
 #[cfg(test)]
 mod tests {
     use super::{
-        patch_compute_msl, patch_compute_msl_entry_point_params, patch_msl_threadgroup_copies,
-        patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
+        patch_compute_msl, patch_compute_msl_entry_point_params, patch_mesh_msl_user_semantics,
+        patch_msl_threadgroup_copies, patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
     };
 
     // ── patch_vertex_stage_in_pointer ────────────────────────────────────────
@@ -666,6 +716,25 @@ mod tests {
         let msl = "[[kernel]] void cs_main(device uint* buf [[buffer(0)]])\n{\n}\n";
         let out = patch_vertex_stage_in_pointer(msl);
         assert_eq!(out, msl, "MSL without [[stage_in]] must pass through unchanged");
+    }
+
+    #[test]
+    fn mesh_user_semantics_match_fragment_stage_in() {
+        let mesh = concat!(
+            "struct Varying_0 {\n",
+            "    float4 position_0 [[position]];\n",
+            "    float dist_0 [[user(TEXCOORD0)]];\n",
+            "    float2 tile_uv_0 [[user(TEXCOORD1)]];\n",
+            "    uint flag_0 [[user(TEXCOORD2)]];\n",
+            "};\n",
+        );
+        let out = patch_mesh_msl_user_semantics(mesh);
+        assert!(out.contains("[[user(TEXCOORD)]]"), "{out}");
+        assert!(out.contains("[[user(TEXCOORD_1)]]"), "{out}");
+        assert!(out.contains("[[user(TEXCOORD_2)]]"), "{out}");
+        assert!(!out.contains("[[user(TEXCOORD0)]]"), "{out}");
+        assert!(!out.contains("[[user(TEXCOORD1)]]"), "{out}");
+        assert_eq!(patch_mesh_msl_user_semantics(&out), out);
     }
 
     // ── patch_vertex_msl_entry_point_params ──────────────────────────────────
