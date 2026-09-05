@@ -14,6 +14,7 @@
 - [Virtual Entry Points](./programming-model/virtual-entry-points.md)
 - [Rust Compute Kernels](./programming-model/rust-kernels.md)
 - [CPU Dispatches](./programming-model/cpu-dispatch.md)
+- [Yielding Scripts](./programming-model/yielding-scripts.md)
 - [Slang in One Source](./programming-model/slang.md)
 
 # Compute Workflows

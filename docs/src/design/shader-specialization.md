@@ -12,7 +12,10 @@ variants.
 
 Specialization is an implementation detail of the runtime, not an API. Every program that
 submits a retained scheme is a potential beneficiary without changing a line, and the
-only knob is an environment variable that turns the whole thing off.
+only knob is an environment variable that turns the whole thing off. Baking is a full
+recompile: the specialized program can elide whole code paths, not merely load a
+constant. How optimistic to be depends on whether the baked word *gates* work; see
+[What baking actually compiles](#what-baking-actually-compiles).
 
 **Status:** implemented in `src/specialization.rs`, driven from `Scheme::submit` and
 `Scheme::set_node_param`. Sections below describe the shipped behaviour; the closing
@@ -104,10 +107,70 @@ Two properties make this safe to swap under an already-recorded dispatch:
 What baking must not do is change the pipeline's *binding* layout, which is a real
 constraint on some backends and is covered below.
 
-What the driver receives is a statically decidable branch. Slang does not run its
-dead-code pass at the default optimization level, so the unreachable block survives into
-the SPIR-V, but the push-constant load is gone and the condition is `OpConstantFalse` —
-folding that is the first thing any driver backend does.
+### What baking actually compiles
+
+Baking is a full recompile, not a constant patch. The specialized program is a new
+`ShaderModule::variant` with the `_GOLDY_SPEC_*` macros defined to wire-word literals,
+so Slang, the backend IR (SPIR-V / DXIL / MSL / PTX), and the driver's ISA compiler all
+see a compile-time constant. That constant can participate in folding anywhere it flows:
+branch conditions, loop trip counts, array indices, `asfloat(...)` arithmetic, resource
+selection. Nothing is rewritten at bind time, and the universal program is left alone.
+
+Elision is split across two compilers, and that split is easy to misread.
+
+Goldy's default `OptimizationLevel::Default` does not run Slang's dead-code pass, so a
+branch whose condition has become `false` still appears in the dumped SPIR-V — as
+`OpConstantFalse` plus the unreachable block. The push-constant load is already gone at
+that point. Folding a constant condition, deleting the dead block, and reallocating
+registers is the first thing any production driver compiler does (NVIDIA, AMD's LLVM,
+Apple's, DXC, Mesa lavapipe). Dumping SPIR-V instruction counts therefore understates
+the specialized program: the variant that looks almost the same as the universal one at
+the SPIR-V level can be a fraction of the size after the driver.
+
+Raising Slang to `OptimizationLevel::Maximal` does the DCE in SPIR-V itself. That moves
+compile time; it does not improve the ISA the GPU runs. Variants inherit the module's
+optimization level and there is no reason to raise it for baking.
+
+Measured on lavapipe through Goldy's real Vulkan compile path, a compute shader whose
+`has_tint` scalar gated a tinting loop:
+
+| Program | SPIR-V instructions | SPIR-V still has the branch+loop | Driver NIR instructions | `if` / `fmul` |
+|---|---|---|---|---|
+| Universal | 212 | yes | 201 | 1 / 55 |
+| Baked `has_tint = 0` | 210 | yes, on `OpConstantFalse` | 36 | 0 / 0 |
+| Baked `has_tint = 1` | 207 | yes | 194 | 0 / 55 |
+| Baked `has_tint = 0`, Slang `Maximal` | 91 | no | 36 | 0 / 0 |
+
+The specialized-off program dropped the extra buffer loads, the extra push-constant
+loads, the unrolled loop, and the registers they held. The specialized-on program
+dropped only the `if` and the two unused push-constant loads, which is the expected
+"only what the constant makes dead goes away" behaviour. Numbers will differ on a
+hardware compiler; the split between Slang and the driver will not.
+
+### When this is worth expecting
+
+A uniform branch on a push constant is already non-divergent and cheap. Removing the
+`if` itself is not the win. The win is whatever sits behind it.
+
+| Kind of `with_param` | What baking does | How optimistic to be |
+|---|---|---|
+| Feature / mode flag that gates whole code paths (`has_tint`, AA mode, filter on) | The driver deletes the unused path, its memory traffic, and the registers it held — occupancy can rise | High, if the gated work is real |
+| Loop bound or "which of N resources" index | Trip count or index becomes a literal; unrolling and addressing follow | High when the bound is small and the body is heavy |
+| Arithmetic coefficient (`x * factor + bias`) | One less push-constant load; maybe a strength reduction | Modest |
+| Value that changes every few frames | Predictor raises the bake threshold and leaves the slot dynamic | None — it will not stay promoted |
+| Value that lives in a bound buffer | Invisible to the predictor | None — put scene facts in `with_param` if they should bake |
+
+The cost is a full Slang compile plus PSO creation on a worker thread, which is why
+warm waits for two clean hits and promotion waits for ten. A scheme whose many nodes
+all stabilize at once will spend real CPU in the background for a moment; the 16-entry
+per-scheme cache bounds the steady state.
+
+Shader authors do not opt sites in, but they do choose where facts live. A mode flag
+in a `Scattered` buffer cannot bake. A mode flag passed with `with_param`, with the
+expensive work behind `if (has_tint != 0u)`, is exactly the shape the predictor was
+built for. That is also why Goldy still [resists permutation systems](./what-goldy-sheds.md):
+the runtime holds at most one specialized program per dispatch site, not the cross
+product of every flag.
 
 ### Per-slot, not per-tuple
 

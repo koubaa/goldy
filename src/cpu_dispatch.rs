@@ -477,7 +477,10 @@ impl fmt::Debug for CpuBindingExec {
 }
 
 /// Type-erased virtual main over bound argument views.
-type ErasedMain = Box<dyn Fn(&mut [CpuArgView<'_>]) + Send + Sync>;
+///
+/// Plain CPU dispatches ignore the context and cannot fail; host drivers (yielding
+/// scripts) submit sub-schemes on it and propagate their errors.
+type ErasedMain = Box<dyn Fn(&Context, &mut [CpuArgView<'_>]) -> Result<(), GoldyError> + Send + Sync>;
 
 /// Side-table entry for one [`crate::task_graph::NodeKind::CpuDispatch`] node.
 pub(crate) struct CpuDispatchExec {
@@ -516,9 +519,30 @@ impl CpuDispatchExec {
     ) -> Self {
         Self {
             label,
-            main: Box::new(move |args| main.invoke(args)),
+            main: Box::new(move |_, args| {
+                main.invoke(args);
+                Ok(())
+            }),
             bindings,
             params,
+            ready_after: AtomicU64::new(0),
+        }
+    }
+
+    /// A node with no staged bindings whose host side drives GPU work itself.
+    ///
+    /// The graph still orders the node through the [`crate::task_graph::TaskNode`]
+    /// bindings recorded next to it; `driver` runs once the GPU has retired everything
+    /// recorded before the node and may submit sub-schemes on the context.
+    pub(crate) fn new_host_driver<F>(label: &'static str, driver: F) -> Self
+    where
+        F: Fn(&Context) -> Result<(), GoldyError> + Send + Sync + 'static,
+    {
+        Self {
+            label,
+            main: Box::new(move |ctx, _| driver(ctx)),
+            bindings: Vec::new(),
+            params: Vec::new(),
             ready_after: AtomicU64::new(0),
         }
     }
@@ -672,7 +696,7 @@ impl CpuDispatchExec {
                 .map(|s| CpuArgView::Bytes(s.as_mut_bytes()))
                 .chain(self.params.iter().map(|&p| CpuArgView::Scalar(p)))
                 .collect();
-            (self.main)(&mut views);
+            (self.main)(context, &mut views)?;
         }
 
         for (b, bytes) in self.bindings.iter().zip(&storage) {

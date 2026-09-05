@@ -21,6 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/src/assets/examples/*.webm`. Defaults to the WebGPU backend, the only
   one whose surface path reaches X11 on Linux.
 
+- **Yielding scripts** — a `[goldy_compute]` shader may suspend a lane with
+  `$yield(continuation, payload, state)` and resume it in a `[goldy_resume]`
+  function with the result of a host or GPU *handler*. Payload types are
+  declared with `[goldy_petition(Result = BufRO<E>)]`; continuations receive a
+  `Resolved<E>` window into a runtime-owned result arena (`is_null()` on
+  rejection). On the host, `ComputePipeline::new` compiles the continuation
+  entry points alongside the prologue, `SchemeNodeBuilder::yield_point(name,
+  YieldPoint)` binds a handler per continuation (`YieldPoint::cpu` closure over
+  `Petition` + `Promised<E>`, or `YieldPoint::node` compute dispatch),
+  `Backpressure::{Stall, Drop}` picks the overflow policy, and
+  `Scheme::yield_stats(node)` reports per-submission counters. The dispatch is
+  recorded as a single host-driven node that runs the yield/service/resume
+  rounds as sub-schemes on the same context (double-buffered mailboxes, so a
+  continuation may yield to itself). See
+  [Yielding Scripts](docs/src/programming-model/yielding-scripts.md).
+
+- **`Interlocked*` on the CPU backend** — `goldy_exp`'s `InterlockedAdd` /
+  `Or` / `Xor` / `Min` / `Max` / `Exchange` compile for the host-callable
+  target as plain read-modify-write (the CPU backend runs lanes serially).
+
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
   of structurally dirty. The next submit recomputes partition fingerprints and
@@ -150,6 +170,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI jobs set `GOLDY_VALIDATION=all` and `GOLDY_VALIDATION_FATAL=1` (and restore
   `VK_LAYER_PATH`) so a Khronos ERROR fails the suite. Metal and DX12 jobs do
   not set `GOLDY_VALIDATION_FATAL` (it is Vulkan-only).
+
+### Changed
+
+- **Docs: what baking compiles** — the shader-specialization design note now
+  states that predicted variants are a full Slang + driver recompile (not a
+  constant patch), that Slang's default opt level leaves dead blocks in SPIR-V
+  while the driver DCE's them, and when that is worth expecting. Scalar params,
+  Slang defines, "no permutation systems", compute pipelines, and
+  `GOLDY_SPECIALIZATION` point at the same distinction.
 
 ### Fixed
 
