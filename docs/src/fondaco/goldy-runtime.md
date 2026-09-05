@@ -27,6 +27,7 @@ That split is a substrate artifact, not a machine requirement.
 |-----------------|-------------------|--------|
 | Scheme | `Scheme` + internal `GraphIR` | **Shipped** |
 | Dispatch | Compute / render / copy / clear / present nodes | **Shipped** |
+| CPU dispatch | `Scheme::cpu_node` — serial host function over staged parcels | **Shipped** (correctness first; staging always copies) |
 | Script | Slang via `[goldy_*]` virtual entry points | **Shipped** |
 | Parcel | `Parcel`, `Buffer`, `Texture` (stable handles) | **Shipped** |
 | Ownership / claims | `NodeAccess` → derived precedences | **Shipped** |
@@ -57,6 +58,8 @@ That split is a substrate artifact, not a machine requirement.
 - **Claims**: `NodeAccess` on scheme nodes — read, write, read-write — mapped to public / private / private-inaugural ownership.
 
 Non-computing dispatches also **Shipped**: buffer copy, buffer write, texture upload, buffer clear, present / copy-to-swapchain.
+
+**CPU dispatches** (**Shipped**, 0.2.x): `Scheme::cpu_node` admits a serial host function whose parameter list is the virtual main (`&[T]` / `&mut [T]` per bound parcel, then scalars). The machine does not distinguish where a dispatch executes; Goldy realizes host execution by staging bound parcels through readback/upload copies around a fence wait, so the node is a full drain of the device pipeline. See [CPU Dispatches](../programming-model/cpu-dispatch.md).
 
 Goldy does not preserve shader invocation identity across dispatch gates; logical threads must persist state in parcels.
 

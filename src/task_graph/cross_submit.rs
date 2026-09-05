@@ -187,6 +187,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
         NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
+        // The device-visible footprint of a CPU dispatch is its staging copies.
+        NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
     }
 }
 

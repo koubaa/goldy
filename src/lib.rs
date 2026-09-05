@@ -39,6 +39,7 @@ pub mod task_graph;
 pub mod texture;
 pub mod types;
 
+pub mod cpu_dispatch;
 pub mod cpu_shaders;
 pub(crate) mod host_access;
 pub mod shader_cache;
@@ -77,7 +78,7 @@ pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawCl
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
-pub use scheme::{Lease, ReplayStats, Scheme, Submission};
+pub use scheme::{Lease, ReplayStats, Scheme, SchemeCpuNodeBuilder, Submission};
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};
@@ -93,6 +94,7 @@ pub use accel::{AccelInstance, AccelKind, AccelerationStructure};
 pub use buffer::StructuredBufferElement;
 pub use compute::ComputePipeline;
 pub use context::Context;
+pub use cpu_dispatch::{CpuArg, CpuMain};
 pub use cpu_shaders::{CpuBinding, CpuComputeKernel};
 pub use device::{
     Adapter, AdapterInfo, BufferHeapStats, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,

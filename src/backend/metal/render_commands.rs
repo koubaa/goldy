@@ -86,14 +86,14 @@ pub(super) fn declare_pass_resources(
     device_handle: DeviceHandle,
     is_mesh: bool,
 ) -> Result<()> {
-    let mut bits = mtl::MTLRenderStages::Vertex.bits() | mtl::MTLRenderStages::Fragment.bits();
+    let render_stages = render_stages_for_pass(is_mesh);
     if is_mesh {
-        bits |= RENDER_STAGE_OBJECT | RENDER_STAGE_MESH;
-    }
-    let render_stages = mtl::MTLRenderStages::from_bits_truncate(bits);
-    if is_mesh {
+        let raw_bits = mtl::MTLRenderStages::Vertex.bits()
+            | mtl::MTLRenderStages::Fragment.bits()
+            | RENDER_STAGE_OBJECT
+            | RENDER_STAGE_MESH;
         eprintln!(
-            "[goldy-mesh] declare_pass_resources raw_stage_bits=0x{bits:x} truncated=0x{:x}",
+            "[goldy-mesh] declare_pass_resources raw_stage_bits=0x{raw_bits:x} truncated=0x{:x}",
             render_stages.bits()
         );
         let heap = logical_device.heap_allocator.lock().unwrap();

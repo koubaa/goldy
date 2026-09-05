@@ -466,18 +466,35 @@ pub fn schedule_waves(ir: &GraphIR, edges: &[(usize, usize)]) -> CompiledSchedul
         wave_nodes[d].push(i);
     }
 
-    // For each wave (beyond wave 0), compute which resources need barriers.
+    // CPU dispatches execute on the host between GPU submits, so each one must own a
+    // wave of its own. Peel them out of their depth group: GPU nodes at the same depth
+    // keep one wave, then each CPU node follows in its own wave. Barrier computation
+    // keeps using the *depth* (not the expanded wave index) so crossing edges are
+    // still recognised after the split.
+    let mut expanded: Vec<(usize, Vec<usize>)> = Vec::with_capacity(num_waves);
+    for (d, nodes) in wave_nodes.into_iter().enumerate() {
+        let (cpu, gpu): (Vec<usize>, Vec<usize>) = nodes
+            .into_iter()
+            .partition(|&i| matches!(ir.nodes[i].kind, NodeKind::CpuDispatch { .. }));
+        if !gpu.is_empty() {
+            expanded.push((d, gpu));
+        }
+        for c in cpu {
+            expanded.push((d, vec![c]));
+        }
+    }
+
+    // For each wave (beyond depth 0), compute which resources need barriers.
     // A barrier is needed for resource R before wave W if:
     //   - some node in a prior wave writes R, and some node in wave W accesses R
     //   - OR some node in a prior wave reads R, and some node in wave W writes R
-    let waves = wave_nodes
+    let waves = expanded
         .into_iter()
-        .enumerate()
-        .map(|(wave_idx, node_indices)| {
-            let barriers_before = if wave_idx == 0 {
+        .map(|(d, node_indices)| {
+            let barriers_before = if d == 0 {
                 BarrierSet::default()
             } else {
-                compute_barriers(ir, edges, &depth, wave_idx, &node_indices)
+                compute_barriers(ir, edges, &depth, d, &node_indices)
             };
             Wave {
                 node_indices,
@@ -487,6 +504,28 @@ pub fn schedule_waves(ir: &GraphIR, edges: &[(usize, usize)]) -> CompiledSchedul
         .collect();
 
     CompiledSchedule { waves }
+}
+
+/// The CPU dispatch carried by `wave`, when it is a CPU wave.
+///
+/// [`schedule_waves`] guarantees a CPU dispatch is always alone in its wave.
+pub(crate) fn wave_cpu_dispatch(ir: &GraphIR, wave: &Wave) -> Option<u32> {
+    match wave.node_indices.as_slice() {
+        [single] => match ir.nodes[*single].kind {
+            NodeKind::CpuDispatch { cpu_id } => Some(cpu_id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// True when any wave in `waves` carries a CPU dispatch.
+pub(crate) fn waves_have_cpu_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| {
+        w.node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::CpuDispatch { .. }))
+    })
 }
 
 /// Map a node's kind to the Koubaa pipeline category it belongs to.
@@ -506,6 +545,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         // WithdrawRead participates in ordering edges but emits no GPU work in the IR.
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
         NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
+        // The device-visible footprint of a CPU dispatch is its staging copies.
+        NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
     }
 }
 
@@ -837,7 +878,8 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 NodeKind::TraceRays { .. }
                 | NodeKind::Dispatch { .. }
                 | NodeKind::RenderPass { .. }
-                | NodeKind::WithdrawRead { .. } => {}
+                | NodeKind::WithdrawRead { .. }
+                | NodeKind::CpuDispatch { .. } => {}
             }
         }
 
@@ -1117,12 +1159,15 @@ pub struct LogicalPartition {
     /// Scheme-unique present binding ids ([`ResourceId::PresentLease`]) referenced
     /// by this partition, sorted and deduplicated.
     pub present_bindings: Vec<u32>,
+    /// True when the slice is a single CPU-dispatch wave (host execution, no GPU
+    /// command stream of its own).
+    pub has_cpu: bool,
 }
 
 impl LogicalPartition {
-    /// True when the partition contains only compute/blit nodes (no render, no present).
+    /// True when the partition contains only compute/blit nodes (no render, no present, no CPU).
     pub fn is_pure_compute(&self) -> bool {
-        !self.has_render && !self.has_present
+        !self.has_render && !self.has_present && !self.has_cpu
     }
 }
 
@@ -1134,6 +1179,8 @@ impl LogicalPartition {
 ///    seen earlier, it opens a new partition (unless it is wave 0).
 /// 2. If a wave changes the render-kind of its predecessor (compute→render or
 ///    render→compute), it opens a new partition.
+/// 3. A CPU-dispatch wave is always a partition of its own: it opens one, and the
+///    wave that follows it opens another.
 ///
 /// The result always covers every wave exactly once.
 pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<LogicalPartition> {
@@ -1145,6 +1192,7 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
             has_render: false,
             has_present: false,
             present_bindings: Vec::new(),
+            has_cpu: false,
         }];
     }
 
@@ -1165,6 +1213,18 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
             wave_bindings.iter().any(|id| !seen_bindings.contains(id)) || (has_swapchain && !seen_swapchain_output);
 
         if i == 0 {
+            for &id in &wave_bindings {
+                if !seen_bindings.contains(&id) {
+                    seen_bindings.push(id);
+                }
+            }
+            seen_swapchain_output |= has_swapchain;
+            continue;
+        }
+
+        // CPU boundary: a host wave never shares a partition with GPU waves on either side.
+        if wave_cpu_dispatch(ir, wave).is_some() || wave_cpu_dispatch(ir, &waves[i - 1]).is_some() {
+            splits.push(i);
             for &id in &wave_bindings {
                 if !seen_bindings.contains(&id) {
                     seen_bindings.push(id);
@@ -1214,11 +1274,13 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
                 .iter()
                 .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
         });
+        let has_cpu = waves_have_cpu_dispatch(ir, slice);
         result.push(LogicalPartition {
             wave_range: start..end,
             has_render,
             has_present,
             present_bindings,
+            has_cpu,
         });
     }
     result
@@ -1237,7 +1299,8 @@ pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 | NodeKind::WriteTextureRegion { .. }
                 | NodeKind::CopyBufferToTexture { src_row_pitch: 0, .. }
                 | NodeKind::CopyTexture { .. }
-                | NodeKind::CopyTextureRegion { .. } => return false,
+                | NodeKind::CopyTextureRegion { .. }
+                | NodeKind::CpuDispatch { .. } => return false,
                 // CopyRenderTarget → PresentLease is retainable via the slot-key
                 // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.
                 // CopyRenderTarget → Texture is also retainable: the texture handle
@@ -1660,7 +1723,8 @@ pub(crate) fn emit_graph_commands_for_waves(
                 NodeKind::Dispatch { .. }
                 | NodeKind::TraceRays { .. }
                 | NodeKind::RenderPass { .. }
-                | NodeKind::WithdrawRead { .. } => {}
+                | NodeKind::WithdrawRead { .. }
+                | NodeKind::CpuDispatch { .. } => {}
             }
         }
 

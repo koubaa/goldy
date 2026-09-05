@@ -8,6 +8,7 @@ use super::cross_submit::{
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, Wave};
 use super::ResourceId;
 use crate::backend::{GpuCommand, GraphCommand, SubmitSync};
+use crate::cpu_dispatch::CpuDispatchExec;
 use crate::sampler::Sampler;
 use crate::timeline::TimelineValue;
 use anyhow::Result;
@@ -482,6 +483,10 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 3u8.hash(&mut h);
                 withdraw_id.hash(&mut h);
             }
+            NodeKind::CpuDispatch { cpu_id } => {
+                6u8.hash(&mut h);
+                cpu_id.hash(&mut h);
+            }
             NodeKind::CopyBufferToTexture {
                 src,
                 src_offset,
@@ -602,6 +607,8 @@ fn try_merge_upload_compute_range(
         || analysis::partition_waves_have_present(ir, w1)
         || partition_waves_have_render(ir, w0)
         || partition_waves_have_render(ir, w1)
+        || analysis::waves_have_cpu_dispatch(ir, w0)
+        || analysis::waves_have_cpu_dispatch(ir, w1)
         || !analysis::partition_waves_have_upload_slots(ir, w0)
         || analysis::partition_waves_have_upload_slots(ir, w1)
         || !partition_waves_can_retain(ir, w1)
@@ -636,6 +643,8 @@ fn try_merge_compute_render_range(
         || analysis::partition_waves_have_present(ir, w1)
         || analysis::partition_waves_have_upload_slots(ir, w0)
         || analysis::partition_waves_have_upload_slots(ir, w1)
+        || analysis::waves_have_cpu_dispatch(ir, w0)
+        || analysis::waves_have_cpu_dispatch(ir, w1)
         || !partition_waves_can_retain(ir, w0)
         || !partition_waves_can_retain(ir, w1)
     {
@@ -815,6 +824,75 @@ pub(crate) struct PresentSubmitOptions<'a> {
     /// Best-effort progress mirror; readable after `Err` for cleanup.
     pub partial: &'a mut PartitionSubmitResult,
     pub partial_tv: &'a mut TimelineValue,
+    /// Side table for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
+    pub cpu_dispatches: &'a [CpuDispatchExec],
+}
+
+/// Execute one CPU-dispatch partition: a single wave holding one [`NodeKind::CpuDispatch`].
+///
+/// Lowers the node to download copies (a GPU submit carrying the partition's sync), a
+/// host-side wait for those copies and every dependency of the node, the host call,
+/// and upload copies (a second GPU submit). Returns the partition's last timeline value,
+/// which is `last_tv` unchanged when the node binds nothing.
+#[allow(clippy::too_many_arguments)]
+fn run_cpu_partition(
+    session: &dyn crate::backend::ContextSubmitSession,
+    context: &crate::Context,
+    ctx: crate::backend::ContextHandle,
+    exec: &CpuDispatchExec,
+    wave: &Wave,
+    sync: Option<&SubmitSync>,
+    sidecar: &mut SubmitSidecarState,
+    last_tv: TimelineValue,
+) -> Result<TimelineValue> {
+    let _tz = crate::tracy_zone!("goldy.submit_partition.cpu");
+    let mut tv = last_tv;
+    let mut sync_carried = false;
+
+    let download = exec.download_commands(&wave.barriers_before);
+    if !download.is_empty() {
+        let merged = sidecar.merge_sync(sync);
+        let _tz = crate::tracy_zone!("goldy.submit_partition.cpu.download");
+        tv = backend_submit_standalone(session, ctx, &download, merged.as_ref())?;
+        sync_carried = true;
+    }
+
+    {
+        let _tz = crate::tracy_zone!("goldy.submit_partition.cpu.wait");
+        // Everything recorded before this node in the scheme has been submitted; the
+        // download copy (or the previous partition) retiring means it all completed.
+        if tv > 0 {
+            context.wait_until(tv)?;
+        }
+        // The previous submission's upload copy must be done reading the staging we
+        // are about to overwrite.
+        let ready_after = exec.ready_after();
+        if ready_after > 0 {
+            context.wait_until(ready_after)?;
+        }
+        // Without a download submit no GPU queue carried the cross-context waits.
+        if !sync_carried {
+            if let Some(s) = sync {
+                for epoch in s.waits.iter().chain(&s.cpu_waits).chain(&s.host_observed_waits) {
+                    context.wait_until_epoch(*epoch)?;
+                }
+            }
+        }
+    }
+
+    exec.run_host(context)?;
+
+    let upload = exec.upload_commands(&wave.barriers_before);
+    if !upload.is_empty() {
+        let merged = if sync_carried {
+            submit_sync_waits_only(sync)
+        } else {
+            sidecar.merge_sync(sync)
+        };
+        let _tz = crate::tracy_zone!("goldy.submit_partition.cpu.upload");
+        tv = backend_submit_standalone(session, ctx, &upload, merged.as_ref())?;
+    }
+    Ok(tv)
 }
 
 /// Ensure present bindings needed by the upcoming partition are in the resolver.
@@ -974,6 +1052,8 @@ pub(crate) struct FreshSegment {
     needs_standalone: bool,
     /// True when any node in the segment references a scheme upload-buffer slot.
     has_upload_slots: bool,
+    /// The segment is one CPU-dispatch wave: executed on the host between GPU submits.
+    has_cpu: bool,
 }
 
 /// True when adjacent fresh segments should coalesce into one graph CB.
@@ -992,6 +1072,8 @@ fn try_merge_fresh_segments(plan: &[FreshSegment], idx: usize, separate_graphics
         && !b.has_upload_slots
         && !a.needs_standalone
         && !b.needs_standalone
+        && !a.has_cpu
+        && !b.has_cpu
         && !a.has_render
         && b.has_render
 }
@@ -1007,9 +1089,11 @@ fn try_merge_upload_compute_fresh_segments(plan: &[FreshSegment], idx: usize, fu
     a.has_upload_slots
         && !a.has_present
         && !a.has_render
+        && !a.has_cpu
         && !b.has_upload_slots
         && !b.has_present
         && !b.has_render
+        && !b.has_cpu
         && !b.needs_standalone
 }
 
@@ -1031,6 +1115,7 @@ fn coalesce_fresh_plan_for_fused_upload(plan: Vec<FreshSegment>, fuse_upload: bo
                 present_bindings: Vec::new(),
                 needs_standalone: true,
                 has_upload_slots: true,
+                has_cpu: false,
             });
             idx += 2;
         } else {
@@ -1090,6 +1175,7 @@ fn submit_resolved_ir_partitions_fresh(
         mut sidecar,
         partial,
         partial_tv,
+        cpu_dispatches,
     } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_partitions.fresh");
@@ -1132,6 +1218,55 @@ fn submit_resolved_ir_partitions_fresh(
         let mut seg_idx = 0usize;
         let plan_len = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap().len();
         while seg_idx < plan_len {
+            let cpu_wave_range = {
+                let plan = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap();
+                let s = &plan[seg_idx];
+                s.has_cpu.then(|| s.wave_range.clone())
+            };
+            if let Some(wave_range) = cpu_wave_range {
+                let wave = cache.as_ref().unwrap().schedule.waves[wave_range.clone()]
+                    .first()
+                    .cloned()
+                    .expect("cpu segment holds one wave");
+                let cpu_id = analysis::wave_cpu_dispatch(ir, &wave).expect("cpu segment holds a CpuDispatch");
+                let exec = &cpu_dispatches[cpu_id as usize];
+                let stamp_ctx = partition_stamp_context(separate, false, ctx, device_owner);
+                let base_sync = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
+                    cross_sync_for_stamps(
+                        &mut cross_scratch,
+                        resource_stamps,
+                        ir,
+                        stamp_ctx,
+                        std::slice::from_ref(&wave),
+                        separate,
+                    )
+                };
+                let sync = merge_queue_boundary_waits(
+                    base_sync,
+                    separate,
+                    false,
+                    ctx,
+                    device_owner,
+                    boundary.last_compute_tv,
+                    boundary.last_render_tv,
+                );
+                last_tv = run_cpu_partition(session, context, ctx, exec, &wave, sync.as_ref(), &mut sidecar, last_tv)?;
+                boundary.record(separate, false, last_tv);
+                apply_partition_epoch_stamps(
+                    resource_stamps,
+                    stamp_targets,
+                    stamp_ctx,
+                    ir,
+                    std::slice::from_ref(&wave),
+                    last_tv,
+                );
+                *partial_tv = last_tv;
+                *partial = result.clone();
+                seg_idx += 1;
+                continue;
+            }
+
             let merge = {
                 let plan = cache.as_ref().unwrap().fresh_plan.as_ref().unwrap();
                 try_merge_fresh_segments(plan, seg_idx, separate)
@@ -1245,6 +1380,7 @@ fn submit_resolved_ir_partitions_replay(
         mut sidecar,
         partial,
         partial_tv,
+        cpu_dispatches,
     } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_partitions.replay");
@@ -1317,6 +1453,55 @@ fn submit_resolved_ir_partitions_replay(
         let mut boundary = QueueBoundaryState::default();
         let mut part_idx = 0usize;
         while part_idx < wave_ranges.len() {
+            let cpu_wave = {
+                let schedule = &cache.as_ref().unwrap().schedule;
+                let waves = &schedule.waves[wave_ranges[part_idx].clone()];
+                match waves {
+                    [single] => analysis::wave_cpu_dispatch(ir, single).map(|id| (id, single.clone())),
+                    _ => None,
+                }
+            };
+            if let Some((cpu_id, wave)) = cpu_wave {
+                // Host partitions are never retained: nothing to key, nothing to replay.
+                let exec = &cpu_dispatches[cpu_id as usize];
+                let stamp_ctx = partition_stamp_context(separate, false, ctx, device_owner);
+                let base_sync = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
+                    cross_sync_for_stamps(
+                        &mut cross_scratch,
+                        resource_stamps,
+                        ir,
+                        stamp_ctx,
+                        std::slice::from_ref(&wave),
+                        separate,
+                    )
+                };
+                let sync = merge_queue_boundary_waits(
+                    base_sync,
+                    separate,
+                    false,
+                    ctx,
+                    device_owner,
+                    boundary.last_compute_tv,
+                    boundary.last_render_tv,
+                );
+                last_tv = run_cpu_partition(session, context, ctx, exec, &wave, sync.as_ref(), &mut sidecar, last_tv)?;
+                replay.record_last_tv(part_idx, last_tv);
+                boundary.record(separate, false, last_tv);
+                apply_partition_epoch_stamps(
+                    resource_stamps,
+                    stamp_targets,
+                    stamp_ctx,
+                    ir,
+                    std::slice::from_ref(&wave),
+                    last_tv,
+                );
+                *partial_tv = last_tv;
+                *partial = result.clone();
+                part_idx += 1;
+                continue;
+            }
+
             let upload_compute_merged = {
                 let schedule = &cache.as_ref().unwrap().schedule;
                 try_merge_upload_compute_range(ir, schedule, &wave_ranges, part_idx, fuse_upload)
@@ -1786,6 +1971,7 @@ impl IrSubmitState {
         ir_clean: bool,
         partial: &'a mut PartitionSubmitResult,
         partial_tv: &'a mut TimelineValue,
+        cpu_dispatches: &'a [CpuDispatchExec],
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
         self.sync_replay_mode(ctx);
         let (queue_epochs, host_epochs, host_writes) = self.take_submit_sidecars();
@@ -1806,6 +1992,7 @@ impl IrSubmitState {
                 sidecar,
                 partial,
                 partial_tv,
+                cpu_dispatches,
             },
         )
     }
@@ -1896,6 +2083,7 @@ fn get_or_build_fresh_plan(
             present_bindings: analysis::partition_present_binding_ids(ir, waves),
             needs_standalone: !partition_waves_can_retain(ir, waves),
             has_upload_slots: analysis::partition_waves_have_upload_slots(ir, waves),
+            has_cpu: analysis::waves_have_cpu_dispatch(ir, waves),
         });
     }
     entry.fresh_plan = Some(coalesce_fresh_plan_for_fused_upload(plan, fuse_upload_with_compute));
@@ -1988,8 +2176,9 @@ fn get_or_build_partitioned_commands(
                 .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
         });
 
-        if has_present || has_upload_slots {
-            // Deferred: commands emitted fresh at submit time with a resolver.
+        if has_present || has_upload_slots || analysis::waves_have_cpu_dispatch(ir, waves) {
+            // Deferred: present/upload commands are emitted fresh at submit time with a
+            // resolver; CPU partitions are lowered by `run_cpu_partition` instead.
             compute_partitions.push(Vec::new());
             graph_partitions.push(None);
         } else if has_render {
@@ -2076,6 +2265,7 @@ mod slice_retention_tests {
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
+                &[],
             )
             .unwrap();
     }
@@ -2169,6 +2359,7 @@ mod slice_retention_tests {
                     sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                     partial: &mut partial,
                     partial_tv: &mut partial_tv,
+                    cpu_dispatches: &[],
                 },
             )
             .unwrap();
@@ -2270,6 +2461,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .unwrap();
@@ -2329,6 +2521,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .unwrap();
@@ -2464,6 +2657,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .expect_err("second present acquire must fail");
@@ -2587,6 +2781,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .unwrap();
@@ -2655,6 +2850,7 @@ mod slice_retention_tests {
                 present_bindings: Vec::new(),
                 needs_standalone: true,
                 has_upload_slots: true,
+                has_cpu: false,
             },
             FreshSegment {
                 wave_range: 1..2,
@@ -2663,6 +2859,7 @@ mod slice_retention_tests {
                 present_bindings: Vec::new(),
                 needs_standalone: false,
                 has_upload_slots: false,
+                has_cpu: false,
             },
         ];
         let split = super::test_coalesce_fresh_plan(plan.clone(), false);
@@ -2715,6 +2912,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .unwrap();
@@ -2775,6 +2973,7 @@ mod slice_retention_tests {
                 false,
                 &mut partial,
                 &mut partial_tv,
+                &[],
             )
             .unwrap();
 
@@ -2855,6 +3054,7 @@ mod slice_retention_tests {
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
+                &[],
             )
             .unwrap();
     }
@@ -2872,6 +3072,7 @@ mod slice_retention_tests {
             present_bindings: Vec::new(),
             needs_standalone,
             has_upload_slots,
+            has_cpu: false,
         }
     }
 
@@ -3108,6 +3309,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .expect("deposit CopyBuffer in a split render scheme must resolve");
@@ -3184,6 +3386,7 @@ mod slice_retention_tests {
                 sidecar: SubmitSidecarState::new(Vec::new(), Vec::new(), Vec::new()),
                 partial: &mut partial,
                 partial_tv: &mut partial_tv,
+                cpu_dispatches: &[],
             },
         )
         .expect("render partition with deposit slots must emit with a slot resolver");

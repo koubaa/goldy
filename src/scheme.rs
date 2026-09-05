@@ -13,6 +13,7 @@ use crate::backend::RenderCommand;
 use crate::backend::{BufferHandle, GpuCommand};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
+use crate::cpu_dispatch::{CpuBindingExec, CpuDispatchExec, CpuMain};
 use crate::error::GoldyError;
 use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
@@ -751,6 +752,8 @@ pub struct Scheme {
     rt_leases: Vec<RenderTarget>,
     /// Epoch-gated CPU-writable staging pools for deposit declarations.
     deposits: Vec<DepositPool>,
+    /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
+    cpu_dispatches: Vec<CpuDispatchExec>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
@@ -803,6 +806,7 @@ impl Scheme {
             #[cfg(feature = "graphics")]
             rt_leases: Vec::new(),
             deposits: Vec::new(),
+            cpu_dispatches: Vec::new(),
             dirty: true,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
@@ -1565,6 +1569,42 @@ impl Scheme {
         }
     }
 
+    /// Begin recording a CPU dispatch: a serial host function over whole buffer parcels.
+    ///
+    /// Bind parcels with [`SchemeCpuNodeBuilder::with_parcel`] (or
+    /// [`SchemeCpuNodeBuilder::with_lease`]) and scalars with
+    /// [`SchemeCpuNodeBuilder::with_param`], then finish with
+    /// [`SchemeCpuNodeBuilder::dispatch`]. The function's parameters are the node's
+    /// "virtual main": one `&[T]` / `&mut [T]` per bound parcel in binding order,
+    /// followed by one scalar per `with_param`. See [`crate::cpu_dispatch`] for the
+    /// execution model and its cost.
+    pub fn cpu_node<'a>(&'a mut self, label: &'static str) -> SchemeCpuNodeBuilder<'a> {
+        self.dirty = true;
+        SchemeCpuNodeBuilder {
+            scheme: self,
+            label,
+            bindings: Vec::new(),
+            params: Vec::new(),
+        }
+    }
+
+    /// Number of CPU dispatch nodes recorded on this scheme.
+    #[doc(hidden)]
+    pub fn cpu_dispatch_count(&self) -> usize {
+        self.cpu_dispatches.len()
+    }
+
+    /// Mark every CPU dispatch's staging as referenced by the submission at `tv`.
+    fn stamp_cpu_dispatches(&self, tv: TimelineValue) {
+        if self.cpu_dispatches.is_empty() {
+            return;
+        }
+        let ctx_h = self.ctx.backend_handle();
+        for exec in &self.cpu_dispatches {
+            exec.stamp(ctx_h, tv);
+        }
+    }
+
     /// Record GPU-orderable buffer reuse dependencies enforced at submit-worker execute time.
     pub fn record_reuse_parcel(&mut self, parcel: &crate::Parcel) {
         self.submit_state.record_reuse_epochs(&parcel.last_referenced());
@@ -1765,6 +1805,7 @@ impl Scheme {
                     ir_clean,
                     &mut partial,
                     &mut partial_tv,
+                    &self.cpu_dispatches,
                 )
             };
             // When CB replay was torn down (env / profiler), drop topology edges that only
@@ -1784,6 +1825,7 @@ impl Scheme {
         let ((tv, part_result), surface_frames, surface_generations, _partial) = match submit_result {
             Ok(ok) => ok,
             Err((e, surface_frames, partial, partial_tv)) => {
+                self.stamp_cpu_dispatches(partial_tv);
                 return Err(self.cleanup_failed_present_submit(e, surface_frames, &partial, partial_tv));
             }
         };
@@ -1796,6 +1838,7 @@ impl Scheme {
                 pool.stamp_pending(ctx_h, tv);
             }
         }
+        self.stamp_cpu_dispatches(tv);
 
         // Stamp each acquired frame with the timeline of the partition that wrote it.
         for (binding_id, binding_tv) in &part_result.present_binding_tvs {
@@ -1942,8 +1985,10 @@ impl Scheme {
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
+                &self.cpu_dispatches,
             )
             .map_err(|e| {
+                self.stamp_cpu_dispatches(partial_tv);
                 self.ctx.advance_high_water_timeline(partial_tv);
                 self.ctx.classify(e)
             })?;
@@ -1959,6 +2004,7 @@ impl Scheme {
         for pool in &mut self.deposits {
             pool.stamp_pending(ctx_h, tv);
         }
+        self.stamp_cpu_dispatches(tv);
         self.ctx.advance_high_water_timeline(tv);
         self.dirty = false;
 
@@ -2700,6 +2746,9 @@ impl Drop for Scheme {
         for pool in std::mem::take(&mut self.deposits) {
             pool.return_all(&ctx);
         }
+        for exec in std::mem::take(&mut self.cpu_dispatches) {
+            exec.release(&ctx);
+        }
         for mut parcel in self.leases.drain(..) {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
@@ -3255,6 +3304,187 @@ impl<'a> ShaderBinding<'a> {
             name,
             slot: ShaderResourceSlot::Sampler(sampler),
         }
+    }
+}
+
+/// One parcel bound to a CPU dispatch before [`SchemeCpuNodeBuilder::dispatch`] runs.
+struct PendingCpuBinding {
+    resource: ResourceId,
+    stamp: Arc<crate::parcel::ParcelStamp>,
+    buffer: BufferHandle,
+    offset: u64,
+    byte_size: u64,
+    keepalive: Arc<Allocation>,
+    access: NodeAccess,
+}
+
+impl PendingCpuBinding {
+    fn from_parcel(label: &str, parcel: &Parcel, access: NodeAccess) -> Result<Self, GoldyError> {
+        let Some(buffer) = parcel.buffer_handle() else {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "cpu_node({label}): with_parcel requires a buffer parcel (textures are not supported)"
+            )));
+        };
+        let keepalive = parcel.grant_buffer_keepalive().map_err(GoldyError::Backend)?;
+        Ok(Self {
+            resource: parcel.resource_id(),
+            stamp: parcel.stamp_handle(),
+            buffer,
+            offset: parcel.source_offset(),
+            byte_size: parcel.byte_size(),
+            keepalive,
+            access,
+        })
+    }
+}
+
+/// Builder for a CPU dispatch node within a [`Scheme`]; see [`Scheme::cpu_node`].
+pub struct SchemeCpuNodeBuilder<'a> {
+    scheme: &'a mut Scheme,
+    label: &'static str,
+    bindings: Vec<Result<PendingCpuBinding, GoldyError>>,
+    params: Vec<u32>,
+}
+
+impl SchemeCpuNodeBuilder<'_> {
+    /// Bind a whole buffer parcel as the next slice parameter of the virtual main.
+    ///
+    /// `access` drives both graph ordering and staging: `Read` downloads only,
+    /// `Write` / `ReadWrite` download then upload, `Overwrite` uploads only (the slice
+    /// arrives zeroed). The matching parameter must be `&[T]` for `Read` and `&mut [T]`
+    /// otherwise, with the parcel byte size a multiple of `size_of::<T>()`.
+    ///
+    /// Errors are reported by [`Self::dispatch`].
+    pub fn with_parcel(mut self, parcel: &Parcel, access: NodeAccess) -> Self {
+        self.bindings
+            .push(PendingCpuBinding::from_parcel(self.label, parcel, access));
+        self
+    }
+
+    /// Bind a scheme-held buffer lease as the next slice parameter of the virtual main.
+    pub fn with_lease(mut self, lease: &Lease<LeaseBuffer>, access: NodeAccess) -> Self {
+        let parcel = &self.scheme.leases[lease.id.0 as usize];
+        self.bindings
+            .push(PendingCpuBinding::from_parcel(self.label, parcel, access));
+        self
+    }
+
+    /// Append one scalar virtual-main parameter (`u32` wire word; `f32` via `to_bits()`).
+    pub fn with_param(mut self, value: u32) -> Self {
+        self.params.push(value);
+        self
+    }
+
+    /// Finalize the node with its virtual main.
+    ///
+    /// Validates the function signature against the bindings (arity, mutability vs
+    /// access, element size) and allocates the node's staging buffers. Fails without
+    /// recording anything when validation or allocation fails.
+    pub fn dispatch<M, F: CpuMain<M>>(self, main: F) -> Result<(), GoldyError> {
+        let Self {
+            scheme,
+            label,
+            bindings,
+            params,
+        } = self;
+        let bindings = bindings.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let shapes: Vec<(NodeAccess, u64)> = bindings.iter().map(|b| (b.access, b.byte_size)).collect();
+        crate::cpu_dispatch::validate_signature(label, &F::signature(), &shapes, params.len())?;
+
+        let ctx = &scheme.ctx;
+        let device = ctx.device();
+
+        // Allocate all staging first so a failure part-way leaves nothing recorded.
+        type Staging = (Option<BufferHandle>, Option<Parcel>);
+        let release_staging = |staged: Vec<Staging>| {
+            let mut backend = device.inner.backend.lock().unwrap();
+            for (readback, _) in &staged {
+                if let Some(h) = readback {
+                    backend.free_readback_buffer(*h);
+                }
+            }
+            drop(backend);
+            for (_, upload) in staged {
+                if let Some(mut p) = upload {
+                    let ready_after = p.last_referenced();
+                    p.release_bookkeeping();
+                    ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ready_after));
+                }
+            }
+        };
+
+        let mut staged: Vec<Staging> = Vec::with_capacity(bindings.len());
+        for b in &bindings {
+            // Every access except Overwrite lets the function observe the parcel's
+            // current bytes, so it needs a device→host copy first.
+            let readback = if b.access != NodeAccess::Overwrite && b.byte_size > 0 {
+                let handle = {
+                    let mut backend = device.inner.backend.lock().unwrap();
+                    backend.alloc_readback_buffer(device.inner.handle, b.byte_size)
+                };
+                match handle {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        release_staging(staged);
+                        return Err(ctx.classify(e));
+                    }
+                }
+            } else {
+                None
+            };
+            let upload = if b.access.writes() && b.byte_size > 0 {
+                let acquired = ctx.with_transient_pool(|pool| {
+                    pool.acquire_buffer(
+                        ctx,
+                        b.byte_size,
+                        crate::types::BufferKind::Scattered,
+                        BufferFlags::CPU_WRITABLE,
+                        None,
+                    )
+                });
+                match acquired {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        staged.push((readback, None));
+                        release_staging(staged);
+                        return Err(ctx.classify(e));
+                    }
+                }
+            } else {
+                None
+            };
+            staged.push((readback, upload));
+        }
+
+        let cpu_id = scheme.cpu_dispatches.len() as u32;
+        let mut ir_bindings: Vec<ResourceBinding> = Vec::with_capacity(bindings.len());
+        let mut execs: Vec<CpuBindingExec> = Vec::with_capacity(bindings.len());
+        for (b, (readback, upload)) in bindings.into_iter().zip(staged) {
+            scheme.submit_state.register_stamp_parts(b.resource, b.stamp);
+            ir_bindings.push(ResourceBinding {
+                resource: b.resource,
+                access: b.access,
+            });
+            execs.push(CpuBindingExec {
+                resource: b.resource,
+                buffer: b.buffer,
+                offset: b.offset,
+                byte_size: b.byte_size,
+                access: b.access,
+                readback,
+                upload,
+                _keepalive: b.keepalive,
+            });
+        }
+        scheme
+            .cpu_dispatches
+            .push(CpuDispatchExec::new(label, main, execs, params));
+        scheme.ir.nodes.push(TaskNode {
+            label,
+            bindings: ir_bindings,
+            kind: NodeKind::CpuDispatch { cpu_id },
+        });
+        Ok(())
     }
 }
 
@@ -4020,6 +4250,336 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             ctx.with_transient_pool(|pool| pool.pending_count()),
             1,
             "dropped lease backing is parked in the pool"
+        );
+    }
+
+    // ---- CPU dispatch nodes -------------------------------------------------
+
+    fn u32_buffer(pool: &mut RetainedPool, data: &[u32]) -> crate::Buffer {
+        pool.acquire_buffer_with_data(data, BufferKind::Scattered)
+            .expect("alloc buffer")
+    }
+
+    fn read_u32(grant: &crate::WithdrawTransaction, frame: &mut Submission) -> Vec<u32> {
+        let bytes = grant.claim(frame).expect("claim").consume().expect("consume");
+        bytemuck::cast_slice(&bytes).to_vec()
+    }
+
+    #[test]
+    fn cpu_node_appends_ir_node_and_allocates_staging() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let buf = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+        let (allocs_before, _) = mock_readback_counts(&device);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .cpu_node("double")
+            .with_parcel(&buf, NodeAccess::ReadWrite)
+            .dispatch(|data: &mut [u32]| {
+                for d in data {
+                    *d *= 2;
+                }
+            })
+            .expect("record cpu node");
+
+        assert_eq!(scheme.ir_node_count(), 1);
+        assert_eq!(scheme.cpu_dispatch_count(), 1);
+        assert!(scheme.is_dirty());
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::CpuDispatch { cpu_id: 0 } => {}
+            other => panic!("expected CpuDispatch node, got {other:?}"),
+        }
+        assert_eq!(scheme.ir.nodes[0].bindings.len(), 1);
+        assert_eq!(scheme.ir.nodes[0].bindings[0].access, NodeAccess::ReadWrite);
+        let (allocs_after, _) = mock_readback_counts(&device);
+        assert_eq!(
+            allocs_after - allocs_before,
+            1,
+            "ReadWrite binding allocates one readback staging"
+        );
+        let exec = &scheme.cpu_dispatches[0];
+        assert!(exec.bindings[0].readback.is_some());
+        assert!(exec.bindings[0].upload.is_some());
+
+        let (_, frees_before) = mock_readback_counts(&device);
+        drop(scheme);
+        let (_, frees_after) = mock_readback_counts(&device);
+        assert_eq!(frees_after - frees_before, 1, "scheme drop frees readback staging");
+    }
+
+    #[test]
+    fn cpu_node_staging_follows_access() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let a = u32_buffer(&mut pool, &[1, 2]);
+        let b = u32_buffer(&mut pool, &[3, 4]);
+        let c = u32_buffer(&mut pool, &[5, 6]);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .cpu_node("mixed")
+            .with_parcel(&a, NodeAccess::Read)
+            .with_parcel(&b, NodeAccess::Overwrite)
+            .with_parcel(&c, NodeAccess::Write)
+            .dispatch(|_a: &[u32], _b: &mut [u32], _c: &mut [u32]| {})
+            .expect("record");
+        let b = &scheme.cpu_dispatches[0].bindings;
+        assert!(b[0].readback.is_some() && b[0].upload.is_none(), "Read: download only");
+        assert!(
+            b[1].readback.is_none() && b[1].upload.is_some(),
+            "Overwrite: upload only"
+        );
+        assert!(
+            b[2].readback.is_some() && b[2].upload.is_some(),
+            "Write: download then upload"
+        );
+    }
+
+    #[test]
+    fn cpu_node_rejects_mismatched_virtual_main() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let buf = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+        let (allocs_before, frees_before) = mock_readback_counts(&device);
+
+        let mut scheme = Scheme::new(&ctx);
+        // Two slice parameters, one binding.
+        let err = scheme
+            .cpu_node("bad_arity")
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(|_a: &[u32], _b: &[u32]| {})
+            .unwrap_err();
+        assert!(format!("{err}").contains("slice parameter"), "{err}");
+        // Read access but `&mut [T]` parameter.
+        let err = scheme
+            .cpu_node("bad_mut")
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(|_a: &mut [u32]| {})
+            .unwrap_err();
+        assert!(format!("{err}").contains("Read"), "{err}");
+        // Element size does not divide the parcel (16 bytes / 3).
+        let err = scheme
+            .cpu_node("bad_stride")
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(|_a: &[[u8; 3]]| {})
+            .unwrap_err();
+        assert!(format!("{err}").contains("multiple"), "{err}");
+        // Scalar count mismatch.
+        let err = scheme
+            .cpu_node("bad_scalars")
+            .with_parcel(&buf, NodeAccess::Read)
+            .with_param(1)
+            .dispatch(|_a: &[u32]| {})
+            .unwrap_err();
+        assert!(format!("{err}").contains("scalar"), "{err}");
+
+        assert_eq!(scheme.ir_node_count(), 0, "failed records leave no node");
+        assert_eq!(scheme.cpu_dispatch_count(), 0);
+        let (allocs_after, frees_after) = mock_readback_counts(&device);
+        assert_eq!(
+            allocs_after - allocs_before,
+            frees_after - frees_before,
+            "no staging leaked"
+        );
+    }
+
+    #[test]
+    fn cpu_node_rejects_texture_parcel() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let tex = pool
+            .acquire_texture(
+                2,
+                2,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Direct,
+                crate::types::TextureFlags::empty(),
+                None,
+            )
+            .expect("texture");
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .cpu_node("tex")
+            .with_parcel(&tex, NodeAccess::Read)
+            .dispatch(|_a: &[u8]| {})
+            .unwrap_err();
+        assert!(format!("{err}").contains("buffer parcel"), "{err}");
+    }
+
+    #[test]
+    fn cpu_node_is_isolated_in_its_own_wave_and_partition() {
+        use crate::task_graph::analysis;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let a = u32_buffer(&mut pool, &[0; 8]);
+        let b = u32_buffer(&mut pool, &[0; 8]);
+        let c = u32_buffer(&mut pool, &[0; 8]);
+
+        let mut scheme = Scheme::new(&ctx);
+        // wave 0: gpu writes A         | independent gpu writes C
+        // wave 0': cpu reads A, writes B (same depth as C, but must be alone)
+        // wave 1: gpu reads B
+        scheme
+            .node("produce_a", &pipeline)
+            .with_parcel(&a, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .cpu_node("host")
+            .with_parcel(&a, NodeAccess::Read)
+            .with_parcel(&b, NodeAccess::Overwrite)
+            .dispatch(|_a: &[u32], _b: &mut [u32]| {})
+            .expect("record");
+        scheme
+            .node("independent_c", &pipeline)
+            .with_parcel(&c, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("consume_b", &pipeline)
+            .with_parcel(&b, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let edges = analysis::build_edges(&scheme.ir);
+        let schedule = analysis::schedule_waves(&scheme.ir, &edges);
+        let waves: Vec<Vec<usize>> = schedule.waves.iter().map(|w| w.node_indices.clone()).collect();
+        assert_eq!(
+            waves,
+            vec![vec![0, 2], vec![1], vec![3]],
+            "cpu node (1) is peeled from its depth group into its own wave"
+        );
+        assert_eq!(analysis::wave_cpu_dispatch(&scheme.ir, &schedule.waves[1]), Some(0));
+        assert!(
+            !schedule.waves[1].barriers_before.is_empty(),
+            "producer→cpu edge yields a barrier on A"
+        );
+        assert!(
+            !schedule.waves[2].barriers_before.is_empty(),
+            "cpu→consumer edge yields a barrier on B"
+        );
+
+        let parts = analysis::partition_wave_ranges(&scheme.ir, &schedule, true);
+        assert_eq!(parts, vec![0..1, 1..2, 2..3], "cpu wave is its own partition");
+    }
+
+    #[test]
+    fn cpu_node_runs_on_mock_and_resubmits() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let data = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+        let out = u32_buffer(&mut pool, &[0; 4]);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .cpu_node("scale_into")
+            .with_parcel(&data, NodeAccess::ReadWrite)
+            .with_parcel(&out, NodeAccess::Overwrite)
+            .with_param(10)
+            .with_param(0.5f32.to_bits())
+            .dispatch(|data: &mut [u32], out: &mut [u32], add: u32, half: f32| {
+                assert_eq!(half, 0.5);
+                for (o, d) in out.iter_mut().zip(data.iter_mut()) {
+                    *d += 1;
+                    *o = *d + add;
+                }
+            })
+            .expect("record");
+        let grant_data = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &data)
+            .expect("withdraw data");
+        let grant_out = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw out");
+
+        let mut frame = scheme.submit().expect("first submit");
+        assert_eq!(read_u32(&grant_data, &mut frame), vec![2, 3, 4, 5]);
+        assert_eq!(read_u32(&grant_out, &mut frame), vec![12, 13, 14, 15]);
+
+        // Second submission observes the uploaded result of the first.
+        let mut frame = scheme.submit().expect("second submit");
+        assert_eq!(read_u32(&grant_data, &mut frame), vec![3, 4, 5, 6]);
+        assert_eq!(read_u32(&grant_out, &mut frame), vec![13, 14, 15, 16]);
+        assert!(!scheme.is_dirty());
+    }
+
+    #[test]
+    fn cpu_node_download_and_upload_are_separate_transfer_submits() {
+        use crate::backend::GpuCommand;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let data = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("gpu_write", &pipeline)
+            .with_parcel(&data, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .cpu_node("host_rw")
+            .with_parcel(&data, NodeAccess::ReadWrite)
+            .dispatch(|_d: &mut [u32]| {})
+            .expect("record");
+        scheme
+            .node("gpu_read", &pipeline)
+            .with_parcel(&data, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+
+        crate::test_support::mock_reset_tracking(&device);
+        scheme.submit().expect("submit");
+
+        let handle = data.buffer_handle().unwrap();
+        let (downloads, uploads, barriers) = crate::test_support::with_mock(&device, |m| {
+            let mut downloads = 0;
+            let mut uploads = 0;
+            let mut barriers = Vec::new();
+            for batch in &m.recorded_compute_commands {
+                for cmd in batch {
+                    match cmd {
+                        GpuCommand::CopyBuffer { src, dst, .. } => {
+                            if *src == handle {
+                                downloads += 1;
+                            }
+                            if *dst == handle {
+                                uploads += 1;
+                            }
+                        }
+                        GpuCommand::ResourceBarrier { buffers, .. } => {
+                            barriers.extend(buffers.iter().filter(|(h, _)| *h == handle).map(|(_, u)| *u));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (downloads, uploads, barriers)
+        });
+        assert_eq!(downloads, 1, "one device→staging copy");
+        assert_eq!(uploads, 1, "one staging→device copy");
+        assert!(
+            barriers
+                .iter()
+                .any(|u| u.dst.kinds == crate::task_graph::UsageKindFlags::TRANSFER
+                    && u.dst.access == crate::task_graph::NodeAccessUnion::ReadOnly
+                    && u.src.kinds.contains(crate::task_graph::UsageKindFlags::COMPUTE)),
+            "download barrier: compute write → transfer read; got {barriers:?}"
+        );
+        assert!(
+            barriers
+                .iter()
+                .any(|u| u.dst.kinds == crate::task_graph::UsageKindFlags::TRANSFER
+                    && u.dst.access == crate::task_graph::NodeAccessUnion::Write),
+            "upload barrier: → transfer write; got {barriers:?}"
         );
     }
 

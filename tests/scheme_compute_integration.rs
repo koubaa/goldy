@@ -4784,6 +4784,192 @@ mod imp {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // CPU dispatch nodes
+    // ---------------------------------------------------------------------------
+
+    /// GPU → CPU → GPU chain on one parcel, resubmitted so the host node runs inside a
+    /// replayed scheme and observes the previous frame's device writes.
+    fn scheme_cpu_dispatch_between_gpu_dispatches(device: &Device) {
+        let ctx = submission_context(device);
+        let double_pipe = ComputePipeline::new(
+            device,
+            &ShaderModule::from_slang(device, IN_PLACE_DOUBLE_SHADER).unwrap(),
+        )
+        .unwrap();
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let input: Vec<u32> = (1..=64).collect();
+        let data = pool.acquire_buffer_with_data(&input, BufferKind::Scattered).unwrap();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("double_a", &double_pipe)
+            .with_parcel(&data, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        scheme
+            .cpu_node("add_one")
+            .with_parcel(&data, NodeAccess::ReadWrite)
+            .dispatch(|data: &mut [u32]| {
+                assert_eq!(data.len(), 64);
+                for d in data {
+                    *d += 1;
+                }
+            })
+            .expect("record cpu node");
+        scheme
+            .node("double_b", &double_pipe)
+            .with_parcel(&data, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &data)
+            .expect("withdraw");
+
+        let step = |x: u32| (2 * x + 1) * 2;
+
+        let mut frame = scheme.submit().expect("first submit");
+        let got = read_grant_u32(&grant, &mut frame, 64);
+        let want: Vec<u32> = input.iter().map(|&x| step(x)).collect();
+        assert_eq!(got, want, "gpu double → cpu +1 → gpu double");
+
+        let mut frame = scheme.submit().expect("second submit");
+        let got = read_grant_u32(&grant, &mut frame, 64);
+        let want: Vec<u32> = want.iter().map(|&x| step(x)).collect();
+        assert_eq!(got, want, "second submission chains on the first");
+        assert!(!scheme.is_dirty(), "cpu nodes do not dirty a clean scheme");
+    }
+
+    /// Read-only and overwrite bindings, scalar params, and a downstream GPU consumer.
+    fn scheme_cpu_dispatch_read_overwrite_and_params(device: &Device) {
+        let ctx = submission_context(device);
+        let add_pipe =
+            ComputePipeline::new(device, &ShaderModule::from_slang(device, ADD_TEN_SHADER).unwrap()).unwrap();
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let src: Vec<u32> = (0..64).collect();
+        let a = pool.acquire_buffer_with_data(&src, BufferKind::Scattered).unwrap();
+        let out = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .unwrap();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .cpu_node("scale_bias")
+            .with_parcel(&a, NodeAccess::Read)
+            .with_parcel(&out, NodeAccess::Overwrite)
+            .with_param(3)
+            .with_param(1.5f32.to_bits())
+            .with_param(1)
+            .dispatch(|a: &[u32], out: &mut [u32], scale: u32, bias: f32, enabled: bool| {
+                assert!(enabled);
+                assert!(out.iter().all(|&o| o == 0), "Overwrite slice arrives zeroed");
+                for (o, &x) in out.iter_mut().zip(a) {
+                    *o = x * scale + bias as u32;
+                }
+            })
+            .expect("record cpu node");
+        scheme
+            .node("add_ten", &add_pipe)
+            .with_parcel(&out, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let grant_out = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &out)
+            .expect("withdraw out");
+        let grant_a = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &a)
+            .expect("withdraw a");
+
+        for _ in 0..3 {
+            let mut frame = scheme.submit().expect("submit");
+            let got = read_grant_u32(&grant_out, &mut frame, 64);
+            let want: Vec<u32> = src.iter().map(|&x| x * 3 + 1 + 10).collect();
+            assert_eq!(got, want);
+            assert_eq!(
+                read_grant_u32(&grant_a, &mut frame, 64),
+                src,
+                "Read binding leaves a untouched"
+            );
+        }
+    }
+
+    /// A CPU node on a scheme-held lease, fed by one GPU node and consumed by another.
+    fn scheme_cpu_dispatch_on_lease(device: &Device) {
+        let ctx = submission_context(device);
+        let copy_pipe = ComputePipeline::new(device, &ShaderModule::from_slang(device, COPY_SHADER).unwrap()).unwrap();
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let src: Vec<u32> = (0..64).map(|x| x * 7).collect();
+        let input = pool.acquire_buffer_with_data(&src, BufferKind::Scattered).unwrap();
+        let output = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .unwrap();
+
+        let mut scheme = Scheme::new(&ctx);
+        let scratch = scheme.lease_buffer(64 * 4).expect("lease");
+        scheme
+            .node("to_scratch", &copy_pipe)
+            .with_parcel(&input, NodeAccess::Read)
+            .with_parcel(&scratch, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .cpu_node("reverse")
+            .with_lease(&scratch, NodeAccess::ReadWrite)
+            .dispatch(|s: &mut [u32]| s.reverse())
+            .expect("record cpu node");
+        scheme
+            .node("from_scratch", &copy_pipe)
+            .with_parcel(&scratch, NodeAccess::Read)
+            .with_parcel(&output, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let grant = MemoryExchange::new(&ctx)
+            .bind_withdraw(&mut scheme, &output)
+            .expect("withdraw");
+
+        let mut frame = scheme.submit().expect("submit");
+        let got = read_grant_u32(&grant, &mut frame, 64);
+        let mut want = src.clone();
+        want.reverse();
+        assert_eq!(got, want);
+    }
+
+    /// Two independent CPU nodes plus a CPU-only scheme (no GPU nodes at all).
+    fn scheme_cpu_dispatch_only_scheme(device: &Device) {
+        let ctx = submission_context(device);
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let a = pool
+            .acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)
+            .unwrap();
+        let b = pool
+            .acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)
+            .unwrap();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .cpu_node("inc_a")
+            .with_parcel(&a, NodeAccess::ReadWrite)
+            .dispatch(|a: &mut [u32]| a.iter_mut().for_each(|x| *x += 1))
+            .expect("record");
+        scheme
+            .cpu_node("sum_into_b")
+            .with_parcel(&a, NodeAccess::Read)
+            .with_parcel(&b, NodeAccess::Write)
+            .dispatch(|a: &[u32], b: &mut [u32]| {
+                for (bi, ai) in b.iter_mut().zip(a) {
+                    *bi += ai;
+                }
+            })
+            .expect("record");
+        let grant_a = MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a).unwrap();
+        let grant_b = MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b).unwrap();
+
+        let mut frame = scheme.submit().expect("submit");
+        assert_eq!(read_grant_u32(&grant_a, &mut frame, 4), vec![2, 3, 4, 5]);
+        assert_eq!(read_grant_u32(&grant_b, &mut frame, 4), vec![12, 23, 34, 45]);
+        let mut frame = scheme.submit().expect("resubmit");
+        assert_eq!(read_grant_u32(&grant_a, &mut frame, 4), vec![3, 4, 5, 6]);
+        assert_eq!(read_grant_u32(&grant_b, &mut frame, 4), vec![15, 27, 39, 51]);
+    }
+
     /// Compute integration gate for all shipped backends, including CUDA-only builds:
     /// `cargo test --no-default-features --features cuda --test scheme_compute_integration`
     pub fn run() {
@@ -4930,6 +5116,10 @@ mod imp {
         trial!(cuda_uint8_t4_writes_rgba8_unorm);
         trial!(cuda_half4_writes_rgba16_float);
         trial!(cuda_rejects_multiple_distinct_samplers);
+        trial!(scheme_cpu_dispatch_between_gpu_dispatches);
+        trial!(scheme_cpu_dispatch_read_overwrite_and_params);
+        trial!(scheme_cpu_dispatch_on_lease);
+        trial!(scheme_cpu_dispatch_only_scheme);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);
