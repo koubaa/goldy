@@ -66,6 +66,7 @@
 
 - [Motivation](./design/motivation.md)
 - [What Goldy Sheds](./design/what-goldy-sheds.md)
+- [Shader Specialization Prediction](./design/shader-specialization.md)
 - [Goldy vs wgpu](./design/comparison.md)
 - [Target Hardware](./design/hardware.md)
 
