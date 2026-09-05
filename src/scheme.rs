@@ -1855,10 +1855,13 @@ impl Scheme {
             if topo_dirty {
                 self.topology_dirty.store(false, Ordering::Release);
             }
-        } else if part_result.resubmit_hits > 0 {
-            // Require an actual partition-level cache hit. `all_from_cache()` is also
-            // true when CB replay is disabled (fresh encodes leave `records == 0`),
-            // and those must not count as retention hits.
+        }
+        // Params-dirty submits often mix a re-record with retained-partition hits.
+        // Count those hits even when `recorded` is true (`params_dirty` always is).
+        // Require an actual partition-level cache hit. `all_from_cache()` is also
+        // true when CB replay is disabled (fresh encodes leave `records == 0`),
+        // and those must not count as retention hits.
+        if part_result.resubmit_hits > 0 {
             #[cfg(not(feature = "metal"))]
             {
                 self.stats.resubmit_hits += 1;

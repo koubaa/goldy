@@ -129,14 +129,18 @@ fn compile_compute_stage_unlocked(
     };
 
     let path_refs: Vec<&str> = shader.search_paths().iter().map(|s| s.as_str()).collect();
-    let define_refs: Vec<(&str, &str)> = shader.defines().iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut extra_defines: Vec<(&str, &str)> = shader.defines().iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let caps = device.capabilities();
+    if (caps.ray_query || caps.ray_tracing_pipelines) && extra_defines.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY") {
+        extra_defines.push(("GOLDY_RAY_QUERY", "1"));
+    }
     let result = compiler.compile_bindless_with_reflection_effective(
         shader.source(),
         shader.effective_source(),
         target,
         &[("cs_main", crate::slang::SlangStage::Compute)],
         &path_refs,
-        &define_refs,
+        &extra_defines,
         shader.layout_checks(),
         shader.optimization_level(),
     )?;
