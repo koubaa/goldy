@@ -293,6 +293,8 @@ mod imp {
     fn scheme_bakes_scalar_param_without_shader_cooperation(device: &Device) {
         use goldy::slang::virtual_main::scalar_specialization_macro;
 
+        // This test swaps pipelines by hand and counts records; keep the predictor out of it.
+        let _spec = goldy::test_support::SpecializationOverride::force_disabled();
         let ctx = submission_context(&device);
 
         let universal_module = ShaderModule::from_slang(device, SCALED_BIAS_SHADER).expect("universal shader");
@@ -358,10 +360,108 @@ mod imp {
         }
     }
 
+    /// The predictor, end to end: a dispatch whose scalar params hold still is moved onto a
+    /// specialized program without anyone asking, computes exactly what it did before, and
+    /// comes back to the caller's program the moment a baked param changes.
+    fn scheme_predictor_specializes_stable_params_transparently(device: &Device) {
+        let _spec = goldy::test_support::SpecializationOverride::force_enabled();
+        let ctx = submission_context(&device);
+        // WebGPU derives bind group layouts from shader usage, so goldy declines to predict
+        // there (`compute_pipeline_layout_follows_signature`); CPU has no bake macros.
+        let predicts = !matches!(device.backend_type(), BackendType::WebGpu | BackendType::Cpu);
+
+        let module = ShaderModule::from_slang(device, SCALED_BIAS_SHADER).expect("shader");
+        let universal = ComputePipeline::new(device, &module).expect("pipeline");
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let data = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("data buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        let node = scheme
+            .node("scaled_bias", &universal)
+            .with_parcel(&data, NodeAccess::Write)
+            .with_param(3)
+            .with_param(7)
+            .dispatch(1, 1, 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &data)
+            .expect("withdraw data");
+
+        // Submit once, check every element, and let any compile the predictor started land
+        // before the next frame polls for it.
+        let mut frame_and_check = |scheme: &mut Scheme, factor: u32, bias: u32, what: &str| {
+            let mut frame = scheme.submit().expect(what);
+            for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+                let i = i as u32;
+                assert_eq!(val, i * factor + bias, "{what}: element {i}");
+            }
+            goldy::test_support::wait_for_specialization_compiles(scheme);
+        };
+
+        // Frame 1 records; frames 2..=11 are clean. Streak 2 (frame 3) starts the compile,
+        // streak 10 (frame 11) swaps the variant in as a params-only re-record.
+        for f in 1..=11 {
+            frame_and_check(&mut scheme, 3, 7, &format!("frame {f} (universal or variant)"));
+        }
+        let stats = scheme.replay_stats();
+        if predicts {
+            assert_eq!(
+                stats.specialization_warms, 1,
+                "one compile for the stable (factor, bias) pair"
+            );
+            assert_eq!(stats.specialization_promotions, 1, "promoted on the 10th clean frame");
+            assert!(scheme.node_is_specialized(node));
+            assert_eq!(stats.records, 2, "initial record plus the promotion re-record");
+        } else {
+            assert_eq!(stats.specialization_warms, 0, "this backend declines to predict");
+            assert!(!scheme.node_is_specialized(node));
+        }
+
+        // The specialized program is indistinguishable from the universal one.
+        frame_and_check(&mut scheme, 3, 7, "steady state on the variant");
+        assert_eq!(scheme.replay_stats().records, stats.records, "no further records");
+
+        // A baked fact changes: the node is back on the caller's pipeline before the next
+        // submit, so the new value is read at runtime and the output follows it.
+        scheme.set_node_param(node, 0, 5).expect("set factor");
+        assert!(!scheme.node_is_specialized(node), "demoted inside set_node_param");
+        if predicts {
+            assert_eq!(scheme.replay_stats().specialization_demotions, 1);
+        }
+        frame_and_check(&mut scheme, 5, 7, "first frame after the factor changed");
+
+        // Left alone again, the site re-earns a specialization for the new facts (bias first,
+        // since it never moved; factor once it has held long enough) and still computes the
+        // same thing.
+        for f in 1..=25 {
+            frame_and_check(&mut scheme, 5, 7, &format!("post-demotion frame {f}"));
+        }
+        let stats = scheme.replay_stats();
+        if predicts {
+            assert!(scheme.node_is_specialized(node), "re-promoted on the new facts");
+            assert!(
+                stats.specialization_promotions >= 2,
+                "promotions: {}",
+                stats.specialization_promotions
+            );
+            assert_eq!(stats.specialization_demotions, 1, "no spurious demotions");
+        } else {
+            assert_eq!(stats.specialization_promotions, 0);
+        }
+
+        // And the way back always works, whichever slot is baked at the time.
+        scheme.set_node_param(node, 1, 100).expect("set bias");
+        assert!(!scheme.node_is_specialized(node));
+        frame_and_check(&mut scheme, 5, 100, "first frame after the bias changed");
+    }
+
     /// End-to-end specialization: compile a variant from one module, swap it onto a recorded
     /// dispatch node, and confirm the GPU runs the new program while the rest of the scheme
     /// stays retained and keeps its record count.
     fn scheme_specialized_variant_swap(device: &Device) {
+        // This test swaps pipelines by hand and counts records; keep the predictor out of it.
+        let _spec = goldy::test_support::SpecializationOverride::force_disabled();
         let ctx = submission_context(&device);
 
         let universal_module = ShaderModule::from_slang(device, TINT_SPECIALIZABLE_SHADER).expect("universal shader");
@@ -5217,6 +5317,7 @@ mod imp {
 
         trial_retain!(scheme_specialized_variant_swap);
         trial_retain!(scheme_bakes_scalar_param_without_shader_cooperation);
+        trial_retain!(scheme_predictor_specializes_stable_params_transparently);
         trial_retain!(scheme_graph_linear_chain);
         trial!(scheme_graph_independent_dispatches);
         trial!(scheme_graph_diamond_dependency);
