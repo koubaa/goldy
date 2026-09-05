@@ -273,6 +273,92 @@ mod imp {
     }
     "#;
 
+    /// A shader with two ordinary `with_param` scalars and no specialization plumbing of its
+    /// own. Baking either one is something the runtime can do without the author's help.
+    const SCALED_BIAS_SHADER: &str = r#"
+    import goldy_exp;
+
+    [goldy_compute]
+    [numthreads(64, 1, 1)]
+    void cs_main(Scattered<uint> data, ThreadId id, uint factor, uint bias) {
+        data[id.x] = id.x * factor + bias;
+    }
+    "#;
+
+    /// Bake a scalar param into the program without touching the shader source.
+    ///
+    /// The runtime can do this for any dispatch site because it already holds the wire words.
+    /// `bias` stays a runtime read, and it has to keep arriving correctly after `factor` is
+    /// baked — that is what proves the push-constant layout is unchanged, and therefore that a
+    /// baked pipeline can be swapped under an already-recorded dispatch.
+    fn scheme_bakes_scalar_param_without_shader_cooperation(device: &Device) {
+        use goldy::slang::virtual_main::scalar_specialization_macro;
+
+        let ctx = submission_context(&device);
+
+        let universal_module = ShaderModule::from_slang(device, SCALED_BIAS_SHADER).expect("universal shader");
+        let baked_factor = scalar_specialization_macro("cs_main", 0);
+        let baked_module = universal_module
+            .variant(&[(baked_factor.as_str(), "10u")])
+            .expect("variant with the factor baked");
+        let universal = ComputePipeline::new(device, &universal_module).expect("universal pipeline");
+        let baked = ComputePipeline::new(device, &baked_module).expect("baked pipeline");
+
+        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let data = pool
+            .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .expect("data buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        let node = scheme
+            .node("scaled_bias", &universal)
+            .with_parcel(&data, NodeAccess::Write)
+            .with_param(3)
+            .with_param(7)
+            .dispatch(1, 1, 1);
+        let grant = MemoryExchange::new(scheme.context())
+            .bind_withdraw(&mut scheme, &data)
+            .expect("withdraw data");
+
+        let mut frame = scheme.submit().expect("universal submit");
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+            let i = i as u32;
+            assert_eq!(val, i * 3 + 7, "universal element {i} reads both params at runtime");
+        }
+        let records_before = scheme.replay_stats().records;
+
+        // The recorded push payload is untouched: the same (3, 7) wire words are still baked
+        // into the command list. Only the program the site binds changes.
+        scheme
+            .set_node_pipeline(node, &baked)
+            .expect("swap in the baked pipeline");
+        let mut frame = scheme.submit().expect("baked submit");
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+            let i = i as u32;
+            assert_eq!(
+                val,
+                i * 10 + 7,
+                "element {i} must use the baked factor and the runtime bias"
+            );
+        }
+        assert_eq!(
+            scheme.replay_stats().records,
+            records_before + 1,
+            "baking costs exactly one re-record"
+        );
+
+        // Reverting to the universal program restores the runtime read, so a mispredicted
+        // site can always be walked back.
+        scheme
+            .set_node_pipeline(node, &universal)
+            .expect("revert to the universal pipeline");
+        let mut frame = scheme.submit().expect("reverted submit");
+        for (i, &val) in read_grant_u32(&grant, &mut frame, 64).iter().enumerate() {
+            let i = i as u32;
+            assert_eq!(val, i * 3 + 7, "reverted element {i} reads the runtime factor again");
+        }
+    }
+
     /// End-to-end specialization: compile a variant from one module, swap it onto a recorded
     /// dispatch node, and confirm the GPU runs the new program while the rest of the scheme
     /// stays retained.
@@ -5126,6 +5212,7 @@ mod imp {
         }
 
         trial_retain!(scheme_specialized_variant_swap);
+        trial_retain!(scheme_bakes_scalar_param_without_shader_cooperation);
         trial_retain!(scheme_graph_linear_chain);
         trial!(scheme_graph_independent_dispatches);
         trial!(scheme_graph_diamond_dependency);

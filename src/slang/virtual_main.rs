@@ -2780,6 +2780,10 @@ struct WrapperBuilder {
     payload_inout: bool,
     /// Local parameter name → pipeline-wide bindless slot. `None` uses sequential slots.
     slot_remap: Option<HashMap<String, u32>>,
+    /// Entry function name, used to scope the scalar specialization macros.
+    entry_name: String,
+    /// Scalar slots this entry reads, in ascending order.
+    scalar_slots: Vec<u32>,
 }
 
 impl WrapperBuilder {
@@ -2792,6 +2796,8 @@ impl WrapperBuilder {
             call_sep: false,
             payload_inout: false,
             slot_remap: None,
+            entry_name: String::new(),
+            scalar_slots: Vec::new(),
         }
     }
 
@@ -2867,14 +2873,18 @@ impl WrapperBuilder {
             ParamKind::Scalar => {
                 let j = *user_idx;
                 *user_idx += 1;
-                // User params are full u32 words at _uw{j}.
+                self.scalar_slots.push(j);
+                // User params are full u32 words at _uw{j}, read through a macro that
+                // defaults to the push-constant word but can be overridden with a
+                // literal wire word to bake the value at compile time.
+                let word = scalar_specialization_macro(&self.entry_name, j);
                 // Use the appropriate HLSL bit-reinterpret intrinsic for the type.
                 let init_expr = match param.ty.as_str() {
-                    "float" => format!("asfloat(_uw{})", j),
-                    "int" => format!("asint(_uw{})", j),
-                    "uint" => format!("_uw{}", j),
-                    "bool" => format!("_uw{} != 0u", j),
-                    _ => format!("({})_uw{}", param.ty, j),
+                    "float" => format!("asfloat({word})"),
+                    "int" => format!("asint({word})"),
+                    "uint" => word.clone(),
+                    "bool" => format!("{word} != 0u"),
+                    _ => format!("({}){}", param.ty, word),
                 };
                 self.push_body_stmt(&format!("    {} {} = {};", param.ty, param.name, init_expr));
                 self.push_call(&param.name);
@@ -3032,6 +3042,7 @@ fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> Strin
     let mut wb = WrapperBuilder::new();
     wb.payload_inout = entry.stage.payload_inout();
     wb.slot_remap = remap.cloned();
+    wb.entry_name = entry.fn_name.clone();
 
     // Always emit all 8 bindless words (_bw0.._bw7), 8 user words (_uw0.._uw7),
     // frame-table dispatch base (_rs0 = PushLayout._reserved[0]), and the
@@ -3097,7 +3108,41 @@ fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> Strin
     }
 
     out.push('}');
+
+    // Scalar reads go through overridable macros so that a caller-supplied define can
+    // bake a known wire word in place of the push-constant read. Emitted ahead of the
+    // stage attribute, which has to stay adjacent to the function it decorates.
+    if !wb.scalar_slots.is_empty() {
+        let mut prelude = String::new();
+        for slot in &wb.scalar_slots {
+            let macro_name = scalar_specialization_macro(&entry.fn_name, *slot);
+            prelude.push_str(&format!(
+                "#ifndef {macro_name}\n#define {macro_name} _uw{slot}\n#endif\n"
+            ));
+        }
+        out.insert_str(0, &prelude);
+    }
+
     out
+}
+
+/// Name of the preprocessor macro that supplies scalar user slot `slot` of `entry_fn_name`.
+///
+/// The generated wrapper reads every scalar param through this macro, which defaults to
+/// the corresponding push-constant word (`_uw{slot}`). Defining it to a `u32` wire-word
+/// literal bakes the value into the compiled program, letting the shader compiler
+/// constant-fold and dead-strip the paths that value selects. The macro is scoped to the
+/// entry point so that sources with several entries specialize independently.
+pub fn scalar_specialization_macro(entry_fn_name: &str, slot: u32) -> String {
+    let mut sanitized = String::with_capacity(entry_fn_name.len());
+    for ch in entry_fn_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.extend(ch.to_uppercase());
+        } else {
+            sanitized.push('_');
+        }
+    }
+    format!("_GOLDY_SPEC_{sanitized}_UW{slot}")
 }
 
 fn goldy_callee_name(entry: &EntryDef) -> String {
@@ -3819,12 +3864,64 @@ void cs_main(Scattered<uint> data, ThreadId id, uint base) {
             result.contains("goldy_scattered<uint>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"),
             "Missing scattered from frame table slot 0"
         );
-        // User region: _uw0 for uint base.
-        assert!(result.contains("uint base = _uw0"), "Missing scalar user param");
+        // User region: _uw0 for uint base, read through the specialization macro.
+        assert!(
+            result.contains("uint base = _GOLDY_SPEC_CS_MAIN_UW0"),
+            "Missing scalar user param"
+        );
+        assert!(
+            result.contains("#define _GOLDY_SPEC_CS_MAIN_UW0 _uw0"),
+            "Missing default binding of the scalar specialization macro"
+        );
         assert!(
             result.contains("_goldy_user_cs_main(data, id, base)"),
             "Wrong call args"
         );
+    }
+
+    #[test]
+    fn scalar_specialization_macros_are_scoped_per_entry_and_slot() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void first(Scattered<uint> data, ThreadId id, uint base, float scale) {
+    data[id.x + base] = (uint)scale;
+}
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void second(Scattered<uint> data, ThreadId id, uint base) {
+    data[id.x] = base;
+}
+"#;
+        let result = transform_virtual_main(src);
+        // Slots are per-entry, so both entries own a `_UW0` macro under their own name.
+        assert!(result.contains("uint base = _GOLDY_SPEC_FIRST_UW0"));
+        assert!(result.contains("float scale = asfloat(_GOLDY_SPEC_FIRST_UW1)"));
+        assert!(result.contains("uint base = _GOLDY_SPEC_SECOND_UW0"));
+        assert!(!result.contains("_GOLDY_SPEC_SECOND_UW1"));
+        // Every macro defaults to its push-constant word, so an undefined variant
+        // compiles to exactly the runtime read it replaced.
+        for macro_name in [
+            "_GOLDY_SPEC_FIRST_UW0 _uw0",
+            "_GOLDY_SPEC_FIRST_UW1 _uw1",
+            "_GOLDY_SPEC_SECOND_UW0 _uw0",
+        ] {
+            assert!(
+                result.contains(&format!("#define {macro_name}")),
+                "missing #define {macro_name}"
+            );
+        }
+        // The stage attribute has to stay adjacent to the function it decorates.
+        assert!(!result.contains("#endif\nvoid first"));
+        assert!(result.contains("#endif\n[shader(\"compute\")]"));
+    }
+
+    #[test]
+    fn scalar_specialization_macro_name_sanitizes_the_entry() {
+        assert_eq!(scalar_specialization_macro("cs_main", 0), "_GOLDY_SPEC_CS_MAIN_UW0");
+        assert_eq!(scalar_specialization_macro("Tint2", 7), "_GOLDY_SPEC_TINT2_UW7");
     }
 
     #[cfg(feature = "graphics")]
