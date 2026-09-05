@@ -283,6 +283,10 @@ impl ShaderLibrary {
                     include_str!("../shaders/goldy_exp/bindless_resources.slang"),
                 ),
                 ("goldy_exp/access", include_str!("../shaders/goldy_exp/access.slang")),
+                (
+                    "goldy_exp/petition",
+                    include_str!("../shaders/goldy_exp/petition.slang"),
+                ),
             ],
         )
     }
