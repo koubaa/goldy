@@ -2051,6 +2051,41 @@ mod uniform_entry_point_param_binding_tests {
     }
 
     #[test]
+    fn pretransformed_source_matches_default_spirv_compile() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let effective = crate::slang::virtual_main::effective_slang_source_for_compile(TEST_SHADER);
+        let via_default = compiler
+            .compile_bindless_with_reflection_and_defines(
+                TEST_SHADER,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("default SPIR-V compile");
+        let via_effective = compiler
+            .compile_bindless_with_reflection_effective(
+                TEST_SHADER,
+                effective.as_ref(),
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("effective SPIR-V compile");
+        assert_eq!(via_default.shader.data, via_effective.shader.data);
+        assert_eq!(
+            via_default.reflection.push_constant_categories,
+            via_effective.reflection.push_constant_categories
+        );
+    }
+
+    #[test]
     fn uniform_params_compile_spirv() {
         let compiler = SlangCompiler::new().expect("Slang unavailable");
         let path = shader_path();
