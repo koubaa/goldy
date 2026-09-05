@@ -120,7 +120,7 @@ impl<T: Pod> CpuArg for &[T] {
 
     fn bind<'a>(view: &'a mut CpuArgView<'_>) -> &'a [T] {
         match view {
-            CpuArgView::Bytes(bytes) => bytemuck::cast_slice(&**bytes),
+            CpuArgView::Bytes(bytes) => bytemuck::cast_slice(bytes),
             CpuArgView::Scalar(_) => panic!("cpu dispatch: slice parameter bound to a scalar"),
         }
     }
@@ -137,7 +137,7 @@ impl<T: Pod> CpuArg for &mut [T] {
 
     fn bind<'a>(view: &'a mut CpuArgView<'_>) -> &'a mut [T] {
         match view {
-            CpuArgView::Bytes(bytes) => bytemuck::cast_slice_mut(&mut **bytes),
+            CpuArgView::Bytes(bytes) => bytemuck::cast_slice_mut(bytes),
             CpuArgView::Scalar(_) => panic!("cpu dispatch: slice parameter bound to a scalar"),
         }
     }
@@ -150,7 +150,7 @@ macro_rules! impl_scalar_cpu_arg {
 
             const KIND: CpuArgKind = CpuArgKind::Scalar;
 
-            fn bind<'a>(view: &'a mut CpuArgView<'_>) -> $ty {
+            fn bind(view: &mut CpuArgView<'_>) -> $ty {
                 match view {
                     CpuArgView::Scalar($w) => {
                         let $w = *$w;
@@ -476,10 +476,13 @@ impl fmt::Debug for CpuBindingExec {
     }
 }
 
+/// Type-erased virtual main over bound argument views.
+type ErasedMain = Box<dyn Fn(&mut [CpuArgView<'_>]) + Send + Sync>;
+
 /// Side-table entry for one [`crate::task_graph::NodeKind::CpuDispatch`] node.
 pub(crate) struct CpuDispatchExec {
     pub label: &'static str,
-    main: Box<dyn Fn(&mut [CpuArgView<'_>]) + Send + Sync>,
+    main: ErasedMain,
     pub bindings: Vec<CpuBindingExec>,
     pub params: Vec<u32>,
     /// Timeline of the last submission whose copies referenced this node's staging.
