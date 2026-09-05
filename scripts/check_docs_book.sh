@@ -39,6 +39,13 @@ for page in root.rglob("*.html"):
         target = (page.parent / match.group(1)).resolve()
         if not target.exists():
             failures.append(f"{page}: broken link to {match.group(1)}")
+    # print.html concatenates every chapter at the book root, so chapter-relative
+    # media paths never resolve there.
+    media = [] if page.name == "print.html" else re.finditer(r'<(?:video|img)[^>]*\ssrc="([^"#?:]+)"', text)
+    for match in media:
+        target = (page.parent / match.group(1)).resolve()
+        if not target.exists():
+            failures.append(f"{page}: missing media {match.group(1)}")
 
 if failures:
     print("\n".join(sorted(set(failures))), file=sys.stderr)
