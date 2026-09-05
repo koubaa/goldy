@@ -5,7 +5,7 @@ mod submission;
 
 #[cfg(feature = "gpu")]
 mod imp {
-    use crate::submission::submission_context;
+    use crate::submission::{skip_dx12_warp_ray_tracing, submission_context};
     use goldy::{
         types::{BackendType, BufferFlags},
         AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
@@ -53,6 +53,9 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
     fn triangle_blas_tlas_ray_query() {
         let _gpu = gpu_lock();
         let device = make_device();
+        if skip_dx12_warp_ray_tracing(&device) {
+            return;
+        }
         if !device.capabilities().ray_query {
             eprintln!("skip: DeviceCapabilities::ray_query is false on this adapter");
             return;
@@ -115,6 +118,9 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
     fn indexed_blas_more_triangles_than_vertex_triples() {
         let _gpu = gpu_lock();
         let device = make_device();
+        if skip_dx12_warp_ray_tracing(&device) {
+            return;
+        }
         if !device.capabilities().ray_query {
             eprintln!("skip: DeviceCapabilities::ray_query is false on this adapter");
             return;
@@ -183,6 +189,9 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
     fn indexed_primitive_index_matches_hit_position() {
         let _gpu = gpu_lock();
         let device = make_device();
+        if skip_dx12_warp_ray_tracing(&device) {
+            return;
+        }
         if !device.capabilities().ray_query {
             eprintln!("skip: DeviceCapabilities::ray_query is false on this adapter");
             return;

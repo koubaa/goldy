@@ -6,6 +6,21 @@ pub fn submission_context(device: &Device) -> Context {
     device.create_context().expect("context")
 }
 
+/// DX12 WARP advertises DXR tiers but BuildRaytracingAccelerationStructure
+/// access-violates (0xC0000005) in Goldy CI and on local WARP. Skip GPU RT tests.
+#[allow(dead_code)]
+pub fn skip_dx12_warp_ray_tracing(device: &Device) -> bool {
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    {
+        if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
+            eprintln!("skip: DX12 WARP does not run ray-tracing tests");
+            return true;
+        }
+    }
+    let _ = device;
+    false
+}
+
 /// Clamp libtest parallelism so concurrent trials cannot exhaust Vulkan's fixed
 /// per-device compute-queue pool (shared `Device` across trials).
 ///

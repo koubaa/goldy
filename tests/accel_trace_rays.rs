@@ -5,7 +5,7 @@ mod submission;
 
 #[cfg(feature = "gpu")]
 mod imp {
-    use crate::submission::submission_context;
+    use crate::submission::{skip_dx12_warp_ray_tracing, submission_context};
     use goldy::{
         types::{BackendType, BufferFlags},
         AccelInstance, AccelerationStructure, BufferKind, Device, DeviceDescriptor, Instance, MemoryExchange,
@@ -66,6 +66,9 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
     fn triangle_blas_tlas_trace_rays() {
         let _gpu = gpu_lock();
         let device = make_device();
+        if skip_dx12_warp_ray_tracing(&device) {
+            return;
+        }
         if !device.capabilities().ray_tracing_pipelines {
             eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
             return;
@@ -172,6 +175,9 @@ void rchit_main(inout HitPayload p) {
     fn triangle_trace_rays_payload_larger_than_16_bytes() {
         let _gpu = gpu_lock();
         let device = make_device();
+        if skip_dx12_warp_ray_tracing(&device) {
+            return;
+        }
         if !device.capabilities().ray_tracing_pipelines {
             eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
             return;
