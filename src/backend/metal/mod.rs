@@ -659,7 +659,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
-        super::shader::ensure_stage_compiled(&mut self.state, shader, stage)
+        shader::ensure_stage_compiled(&mut self.state, shader, stage)
     }
 
     fn shader_stage_interface(
