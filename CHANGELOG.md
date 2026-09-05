@@ -36,15 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allocates a new backend shader handle without a per-backend trait method.
   Post-virtual-main source is cached once per module (`OnceLock`).
 
-- **Bakeable scalar params** — the generated compute wrapper reads each scalar
-  `with_param` slot through a macro that defaults to the push-constant word
-  (`_GOLDY_SPEC_<ENTRY>_UW<slot>`, named by
-  `slang::virtual_main::scalar_specialization_macro`). Defining it to a `u32`
-  wire-word literal bakes the value into the compiled program, so the shader
-  compiler sees a constant instead of a push-constant load, with no change to
-  the shader source and no change to the push-constant layout — unbaked slots
-  keep their offsets, and the recorded command list is untouched. This is the
-  primitive behind
+- **Bakeable scalar params** — every generated compute wrapper reads each scalar
+  `with_param` slot through a macro that defaults to that backend's own read
+  expression (`_GOLDY_SPEC_<ENTRY>_UW<slot>`, named by
+  `slang::virtual_main::scalar_specialization_macro`; the push-constant word on
+  Vulkan/DX12/Metal, the user-params uniform field on WebGPU, the kernel
+  argument on CUDA). Defining it to a `u32` wire-word literal bakes the value
+  into the compiled program, so the shader compiler sees a constant instead of a
+  load, with no change to the shader source and no change to the parameter
+  layout — unbaked slots keep their positions and the recorded command list is
+  untouched, so a baked pipeline can be swapped onto an already-recorded
+  dispatch node. Note that baking must not change the pipeline's *binding*
+  layout: WebGPU derives bind group layouts from compiled WGSL usage, so baking
+  every scalar of an entry point leaves the user-params uniform unreferenced and
+  drops the binding. This is the primitive behind
   [shader specialization prediction](docs/src/design/shader-specialization.md).
 
 - **Unlocked compute Slang compile** — `ComputePipeline::new` runs Slang
