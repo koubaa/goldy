@@ -78,7 +78,7 @@ pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawCl
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
-pub use scheme::{Lease, ReplayStats, Scheme, SchemeCpuNodeBuilder, Submission};
+pub use scheme::{Lease, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, Submission};
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};

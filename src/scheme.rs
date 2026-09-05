@@ -620,6 +620,29 @@ struct WithdrawInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LeaseId(pub(crate) u32);
 
+/// Stable identity of one recorded scheme node, returned when the node is finalized.
+///
+/// Nodes are only ever appended to a scheme, so an id stays valid — and keeps pointing at
+/// the same dispatch site — for the life of the scheme it came from. That makes it usable
+/// as a key for per-site history across frames (see
+/// [Shader Specialization Prediction](https://koubaa.github.io/goldy/design/shader-specialization.html)),
+/// not just as an argument to [`Scheme::set_node_pipeline`] and its siblings.
+///
+/// Ids carry the originating scheme's identity, so passing one to a different scheme is
+/// rejected instead of silently addressing an unrelated node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId {
+    scheme_id: u64,
+    index: u32,
+}
+
+impl NodeId {
+    /// Position of this node in its scheme's recording order.
+    pub fn index(&self) -> usize {
+        self.index as usize
+    }
+}
+
 /// Marker type for texture leases acquired via [`Scheme::lease_texture`].
 pub struct LeaseTexture;
 
@@ -735,6 +758,13 @@ pub struct ReplayStats {
     pub records: u64,
     /// Re-records caused by a foreign scheme changing shared-parcel topology.
     pub topology_records: u64,
+    /// Submissions that found the scheme clean: no structural, params, or topology dirtiness.
+    ///
+    /// Unlike [`Self::resubmit_hits`], this counts the scheme's own state rather than backend
+    /// command-list retention, so it means the same thing on Metal and WebGPU (which re-encode
+    /// every frame) as it does on Vulkan and DX12. That makes it the portable signal for
+    /// per-site history across frames.
+    pub clean_submits: u64,
 }
 
 /// How much of a retained scheme the next [`Scheme::submit`] must rebuild.
@@ -1605,6 +1635,41 @@ impl Scheme {
         }
     }
 
+    /// Identity of the node appended most recently. Call sites push first, then ask.
+    fn last_node_id(&self) -> NodeId {
+        debug_assert!(!self.ir.nodes.is_empty(), "last_node_id after a push");
+        NodeId {
+            scheme_id: self.scheme_id,
+            index: (self.ir.nodes.len() - 1) as u32,
+        }
+    }
+
+    /// Borrow a recorded compute dispatch node for in-place payload mutation.
+    ///
+    /// `api` names the caller for error text.
+    fn dispatch_node_mut(&mut self, node: NodeId, api: &str) -> Result<&mut NodeKind, GoldyError> {
+        if node.scheme_id != self.scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "{api}: node id belongs to scheme {}, not scheme {}",
+                node.scheme_id,
+                self.scheme_id
+            )));
+        }
+        let index = node.index();
+        let kind = self
+            .ir
+            .nodes
+            .get_mut(index)
+            .map(|n| &mut n.kind)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("{api}: node {index} out of range")))?;
+        if !matches!(kind, NodeKind::Dispatch { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "{api}: node {index} is not a compute dispatch"
+            )));
+        }
+        Ok(kind)
+    }
+
     /// Replace the compute pipeline on an existing dispatch node.
     ///
     /// Bindings stay as recorded. Marks the scheme params-dirty: the next submit
@@ -1612,26 +1677,18 @@ impl Scheme {
     /// pipeline (or other payload) changed. Other retained partitions resubmit.
     pub fn set_node_pipeline(
         &mut self,
-        node_index: usize,
+        node: NodeId,
         pipeline: &crate::compute::ComputePipeline,
     ) -> Result<(), GoldyError> {
-        let node = self.ir.nodes.get_mut(node_index).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "set_node_pipeline: node_index {node_index} out of range"
-            ))
-        })?;
-        match &mut node.kind {
-            NodeKind::Dispatch { pipeline: slot, .. } => {
-                if *slot != pipeline.handle {
-                    *slot = pipeline.handle;
-                    self.mark_params_dirty();
-                }
+        let changed = match self.dispatch_node_mut(node, "set_node_pipeline")? {
+            NodeKind::Dispatch { pipeline: slot, .. } if *slot != pipeline.handle => {
+                *slot = pipeline.handle;
+                true
             }
-            _ => {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "set_node_pipeline: node {node_index} is not a compute dispatch"
-                )));
-            }
+            _ => false,
+        };
+        if changed {
+            self.mark_params_dirty();
         }
         Ok(())
     }
@@ -1639,25 +1696,17 @@ impl Scheme {
     /// Replace the direct dispatch dimensions on an existing dispatch node.
     ///
     /// Marks the scheme params-dirty. Indirect dispatches become direct.
-    pub fn set_node_dispatch(&mut self, node_index: usize, x: u32, y: u32, z: u32) -> Result<(), GoldyError> {
-        let node = self.ir.nodes.get_mut(node_index).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "set_node_dispatch: node_index {node_index} out of range"
-            ))
-        })?;
-        match &mut node.kind {
-            NodeKind::Dispatch { dispatch, .. } => {
-                let next = DispatchDim::Direct { x, y, z };
-                if *dispatch != next {
-                    *dispatch = next;
-                    self.mark_params_dirty();
-                }
+    pub fn set_node_dispatch(&mut self, node: NodeId, x: u32, y: u32, z: u32) -> Result<(), GoldyError> {
+        let next = DispatchDim::Direct { x, y, z };
+        let changed = match self.dispatch_node_mut(node, "set_node_dispatch")? {
+            NodeKind::Dispatch { dispatch, .. } if *dispatch != next => {
+                *dispatch = next;
+                true
             }
-            _ => {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "set_node_dispatch: node {node_index} is not a compute dispatch"
-                )));
-            }
+            _ => false,
+        };
+        if changed {
+            self.mark_params_dirty();
         }
         Ok(())
     }
@@ -1665,11 +1714,12 @@ impl Scheme {
     /// Replace one virtual-main scalar parameter (`with_param` slot) on a dispatch node.
     ///
     /// `param_index` is the nth recorded `with_param` value. Marks the scheme params-dirty.
-    pub fn set_node_param(&mut self, node_index: usize, param_index: usize, value: u32) -> Result<(), GoldyError> {
-        let node = self.ir.nodes.get_mut(node_index).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!("set_node_param: node_index {node_index} out of range"))
-        })?;
-        match &mut node.kind {
+    ///
+    /// Scalar params are baked into the emitted command list, so a value that changes every
+    /// frame re-records its partition every frame. Facts that flip often belong in a bound
+    /// parcel instead.
+    pub fn set_node_param(&mut self, node: NodeId, param_index: usize, value: u32) -> Result<(), GoldyError> {
+        let changed = match self.dispatch_node_mut(node, "set_node_param")? {
             NodeKind::Dispatch { user_slots, .. } => {
                 if param_index >= user_slots.len() {
                     return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -1677,16 +1727,14 @@ impl Scheme {
                         user_slots.len()
                     )));
                 }
-                if user_slots[param_index] != value {
-                    user_slots[param_index] = value;
-                    self.mark_params_dirty();
-                }
+                let changed = user_slots[param_index] != value;
+                user_slots[param_index] = value;
+                changed
             }
-            _ => {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "set_node_param: node {node_index} is not a compute dispatch"
-                )));
-            }
+            _ => false,
+        };
+        if changed {
+            self.mark_params_dirty();
         }
         Ok(())
     }
@@ -1823,6 +1871,9 @@ impl Scheme {
         let structurally_dirty = prep.structurally_dirty;
         let params_dirty = prep.params_dirty;
         let topo_dirty = prep.topo_dirty;
+        if prep.ir_clean {
+            self.stats.clean_submits += 1;
+        }
         // Standalone upload partitions never increment `PartitionSubmitResult.records`,
         // but the first submit after IR mutation still counts as a scheme record.
         // Params-only mutation also counts: at least one partition typically re-records,
@@ -3259,15 +3310,18 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     /// Finalize the node with fixed workgroup dimensions.
-    pub fn dispatch(self, x: u32, y: u32, z: u32) {
-        self.push_dispatch_node(DispatchDim::Direct { x, y, z });
+    ///
+    /// The returned [`NodeId`] addresses this node in [`Scheme::set_node_pipeline`],
+    /// [`Scheme::set_node_dispatch`], and [`Scheme::set_node_param`].
+    pub fn dispatch(self, x: u32, y: u32, z: u32) -> NodeId {
+        self.push_dispatch_node(DispatchDim::Direct { x, y, z })
     }
 
     /// Finalize the node with a device-resident [`DispatchShape`] parcel (indirect dispatch).
     ///
     /// The shape parcel's ordering dependency is registered automatically and is not a shader
     /// resource slot. Fixed workgroup counts use [`Self::dispatch`] instead.
-    pub fn dispatch_shape_parcel(self, parcel: &Parcel) -> Result<(), GoldyError> {
+    pub fn dispatch_shape_parcel(self, parcel: &Parcel) -> Result<NodeId, GoldyError> {
         if self.rt_pipeline.is_some() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "trace_rays does not support indirect DispatchShape parcels; use dispatch(width, height, depth)"
@@ -3296,10 +3350,10 @@ impl<'a> SchemeNodeBuilder<'a> {
                 dispatch: DispatchDim::Indirect { buffer, offset },
             },
         });
-        Ok(())
+        Ok(self.scheme.last_node_id())
     }
 
-    fn push_dispatch_node(self, dispatch: DispatchDim) {
+    fn push_dispatch_node(self, dispatch: DispatchDim) -> NodeId {
         #[cfg(feature = "graphics")]
         {
             let present_bindings = self
@@ -3348,6 +3402,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 }
             },
         });
+        self.scheme.last_node_id()
     }
 }
 
@@ -4018,7 +4073,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn clean_scheme(
         device: &Arc<Device>,
         pool: &mut RetainedPool,
-    ) -> (Scheme, crate::Buffer, crate::test_support::CbReuseOverride) {
+    ) -> (Scheme, NodeId, crate::Buffer, crate::test_support::CbReuseOverride) {
         let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
@@ -4027,7 +4082,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
-        scheme
+        let node = scheme
             .node("a", &pipeline)
             .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
@@ -4039,7 +4094,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
         // Keep `parcel` alive: dropping a retained buffer bound to the scheme marks its
         // stamp dead and subsequent submits return `StaleResource`.
-        (scheme, parcel, cb)
+        (scheme, node, parcel, cb)
     }
 
     fn leased_texture_scheme(
@@ -4105,12 +4160,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn clean_submits_resubmit_without_rerecord() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
 
         assert_eq!(scheme.replay_stats().records, 1, "only the first submit records");
+        // Counted on every backend, including those without command-list retention.
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            2,
+            "both post-record submits found the scheme clean"
+        );
         #[cfg(not(feature = "metal"))]
         assert_eq!(
             scheme.replay_stats().resubmit_hits,
@@ -4120,11 +4181,37 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    fn params_dirty_submit_is_not_a_clean_submit() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        scheme.submit().unwrap();
+        assert_eq!(scheme.replay_stats().clean_submits, 1);
+
+        let shader = mock_shader(&device);
+        let swapped = mock_pipeline(&device, &shader);
+        scheme.set_node_pipeline(node0, &swapped).unwrap();
+        scheme.submit().unwrap();
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            1,
+            "a params-dirty submit breaks the clean streak"
+        );
+
+        scheme.submit().unwrap();
+        assert_eq!(
+            scheme.replay_stats().clean_submits,
+            2,
+            "the streak resumes once the swap is recorded"
+        );
+    }
+
+    #[test]
     #[cfg(not(feature = "metal"))]
     fn clean_resubmit_performs_no_cpu_wait() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -4145,7 +4232,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -4155,6 +4242,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 records: 1,
                 resubmit_hits: 1,
                 topology_records: 0,
+                clean_submits: 1,
             }
         );
         #[cfg(feature = "metal")]
@@ -4179,6 +4267,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 records: 2,
                 resubmit_hits: 2,
                 topology_records: 0,
+                clean_submits: 2,
             }
         );
         #[cfg(feature = "metal")]
@@ -4189,12 +4278,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn set_node_pipeline_rerecords_once_then_resubmits() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
         let shader = mock_shader(&device);
         let pipeline2 = mock_pipeline(&device, &shader);
-        scheme.set_node_pipeline(0, &pipeline2).unwrap();
+        scheme.set_node_pipeline(node0, &pipeline2).unwrap();
         assert!(scheme.is_dirty());
         scheme.submit().unwrap();
         assert!(!scheme.is_dirty());
@@ -4207,10 +4296,37 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 records: 2,
                 resubmit_hits: 2,
                 topology_records: 0,
+                // Submits 2 and 4: the swap makes 3 params-dirty.
+                clean_submits: 2,
             }
         );
         #[cfg(feature = "metal")]
         assert_eq!(scheme.replay_stats().records, 2);
+    }
+
+    #[test]
+    fn node_id_from_another_scheme_is_rejected() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (mut scheme_a, node_a, _buf_a, _cb) = clean_scheme(&device, &mut pool);
+        let (scheme_b, _node_b, _buf_b, _cb_b) = clean_scheme(&device, &mut pool);
+
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let err = scheme_a
+            .set_node_pipeline(
+                NodeId {
+                    scheme_id: scheme_b.scheme_id,
+                    index: node_a.index as u32,
+                },
+                &pipeline,
+            )
+            .expect_err("foreign node id must be rejected");
+        assert!(
+            err.to_string().contains("belongs to scheme"),
+            "unexpected error: {err}"
+        );
+        assert!(!scheme_a.is_dirty(), "a rejected id must not dirty the scheme");
     }
 
     #[test]
@@ -4228,7 +4344,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let buf1 = retained_buffer(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        scheme
+        let node_a = scheme
             .node("a", &p_a)
             .with_parcel(&buf0, NodeAccess::Write)
             .dispatch(1, 1, 1);
@@ -4248,7 +4364,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         #[cfg(not(feature = "metal"))]
         let resubmits_after_warmup = scheme.replay_stats().resubmit_hits;
 
-        scheme.set_node_pipeline(0, &p_a2).unwrap();
+        scheme.set_node_pipeline(node_a, &p_a2).unwrap();
         scheme.submit().unwrap();
 
         assert_eq!(

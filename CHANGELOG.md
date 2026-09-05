@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot reuse a stale `SetPipeline`. Structural mutations (new nodes,
   bindings) still drop all retained command lists.
 
+- **`NodeId`** — finalizing a dispatch (`dispatch`, `dispatch_shape_parcel`)
+  returns the recorded node's identity, which is what `set_node_pipeline`,
+  `set_node_dispatch`, and `set_node_param` now take instead of a raw index.
+  Ids carry their originating scheme, so a node id from another scheme is
+  rejected rather than silently addressing an unrelated node. Nodes are only
+  appended, so an id keeps pointing at the same dispatch site for the life of
+  the scheme and can key per-site history across frames.
+
+- **`ReplayStats::clean_submits`** — submissions that found the scheme clean
+  (no structural, params, or topology dirtiness). Unlike `resubmit_hits`, it
+  reflects scheme state rather than backend command-list retention, so it is
+  present and meaningful on every backend including Metal and WebGPU.
+
 - **`ShaderModule::variant`** — frontend-retained source, search paths, and
   preprocessor defines. `variant(extra_defines)` merges/overrides defines and
   allocates a new backend shader handle without a per-backend trait method.
