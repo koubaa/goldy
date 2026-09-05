@@ -53,6 +53,7 @@ pub struct ShaderModule {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ShaderHandle,
     /// Authored Slang source used for graphics linking (virtual-main parse).
+    #[cfg_attr(not(feature = "graphics"), allow(dead_code))]
     pub(crate) slang_source: String,
 }
 

@@ -897,7 +897,7 @@ pub fn link_mesh_pipeline(
     if let Some(src) = amp_source {
         sources.push(src);
     }
-    let src_refs: Vec<&str> = sources.iter().copied().collect();
+    let src_refs: Vec<&str> = sources.to_vec();
 
     let mesh_out = payload_outputs_for(&mesh, &src_refs);
     let fs_in = payload_inputs_for(&fs, &src_refs);

@@ -193,13 +193,7 @@ impl<'a> RenderPipelineBuilder<'a> {
             );
             let _ = backend.compile_shader_stage(vertex_shader.handle, SlangStage::Vertex);
             let _ = backend.compile_shader_stage(fragment_shader.handle, SlangStage::Fragment);
-            refine_raster_from_reflection(
-                &mut **backend,
-                vertex_shader,
-                fragment_shader,
-                &desc.vertex_layout,
-                link,
-            )?;
+            refine_raster_from_reflection(&**backend, vertex_shader, fragment_shader, &desc.vertex_layout, link)?;
         }
 
         let handle = if desc.depth_stencil.is_some() {
@@ -429,7 +423,7 @@ impl<'a> MeshPipelineBuilder<'a> {
             }
             let _ = backend.compile_shader_stage(mesh.handle, SlangStage::Mesh);
             let _ = backend.compile_shader_stage(fragment.handle, SlangStage::Fragment);
-            refine_mesh_from_reflection(&mut **backend, mesh, fragment, self.amplification, link)?;
+            refine_mesh_from_reflection(&**backend, mesh, fragment, self.amplification, link)?;
         }
         let handle = backend.create_mesh_pipeline(
             self.device.inner.handle,

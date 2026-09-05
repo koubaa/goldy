@@ -232,7 +232,7 @@ impl GpuType<'_> {
 
     /// Pack host bytes (`n * rust_size`) into storage (`n * storage_stride`).
     pub fn encode_bytes(&self, host_bytes: &[u8]) -> Result<Vec<u8>> {
-        if host_bytes.len() % self.rust_size != 0 {
+        if !host_bytes.len().is_multiple_of(self.rust_size) {
             bail!(
                 "GpuType `{}` host blob length {} is not a multiple of {}",
                 self.type_name,
@@ -241,11 +241,7 @@ impl GpuType<'_> {
             );
         }
         let packed = self.packed()?;
-        let count = if self.rust_size == 0 {
-            0
-        } else {
-            host_bytes.len() / self.rust_size
-        };
+        let count = host_bytes.len().checked_div(self.rust_size).unwrap_or(0);
         let mut out = vec![0u8; count * packed.stride];
         for i in 0..count {
             let src = &host_bytes[i * self.rust_size..];
@@ -375,7 +371,7 @@ fn emit_padding(
     if byte_count == 0 {
         return Ok(());
     }
-    if byte_count % 4 != 0 {
+    if !byte_count.is_multiple_of(4) {
         bail!(
             "GpuType `{type_name}` has an unrepresentable {byte_count}-byte padding gap at offset {start}; \
              generated Slang padding currently requires 4-byte granularity"

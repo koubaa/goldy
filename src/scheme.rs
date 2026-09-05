@@ -45,7 +45,9 @@ use crate::types::{
 #[cfg(feature = "graphics")]
 use crate::types::{DepthFormat, IndexFormat};
 use crate::validation_env;
-use std::collections::{HashMap, HashSet};
+#[cfg(feature = "graphics")]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
