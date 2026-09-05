@@ -64,12 +64,14 @@ let node = scheme
             }
         }),
     )
-    .dispatch(groups, 1, 1);
+    .dispatch(16, 1, 1);
 scheme.submit()?;
 let stats = scheme.yield_stats(node).unwrap();
 ```
 
 The scheme sees one node. Inside it the runtime runs as many rounds as the script needs.
+
+`dispatch(16, 1, 1)` is the prologue launch: 16 groups × `[numthreads(64,1,1)]` = 1024 lanes, which matches the mailbox **capacity**. They are chosen independently — capacity is “how many lanes may be suspended at once”, not a dispatch size — and `Backpressure::Stall` chunks a wider prologue so the live population never exceeds capacity. `arena_len` (4096) is a third knob: how many result elements all fulfilments of one round may occupy, not a lane count.
 
 ## The Slang side
 
