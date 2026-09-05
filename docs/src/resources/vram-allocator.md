@@ -2,7 +2,7 @@
 
 All GPU buffer and texture allocations route through the device's internal
 allocator (pools call `Device::alloc_*`). Clients obtain bytes via
-[`RetainedPool`](./retained.md) / [`TransientPool`](./transient-allocation.md);
+[`RetainedPool`](./retained-pool.md) / [`TransientPool`](./transient-allocation.md);
 the allocator itself is not a public customization point.
 
 ## Allocation Policy (Tracking and Budget)

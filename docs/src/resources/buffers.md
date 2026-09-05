@@ -4,7 +4,7 @@
 
 ## Creating buffers (recommended)
 
-For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, [`MemoryExchange`](../compute/timeline.md) deposits). All Rust, Python, FFI, and .NET examples use this path.
+For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, [`MemoryExchange`](../compute/settlement.md) deposits). All Rust, Python, FFI, and .NET examples use this path.
 
 ```rust
 use goldy::{BufferFlags, BufferKind, RetainedPool};
@@ -118,14 +118,14 @@ bitflags! {
 |------|---------|
 | `COPY_SRC` | Buffer can be a copy source |
 | `COPY_DST` | Buffer can be a copy destination |
-| `CPU_READABLE` | Medium hint for host-visible storage. Prefer [`MemoryExchange::bind_withdraw`](../compute/timeline.md) for observation. Not a public host-read API. |
-| `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/timeline.md) for application uploads. |
+| `CPU_READABLE` | Medium hint for host-visible storage. Prefer [`MemoryExchange::bind_withdraw`](../compute/settlement.md) for observation. Not a public host-read API. |
+| `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/settlement.md) for application uploads. |
 
 Query `DeviceCapabilities::has_zero_copy_storage_readback` to detect whether withdraw staging can elide a GPU copy on the current backend.
 
 ## Writing Data
 
-Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/timeline.md) for CPU→GPU uploads. Direct host writes on `CPU_WRITABLE` staging parcels remain for deposit/staging internals:
+Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/settlement.md) for CPU→GPU uploads. Direct host writes on `CPU_WRITABLE` staging parcels remain for deposit/staging internals:
 
 ### Raw bytes
 

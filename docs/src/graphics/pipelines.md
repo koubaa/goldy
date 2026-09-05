@@ -167,7 +167,7 @@ For reverse-Z rendering, use `CompareFunction::Greater` and clear depth to `0.0`
 
 ## Compute Pipelines
 
-`ComputePipeline` wraps a single compute shader. See the [compute documentation](../compute/overview.md) for the full compute API.
+`ComputePipeline` wraps a single compute shader. See [Your First Compute Shader](../tutorial/first-compute.md) for the full compute API.
 
 ```rust
 use goldy::{ComputePipeline, ShaderModule};

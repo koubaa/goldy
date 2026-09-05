@@ -168,7 +168,7 @@ For iterative algorithms, alternate two buffer fields as input/output within one
 
 ### Combining Compute and Graphics
 
-Hybrid compute + render workflows use a single `Scheme` with both compute nodes and render passes (see `python/examples/game_of_life.py` and `goldy/examples/game_of_life.rs`).
+Hybrid compute + render workflows use a single `Scheme` with both compute nodes and render passes (see `python/examples/game_of_life.py` and `examples/game_of_life.rs`).
 
 ## Key Differences from Rust
 

@@ -29,6 +29,7 @@ useful precommit commands:
 `cargo clippy --no-default-features -- -D warnings`
 `cargo check`
 `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps`
+`scripts/check_docs_book.sh` (mdBook build; catches unresolved `{{#include}}` and broken links)
 
 ## Running tests
 

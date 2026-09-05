@@ -8,7 +8,7 @@ reuse is safe.
 
 ## Client door: `TransientPool`
 
-Goldy exposes one transient door per [`Context`](../compute/timeline.md):
+Goldy exposes one transient door per [`Context`](../compute/settlement.md):
 
 | Acquire | Return |
 |---------|--------|
