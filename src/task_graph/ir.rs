@@ -271,6 +271,17 @@ pub enum NodeKind {
     /// Emits no GPU commands in v1; exists so the analyzer can eventually
     /// choose host-visible backing vs an inserted device→host blit per backend.
     WithdrawRead { withdraw_id: u32 },
+    /// GPU acceleration-structure build (BLAS triangles or TLAS instances).
+    BuildAccelerationStructure(crate::backend::AccelBuildCommand),
+    /// Hardware `TraceRays` / `DispatchRays` (internal SBT on the pipeline).
+    TraceRays {
+        pipeline: crate::backend::RayTracingPipelineHandle,
+        resource_slots: Vec<u32>,
+        user_slots: Vec<u32>,
+        width: u32,
+        height: u32,
+        depth: u32,
+    },
     /// Serial host function over whole buffer parcels (see [`crate::cpu_dispatch`]).
     ///
     /// The closure and its staging buffers live in a side table owned by

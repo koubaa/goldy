@@ -123,6 +123,15 @@ Declare these as parameters in `[goldy_*]` entry points to receive GPU-provided 
 | `InstanceId` | `SV_InstanceID` | `.value` |
 | `IsFrontFace` | `SV_IsFrontFace` | `.value` |
 
+### Ray tracing
+
+| Type | Maps to | Components |
+|------|---------|------------|
+| `DispatchRaysIndex` | `SV_DispatchRaysIndex` | `.x`, `.y`, `.z` |
+| `DispatchRaysDimensions` | `SV_DispatchRaysDimensions` | `.x`, `.y`, `.z` |
+
+Use `[goldy_raygen]` / `[goldy_miss]` / `[goldy_closesthit]` with `Accel` and an `inout` payload struct on miss and closest-hit. Dispatch with `Scheme::trace_rays` (ray counts, not workgroups).
+
 ## Entry Point Attributes
 
 ### `[goldy_compute]`
@@ -172,6 +181,33 @@ import goldy_exp;
 float4 fs_main(Interpolated<float4> tex, Filter samp, float2 uv : TEXCOORD0) : SV_Target {
     return tex.Sample(samp, uv);
 }
+```
+
+### `[goldy_raygen]` / `[goldy_miss]` / `[goldy_closesthit]`
+
+Ray-tracing pipeline stages. Miss and closest-hit take an `inout` payload; raygen uses bindless resources like compute. The shader-binding table is owned by `RayTracingPipeline`.
+
+```hlsl
+import goldy_exp;
+struct HitPayload { uint hit; }
+
+[goldy_raygen]
+void rgen_main(Accel scene, Scattered<uint> hits, DispatchRaysIndex idx) {
+    RayDesc ray;
+    ray.Origin = float3(0, 0, -2);
+    ray.TMin = 0.001;
+    ray.Direction = float3(0, 0, 1);
+    ray.TMax = 100;
+    HitPayload p;
+    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 0, 0, ray, p);
+    hits[idx.x] = p.hit;
+}
+
+[goldy_miss]
+void rmiss_main(inout HitPayload p) { p.hit = 0; }
+
+[goldy_closesthit]
+void rchit_main(inout HitPayload p) { p.hit = 1; }
 ```
 
 ## Common Patterns

@@ -46,8 +46,8 @@ pub(crate) mod cuda;
 
 pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
-    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, TextureHandle,
+    AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
+    RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, TextureHandle,
 };
 #[cfg(feature = "graphics")]
 pub(crate) use crate::handles::{SurfaceHandle, SwapchainImageHandle};
@@ -351,7 +351,7 @@ where
     let mut current_pipeline: Option<PipelineHandle> = None;
     for cmd in commands {
         match cmd {
-            RenderCommand::SetPipeline(h) => current_pipeline = Some(*h),
+            RenderCommand::SetPipeline(h) | RenderCommand::SetMeshPipeline(h) => current_pipeline = Some(*h),
             RenderCommand::BindResources { buffers } => {
                 if let Some(ph) = current_pipeline {
                     if let Some((expected, name)) = pipeline_strides(ph) {
@@ -403,8 +403,10 @@ pub(crate) struct FrameToken {
 pub(crate) enum RenderCommand {
     /// Clear the depth buffer.
     ClearDepth(f32),
-    /// Set the active pipeline.
+    /// Set the active vertex/fragment pipeline.
     SetPipeline(PipelineHandle),
+    /// Set the active mesh (+ fragment) pipeline.
+    SetMeshPipeline(PipelineHandle),
     /// Set a vertex buffer.
     SetVertexBuffer {
         slot: u32,
@@ -454,6 +456,8 @@ pub(crate) enum RenderCommand {
         base_vertex: i32,
         first_instance: u32,
     },
+    /// Mesh-shader workgroups (`vkCmdDrawMeshTasksEXT` / `DispatchMesh`).
+    DispatchMesh { x: u32, y: u32, z: u32 },
 }
 
 /// CPU-side write deferred to the submission worker, after [`SubmitSync::host_observed_waits`]
@@ -704,6 +708,77 @@ pub(crate) enum GpuCommand {
         buffers: Vec<(BufferHandle, crate::task_graph::BarrierUsage)>,
         textures: Vec<(TextureHandle, crate::task_graph::BarrierUsage)>,
     },
+    /// GPU build of a BLAS or TLAS. The backend inserts an AS-build → shader-read barrier.
+    BuildAccelerationStructure(AccelBuildCommand),
+    /// Bind a ray-tracing pipeline (SBT is owned by the pipeline).
+    SetRayTracingPipeline(RayTracingPipelineHandle),
+    /// `vkCmdTraceRaysKHR` / `DispatchRays` with dimensions in rays (not workgroups).
+    TraceRays {
+        label: Option<&'static str>,
+        width: u32,
+        height: u32,
+        depth: u32,
+    },
+}
+
+/// Create-time sizing for [`GpuBackend::create_acceleration_structure`].
+#[allow(dead_code)] // fields matched by GPU backends behind feature flags
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum GpuAccelCreate {
+    BlasTriangles {
+        max_triangles: u32,
+        max_vertices: u32,
+        vertex_stride: u32,
+    },
+    Tlas {
+        max_instances: u32,
+    },
+}
+
+/// Recorded TLAS instance (backend-resolved BLAS addresses at encode time).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AccelInstanceRecord {
+    pub blas: AccelerationStructureHandle,
+    pub transform: [f32; 12],
+    pub mask: u8,
+    pub custom_index: u32,
+}
+
+/// GPU build recorded from [`crate::Scheme::build_blas`] / [`crate::Scheme::build_tlas`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AccelBuildCommand {
+    BlasTriangles {
+        dest: AccelerationStructureHandle,
+        vertex_buffer: BufferHandle,
+        vertex_offset: u64,
+        vertex_count: u32,
+        vertex_stride: u32,
+        index_buffer: Option<BufferHandle>,
+        index_offset: u64,
+        index_count: u32,
+    },
+    Tlas {
+        dest: AccelerationStructureHandle,
+        instances: std::sync::Arc<[AccelInstanceRecord]>,
+    },
+}
+
+/// Shader modules for a triangle-hit RT pipeline (one raygen, one miss, one closest-hit).
+#[allow(dead_code)] // fields read by GPU backends behind feature flags
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuRayTracingPipelineDesc {
+    pub raygen: ShaderHandle,
+    pub miss: ShaderHandle,
+    pub closest_hit: ShaderHandle,
+}
+
+/// Mesh (+ optional amplification) graphics pipeline.
+#[allow(dead_code)] // constructed by mesh pipeline backends behind feature flags
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuMeshPipelineDesc {
+    pub mesh: ShaderHandle,
+    pub fragment: ShaderHandle,
+    pub amplification: Option<ShaderHandle>,
 }
 
 /// Mixed compute + offscreen render commands from [`crate::Scheme`].
@@ -1403,6 +1478,25 @@ pub(crate) trait GpuBackend:
     /// Returns None if the sampler is not registered.
     fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32>;
 
+    /// Allocate a BLAS or TLAS. Default: unsupported on this backend.
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        let _ = (device, desc);
+        anyhow::bail!("acceleration structures are not supported on this backend")
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        let _ = accel;
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        let _ = accel;
+        None
+    }
+
     // Surface API - zero-copy presentation to window
     /// Create a surface for presenting to a window.
     /// The window handle is platform-specific (HWND on Windows, wl_surface on Wayland, NSView on macOS).
@@ -1627,10 +1721,82 @@ pub(crate) trait GpuBackend:
         Vec::new()
     }
 
+    /// Create a ray-tracing pipeline and an internal shader-binding table (one raygen, miss, hit).
+    fn create_ray_tracing_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: GpuRayTracingPipelineDesc,
+        debug_name: Option<&str>,
+    ) -> Result<RayTracingPipelineHandle> {
+        let _ = (device, desc, debug_name);
+        anyhow::bail!("ray tracing pipelines are not supported on this backend")
+    }
+
+    fn destroy_ray_tracing_pipeline(&mut self, pipeline: RayTracingPipelineHandle) {
+        let _ = pipeline;
+    }
+
+    fn ray_tracing_pipeline_slot_access(&self, _pipeline: RayTracingPipelineHandle) -> Vec<Option<ResourceAccess>> {
+        Vec::new()
+    }
+
+    /// Create a mesh (+ optional amplification) graphics pipeline.
+    #[cfg(feature = "graphics")]
+    fn create_mesh_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        let _ = (device, desc, raster, depth_stencil, debug_name);
+        anyhow::bail!("mesh pipelines are not supported on this backend")
+    }
+
     /// Like [`Self::compute_pipeline_slot_access`] but for a graphics pipeline.
     #[cfg(feature = "graphics")]
     fn render_pipeline_slot_access(&self, _pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
         Vec::new()
+    }
+
+    /// Record a per-stage local-name → pipeline-slot remap used when this shader stage is compiled.
+    #[cfg(feature = "graphics")]
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        let _ = (shader, stage, remap);
+    }
+
+    /// Compile a graphics shader stage so its reflection (including stage I/O) is available.
+    #[cfg(feature = "graphics")]
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        let _ = (shader, stage);
+        Ok(())
+    }
+
+    /// Reflected stage I/O after [`Self::compile_shader_stage`].
+    #[cfg(feature = "graphics")]
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let _ = (shader, stage);
+        None
+    }
+
+    /// Replace fragment/mesh-wins bindless metadata with the merged pipeline contract.
+    #[cfg(feature = "graphics")]
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        let _ = (pipeline, contract);
     }
 
     /// Notify the backend that a frame has completed and all transient buffers

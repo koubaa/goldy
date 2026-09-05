@@ -41,6 +41,7 @@ fn metal_slot_key_from_category(cat: ResourceCategory, index: u32) -> Option<Met
         ResourceCategory::Texture => Some(MetalSlotKey::Texture(index)),
         ResourceCategory::StorageImage => Some(MetalSlotKey::StorageImage(index)),
         ResourceCategory::Sampler => None,
+        ResourceCategory::Accel => Some(MetalSlotKey::Accel(index)),
     }
 }
 
@@ -70,7 +71,9 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
             } => {
                 for rc in render_cmds {
                     match rc {
-                        RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
+                        RenderCommand::SetPipeline(p) | RenderCommand::SetMeshPipeline(p) => {
+                            current_render_pipeline = Some(*p)
+                        }
                         RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
                                 if let Some(buf) = state.buffers.get(h) {
@@ -548,6 +551,13 @@ pub(super) fn begin_compute_encoder<'a>(
     if !ro_refs.is_empty() {
         encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
     }
+    for accel in state.accels.values() {
+        if accel.device_handle == device_handle {
+            let as_ref: &mtl::AccelerationStructureRef = &accel.accel;
+            let res_ref = unsafe { std::mem::transmute::<&mtl::AccelerationStructureRef, &mtl::ResourceRef>(as_ref) };
+            encoder.use_resources(&[res_ref], mtl::MTLResourceUsage::Read);
+        }
+    }
 
     // Frame-table device table (not in state.buffers).  Selector is intentionally
     // omitted: Metal shaders use absolute offsets via `_reserved[0]`, not the selector.
@@ -611,6 +621,7 @@ pub(super) fn record_commands_to_buffer(
     tex_idx: &mut usize,
     gpu_idle: bool,
     prologue_row: Option<u32>,
+    accel_uploads: &mut Vec<mtl::Buffer>,
 ) -> Result<()> {
     let mut guard = EncoderGuard {
         compute: None,
@@ -1270,6 +1281,15 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
+            GpuCommand::BuildAccelerationStructure(build) => {
+                end_compute!();
+                end_blit!();
+                super::accel::encode_build(state, command_buffer, build, accel_uploads)?;
+                has_recorded_gpu_work = true;
+            }
+            GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
+                anyhow::bail!("Metal backend does not support ray tracing pipelines");
+            }
             GpuCommand::ResourceBarrier {
                 buffers: buf_entries,
                 textures: tex_entries,
@@ -1497,6 +1517,10 @@ fn stage_uploads(
             }
             GpuCommand::FrameTableStaging { .. } => {}
             GpuCommand::ResourceBarrier { .. } => {}
+            GpuCommand::BuildAccelerationStructure(_) => {
+                would_have_gpu_work = true;
+            }
+            GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {}
         }
     }
 
@@ -1565,10 +1589,11 @@ pub(super) fn submit(
     // Reclaim and pre-stage all uploads before recording.
     let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, commands)?;
 
-    {
+    let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
+        let mut accel_uploads = Vec::new();
         record_commands_to_buffer(
             state,
             command_buffer_ref,
@@ -1581,8 +1606,10 @@ pub(super) fn submit(
             &mut tex_idx,
             gpu_idle,
             prologue_row,
+            &mut accel_uploads,
         )?;
-    }
+        accel_uploads
+    };
 
     let ld = state
         .devices
@@ -1622,6 +1649,10 @@ pub(super) fn submit(
         sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.last_submitted_seq = signal_value;
+        for buffer in accel_uploads.drain(..) {
+            sc.deletion_queue
+                .queue(signal_value, super::types::PendingDeletion::AccelUpload { buffer });
+        }
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1742,12 +1773,13 @@ pub(super) fn submit_graph(
     //
     // belt_idx and tex_idx advance across all compute-batch calls to
     // record_commands_to_buffer so they consume the single pre-pass result.
-    {
+    let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         let mut compute_batch: Vec<GpuCommand> = Vec::new();
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
+        let mut accel_uploads = Vec::new();
 
         for cmd in commands {
             match cmd {
@@ -1773,6 +1805,7 @@ pub(super) fn submit_graph(
                             &mut tex_idx,
                             gpu_idle,
                             prologue_row,
+                            &mut accel_uploads,
                         )?;
                         compute_batch.clear();
                     }
@@ -1826,9 +1859,11 @@ pub(super) fn submit_graph(
                 &mut tex_idx,
                 gpu_idle,
                 prologue_row,
+                &mut accel_uploads,
             )?;
         }
-    }
+        accel_uploads
+    };
 
     // Signal timeline and commit — same pattern as `submit`.
     let ld = state
@@ -1867,6 +1902,10 @@ pub(super) fn submit_graph(
         sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.last_submitted_seq = signal_value;
+        for buffer in accel_uploads.drain(..) {
+            sc.deletion_queue
+                .queue(signal_value, super::types::PendingDeletion::AccelUpload { buffer });
+        }
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1981,35 +2020,18 @@ fn record_render_pass_to_buffer(
         clear_depth,
     );
 
-    let encoder = command_buffer.new_render_command_encoder(render_pass);
-
-    let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-    logical_device
-        .heap_allocator
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    logical_device
-        .texture_heap
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle {
-            encoder.use_resource_at(
-                &buf_state.buffer,
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-                render_stages,
-            );
-        }
+    let is_mesh = super::render_commands::commands_use_mesh(commands);
+    if is_mesh {
+        eprintln!("[goldy-mesh] record_render_pass_to_buffer is_mesh=true");
     }
-    {
-        let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
-    }
-
-    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
-    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
+    let encoder = if is_mesh {
+        super::objc_catch::catch_objc("new_render_command_encoder(mesh)", || {
+            command_buffer.new_render_command_encoder(render_pass)
+        })?
+    } else {
+        command_buffer.new_render_command_encoder(render_pass)
+    };
+    super::render_commands::declare_pass_resources(encoder, logical_device, &state.buffers, device_handle, is_mesh)?;
 
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
@@ -2028,7 +2050,11 @@ fn record_render_pass_to_buffer(
 
     super::render_commands::record(encoder, commands, &state.pipelines, &state.buffers, prologue_row)?;
 
-    encoder.end_encoding();
+    if is_mesh {
+        super::objc_catch::catch_objc("end_encoding(mesh)", || encoder.end_encoding())?;
+    } else {
+        encoder.end_encoding();
+    }
     Ok(())
 }
 

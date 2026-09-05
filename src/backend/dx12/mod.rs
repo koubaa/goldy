@@ -39,6 +39,7 @@ mod context;
 mod diagnostic;
 mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
+mod accel;
 mod device;
 mod frame_table;
 mod host_wait;
@@ -48,6 +49,7 @@ mod process_shared;
 mod pso_cache;
 mod render_commands;
 mod render_target;
+mod rt_pipeline;
 mod sampler;
 mod shader;
 mod staging;
@@ -230,11 +232,13 @@ impl Dx12Backend {
             shaders: std::sync::Arc::new(std::sync::RwLock::new(types::ShaderTable::new())),
             pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::PipelineTable::new())),
             compute_pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::ComputePipelineTable::new())),
+            rt_pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::RayTracingPipelineTable::new())),
             render_targets: std::sync::Arc::new(std::sync::RwLock::new(types::RenderTargetTable::new())),
             surfaces: HashMap::new(),
             next_surface_handle: 1,
             textures: std::sync::Arc::new(std::sync::RwLock::new(types::TextureTable::new())),
             samplers: std::sync::Arc::new(std::sync::RwLock::new(types::SamplerTable::new())),
+            accels: std::sync::Arc::new(std::sync::RwLock::new(types::AccelTable::new())),
             next_rtv_offset: 0,
             free_rtv_offsets: Vec::new(),
             next_dsv_offset: 0,
@@ -915,6 +919,26 @@ impl GpuBackend for Dx12Backend {
         pipeline::destroy(&mut self.state, pipeline_handle);
     }
 
+    fn create_mesh_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        depth_stencil: Option<&crate::types::DepthStencilState>,
+        debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        pipeline::create_mesh(
+            &mut self.state,
+            device_handle,
+            desc.mesh,
+            desc.fragment,
+            desc.amplification,
+            raster,
+            depth_stencil,
+            debug_name,
+        )
+    }
+
     fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,
@@ -1201,6 +1225,22 @@ impl GpuBackend for Dx12Backend {
         sampler::bindless_index(&self.state, sampler_handle)
     }
 
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        desc: &crate::backend::GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        accel::create(&mut self.state, device, desc)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        accel::destroy(&self.state, accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        accel::bindless_index(&self.state, accel)
+    }
+
     fn create_compute_pipeline(
         &mut self,
         device_handle: DeviceHandle,
@@ -1241,6 +1281,62 @@ impl GpuBackend for Dx12Backend {
         compute::destroy(&mut self.state, pipeline_handle);
     }
 
+    fn create_ray_tracing_pipeline(
+        &mut self,
+        device_handle: DeviceHandle,
+        desc: crate::backend::GpuRayTracingPipelineDesc,
+        debug_name: Option<&str>,
+    ) -> Result<RayTracingPipelineHandle> {
+        let handle = rt_pipeline::create(
+            &mut self.state,
+            device_handle,
+            desc.raygen,
+            desc.miss,
+            desc.closest_hit,
+            debug_name,
+        )?;
+        let (cats, slot_kinds, strides) = self
+            .state
+            .shaders
+            .read()
+            .unwrap()
+            .entries
+            .get(&desc.raygen)
+            .and_then(|s| s.reflection.as_ref())
+            .map(|r| {
+                (
+                    r.push_constant_categories.clone(),
+                    r.push_constant_slot_kinds.clone(),
+                    r.binding_element_strides.clone(),
+                )
+            })
+            .unwrap_or_default();
+        {
+            let mut rt_write = self.state.rt_pipelines.write().unwrap();
+            if let Some(ps) = rt_write.entries.get_mut(&handle) {
+                ps.push_constant_categories = cats;
+                ps.push_constant_slot_kinds = slot_kinds;
+                ps.binding_element_strides = strides;
+            }
+        }
+        Ok(handle)
+    }
+
+    fn destroy_ray_tracing_pipeline(&mut self, pipeline_handle: RayTracingPipelineHandle) {
+        rt_pipeline::destroy(&self.state, pipeline_handle);
+    }
+
+    fn ray_tracing_pipeline_slot_access(
+        &self,
+        pipeline: RayTracingPipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        let read = self.state.rt_pipelines.read().unwrap();
+        let Some(ps) = read.entries.get(&pipeline) else {
+            return Vec::new();
+        };
+        slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
+    }
+
     fn compute_pipeline_slot_access(
         &self,
         pipeline: ComputePipelineHandle,
@@ -1258,6 +1354,53 @@ impl GpuBackend for Dx12Backend {
             return Vec::new();
         };
         slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
+    }
+
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.state.shaders.write().unwrap().entries.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+        }
+    }
+
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        let _ = shader::ensure_stage_compiled(&mut self.state, shader, stage)?;
+        Ok(())
+    }
+
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let shaders = self.state.shaders.read().unwrap();
+        let reflection = shaders.entries.get(&shader)?.reflection.as_ref()?;
+        let want = match stage {
+            crate::slang::SlangStage::Vertex => "vertex",
+            crate::slang::SlangStage::Fragment => "fragment",
+            crate::slang::SlangStage::Mesh => "mesh",
+            crate::slang::SlangStage::Amplification => "amplification",
+            _ => return None,
+        };
+        reflection.stage_interfaces.iter().find(|s| s.stage == want).cloned()
+    }
+
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&pipeline) {
+            ps.push_constant_categories = contract.categories();
+            ps.push_constant_slot_kinds = contract.resources.iter().map(|r| r.slot_kind()).collect();
+            if ps.binding_element_strides.len() != contract.resources.len() {
+                ps.binding_element_strides = vec![None; contract.resources.len()];
+            }
+        }
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {

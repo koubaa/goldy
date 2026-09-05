@@ -28,7 +28,8 @@ fn record_with_tables(
     record: &Dx12RecordState<'_>,
 ) -> anyhow::Result<()> {
     // COM: same pointer as ID3D12GraphicsCommandList for method calls.
-    let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
+    let cmd7 = cmd;
+    let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd7) };
     let mut current_vertex_stride = 24u32; // Default stride
     let mut current_pipeline_handle: Option<super::PipelineHandle> = None;
     for command in commands {
@@ -36,7 +37,7 @@ fn record_with_tables(
             RenderCommand::ClearDepth(_) => {
                 // Depth clear is applied at pass begin.
             }
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 let pipelines_read = record.pipelines.read().unwrap();
                 if let Some(pipeline) = pipelines_read.entries.get(pipeline_handle) {
                     current_vertex_stride = pipeline.vertex_stride;
@@ -44,7 +45,9 @@ fn record_with_tables(
                     unsafe {
                         cmd.SetGraphicsRootSignature(&pipeline.root_signature);
                         cmd.SetPipelineState(&pipeline.pipeline_state);
-                        cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
+                        if !pipeline.is_mesh {
+                            cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
+                        }
                     }
                 }
             }
@@ -171,6 +174,9 @@ fn record_with_tables(
                     *base_vertex,
                     *first_instance,
                 );
+            },
+            RenderCommand::DispatchMesh { x, y, z } => unsafe {
+                cmd7.DispatchMesh(*x, *y, *z);
             },
         }
     }

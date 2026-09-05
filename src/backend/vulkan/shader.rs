@@ -32,8 +32,11 @@ pub(super) fn create(
             vertex_module: None,
             fragment_module: None,
             compute_module: None,
+            extra_modules: HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
+            stage_slot_remaps: HashMap::new(),
+            remapped_modules: HashMap::new(),
         },
     );
 
@@ -59,6 +62,12 @@ pub(super) fn destroy(
                 if let Some(module) = shader.compute_module {
                     device.device.destroy_shader_module(module, None);
                 }
+                for module in shader.extra_modules.into_values() {
+                    device.device.destroy_shader_module(module, None);
+                }
+                for module in shader.remapped_modules.into_values() {
+                    device.device.destroy_shader_module(module, None);
+                }
             }
         }
     }
@@ -72,30 +81,44 @@ pub(super) fn ensure_stage_compiled(
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,
 ) -> Result<vk::ShaderModule> {
-    {
+    let remap_fp = {
         let shaders_read = shaders.read().unwrap();
         let shader = shaders_read
             .entries
             .get(&shader_handle)
             .context("Invalid shader handle")?;
-        let cached_module = match stage {
-            crate::slang::SlangStage::Vertex => shader.vertex_module,
-            crate::slang::SlangStage::Fragment => shader.fragment_module,
-            crate::slang::SlangStage::Compute => shader.compute_module,
-            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-        };
-        if let Some(module) = cached_module {
-            return Ok(module);
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let fp = remap
+            .map(crate::slang::graphics_link::slot_remap_fingerprint)
+            .unwrap_or(0);
+        if fp != 0 {
+            if let Some(module) = shader.remapped_modules.get(&(stage as u32, fp)).copied() {
+                return Ok(module);
+            }
+        } else {
+            let cached_module = match stage {
+                crate::slang::SlangStage::Vertex => shader.vertex_module,
+                crate::slang::SlangStage::Fragment => shader.fragment_module,
+                crate::slang::SlangStage::Compute => shader.compute_module,
+                crate::slang::SlangStage::RayGeneration
+                | crate::slang::SlangStage::Intersection
+                | crate::slang::SlangStage::AnyHit
+                | crate::slang::SlangStage::ClosestHit
+                | crate::slang::SlangStage::Miss
+                | crate::slang::SlangStage::Callable
+                | crate::slang::SlangStage::Mesh
+                | crate::slang::SlangStage::Amplification => shader.extra_modules.get(&stage).copied(),
+                other => anyhow::bail!("Unsupported shader stage: {:?}", other),
+            };
+            if let Some(module) = cached_module {
+                return Ok(module);
+            }
         }
-    }
-
-    // Get the entry point name based on stage
-    let entry_point_name = match stage {
-        crate::slang::SlangStage::Vertex => "vs_main",
-        crate::slang::SlangStage::Fragment => "fs_main",
-        crate::slang::SlangStage::Compute => "cs_main",
-        _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
+        fp
     };
+
+    let entry_point_name = crate::slang::canonical_entry_point(stage)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
 
     let (slang_source, search_paths, extra_defines, device_handle, optimization_level, layout_checks_snapshot) = {
         let shaders_read = shaders.read().unwrap();
@@ -103,8 +126,11 @@ pub(super) fn ensure_stage_compiled(
             .entries
             .get(&shader_handle)
             .context("Invalid shader handle")?;
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let source =
+            crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap).into_owned();
         (
-            shader.slang_source.clone(),
+            source,
             shader.search_paths.clone(),
             shader.defines.clone(),
             shader.device_handle,
@@ -114,7 +140,15 @@ pub(super) fn ensure_stage_compiled(
     };
 
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
-    let extra_define_refs: Vec<(&str, &str)> = extra_defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut extra_define_refs: Vec<(&str, &str)> =
+        extra_defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    if (devices
+        .get(&device_handle)
+        .is_some_and(|ld| ld.ray_query || ld.ray_tracing_pipelines))
+        && extra_define_refs.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY")
+    {
+        extra_define_refs.push(("GOLDY_RAY_QUERY", "1"));
+    }
 
     // Compile shader with reflection data for resource binding
     let result = slang_compiler
@@ -166,11 +200,25 @@ pub(super) fn ensure_stage_compiled(
     {
         let mut shaders_write = shaders.write().unwrap();
         let shader = shaders_write.entries.get_mut(&shader_handle).unwrap();
-        match stage {
-            crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
-            crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
-            crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
-            _ => {} // Already validated above, shouldn't reach here
+        if remap_fp != 0 {
+            shader.remapped_modules.insert((stage as u32, remap_fp), module);
+        } else {
+            match stage {
+                crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
+                crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
+                crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
+                crate::slang::SlangStage::RayGeneration
+                | crate::slang::SlangStage::Intersection
+                | crate::slang::SlangStage::AnyHit
+                | crate::slang::SlangStage::ClosestHit
+                | crate::slang::SlangStage::Miss
+                | crate::slang::SlangStage::Callable
+                | crate::slang::SlangStage::Mesh
+                | crate::slang::SlangStage::Amplification => {
+                    shader.extra_modules.insert(stage, module);
+                }
+                _ => {}
+            }
         }
 
         if !layout_checks_snapshot.is_empty() {
@@ -191,6 +239,15 @@ pub(super) fn ensure_stage_compiled(
                 }
                 if existing.binding_element_strides.is_empty() {
                     existing.binding_element_strides = new_reflection.binding_element_strides.clone();
+                }
+                for iface in &new_reflection.stage_interfaces {
+                    if !existing
+                        .stage_interfaces
+                        .iter()
+                        .any(|s| s.entry_name == iface.entry_name && s.stage == iface.stage)
+                    {
+                        existing.stage_interfaces.push(iface.clone());
+                    }
                 }
             } else {
                 shader.reflection = reflection;

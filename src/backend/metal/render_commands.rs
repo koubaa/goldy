@@ -3,14 +3,144 @@
 //! Used by both render_target and surface to avoid code duplication.
 
 use super::super::shared;
-use super::super::{BufferHandle, PipelineHandle, RenderCommand};
-use super::types::{PipelineState, PushLayout, RESOURCE_SLOT_BUFFER};
+use super::super::{BufferHandle, DeviceHandle, PipelineHandle, RenderCommand};
+use super::types::{LogicalDevice, PipelineState, PushLayout, RESOURCE_SLOT_BUFFER};
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
 use ::metal as mtl;
 use anyhow::Result;
 use mtl::MTLPrimitiveType;
 use std::collections::HashMap;
+
+/// metal-rs 0.33 omits object/mesh bits on [`MTLRenderStages`] (macOS 13 / iOS 16).
+const RENDER_STAGE_OBJECT: u64 = 1 << 3;
+const RENDER_STAGE_MESH: u64 = 1 << 4;
+
+pub(super) fn commands_use_mesh(commands: &[RenderCommand]) -> bool {
+    commands.iter().any(|c| matches!(c, RenderCommand::DispatchMesh { .. }))
+}
+
+pub(super) fn render_stages_for_pass(is_mesh: bool) -> mtl::MTLRenderStages {
+    let mut bits = mtl::MTLRenderStages::Vertex.bits() | mtl::MTLRenderStages::Fragment.bits();
+    if is_mesh {
+        bits |= RENDER_STAGE_OBJECT | RENDER_STAGE_MESH;
+    }
+    mtl::MTLRenderStages::from_bits_truncate(bits)
+}
+
+fn bind_goldy_argument_buffer(
+    encoder: &mtl::RenderCommandEncoderRef,
+    argument_buffer: &mtl::BufferRef,
+    is_mesh: bool,
+) -> Result<()> {
+    encoder.set_fragment_buffer(0, Some(argument_buffer), 0);
+    if is_mesh {
+        super::objc_catch::catch_objc("set_mesh_buffer(0)", || {
+            encoder.set_mesh_buffer(0, Some(argument_buffer), 0);
+        })?;
+        super::objc_catch::catch_objc("set_object_buffer(0)", || {
+            encoder.set_object_buffer(0, Some(argument_buffer), 0);
+        })?;
+    } else {
+        encoder.set_vertex_buffer(0, Some(argument_buffer), 0);
+    }
+    Ok(())
+}
+
+fn bind_push_bytes(encoder: &mtl::RenderCommandEncoderRef, layout_bytes: &[u8], is_mesh: bool) -> Result<()> {
+    encoder.set_fragment_bytes(
+        RESOURCE_SLOT_BUFFER,
+        layout_bytes.len() as u64,
+        layout_bytes.as_ptr() as *const _,
+    );
+    if is_mesh {
+        super::objc_catch::catch_objc("set_mesh_bytes", || {
+            encoder.set_mesh_bytes(
+                RESOURCE_SLOT_BUFFER,
+                layout_bytes.len() as u64,
+                layout_bytes.as_ptr() as *const _,
+            );
+        })?;
+        super::objc_catch::catch_objc("set_object_bytes", || {
+            encoder.set_object_bytes(
+                RESOURCE_SLOT_BUFFER,
+                layout_bytes.len() as u64,
+                layout_bytes.as_ptr() as *const _,
+            );
+        })?;
+    } else {
+        encoder.set_vertex_bytes(
+            RESOURCE_SLOT_BUFFER,
+            layout_bytes.len() as u64,
+            layout_bytes.as_ptr() as *const _,
+        );
+    }
+    Ok(())
+}
+
+/// Heaps, bindless argument buffer, and buffer residency for a render encoder.
+pub(super) fn declare_pass_resources(
+    encoder: &mtl::RenderCommandEncoderRef,
+    logical_device: &LogicalDevice,
+    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    device_handle: DeviceHandle,
+    is_mesh: bool,
+) -> Result<()> {
+    let render_stages = render_stages_for_pass(is_mesh);
+    if is_mesh {
+        let raw_bits = mtl::MTLRenderStages::Vertex.bits()
+            | mtl::MTLRenderStages::Fragment.bits()
+            | RENDER_STAGE_OBJECT
+            | RENDER_STAGE_MESH;
+        eprintln!(
+            "[goldy-mesh] declare_pass_resources raw_stage_bits=0x{raw_bits:x} truncated=0x{:x}",
+            render_stages.bits()
+        );
+        let heap = logical_device.heap_allocator.lock().unwrap();
+        let tex_heap = logical_device.texture_heap.lock().unwrap();
+        let ft = logical_device.frame_table.lock().unwrap();
+        super::objc_catch::catch_objc("use_heaps_and_resources(mesh)", || {
+            heap.use_heaps_for_render(encoder, render_stages);
+            tex_heap.use_heaps_for_render(encoder, render_stages);
+            for buf_state in buffers.values() {
+                if buf_state.device_handle == device_handle {
+                    encoder.use_resource_at(
+                        &buf_state.buffer,
+                        mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+                        render_stages,
+                    );
+                }
+            }
+            encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+        })?;
+    } else {
+        logical_device
+            .heap_allocator
+            .lock()
+            .unwrap()
+            .use_heaps_for_render(encoder, render_stages);
+        logical_device
+            .texture_heap
+            .lock()
+            .unwrap()
+            .use_heaps_for_render(encoder, render_stages);
+        for buf_state in buffers.values() {
+            if buf_state.device_handle == device_handle {
+                encoder.use_resource_at(
+                    &buf_state.buffer,
+                    mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
+                    render_stages,
+                );
+            }
+        }
+        {
+            let ft = logical_device.frame_table.lock().unwrap();
+            encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+        }
+    }
+    bind_goldy_argument_buffer(encoder, &logical_device.argument_buffer, is_mesh)?;
+    Ok(())
+}
 
 /// Record render commands into a Metal render command encoder.
 pub(super) fn record(
@@ -22,14 +152,34 @@ pub(super) fn record(
 ) -> Result<()> {
     let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
     let mut current_primitive_type = MTLPrimitiveType::Triangle;
+    let mut current_is_mesh = false;
+    let mut current_object_tg = mtl::MTLSize {
+        width: 0,
+        height: 0,
+        depth: 0,
+    };
+    let mut current_mesh_tg = mtl::MTLSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
 
     for cmd in commands {
         match cmd {
             RenderCommand::ClearDepth(_) => {}
-            RenderCommand::SetPipeline(pipeline_handle) => {
+            RenderCommand::SetPipeline(pipeline_handle) | RenderCommand::SetMeshPipeline(pipeline_handle) => {
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
-                    encoder.set_render_pipeline_state(&pipeline.pipeline);
+                    if pipeline.is_mesh {
+                        super::objc_catch::catch_objc("set_render_pipeline_state(mesh)", || {
+                            encoder.set_render_pipeline_state(&pipeline.pipeline);
+                        })?;
+                    } else {
+                        encoder.set_render_pipeline_state(&pipeline.pipeline);
+                    }
                     current_primitive_type = pipeline.primitive_type;
+                    current_is_mesh = pipeline.is_mesh;
+                    current_object_tg = pipeline.object_threadgroup;
+                    current_mesh_tg = pipeline.mesh_threadgroup;
                     if let Some(ds) = &pipeline.depth_stencil {
                         encoder.set_depth_stencil_state(ds);
                     }
@@ -75,17 +225,7 @@ pub(super) fn record(
                     crate::frame_table::FRAME_TABLE_SELECTOR_SLOT,
                     crate::frame_table::FRAME_TABLE_DEVICE_SLOT,
                 );
-                let layout_bytes = layout.as_bytes();
-                encoder.set_vertex_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
-                encoder.set_fragment_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
+                bind_push_bytes(encoder, layout.as_bytes(), current_is_mesh)?;
             }
             RenderCommand::BindResourcesTyped { .. } => {
                 anyhow::bail!(
@@ -137,6 +277,27 @@ pub(super) fn record(
                         );
                     }
                 }
+            }
+            RenderCommand::DispatchMesh { x, y, z } => {
+                anyhow::ensure!(
+                    current_is_mesh,
+                    "DispatchMesh requires a mesh pipeline (set_mesh_pipeline)"
+                );
+                eprintln!(
+                    "[goldy-mesh] draw_mesh_threadgroups grid=({x},{y},{z}) object_tg={:?} mesh_tg={:?}",
+                    current_object_tg, current_mesh_tg
+                );
+                super::objc_catch::catch_objc("draw_mesh_threadgroups", || {
+                    encoder.draw_mesh_threadgroups(
+                        mtl::MTLSize {
+                            width: *x as u64,
+                            height: *y as u64,
+                            depth: *z as u64,
+                        },
+                        current_object_tg,
+                        current_mesh_tg,
+                    );
+                })?;
             }
         }
     }

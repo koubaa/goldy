@@ -38,6 +38,7 @@
 //! ```
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use goldy_shader_ir::{
@@ -69,6 +70,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
                 name: p.name.clone(),
                 ty,
                 kind,
+                qualifier: String::new(),
+                array_suffix: String::new(),
             })
         })
         .collect();
@@ -78,6 +81,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
             name: "_goldy_gid".into(),
             ty: "ThreadId".into(),
             kind: ParamKind::SystemValue(SvKind::DispatchThreadId),
+            qualifier: String::new(),
+            array_suffix: String::new(),
         }));
     }
     if def.builtins.local_id {
@@ -85,6 +90,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
             name: "_goldy_lid".into(),
             ty: "GroupThreadId".into(),
             kind: ParamKind::SystemValue(SvKind::GroupThreadId),
+            qualifier: String::new(),
+            array_suffix: String::new(),
         }));
     }
     if def.builtins.workgroup_id {
@@ -92,6 +99,8 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
             name: "_goldy_wid".into(),
             ty: "GroupId".into(),
             kind: ParamKind::SystemValue(SvKind::GroupId),
+            qualifier: String::new(),
+            array_suffix: String::new(),
         }));
     }
 
@@ -103,8 +112,10 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
         return_semantic: None,
         params,
         numthreads: Some((x, y, z)),
+        outputtopology: None,
         goldy_attr_range: 0..0,
         numthreads_attr_range: None,
+        outputtopology_attr_range: None,
         fn_name_range: 0..0,
         return_semantic_range: None,
     }
@@ -112,7 +123,7 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
 
 /// Emit the native `[shader("compute")]` wrapper from structured ABI metadata.
 pub fn emit_wrapper_from_kernel_def(def: &KernelDef) -> String {
-    emit_wrapper(&entry_def_from_kernel_def(def))
+    emit_wrapper(&entry_def_from_kernel_def(def), None)
 }
 
 /// Extract a structured [`KernelDef`] from a simple `[goldy_compute]` source unit.
@@ -322,7 +333,7 @@ pub fn extract_binding_element_type_names(source: &str) -> Vec<Option<String>> {
         if !names.is_empty() {
             if entry.stage == Stage::Fragment {
                 fragment_names = Some(names);
-            } else if fallback_names.is_none() || entry.stage == Stage::Compute {
+            } else if fallback_names.is_none() || entry.stage.bindless_like_compute() {
                 fallback_names = Some(names);
             }
         }
@@ -358,6 +369,8 @@ pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types
                     Some(ResourceCategory::StorageImage)
                 } else if ty == "Filter" {
                     Some(ResourceCategory::Sampler)
+                } else if ty == "Accel" {
+                    Some(ResourceCategory::Accel)
                 } else {
                     None
                 }
@@ -422,7 +435,7 @@ pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types
         if !cats.is_empty() {
             if entry.stage == Stage::Fragment {
                 fragment_cats = Some(cats);
-            } else if fallback_cats.is_none() || entry.stage == Stage::Compute {
+            } else if fallback_cats.is_none() || entry.stage.bindless_like_compute() {
                 fallback_cats = Some(cats);
             }
         }
@@ -449,7 +462,7 @@ pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate
                 let ty = param.ty.trim();
                 if ty.starts_with("Scattered<") || ty == "ByteAddress" {
                     Some(BindlessSlotKind::StorageUav)
-                } else if ty.starts_with("BufRO<") {
+                } else if ty.starts_with("BufRO<") || ty == "Accel" {
                     Some(BindlessSlotKind::ReadOnlySrv)
                 } else {
                     None
@@ -514,7 +527,7 @@ pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate
         if !kinds.is_empty() {
             if entry.stage == Stage::Fragment {
                 fragment_kinds = Some(kinds);
-            } else if fallback_kinds.is_none() || entry.stage == Stage::Compute {
+            } else if fallback_kinds.is_none() || entry.stage.bindless_like_compute() {
                 fallback_kinds = Some(kinds);
             }
         }
@@ -528,6 +541,14 @@ pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate
 ///
 /// If no `[goldy_*]` attributes are present, the source is returned unchanged.
 pub fn transform_virtual_main(source: &str) -> String {
+    transform_virtual_main_with_remaps(source, None)
+}
+
+/// [`transform_virtual_main`] with per-stage local-name → pipeline-slot remaps.
+pub fn transform_virtual_main_with_remaps(
+    source: &str,
+    remaps: Option<&HashMap<Stage, HashMap<String, u32>>>,
+) -> String {
     let entries = find_all_entries(source);
     if entries.is_empty() {
         return source.to_string();
@@ -536,7 +557,8 @@ pub fn transform_virtual_main(source: &str) -> String {
     // Generate wrapper code (in declaration order — first entry first).
     let mut wrapper_block = String::from("// [generated by goldy virtual_main — do not edit]\n");
     for entry in &entries {
-        wrapper_block.push_str(&emit_wrapper(entry));
+        let remap = remaps.and_then(|m| m.get(&entry.stage));
+        wrapper_block.push_str(&emit_wrapper(entry, remap));
         wrapper_block.push_str("\n\n");
     }
 
@@ -561,8 +583,11 @@ pub fn transform_virtual_main(source: &str) -> String {
 pub fn transform_virtual_main_cpu(source: &str) -> Result<String, String> {
     let has_compute = source.contains("[goldy_compute]");
     let has_graphics = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
-    if has_graphics {
-        return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment)".into());
+    let has_rt =
+        source.contains("[goldy_raygen]") || source.contains("[goldy_miss]") || source.contains("[goldy_closesthit]");
+    let has_mesh = source.contains("[goldy_mesh]") || source.contains("[goldy_amplification]");
+    if has_graphics || has_rt || has_mesh {
+        return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt/mesh)".into());
     }
     if !has_compute {
         return Ok(source.to_string());
@@ -715,6 +740,8 @@ pub enum WgpuComputeResourceKind {
     StorageTexture,
     /// `Filter` → sampler.
     Sampler,
+    /// `Accel` → acceleration structure (experimental ray query).
+    AccelerationStructure,
 }
 
 impl WgpuComputeResourceKind {
@@ -722,7 +749,7 @@ impl WgpuComputeResourceKind {
     pub fn default_access(self) -> crate::types::ResourceAccess {
         match self {
             Self::StorageReadWrite | Self::StorageTexture => crate::types::ResourceAccess::ReadWrite,
-            Self::StorageRead | Self::Uniform | Self::SampledTexture | Self::Sampler => {
+            Self::StorageRead | Self::Uniform | Self::SampledTexture | Self::Sampler | Self::AccelerationStructure => {
                 crate::types::ResourceAccess::Read
             }
         }
@@ -786,6 +813,8 @@ pub fn extract_webgpu_compute_layout(source: &str, defines: &[(&str, &str)]) -> 
             Ok(WgpuComputeResourceKind::StorageTexture)
         } else if ty == "Filter" {
             Ok(WgpuComputeResourceKind::Sampler)
+        } else if ty == "Accel" {
+            Ok(WgpuComputeResourceKind::AccelerationStructure)
         } else if matches!(param.kind, ParamKind::Broadcast) {
             Ok(WgpuComputeResourceKind::Uniform)
         } else {
@@ -836,6 +865,14 @@ pub fn extract_webgpu_compute_layout(source: &str, defines: &[(&str, &str)]) -> 
 /// Bindings are assigned in vertex-then-fragment author order (same as the
 /// graphics lowering). Shaders without those attributes use [`WgpuComputeLayout::inferred_storage`].
 pub fn extract_webgpu_graphics_layout(source: &str) -> Result<WgpuComputeLayout, String> {
+    extract_webgpu_graphics_layout_with_remaps(source, None)
+}
+
+/// Like [`extract_webgpu_graphics_layout`], placing resources at pipeline-contract slots.
+pub fn extract_webgpu_graphics_layout_with_remaps(
+    source: &str,
+    remaps: Option<&HashMap<Stage, HashMap<String, u32>>>,
+) -> Result<WgpuComputeLayout, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
         return Ok(WgpuComputeLayout::inferred_storage());
@@ -853,6 +890,8 @@ pub fn extract_webgpu_graphics_layout(source: &str) -> Result<WgpuComputeLayout,
             Ok(WgpuComputeResourceKind::StorageTexture)
         } else if ty == "Filter" {
             Ok(WgpuComputeResourceKind::Sampler)
+        } else if ty == "Accel" {
+            Ok(WgpuComputeResourceKind::AccelerationStructure)
         } else if matches!(param.kind, ParamKind::Broadcast) {
             Ok(WgpuComputeResourceKind::Uniform)
         } else {
@@ -860,19 +899,33 @@ pub fn extract_webgpu_graphics_layout(source: &str) -> Result<WgpuComputeLayout,
         }
     }
 
+    let use_remap = remaps.is_some_and(|m| m.values().any(|r| !r.is_empty()));
     let mut resources = Vec::new();
+    let mut by_slot: HashMap<u32, WgpuComputeResourceKind> = HashMap::new();
     let mut scalar_count = 0u32;
     let mut saw_graphics = false;
     for stage in [Stage::Vertex, Stage::Fragment] {
         for entry in entries.iter().filter(|entry| entry.stage == stage) {
             saw_graphics = true;
+            let mut sequential = 0u32;
             for item in &entry.params {
                 let ParamItem::Single(param) = item else {
                     return Err("conditional parameters are not supported by the WebGPU prototype".to_string());
                 };
                 match &param.kind {
                     ParamKind::Resource | ParamKind::Broadcast => {
-                        resources.push(resource_kind(param)?);
+                        let kind = resource_kind(param)?;
+                        if use_remap {
+                            let slot = remaps
+                                .and_then(|m| m.get(&entry.stage))
+                                .and_then(|m| m.get(&param.name))
+                                .copied()
+                                .unwrap_or(sequential);
+                            by_slot.entry(slot).or_insert(kind);
+                        } else {
+                            resources.push(kind);
+                        }
+                        sequential += 1;
                     }
                     ParamKind::Scalar => {
                         hlsl_scalar_from_uint_word(&param.ty, "_")?;
@@ -885,6 +938,12 @@ pub fn extract_webgpu_graphics_layout(source: &str) -> Result<WgpuComputeLayout,
     }
     if !saw_graphics {
         return Ok(WgpuComputeLayout::inferred_storage());
+    }
+    if use_remap {
+        let max = by_slot.keys().copied().max().unwrap_or(0);
+        resources = (0..=max)
+            .map(|i| by_slot.get(&i).copied().unwrap_or(WgpuComputeResourceKind::StorageRead))
+            .collect();
     }
     Ok(WgpuComputeLayout {
         resources: Some(resources),
@@ -937,6 +996,8 @@ pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &st
             (format!("RWTexture2D<{logical_elem}>"), 'u')
         } else if ty == "Filter" {
             (ty.to_string(), 's')
+        } else if ty == "Accel" {
+            ("RaytracingAccelerationStructure".to_string(), 't')
         } else if matches!(param.kind, ParamKind::Broadcast) {
             (format!("ConstantBuffer<{ty}>"), 'b')
         } else {
@@ -1062,6 +1123,14 @@ pub fn transform_virtual_main_webgpu_compute(source: &str, defines: &[(&str, &st
 /// `Scattered<T>` is lowered as read-only `BufRO<T>` so WGSL uses `storage, read`
 /// (portable WebGPU; no `VERTEX_WRITABLE_STORAGE`).
 pub fn transform_virtual_main_webgpu_graphics(source: &str) -> Result<String, String> {
+    transform_virtual_main_webgpu_graphics_with_remaps(source, None)
+}
+
+/// Like [`transform_virtual_main_webgpu_graphics`], assigning `register(tN)` from pipeline slots.
+pub fn transform_virtual_main_webgpu_graphics_with_remaps(
+    source: &str,
+    remaps: Option<&HashMap<Stage, HashMap<String, u32>>>,
+) -> Result<String, String> {
     let entries = find_all_entries(source);
     if entries.is_empty() {
         return Ok(source.to_string());
@@ -1096,16 +1165,19 @@ pub fn transform_virtual_main_webgpu_graphics(source: &str) -> Result<String, St
         return Err("WebGPU graphics lowering found no [goldy_vertex]/[goldy_fragment] entry point".to_string());
     }
 
+    let use_remap = remaps.is_some_and(|m| m.values().any(|r| !r.is_empty()));
     let mut generated = String::from("// [generated by goldy virtual_main WebGPU graphics lowering — do not edit]\n");
     let mut binding = 0u32;
     let mut user = 0u32;
     let mut wrappers = String::new();
+    let mut emitted_slots = HashSet::new();
 
     for entry in &graphics_entries {
         let mut signature = Vec::new();
         let mut body = String::new();
         let mut call_args = Vec::new();
         let mut sv_index = 0u32;
+        let mut sequential = 0u32;
 
         for item in &entry.params {
             let ParamItem::Single(param) = item else {
@@ -1113,9 +1185,21 @@ pub fn transform_virtual_main_webgpu_graphics(source: &str) -> Result<String, St
             };
             match &param.kind {
                 ParamKind::Resource | ParamKind::Broadcast => {
-                    let global = format!("_goldy_wgpu_binding_{binding}");
-                    generated.push_str(&resource_decl(param, binding, &global)?);
-                    generated.push('\n');
+                    let slot = if use_remap {
+                        remaps
+                            .and_then(|m| m.get(&entry.stage))
+                            .and_then(|m| m.get(&param.name))
+                            .copied()
+                            .unwrap_or(sequential)
+                    } else {
+                        binding
+                    };
+                    sequential += 1;
+                    let global = format!("_goldy_wgpu_binding_{slot}");
+                    if emitted_slots.insert(slot) {
+                        generated.push_str(&resource_decl(param, slot, &global)?);
+                        generated.push('\n');
+                    }
                     if matches!(param.kind, ParamKind::Broadcast) {
                         body.push_str(&format!("    {} {} = {};\n", param.ty, param.name, global));
                         call_args.push(param.name.clone());
@@ -1126,7 +1210,11 @@ pub fn transform_virtual_main_webgpu_graphics(source: &str) -> Result<String, St
                     } else {
                         call_args.push(global);
                     }
-                    binding += 1;
+                    if !use_remap {
+                        binding += 1;
+                    } else {
+                        binding = binding.max(slot + 1);
+                    }
                 }
                 ParamKind::SystemValue(sv) => {
                     let arg = format!("_sv{sv_index}");
@@ -1473,6 +1561,7 @@ pub fn transform_virtual_main_cuda_compute_specialized(
             || ty.starts_with("Interpolated<")
             || ty.starts_with("DirectSpatial<")
             || ty == "Filter"
+            || ty == "Accel"
         {
             Ok(ty.to_string())
         } else if matches!(param.kind, ParamKind::Broadcast) {
@@ -1841,8 +1930,9 @@ fn fn_param_list_contains_offset(source: &str, fn_start: usize, offset: usize) -
 /// Slang translation-unit source after the optional virtual-main rewrite.
 ///
 /// This matches the compiler gate: [`transform_virtual_main`] runs only when `source`
-/// contains `[goldy_compute]`, `[goldy_vertex]`, or `[goldy_fragment]` as substrings
-/// (the same [`str::contains`] checks previously used before calling Slang).
+/// contains `[goldy_compute]`, `[goldy_vertex]`, `[goldy_fragment]`, RT `[goldy_ray*]`,
+/// or mesh `[goldy_mesh]` / `[goldy_amplification]` as substrings (the same
+/// [`str::contains`] checks previously used before calling Slang).
 ///
 /// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
 /// use this so the hashed text matches the compiled text.
@@ -1852,8 +1942,30 @@ pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
     let has_graphics_stage = source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]");
     #[cfg(not(feature = "graphics"))]
     let has_graphics_stage = false;
-    if has_compute || has_graphics_stage {
+    let has_rt = source.contains("[goldy_raygen]")
+        || source.contains("[goldy_miss]")
+        || source.contains("[goldy_closesthit]")
+        || source.contains("[goldy_anyhit]")
+        || source.contains("[goldy_intersection]");
+    let has_mesh = source.contains("[goldy_mesh]") || source.contains("[goldy_amplification]");
+    if has_compute || has_graphics_stage || has_rt || has_mesh {
         Cow::Owned(transform_virtual_main(source))
+    } else {
+        Cow::Borrowed(source)
+    }
+}
+
+/// Like [`effective_slang_source_for_compile`], applying per-stage slot remaps.
+pub fn effective_slang_source_for_compile_with_remaps<'a>(
+    source: &'a str,
+    remaps: Option<&HashMap<Stage, HashMap<String, u32>>>,
+) -> Cow<'a, str> {
+    if remaps.is_none() {
+        return effective_slang_source_for_compile(source);
+    }
+    let has_goldy = source.contains("[goldy_");
+    if has_goldy {
+        Cow::Owned(transform_virtual_main_with_remaps(source, remaps))
     } else {
         Cow::Borrowed(source)
     }
@@ -1864,11 +1976,18 @@ pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
 // ---------------------------------------------------------------------------
 
 /// The shader stage for a virtual entry point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
     Compute,
     Vertex,
     Fragment,
+    RayGeneration,
+    Miss,
+    ClosestHit,
+    AnyHit,
+    Intersection,
+    Mesh,
+    Amplification,
 }
 
 impl Stage {
@@ -1877,7 +1996,28 @@ impl Stage {
             Stage::Compute => r#"[shader("compute")]"#,
             Stage::Vertex => r#"[shader("vertex")]"#,
             Stage::Fragment => r#"[shader("fragment")]"#,
+            Stage::RayGeneration => r#"[shader("raygeneration")]"#,
+            Stage::Miss => r#"[shader("miss")]"#,
+            Stage::ClosestHit => r#"[shader("closesthit")]"#,
+            Stage::AnyHit => r#"[shader("anyhit")]"#,
+            Stage::Intersection => r#"[shader("intersection")]"#,
+            Stage::Mesh => r#"[shader("mesh")]"#,
+            Stage::Amplification => r#"[shader("amplification")]"#,
         }
+    }
+
+    fn bindless_like_compute(self) -> bool {
+        matches!(
+            self,
+            Stage::Compute | Stage::RayGeneration | Stage::Mesh | Stage::Amplification
+        )
+    }
+
+    fn payload_inout(self) -> bool {
+        matches!(
+            self,
+            Stage::Miss | Stage::ClosestHit | Stage::AnyHit | Stage::Intersection
+        )
     }
 }
 
@@ -1907,12 +2047,14 @@ pub enum ParamKind {
 /// The kind of system-value a `SystemValue` param maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvKind {
-    DispatchThreadId, // SV_DispatchThreadID  uint3
-    GroupThreadId,    // SV_GroupThreadID     uint3
-    GroupId,          // SV_GroupID           uint3
-    VertexId,         // SV_VertexID          uint
-    InstanceId,       // SV_InstanceID        uint
-    IsFrontFace,      // SV_IsFrontFace       bool
+    DispatchThreadId,       // SV_DispatchThreadID  uint3
+    GroupThreadId,          // SV_GroupThreadID     uint3
+    GroupId,                // SV_GroupID           uint3
+    VertexId,               // SV_VertexID          uint
+    InstanceId,             // SV_InstanceID        uint
+    IsFrontFace,            // SV_IsFrontFace       bool
+    DispatchRaysIndex,      // SV_DispatchRaysIndex uint3
+    DispatchRaysDimensions, // SV_DispatchRaysDimensions uint3
 }
 
 impl SvKind {
@@ -1925,13 +2067,28 @@ impl SvKind {
             SvKind::VertexId => "SV_VertexID",
             SvKind::InstanceId => "SV_InstanceID",
             SvKind::IsFrontFace => "SV_IsFrontFace",
+            SvKind::DispatchRaysIndex => "SV_DispatchRaysIndex",
+            SvKind::DispatchRaysDimensions => "SV_DispatchRaysDimensions",
+        }
+    }
+
+    /// Slang ray-dispatch builtins are functions, not DXIL parameter semantics.
+    fn goldy_intrinsic(self) -> Option<&'static str> {
+        match self {
+            SvKind::DispatchRaysIndex => Some("goldy_dispatch_rays_index()"),
+            SvKind::DispatchRaysDimensions => Some("goldy_dispatch_rays_dimensions()"),
+            _ => None,
         }
     }
 
     /// The primitive type for the generated SV parameter.
     fn primitive(self) -> &'static str {
         match self {
-            SvKind::DispatchThreadId | SvKind::GroupThreadId | SvKind::GroupId => "uint3",
+            SvKind::DispatchThreadId
+            | SvKind::GroupThreadId
+            | SvKind::GroupId
+            | SvKind::DispatchRaysIndex
+            | SvKind::DispatchRaysDimensions => "uint3",
             SvKind::VertexId | SvKind::InstanceId => "uint",
             SvKind::IsFrontFace => "bool",
         }
@@ -1947,6 +2104,10 @@ pub struct Param {
     pub ty: String,
     /// Classified kind.
     pub kind: ParamKind,
+    /// `in` / `out` / `inout` qualifier, when present (mesh `out vertices` / `in payload`).
+    pub qualifier: String,
+    /// Array declarator on the name, e.g. `"[3]"` in `verts[3]`.
+    pub array_suffix: String,
 }
 
 /// A parameter item in a `[goldy_*]` entry-point signature.
@@ -1978,14 +2139,18 @@ pub struct EntryDef {
     /// Return semantic (e.g., `"SV_Target"`) — fragment only.
     pub return_semantic: Option<String>,
     pub params: Vec<ParamItem>,
-    /// `[numthreads(X, Y, Z)]` if present (compute only).
+    /// `[numthreads(X, Y, Z)]` if present (compute / mesh / amplification).
     pub numthreads: Option<(u32, u32, u32)>,
+    /// `[outputtopology("triangle")]` payload, if present (mesh).
+    pub outputtopology: Option<String>,
 
     // Byte ranges in the *original* source for the apply_transforms step.
     /// The `[goldy_*]` attribute span (including brackets).
     pub goldy_attr_range: Range<usize>,
     /// The `[numthreads(...)]` span, if found adjacent to the entry.
     pub numthreads_attr_range: Option<Range<usize>>,
+    /// The `[outputtopology(...)]` span, if found adjacent to the entry.
+    pub outputtopology_attr_range: Option<Range<usize>>,
     /// The span of just the function name (e.g., `"cs_main"`).
     pub fn_name_range: Range<usize>,
     /// The `: SV_Target` span in the user function declaration (fragment only).
@@ -2002,10 +2167,17 @@ const GOLDY_STAGES: &[(&str, Stage)] = &[
     ("goldy_vertex", Stage::Vertex),
     #[cfg(feature = "graphics")]
     ("goldy_fragment", Stage::Fragment),
+    ("goldy_raygen", Stage::RayGeneration),
+    ("goldy_miss", Stage::Miss),
+    ("goldy_closesthit", Stage::ClosestHit),
+    ("goldy_anyhit", Stage::AnyHit),
+    ("goldy_intersection", Stage::Intersection),
+    ("goldy_mesh", Stage::Mesh),
+    ("goldy_amplification", Stage::Amplification),
 ];
 
 /// Find all `[goldy_*]` entry points in `source`, sorted by position.
-fn find_all_entries(source: &str) -> Vec<EntryDef> {
+pub(crate) fn find_all_entries(source: &str) -> Vec<EntryDef> {
     let mut entries: Vec<EntryDef> = Vec::new();
     let bytes = source.as_bytes();
     let mut search_from = 0;
@@ -2063,6 +2235,8 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
     let mut pos = attr_end;
     let mut numthreads_attr_range: Option<Range<usize>> = None;
     let mut numthreads: Option<(u32, u32, u32)> = None;
+    let mut outputtopology_attr_range: Option<Range<usize>> = None;
+    let mut outputtopology: Option<String> = None;
 
     // Scan forward through any attributes that follow [goldy_*].
     loop {
@@ -2078,6 +2252,12 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
                     numthreads_attr_range = Some(pos..bracket_end);
                 }
             }
+            if trimmed.starts_with("outputtopology") {
+                if let Some(topo) = parse_outputtopology(trimmed) {
+                    outputtopology = Some(topo);
+                    outputtopology_attr_range = Some(pos..bracket_end);
+                }
+            }
             // Skip [shader("...")] — it will be replaced by our generated one.
             pos = bracket_end;
         } else {
@@ -2090,6 +2270,12 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
         if let Some((nt, nt_range)) = find_numthreads_in_range(source, group_start, attr_start) {
             numthreads = Some(nt);
             numthreads_attr_range = Some(nt_range);
+        }
+    }
+    if outputtopology.is_none() {
+        if let Some((topo, range)) = find_outputtopology_in_range(source, group_start, attr_start) {
+            outputtopology = Some(topo);
+            outputtopology_attr_range = Some(range);
         }
     }
 
@@ -2144,8 +2330,10 @@ fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _
         return_semantic,
         params,
         numthreads,
+        outputtopology,
         goldy_attr_range: attr_start..attr_end,
         numthreads_attr_range,
+        outputtopology_attr_range,
         fn_name_range: fn_name_start..fn_name_end,
         return_semantic_range,
     })
@@ -2307,11 +2495,22 @@ fn parse_single_param(s: &str) -> Option<Param> {
         return None;
     }
 
-    // Skip `uniform` keyword if present (old-style params in shaders that mix styles).
-    let s = if let Some(rest) = s.strip_prefix("uniform") {
-        rest.trim_start()
+    // Skip `uniform` / `inout` / `in` / `out` keywords.
+    let (qualifier, s) = if let Some(rest) = s.strip_prefix("inout") {
+        ("inout", rest.trim_start())
+    } else if let Some(rest) = s.strip_prefix("out") {
+        ("out", rest.trim_start())
+    } else if let Some(rest) = s.strip_prefix("in") {
+        // Avoid stripping `int` / `Interpolated`.
+        if rest.starts_with(|c: char| c.is_whitespace()) {
+            ("in", rest.trim_start())
+        } else {
+            ("", s)
+        }
+    } else if let Some(rest) = s.strip_prefix("uniform") {
+        ("", rest.trim_start())
     } else {
-        s
+        ("", s)
     };
 
     // Find the split point between type and name: the last "whitespace gap"
@@ -2330,7 +2529,7 @@ fn parse_single_param(s: &str) -> Option<Param> {
         }
     }
 
-    let (ty_str, name) = if let Some(sp) = last_space {
+    let (ty_str, raw_name) = if let Some(sp) = last_space {
         let ty = s[..sp].trim();
         let name = s[sp + 1..].trim();
         // If name contains spaces it likely has a : SV_ annotation (old-style param).
@@ -2342,8 +2541,24 @@ fn parse_single_param(s: &str) -> Option<Param> {
         (s.to_string(), String::new())
     };
 
+    let (name, array_suffix) = split_array_suffix(&raw_name);
+
     let kind = classify_type(&ty_str);
-    Some(Param { name, ty: ty_str, kind })
+    Some(Param {
+        name,
+        ty: ty_str,
+        kind,
+        qualifier: qualifier.to_string(),
+        array_suffix,
+    })
+}
+
+fn split_array_suffix(name: &str) -> (String, String) {
+    if let Some(i) = name.find('[') {
+        (name[..i].to_string(), name[i..].to_string())
+    } else {
+        (name.to_string(), String::new())
+    }
 }
 
 /// Build the RHS initialiser expression for a resource parameter.
@@ -2383,6 +2598,9 @@ fn resource_init_expr(ty: &str, slot_var: &str) -> String {
     if ty == "Filter" {
         return format!("goldy_filter({})", slot_var);
     }
+    if ty == "Accel" {
+        return format!("goldy_accel({})", slot_var);
+    }
     // Unrecognised resource type: fall back to calling __init(slot).
     format!("{}({})", ty, slot_var)
 }
@@ -2403,7 +2621,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
     // InstanceId, etc.) follow the last PassThrough, there is no stage-input struct
     // and all PassThroughs are broadcasts.
     let preserve_idx: Option<usize> = match stage {
-        Stage::Vertex | Stage::Fragment => {
+        Stage::Vertex | Stage::Fragment | Stage::Miss | Stage::ClosestHit | Stage::AnyHit | Stage::Intersection => {
             let last_pt = params
                 .iter()
                 .rposition(|item| matches!(item, ParamItem::Single(p) if p.kind == ParamKind::PassThrough));
@@ -2420,12 +2638,14 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
                 None
             }
         }
-        Stage::Compute => None,
+        Stage::Compute | Stage::RayGeneration | Stage::Mesh | Stage::Amplification => None,
     };
 
     for (i, item) in params.iter_mut().enumerate() {
         match item {
-            ParamItem::Single(p) if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx => {
+            ParamItem::Single(p)
+                if p.kind == ParamKind::PassThrough && Some(i) != preserve_idx && !is_mesh_io_type(&p.ty) =>
+            {
                 p.kind = ParamKind::Broadcast;
             }
             ParamItem::Conditional {
@@ -2435,7 +2655,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
             } => {
                 // Conditional blocks never contain stage inputs — all PassThrough → Broadcast.
                 for p in then_params.iter_mut().chain(else_params.iter_mut()) {
-                    if p.kind == ParamKind::PassThrough {
+                    if p.kind == ParamKind::PassThrough && !is_mesh_io_type(&p.ty) {
                         p.kind = ParamKind::Broadcast;
                     }
                 }
@@ -2470,6 +2690,12 @@ fn classify_type(ty: &str) -> ParamKind {
     if ty == "Filter" {
         return ParamKind::Resource;
     }
+    if ty == "Accel" {
+        return ParamKind::Resource;
+    }
+    if is_mesh_io_type(ty) {
+        return ParamKind::PassThrough;
+    }
 
     // System-value types.
     if ty == "ThreadId" {
@@ -2489,6 +2715,12 @@ fn classify_type(ty: &str) -> ParamKind {
     }
     if ty == "IsFrontFace" {
         return ParamKind::SystemValue(SvKind::IsFrontFace);
+    }
+    if ty == "DispatchRaysIndex" {
+        return ParamKind::SystemValue(SvKind::DispatchRaysIndex);
+    }
+    if ty == "DispatchRaysDimensions" {
+        return ParamKind::SystemValue(SvKind::DispatchRaysDimensions);
     }
 
     // Plain scalars → uniform entry-point parameters.
@@ -2545,6 +2777,9 @@ struct WrapperBuilder {
     call: String,
     sig_sep: bool,
     call_sep: bool,
+    payload_inout: bool,
+    /// Local parameter name → pipeline-wide bindless slot. `None` uses sequential slots.
+    slot_remap: Option<HashMap<String, u32>>,
 }
 
 impl WrapperBuilder {
@@ -2555,7 +2790,16 @@ impl WrapperBuilder {
             call: String::new(),
             sig_sep: false,
             call_sep: false,
+            payload_inout: false,
+            slot_remap: None,
         }
+    }
+
+    fn bindless_slot(&self, param_name: &str, sequential: u32) -> u32 {
+        self.slot_remap
+            .as_ref()
+            .and_then(|m| m.get(param_name).copied())
+            .unwrap_or(sequential)
     }
 
     fn push_sig(&mut self, s: &str) {
@@ -2591,7 +2835,7 @@ impl WrapperBuilder {
     ) {
         match &param.kind {
             ParamKind::Resource => {
-                let k = *bindless_idx;
+                let k = self.bindless_slot(&param.name, *bindless_idx);
                 *bindless_idx += 1;
                 let extract = format!("goldy_frame_table_index(_rs0, {}u, _rs1, _rs2)", k);
                 let init_expr = resource_init_expr(&param.ty, &extract);
@@ -2599,14 +2843,19 @@ impl WrapperBuilder {
                 self.push_call(&param.name);
             }
             ParamKind::SystemValue(sv) => {
-                let gn = format!("_sv{}", *sv_idx);
-                *sv_idx += 1;
-                self.push_sig(&format!("{} {} : {}", sv.primitive(), gn, sv.semantic()));
-                self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, gn));
-                self.push_call(&param.name);
+                if let Some(helper) = sv.goldy_intrinsic() {
+                    self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, helper));
+                    self.push_call(&param.name);
+                } else {
+                    let gn = format!("_sv{}", *sv_idx);
+                    *sv_idx += 1;
+                    self.push_sig(&format!("{} {} : {}", sv.primitive(), gn, sv.semantic()));
+                    self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, gn));
+                    self.push_call(&param.name);
+                }
             }
             ParamKind::Broadcast => {
-                let k = *bindless_idx;
+                let k = self.bindless_slot(&param.name, *bindless_idx);
                 *bindless_idx += 1;
                 let extract = format!("goldy_frame_table_index(_rs0, {}u, _rs1, _rs2)", k);
                 self.push_body_stmt(&format!(
@@ -2631,10 +2880,25 @@ impl WrapperBuilder {
                 self.push_call(&param.name);
             }
             ParamKind::PassThrough => {
-                let gn = format!("_pt{}", *pt_idx);
-                *pt_idx += 1;
-                self.push_sig(&format!("{} {}", param.ty, gn));
-                self.push_call(&gn);
+                if is_mesh_io_type(&param.ty) {
+                    let qual = if param.qualifier.is_empty() {
+                        "out"
+                    } else {
+                        param.qualifier.as_str()
+                    };
+                    let decl = format!("{}{}", param.name, param.array_suffix);
+                    self.push_sig(&format!("{} {} {}", qual, param.ty, decl));
+                    self.push_call(&param.name);
+                } else {
+                    let gn = format!("_pt{}", *pt_idx);
+                    *pt_idx += 1;
+                    if self.payload_inout {
+                        self.push_sig(&format!("inout {} {}", param.ty, gn));
+                    } else {
+                        self.push_sig(&format!("{} {}", param.ty, gn));
+                    }
+                    self.push_call(&gn);
+                }
             }
         }
     }
@@ -2666,6 +2930,8 @@ impl WrapperBuilder {
         let mut t_sv = start_sv;
         let mut t_pt = start_pt;
         let mut then_b = WrapperBuilder::new();
+        then_b.payload_inout = self.payload_inout;
+        then_b.slot_remap = self.slot_remap.clone();
         for p in then_params {
             then_b.process_param(p, &mut t_bindless, &mut t_user, &mut t_sv, &mut t_pt);
         }
@@ -2676,6 +2942,8 @@ impl WrapperBuilder {
         let mut e_sv = start_sv;
         let mut e_pt = start_pt;
         let mut else_b = WrapperBuilder::new();
+        else_b.payload_inout = self.payload_inout;
+        else_b.slot_remap = self.slot_remap.clone();
         for p in else_params {
             else_b.process_param(p, &mut e_bindless, &mut e_user, &mut e_sv, &mut e_pt);
         }
@@ -2740,25 +3008,30 @@ impl WrapperBuilder {
 }
 
 /// Emit the generated `[shader("...")]` wrapper for one entry point.
-fn emit_wrapper(entry: &EntryDef) -> String {
+fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> String {
     let mut out = String::new();
 
     // Stage attribute.
     out.push_str(entry.stage.shader_attr());
     out.push('\n');
 
-    // Transfer [numthreads] for compute.
+    // Transfer [numthreads] for compute / mesh / amplification.
     if let Some((x, y, z)) = entry.numthreads {
         out.push_str(&format!("[numthreads({}, {}, {})]\n", x, y, z));
     }
+    if let Some(ref topo) = entry.outputtopology {
+        out.push_str(&format!("[outputtopology(\"{topo}\")]\n"));
+    }
 
-    let user_fn_name = format!("_goldy_user_{}", entry.fn_name);
+    let user_fn_name = goldy_callee_name(entry);
 
     let mut bindless_idx = 0u32;
     let mut user_idx = 0u32;
     let mut sv_idx = 0u32;
     let mut pt_idx = 0u32;
     let mut wb = WrapperBuilder::new();
+    wb.payload_inout = entry.stage.payload_inout();
+    wb.slot_remap = remap.cloned();
 
     // Always emit all 8 bindless words (_bw0.._bw7), 8 user words (_uw0.._uw7),
     // frame-table dispatch base (_rs0 = PushLayout._reserved[0]), and the
@@ -2795,6 +3068,10 @@ fn emit_wrapper(entry: &EntryDef) -> String {
         }
     }
 
+    if matches!(entry.stage, Stage::ClosestHit | Stage::AnyHit) {
+        wb.push_sig("BuiltInTriangleIntersectionAttributes _goldy_hit_attr");
+    }
+
     // --- Function signature ---
     let ret_sem = if let Some(ref sem) = entry.return_semantic {
         format!(" : {}", sem)
@@ -2823,6 +3100,14 @@ fn emit_wrapper(entry: &EntryDef) -> String {
     out
 }
 
+fn goldy_callee_name(entry: &EntryDef) -> String {
+    match entry.stage {
+        Stage::Mesh => "goldy_mesh".into(),
+        Stage::Amplification => "goldy_amplification".into(),
+        _ => format!("_goldy_user_{}", entry.fn_name),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source modification
 // ---------------------------------------------------------------------------
@@ -2839,7 +3124,7 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
     }
 
     // 2. Rename the function name.
-    let new_fn_name = format!("_goldy_user_{}", entry.fn_name);
+    let new_fn_name = goldy_callee_name(entry);
     replacements.push((
         entry.fn_name_range.start,
         entry.fn_name_range.end,
@@ -2847,18 +3132,29 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
         Box::leak(new_fn_name.into_boxed_str()),
     ));
 
-    // 3. Remove [numthreads(...)] from the user function (compute only).
-    //    It lives on the generated wrapper, not the user helper function.
+    // 3. Remove [numthreads(...)] / [outputtopology] from the helper.
+    //    They live on the generated wrapper, not the user function.
     if let Some(ref nr) = entry.numthreads_attr_range {
         // Include any trailing whitespace/newline.
         let end = skip_whitespace_in_source(source, nr.end);
         replacements.push((nr.start, end, ""));
     }
+    if let Some(ref or) = entry.outputtopology_attr_range {
+        let end = skip_whitespace_in_source(source, or.end);
+        replacements.push((or.start, end, ""));
+    }
 
-    // 4. Remove the [goldy_*] attribute.
+    // 4. Remove the [goldy_*] attribute. Mesh/amplification helpers get
+    //    [ForceInline] so DXC sees SV_Position writes in the [shader("mesh")]
+    //    entry after inlining `goldy_mesh(...)`.
     {
         let end = skip_whitespace_in_source(source, entry.goldy_attr_range.end);
-        replacements.push((entry.goldy_attr_range.start, end, ""));
+        let replacement = if matches!(entry.stage, Stage::Mesh | Stage::Amplification) {
+            "[ForceInline]\n"
+        } else {
+            ""
+        };
+        replacements.push((entry.goldy_attr_range.start, end, replacement));
     }
 
     // Sort by start position descending, apply.
@@ -3074,6 +3370,112 @@ fn find_numthreads_in_range(source: &str, start: usize, end: usize) -> Option<((
     Some((nt, bracket_pos..close_pos))
 }
 
+fn is_mesh_io_type(ty: &str) -> bool {
+    let ty = ty.trim();
+    ty.starts_with("vertices ")
+        || ty.starts_with("indices ")
+        || ty.starts_with("primitives ")
+        || ty.starts_with("payload ")
+}
+
+/// Flatten bindless (`Resource` / `Broadcast`) parameters in declaration order.
+///
+/// Conditional branches contribute the then-branch names (same slot count as the
+/// extract helpers, which take `max(then, else)`).
+pub(crate) fn flatten_bindless_params(params: &[ParamItem]) -> Vec<Param> {
+    let mut out = Vec::new();
+    for item in params {
+        match item {
+            ParamItem::Single(p) => {
+                if matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast) {
+                    out.push(p.clone());
+                }
+            }
+            ParamItem::Conditional {
+                then_params,
+                else_params,
+                ..
+            } => {
+                let then: Vec<&Param> = then_params
+                    .iter()
+                    .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                    .collect();
+                let else_p: Vec<&Param> = else_params
+                    .iter()
+                    .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                    .collect();
+                let max_slots = then.len().max(else_p.len());
+                for i in 0..max_slots {
+                    if let Some(p) = then.get(i).copied().or_else(|| else_p.get(i).copied()) {
+                        out.push(p.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Last pass-through struct on vertex/fragment (IA input or interpolated payload).
+pub(crate) fn stage_input_payload_type(entry: &EntryDef) -> Option<String> {
+    entry.params.iter().rev().find_map(|item| match item {
+        ParamItem::Single(p) if p.kind == ParamKind::PassThrough && !is_mesh_io_type(&p.ty) => Some(p.ty.clone()),
+        _ => None,
+    })
+}
+
+/// Mesh `out vertices T` payload type.
+pub(crate) fn mesh_vertices_type(entry: &EntryDef) -> Option<String> {
+    for item in &entry.params {
+        if let ParamItem::Single(p) = item {
+            let ty = p.ty.trim();
+            if let Some(inner) = ty.strip_prefix("vertices ") {
+                return Some(inner.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Mesh/amplification `in payload T` / `out payload T`.
+pub(crate) fn mesh_payload_type(entry: &EntryDef, output: bool) -> Option<String> {
+    for item in &entry.params {
+        if let ParamItem::Single(p) = item {
+            let ty = p.ty.trim();
+            if let Some(inner) = ty.strip_prefix("payload ") {
+                let is_out = p.qualifier == "out" || p.qualifier == "inout";
+                if output == is_out || (!output && (p.qualifier == "in" || p.qualifier.is_empty())) {
+                    return Some(inner.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find a `[outputtopology("...")]` attribute in `source[start..end]`.
+fn find_outputtopology_in_range(source: &str, start: usize, end: usize) -> Option<(String, Range<usize>)> {
+    let slice = &source[start..end];
+    let needle = "outputtopology";
+    let rel_pos = slice.find(needle)?;
+    let bracket_pos = source[start..start + rel_pos].rfind('[').map(|i| start + i)?;
+    let (inner, close_pos) = scan_bracket_block(source, bracket_pos)?;
+    let topo = parse_outputtopology(inner.trim())?;
+    Some((topo, bracket_pos..close_pos))
+}
+
+/// Parse `outputtopology("triangle")` from the inner content of `[outputtopology(...)]`.
+fn parse_outputtopology(s: &str) -> Option<String> {
+    let rest = s
+        .strip_prefix("outputtopology")?
+        .trim_start()
+        .strip_prefix('(')?
+        .trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 /// Parse `numthreads(X, Y, Z)` from the inner content of `[numthreads(...)]`.
 fn parse_numthreads(s: &str) -> Option<(u32, u32, u32)> {
     let [x, y, z] = super::parse_numthreads(s)?;
@@ -3129,6 +3531,78 @@ mod tests {
             classify_type("IsFrontFace"),
             ParamKind::SystemValue(SvKind::IsFrontFace)
         );
+        assert_eq!(
+            classify_type("DispatchRaysIndex"),
+            ParamKind::SystemValue(SvKind::DispatchRaysIndex)
+        );
+    }
+
+    #[test]
+    fn goldy_raygen_miss_chit_wrappers() {
+        let src = r#"
+import goldy_exp;
+struct HitPayload { uint hit; }
+
+[goldy_raygen]
+void rgen_main(Accel scene, Scattered<uint> hits, DispatchRaysIndex idx) {
+    RayDesc ray;
+    ray.Origin = float3(0, 0, -2);
+    ray.TMin = 0.001;
+    ray.Direction = float3(0, 0, 1);
+    ray.TMax = 100;
+    HitPayload p;
+    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 0, 0, ray, p);
+    hits[idx.x] = p.hit;
+}
+
+[goldy_miss]
+void rmiss_main(inout HitPayload p) { p.hit = 0; }
+
+[goldy_closesthit]
+void rchit_main(inout HitPayload p) { p.hit = 1; }
+"#;
+        let out = transform_virtual_main(src);
+        assert!(out.contains(r#"[shader("raygeneration")]"#), "{out}");
+        assert!(out.contains(r#"[shader("miss")]"#), "{out}");
+        assert!(out.contains(r#"[shader("closesthit")]"#), "{out}");
+        assert!(out.contains("goldy_accel"), "{out}");
+        assert!(out.contains("goldy_dispatch_rays_index()"), "{out}");
+        assert!(out.contains("inout HitPayload"), "{out}");
+        assert!(out.contains("BuiltInTriangleIntersectionAttributes"), "{out}");
+        assert!(!out.contains("[goldy_raygen]"), "{out}");
+    }
+
+    #[test]
+    fn goldy_mesh_wrapper_keeps_vertices_indices() {
+        let src = r#"
+import goldy_exp;
+struct MeshOutput { float4 pos : SV_Position; float4 color : COLOR; };
+
+[goldy_mesh]
+[numthreads(1, 1, 1)]
+[outputtopology("triangle")]
+void mesh_main(out vertices MeshOutput verts[3], out indices uint3 tris[1]) {
+    SetMeshOutputCounts(3, 1);
+    verts[0].pos = float4(-1, -1, 0, 1);
+    verts[1].pos = float4(3, -1, 0, 1);
+    verts[2].pos = float4(-1, 3, 0, 1);
+    tris[0] = uint3(0, 1, 2);
+}
+
+[goldy_fragment]
+float4 fs_main() : SV_Target { return float4(1, 0, 0, 1); }
+"#;
+        let out = transform_virtual_main(src);
+        assert!(out.contains(r#"[shader("mesh")]"#), "{out}");
+        assert!(out.contains(r#"[outputtopology("triangle")]"#), "{out}");
+        assert!(out.contains("out vertices MeshOutput verts[3]"), "{out}");
+        assert!(out.contains("out indices uint3 tris[1]"), "{out}");
+        assert!(out.contains("void mesh_main("), "{out}");
+        assert!(out.contains("goldy_mesh(verts, tris)"), "{out}");
+        assert!(out.contains("void goldy_mesh("), "{out}");
+        assert!(out.contains("[ForceInline]"), "{out}");
+        assert!(out.contains("[numthreads(1, 1, 1)]"), "{out}");
+        assert!(!out.contains("[goldy_mesh]"), "{out}");
     }
 
     #[test]
@@ -3306,6 +3780,27 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         // [goldy_compute] must be removed from user function.
         let goldy_count = result.matches("[goldy_compute]").count();
         assert_eq!(goldy_count, 0, "[goldy_compute] should be removed");
+    }
+
+    #[test]
+    fn compute_accel_transform() {
+        let src = r#"import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Accel scene, Scattered<uint> hits, ThreadId id) {
+    hits[id.x] = 0;
+}
+"#;
+        let result = transform_virtual_main(src);
+        assert!(
+            result.contains("goldy_accel(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"),
+            "Missing goldy_accel init, got:\n{result}"
+        );
+        assert!(
+            result.contains("goldy_scattered<uint>(goldy_frame_table_index(_rs0, 1u, _rs1, _rs2))"),
+            "Missing scattered init after Accel"
+        );
     }
 
     #[test]
@@ -3645,16 +4140,18 @@ void cs_main(
     Interpolated<float4> tex,
     DirectSpatial<float4> img,
     Filter sampler,
+    Accel scene,
     ThreadId id
 ) {}
 "#;
         let cats = extract_push_constant_categories(source);
-        assert_eq!(cats.len(), 5);
+        assert_eq!(cats.len(), 6);
         assert_eq!(cats[0], Some(ResourceCategory::Scattered));
         assert_eq!(cats[1], Some(ResourceCategory::Scattered));
         assert_eq!(cats[2], Some(ResourceCategory::Texture));
         assert_eq!(cats[3], Some(ResourceCategory::StorageImage));
         assert_eq!(cats[4], Some(ResourceCategory::Sampler));
+        assert_eq!(cats[5], Some(ResourceCategory::Accel));
     }
 
     #[cfg(all(test, feature = "dx12", target_os = "windows"))]
@@ -4591,5 +5088,28 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
             extract_cuda_compute_launch_layout(src, &[]).unwrap(),
             vec![CudaLaunchArgKind::Buffer, CudaLaunchArgKind::Buffer]
         );
+    }
+
+    #[test]
+    fn slot_remap_changes_bindless_index() {
+        let src = r#"
+import goldy_exp;
+struct VertIn { float2 pos : POSITION; };
+struct Varying { float4 position : SV_Position; };
+[goldy_vertex]
+Varying vs_main(SceneUniforms scene, VertIn input) { Varying o; return o; }
+"#;
+        let identity = transform_virtual_main(src);
+        assert!(identity.contains("goldy_frame_table_index(_rs0, 0u, _rs1, _rs2)"));
+        let mut vs = std::collections::HashMap::new();
+        vs.insert("scene".to_string(), 3u32);
+        let mut maps = std::collections::HashMap::new();
+        maps.insert(Stage::Vertex, vs);
+        let remapped = transform_virtual_main_with_remaps(src, Some(&maps));
+        assert!(
+            remapped.contains("goldy_frame_table_index(_rs0, 3u, _rs1, _rs2)"),
+            "{remapped}"
+        );
+        assert!(!remapped.contains("goldy_frame_table_index(_rs0, 0u, _rs1, _rs2)"));
     }
 }

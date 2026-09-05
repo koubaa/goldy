@@ -24,6 +24,7 @@
 //                         img[int2(x,y)], img.GetDimensions(w,h)
 //     ByteAddress       = ByteAddressView     .Load/.Store/.Interlocked*
 //     Filter            = SamplerState        tex.Sample(samp, uv)
+//     Accel             = RaytracingAccelerationStructure  (GOLDY_RAY_QUERY)
 //
 //   Broadcast (constant buffer): declare the struct type directly as a parameter.
 //   The codegen recognises any non-resource, non-SV struct as a constant-buffer
@@ -295,6 +296,13 @@ public SamplerState goldy_filter(uint slot)
     return g_GoldySamplerHeap[slot].asOpaqueDescriptor<SamplerState>();
 }
 
+#if defined(GOLDY_RAY_QUERY)
+public RaytracingAccelerationStructure goldy_accel(uint slot)
+{
+    return g_GoldyAccelHeap[slot].asOpaqueDescriptor<RaytracingAccelerationStructure>();
+}
+#endif
+
 // =============================================================================
 // DX12 Implementation
 // Uses DescriptorHandle<T> which Slang maps to ResourceDescriptorHeap
@@ -350,6 +358,15 @@ public SamplerState goldy_filter(uint slot)
     return *handle;
 }
 
+#if defined(GOLDY_RAY_QUERY)
+public RaytracingAccelerationStructure goldy_accel(uint slot)
+{
+    DescriptorHandle<RaytracingAccelerationStructure> handle;
+    handle = DescriptorHandle<RaytracingAccelerationStructure>(uint2(slot, 0));
+    return *handle;
+}
+#endif
+
 // =============================================================================
 // Metal Implementation (Bindless via Argument Buffers Tier 2)
 // Uses ParameterBlock with device pointers
@@ -399,6 +416,11 @@ public DirectSpatial<T> goldy_direct_spatial<T : ITexelElement>(uint slot)
 public SamplerState goldy_filter(uint slot)
 {
     return gGoldy.samplers[slot];
+}
+
+public RaytracingAccelerationStructure goldy_accel(uint slot)
+{
+    return gGoldy.accelerationStructures[slot];
 }
 
 // =============================================================================
@@ -451,6 +473,11 @@ public typealias ByteAddress = ByteAddressView;
 /// Sampler state (= SamplerState).
 /// Pass directly to texture `.Sample(filter, uv)` calls.
 public typealias Filter = SamplerState;
+
+#if defined(GOLDY_RAY_QUERY)
+/// Top-level acceleration structure for inline `RayQuery`.
+public typealias Accel = RaytracingAccelerationStructure;
+#endif
 
 /// Element count for a structured buffer (`buf.len()` in the Rust GPU dialect).
 ///
@@ -546,4 +573,53 @@ public struct InstanceId {
 public struct IsFrontFace {
     public bool value;
     public __init(bool v) { value = v; }
+}
+
+public uint3 goldy_dispatch_rays_index() {
+    __target_switch
+    {
+    case hlsl: __intrinsic_asm "DispatchRaysIndex";
+    case glsl: __intrinsic_asm "(gl_LaunchIDEXT)";
+    case spirv:
+        return spirv_asm
+        {
+            result:$$uint3 = OpLoad builtin(LaunchIdKHR:uint3);
+        };
+    default:
+        return uint3(0);
+    }
+}
+
+public uint3 goldy_dispatch_rays_dimensions() {
+    __target_switch
+    {
+    case hlsl: __intrinsic_asm "DispatchRaysDimensions";
+    case glsl: __intrinsic_asm "(gl_LaunchSizeEXT)";
+    case spirv:
+        return spirv_asm
+        {
+            result:$$uint3 = OpLoad builtin(LaunchSizeKHR:uint3);
+        };
+    default:
+        return uint3(0);
+    }
+}
+
+/// Ray index in a `TraceRays` / `DispatchRays` grid (`DispatchRaysIndex()`).
+public struct DispatchRaysIndex {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint2 xy { get { return uint2(x, y); } }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
+}
+
+/// Launch dimensions of `TraceRays` / `DispatchRays` (`DispatchRaysDimensions()`).
+public struct DispatchRaysDimensions {
+    public uint x;
+    public uint y;
+    public uint z;
+    public __init(uint3 v) { x = v.x; y = v.y; z = v.z; }
+    public property uint3 xyz { get { return uint3(x, y, z); } }
 }

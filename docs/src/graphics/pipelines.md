@@ -1,31 +1,66 @@
 # Pipelines
 
-Pipelines combine compiled shaders with fixed-function rendering state. Goldy provides `RenderPipeline` for graphics and `ComputePipeline` for compute workloads.
+Pipelines combine compiled shaders with fixed-function rendering state. Goldy provides `RenderPipeline` for raster, `MeshPipeline` for mesh shading, and `ComputePipeline` for compute.
+
+A graphics pipeline is a typed connection:
+
+**vertex input → vertex/mesh stage → interpolated payload → fragment stage**
+
+Think of it as `RasterPipeline<VertexIn, Varying, Color>` — without repeating those types in Rust. Payloads stay shader-owned. Goldy reflects each stage, links them structurally by semantic, and merges per-stage virtual-main resources into one named contract.
+
+## Three things a draw needs
+
+| Concept | Who owns it | Example |
+|---------|-------------|---------|
+| **Pipeline payload** | Shader structs with semantics (`SV_Position`, `TEXCOORD0`) | `Varying` returned by the vertex/mesh stage and consumed by the fragment stage |
+| **Runtime resource bindings** | Named virtual-main parameters, bound at record time | `ShaderBinding::read("scene", &scene)` |
+| **Invocation builtins** | System-value wrappers | `VertexId`, `ThreadId`, `IsFrontFace` |
+
+`RenderPipeline::interface()` exposes the reflected vertex input, payload links, fragment outputs, and merged resource contract for diagnostics.
 
 ## Render Pipelines
 
-A `RenderPipeline` pairs vertex and fragment shaders with a `RenderPipelineDesc` that configures vertex input, primitive assembly, depth testing, and the output format.
+A `RenderPipeline` pairs vertex and fragment shaders with raster state: vertex input layout, primitive assembly, depth testing, and the output format.
 
 ### Creating a Render Pipeline
 
+The builder reflects and links stages automatically. Existing `RenderPipeline::new` delegates to the same linker.
+
 ```rust
-use goldy::{
-    RenderPipeline, RenderPipelineDesc, ShaderModule,
-    Vertex2D, TextureFormat, PrimitiveTopology,
-};
+use goldy::{RenderPipeline, ShaderBinding, ShaderModule, Vertex2D};
 
 let vs = ShaderModule::from_slang(&device, include_str!("shaders/tri.vs.slang"))?;
 let fs = ShaderModule::from_slang(&device, include_str!("shaders/tri.fs.slang"))?;
 
-let pipeline = RenderPipeline::new(&device, &vs, &fs, &RenderPipelineDesc {
-    vertex_layout: Vertex2D::layout(),
-    topology: PrimitiveTopology::TriangleList,
-    target_format: surface.format(),
-    depth_stencil: None,
-})?;
+let pipeline = RenderPipeline::builder(&device)
+    .vertex(&vs)
+    .fragment(&fs)
+    .vertex_layout(Vertex2D::layout())
+    .topology(PrimitiveTopology::TriangleList)
+    .target_format(surface.format())
+    .build()?;
 ```
 
+Each stage may declare only the resources it uses. Shared names (`scene` on both VS and FS) merge into one slot; unique names append after the fragment list (raster) or the mesh list (mesh pipelines).
+
+### Named draw bindings
+
+```rust
+pass.with_shader_bindings(&[
+    ShaderBinding::read("scene", &scene),
+    ShaderBinding::read("albedo", &albedo),
+    ShaderBinding::sampler("nearest", &sampler),
+]);
+pass.set_pipeline(&pipeline);
+```
+
+Extra names are allowed so one pass-level set can serve several pipeline switches. Missing required names and wrong resource categories fail with an error that names the pipeline parameter.
+
+Positional `with_shader_resources` remains valid: slots follow the merged contract order (fragment-first for raster, mesh-first for mesh).
+
 ### RenderPipelineDesc
+
+`RenderPipeline::new(&device, &vs, &fs, &desc)` still works. The descriptor is the same raster state the builder sets:
 
 ```rust
 pub struct RenderPipelineDesc {
@@ -178,3 +213,23 @@ impl Renderer {
     }
 }
 ```
+
+## Mesh pipelines
+
+`MeshPipeline` replaces the vertex stage with a mesh shader (`[goldy_mesh]` / `mesh_main`) and a fragment shader. Amplification / task shaders are optional (`[goldy_amplification]` / `amp_main`) when `DeviceCapabilities::amplification_shaders` is set.
+
+Create the pipeline only when `device.capabilities().mesh_shaders` is true. Record with `set_mesh_pipeline` and `dispatch_mesh` instead of `draw`. Vulkan, DX12, and Metal implement this.
+
+```rust
+let pipeline = MeshPipeline::builder(&device)
+    .mesh(&shader)
+    .fragment(&shader)
+    .target_format(rt_format)
+    .build()?;
+
+let mut pass = scheme.render_pass("mesh", &rt, TargetLoad::Discard);
+pass.set_mesh_pipeline(&pipeline);
+pass.dispatch_mesh(1, 1, 1);
+pass.finish();
+```
+

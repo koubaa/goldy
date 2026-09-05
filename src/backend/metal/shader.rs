@@ -236,6 +236,45 @@ pub(super) fn patch_vertex_stage_in_pointer(msl: &str) -> String {
     result
 }
 
+/// Rewrite mesh-shader `[[user(...)]]` names to match fragment `[[stage_in]]`.
+///
+/// Slang's Metal mesh path emits `[[user(TEXCOORD0)]]`, `[[user(TEXCOORD1)]]`, …
+/// while the fragment path (shared with vertex) emits `[[user(TEXCOORD)]]` and
+/// `[[user(TEXCOORD_1)]]`. Metal requires the strings to match exactly or PSO
+/// creation fails with "Fragment input(s) `user(TEXCOORD),…` … not written by
+/// mesh shader".
+pub(super) fn patch_mesh_msl_user_semantics(msl: &str) -> String {
+    const PREFIX: &str = "[[user(";
+    let mut out = String::with_capacity(msl.len() + 8);
+    let mut rest = msl;
+    while let Some(rel) = rest.find(PREFIX) {
+        out.push_str(&rest[..rel]);
+        let after = &rest[rel + PREFIX.len()..];
+        let ident_end = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+        let ident = &after[..ident_end];
+        let digits_end = ident_end
+            + after[ident_end..]
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after[ident_end..].len());
+        let digits = &after[ident_end..digits_end];
+        if !ident.is_empty() && !digits.is_empty() && after[digits_end..].starts_with(")]]") {
+            out.push_str(PREFIX);
+            out.push_str(ident);
+            if digits != "0" {
+                out.push('_');
+                out.push_str(digits);
+            }
+            out.push_str(")]]");
+            rest = &after[digits_end + 3..];
+        } else {
+            out.push_str(PREFIX);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Patch vertex-shader MSL to inject the missing EntryPointParams [[buffer(1)]] binding.
 ///
 /// Slang's Metal backend generates `EntryPointParams_0` inside `KernelContext_0` for
@@ -378,6 +417,12 @@ fn compile_stage_with_reflection(
             );
         }
         patched
+    } else if desc.stage == SlangStage::Mesh {
+        let patched = patch_mesh_msl_user_semantics(&raw_msl);
+        if patched != raw_msl {
+            tracing::debug!("Applied mesh [[user]] semantic rename patch for {}", desc.entry_point);
+        }
+        patched
     } else {
         raw_msl
     };
@@ -402,6 +447,20 @@ fn compile_stage_with_reflection(
         .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
         .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
 
+    if matches!(desc.stage, SlangStage::Mesh | SlangStage::Amplification) {
+        eprintln!(
+            "[goldy-mesh] compiled {} ({} bytes) contains_max_total_threads={} functions={:?}",
+            desc.entry_point,
+            msl_source.len(),
+            msl_source.contains("max_total_threads_per_threadgroup"),
+            library.function_names()
+        );
+        eprintln!(
+            "[goldy-mesh] ---- MSL {} begin ----\n{}\n[goldy-mesh] ---- MSL {} end ----",
+            desc.entry_point, msl_source, desc.entry_point
+        );
+    }
+
     Ok((library, Some(result.reflection)))
 }
 
@@ -421,28 +480,60 @@ pub(super) fn ensure_stage_compiled(
         entry_point: &'static str,
     }
 
-    let maybe_scratch: Option<CompileScratch> = {
-        let shaders = &state.shaders;
-        let shader = shaders.get(&shader_handle).context("Invalid shader handle")?;
-        let (entry_point, need_compile) = match stage {
-            SlangStage::Vertex => ("vs_main", shader.vertex_library.is_none()),
-            SlangStage::Fragment => ("fs_main", shader.fragment_library.is_none()),
-            SlangStage::Compute => ("cs_main", shader.compute_library.is_none()),
-            _ => anyhow::bail!("Metal backend only supports Vertex, Fragment, and Compute stages"),
-        };
-        if !need_compile {
-            None
+    let remapped_hit = {
+        let shader = state.shaders.get(&shader_handle).context("Invalid shader handle")?;
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let fp = remap
+            .map(crate::slang::graphics_link::slot_remap_fingerprint)
+            .unwrap_or(0);
+        if fp != 0 {
+            shader.remapped_libraries.contains_key(&(stage as u32, fp))
         } else {
-            Some(CompileScratch {
-                device_handle: shader.device_handle,
-                slang_source: shader.slang_source.clone(),
-                search_paths: shader.search_paths.clone(),
-                optimization_level: shader.optimization_level,
-                defines: shader.defines.clone(),
-                layout_checks: shader.layout_checks.clone(),
-                entry_point,
-            })
+            false
         }
+    };
+    if remapped_hit {
+        return Ok(());
+    }
+
+    let maybe_scratch: Option<CompileScratch> = {
+        let shader = state.shaders.get(&shader_handle).context("Invalid shader handle")?;
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let fp = remap
+            .map(crate::slang::graphics_link::slot_remap_fingerprint)
+            .unwrap_or(0);
+        if fp == 0 {
+            let need_compile = match stage {
+                SlangStage::Vertex => shader.vertex_library.is_none(),
+                SlangStage::Fragment => shader.fragment_library.is_none(),
+                SlangStage::Compute => shader.compute_library.is_none(),
+                SlangStage::RayGeneration
+                | SlangStage::Intersection
+                | SlangStage::AnyHit
+                | SlangStage::ClosestHit
+                | SlangStage::Miss
+                | SlangStage::Callable
+                | SlangStage::Mesh
+                | SlangStage::Amplification => !shader.extra_libraries.contains_key(&stage),
+                other => anyhow::bail!("Unsupported shader stage: {:?}", other),
+            };
+            if !need_compile {
+                return Ok(());
+            }
+        }
+        let entry_point = crate::slang::canonical_entry_point(stage)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
+        let source =
+            crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap).into_owned();
+        Some(CompileScratch {
+            device_handle: shader.device_handle,
+            slang_source: source,
+            search_paths: shader.search_paths.clone(),
+            optimization_level: shader.optimization_level,
+            defines: shader.defines.clone(),
+            layout_checks: shader.layout_checks.clone(),
+            entry_point,
+        })
     };
 
     let Some(scratch) = maybe_scratch else {
@@ -458,6 +549,15 @@ pub(super) fn ensure_stage_compiled(
 
     let search_path_refs: Vec<&str> = scratch.search_paths.iter().map(|s| s.as_str()).collect();
     let extra_defines: Vec<(&str, &str)> = scratch.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut extra_defines = extra_defines;
+    if extra_defines.iter().all(|(k, _)| *k != "GOLDY_RAY_QUERY")
+        && state
+            .devices
+            .get(&scratch.device_handle)
+            .is_some_and(|ld| ld.device.supports_raytracing())
+    {
+        extra_defines.push(("GOLDY_RAY_QUERY", "1"));
+    }
     let compile_desc = ShaderStageCompileDesc {
         slang_source: &scratch.slang_source,
         search_paths: &search_path_refs,
@@ -475,11 +575,15 @@ pub(super) fn ensure_stage_compiled(
         .shaders
         .get_mut(&shader_handle)
         .expect("shader handle must be valid after ensure_stage_compiled");
-    match stage {
-        SlangStage::Vertex => shader.vertex_library = Some(library),
-        SlangStage::Fragment => shader.fragment_library = Some(library),
-        SlangStage::Compute => shader.compute_library = Some(library),
-        _ => unreachable!("stage already validated"),
+    let fp = shader
+        .stage_slot_remaps
+        .get(&stage)
+        .map(crate::slang::graphics_link::slot_remap_fingerprint)
+        .unwrap_or(0);
+    if fp != 0 {
+        shader.remapped_libraries.insert((stage as u32, fp), library);
+    } else {
+        install_metal_stage_library(shader, stage, library);
     }
 
     if shader.reflection.is_none() {
@@ -500,7 +604,42 @@ pub(super) fn ensure_stage_compiled(
     Ok(())
 }
 
-/// Create a shader handle (compilation deferred to pipeline creation).
+fn install_metal_stage_library(shader: &mut ShaderState, stage: SlangStage, library: Library) {
+    match stage {
+        SlangStage::Vertex => shader.vertex_library = Some(library),
+        SlangStage::Fragment => shader.fragment_library = Some(library),
+        SlangStage::Compute => shader.compute_library = Some(library),
+        SlangStage::RayGeneration
+        | SlangStage::Intersection
+        | SlangStage::AnyHit
+        | SlangStage::ClosestHit
+        | SlangStage::Miss
+        | SlangStage::Callable
+        | SlangStage::Mesh
+        | SlangStage::Amplification => {
+            shader.extra_libraries.insert(stage, library);
+        }
+        _ => {}
+    }
+}
+
+/// Library compiled for `stage` under the shader's current slot remap (or the identity cache).
+pub(super) fn stage_library(shader: &ShaderState, stage: SlangStage) -> Option<&Library> {
+    let fp = shader
+        .stage_slot_remaps
+        .get(&stage)
+        .map(crate::slang::graphics_link::slot_remap_fingerprint)
+        .unwrap_or(0);
+    if fp != 0 {
+        return shader.remapped_libraries.get(&(stage as u32, fp));
+    }
+    match stage {
+        SlangStage::Vertex => shader.vertex_library.as_ref(),
+        SlangStage::Fragment => shader.fragment_library.as_ref(),
+        SlangStage::Compute => shader.compute_library.as_ref(),
+        _ => shader.extra_libraries.get(&stage),
+    }
+}
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
@@ -527,8 +666,11 @@ pub(super) fn create(
             vertex_library: None,
             fragment_library: None,
             compute_library: None,
+            extra_libraries: HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
+            stage_slot_remaps: HashMap::new(),
+            remapped_libraries: HashMap::new(),
         },
     );
 
@@ -557,8 +699,8 @@ pub(super) fn destroy(
 #[cfg(test)]
 mod tests {
     use super::{
-        patch_compute_msl, patch_compute_msl_entry_point_params, patch_msl_threadgroup_copies,
-        patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
+        patch_compute_msl, patch_compute_msl_entry_point_params, patch_mesh_msl_user_semantics,
+        patch_msl_threadgroup_copies, patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
     };
 
     // ── patch_vertex_stage_in_pointer ────────────────────────────────────────
@@ -634,6 +776,25 @@ mod tests {
         let msl = "[[kernel]] void cs_main(device uint* buf [[buffer(0)]])\n{\n}\n";
         let out = patch_vertex_stage_in_pointer(msl);
         assert_eq!(out, msl, "MSL without [[stage_in]] must pass through unchanged");
+    }
+
+    #[test]
+    fn mesh_user_semantics_match_fragment_stage_in() {
+        let mesh = concat!(
+            "struct Varying_0 {\n",
+            "    float4 position_0 [[position]];\n",
+            "    float dist_0 [[user(TEXCOORD0)]];\n",
+            "    float2 tile_uv_0 [[user(TEXCOORD1)]];\n",
+            "    uint flag_0 [[user(TEXCOORD2)]];\n",
+            "};\n",
+        );
+        let out = patch_mesh_msl_user_semantics(mesh);
+        assert!(out.contains("[[user(TEXCOORD)]]"), "{out}");
+        assert!(out.contains("[[user(TEXCOORD_1)]]"), "{out}");
+        assert!(out.contains("[[user(TEXCOORD_2)]]"), "{out}");
+        assert!(!out.contains("[[user(TEXCOORD0)]]"), "{out}");
+        assert!(!out.contains("[[user(TEXCOORD1)]]"), "{out}");
+        assert_eq!(patch_mesh_msl_user_semantics(&out), out);
     }
 
     // ── patch_vertex_msl_entry_point_params ──────────────────────────────────

@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 #[cfg(feature = "graphics")]
 use crate::backend::RenderTargetHandle;
-use crate::backend::{BufferHandle, ContextHandle, SubmitSync, TextureHandle};
+use crate::backend::{AccelerationStructureHandle, BufferHandle, ContextHandle, SubmitSync, TextureHandle};
 use crate::parcel::{InteractionEdge, InteractionRole, ParcelStamp};
 use crate::task_graph::ir::{
     BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeKind, ResourceBinding, SlotUsageSet, UsageKindFlags,
@@ -60,6 +60,7 @@ pub enum ResourceKey {
     /// present-easement WAR (copy-to-present readers) can gate the next RT write.
     #[cfg(feature = "graphics")]
     RenderTarget(RenderTargetHandle),
+    Accel(AccelerationStructureHandle),
 }
 
 impl ResourceKey {
@@ -77,6 +78,7 @@ impl ResourceKey {
             #[cfg(feature = "graphics")]
             ResourceId::SwapchainOutput | ResourceId::PresentLease(_) => None,
             ResourceId::Deposit(_) => None,
+            ResourceId::Accel(h) => Some(Self::Accel(h)),
         }
     }
 }
@@ -106,6 +108,7 @@ pub(crate) fn resource_keys_alias(a: ResourceKey, b: ResourceKey) -> bool {
         (ResourceKey::Texture(x), ResourceKey::Texture(y)) => x == y,
         #[cfg(feature = "graphics")]
         (ResourceKey::RenderTarget(x), ResourceKey::RenderTarget(y)) => x == y,
+        (ResourceKey::Accel(x), ResourceKey::Accel(y)) => x == y,
         _ => false,
     }
 }
@@ -171,7 +174,7 @@ pub struct CrossSubmitSync {
 
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
-        NodeKind::Dispatch { .. } => UsageKindFlags::COMPUTE,
+        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } => UsageKindFlags::COMPUTE,
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
@@ -183,6 +186,7 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyTextureRegion { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
         NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
+        NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
         // The device-visible footprint of a CPU dispatch is its staging copies.
         NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
     }
@@ -203,6 +207,7 @@ fn barrier_usage_kind_for_binding(
             | ResourceId::Texture(_)
             | ResourceId::TransientTexture(_)
             | ResourceId::Deposit(_)
+            | ResourceId::Accel(_)
     );
     if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
         UsageKindFlags::COMPUTE
@@ -303,6 +308,9 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
         ResourceKey::RenderTarget(_) => {
             // BarrierSet has no RT slot; scheme-owned RTs rely on queue ordering for
             // same-context last_reads and on foreign_reads waits for present easement.
+        }
+        ResourceKey::Accel(_) => {
+            // AS builds/reads are ordered by the graph plus backend post-build UAV/RQ barriers.
         }
     }
 }

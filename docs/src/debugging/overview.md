@@ -16,6 +16,7 @@ or whitespace-separated list of categories:
 | `api` | Enable backend GPU API validation (see below) |
 | `layout` | Enable Rust ↔ Slang struct layout checks and buffer stride checks |
 | `host_access` | Page-protect CPU-visible GPU copies (CPU backend parcels; stray host pointers fault) |
+| `scheme`, `graph`, `readback` | Retained withdraw-staging checks, plus strict Accel build-before-trace in the same scheme |
 | `all` | Enable `api`, `layout`, timeline, scheme, and `host_access` |
 | `1`, `true`, `yes` | GPU API validation only (legacy shorthand; does **not** enable layout checks) |
 
@@ -46,6 +47,8 @@ enables backend-specific validation:
 | WebGPU | wgpu validation error scopes on shader/PSO create (always in debug builds; in release when GPU API validation is on) and on bind-group create (GPU API validation only) |
 
 On Vulkan, `GOLDY_VALIDATION_FATAL=1` treats messenger ERROR records as hard failures (`Err` on later Goldy `Result` calls; panic on backend drop).
+
+Goldy also validates the scheme graph on every `Scheme::submit` **without** an env var: dependency cycles, `dispatch_mesh` without `set_mesh_pipeline`, draw after a mesh pipeline, BLAS bound as a shader `Accel`, and BLAS geometry missing `BufferFlags::ACCEL_INPUT`. Failures are [`GoldyError::Validation`](https://docs.rs/goldy/latest/goldy/enum.GoldyError.html) strings that include a `hint:` with the fix. `GOLDY_VALIDATION=scheme` (or `graph`) additionally requires each `Accel` read to have a `build_blas` / `build_tlas` in the **same** scheme — turn that off if you built the AS in an earlier submit.
 
 For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` contains
 `VK_LAYER_KHRONOS_validation` (the standard loader-driven workflow).

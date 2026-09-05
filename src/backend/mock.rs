@@ -39,6 +39,8 @@ pub(crate) struct MockBackend {
     next_texture_handle: TextureHandle,
     samplers: HashMap<SamplerHandle, MockSampler>,
     next_sampler_handle: SamplerHandle,
+    accels: HashMap<AccelerationStructureHandle, u32>,
+    next_accel_handle: AccelerationStructureHandle,
     /// Next bindless index to assign (shared across buffers, textures, samplers)
     next_bindless_index: u32,
     /// Render commands recorded during render operations
@@ -266,6 +268,8 @@ impl MockBackend {
             next_texture_handle: 1,
             samplers: HashMap::new(),
             next_sampler_handle: 1,
+            accels: HashMap::new(),
+            next_accel_handle: 1,
             next_bindless_index: 0,
             recorded_commands: Vec::new(),
             recorded_compute_commands: Vec::new(),
@@ -302,6 +306,11 @@ impl MockBackend {
 
     fn context_state_mut(&mut self, ctx: ContextHandle) -> std::sync::MutexGuard<'_, MockContextState> {
         self.context_state(ctx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_accel(&self, accel: AccelerationStructureHandle) -> bool {
+        self.accels.contains_key(&accel)
     }
 
     /// Max completed over live contexts on `device`, floored by `retired_floor`.
@@ -647,6 +656,10 @@ impl GpuBackend for MockBackend {
         crate::device::DeviceCapabilities {
             host_sidecar_on_submit_worker: true,
             fuse_upload_with_compute_partitions: self.fuse_upload_with_compute_partitions,
+            mesh_shaders: true,
+            amplification_shaders: true,
+            ray_query: true,
+            ray_tracing_pipelines: true,
             ..crate::device::DeviceCapabilities::default()
         }
     }
@@ -1192,6 +1205,25 @@ impl GpuBackend for MockBackend {
         )
     }
 
+    #[cfg(feature = "graphics")]
+    fn create_mesh_pipeline(
+        &mut self,
+        device: DeviceHandle,
+        desc: crate::backend::GpuMeshPipelineDesc,
+        raster: &crate::backend::shared::PipelineDesc<'_>,
+        _depth_stencil: Option<&DepthStencilState>,
+        _debug_name: Option<&str>,
+    ) -> Result<PipelineHandle> {
+        self.create_pipeline(
+            device,
+            desc.mesh,
+            desc.fragment,
+            raster.vertex_layout,
+            raster.topology,
+            raster.target_format,
+        )
+    }
+
     // RenderTarget API
     #[cfg(feature = "graphics")]
     fn create_render_target_with_depth(
@@ -1561,6 +1593,30 @@ impl GpuBackend for MockBackend {
 
     fn sampler_bindless_index(&self, sampler: SamplerHandle) -> Option<u32> {
         self.samplers.get(&sampler).map(|s| s.bindless_index)
+    }
+
+    fn create_acceleration_structure(
+        &mut self,
+        device: DeviceHandle,
+        _desc: &GpuAccelCreate,
+    ) -> Result<AccelerationStructureHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        let handle = self.next_accel_handle;
+        self.next_accel_handle += 1;
+        let bindless = self.next_bindless_index;
+        self.next_bindless_index += 1;
+        self.accels.insert(handle, bindless);
+        Ok(handle)
+    }
+
+    fn destroy_acceleration_structure(&mut self, accel: AccelerationStructureHandle) {
+        self.accels.remove(&accel);
+    }
+
+    fn accel_bindless_index(&self, accel: AccelerationStructureHandle) -> Option<u32> {
+        self.accels.get(&accel).copied()
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {

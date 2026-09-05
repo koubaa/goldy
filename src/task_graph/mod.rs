@@ -9,6 +9,7 @@ pub(crate) mod cross_submit;
 mod graph;
 mod ir;
 pub mod record;
+pub(crate) mod validate;
 
 pub use graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]
@@ -115,6 +116,8 @@ pub(crate) enum ResourceId {
     /// selected by [`crate::exchange::DepositTransaction::write`] and resolved at submit
     /// through [`SlotResolver::deposits`].
     Deposit(u32),
+    /// Ray-tracing acceleration structure (BLAS or TLAS).
+    Accel(crate::backend::AccelerationStructureHandle),
 }
 
 impl ResourceId {
@@ -136,6 +139,7 @@ impl ResourceId {
             #[cfg(feature = "graphics")]
             ResourceId::PresentLease(_) => None,
             ResourceId::Deposit(_) => None,
+            ResourceId::Accel(_) => None,
         }
     }
 }

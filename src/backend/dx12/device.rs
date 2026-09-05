@@ -54,15 +54,26 @@ pub(super) fn enumerate(adapters: &[DxgiAdapterInfo]) -> Vec<AdapterInfo> {
         .collect()
 }
 
-/// Probe whether an adapter supports reserved (tiled) buffers without creating a full Goldy device.
-pub(super) fn query_supports_reserved_buffers(adapter: &IDXGIAdapter1) -> bool {
+/// Probe tiled-buffer / RT / mesh features without creating a full Goldy device.
+#[derive(Clone, Copy, Default)]
+pub(super) struct AdapterGpuFeatures {
+    pub supports_reserved_buffers: bool,
+    pub ray_query: bool,
+    pub ray_tracing_pipelines: bool,
+    pub mesh_shaders: bool,
+    pub amplification_shaders: bool,
+}
+
+pub(super) fn query_adapter_gpu_features(adapter: &IDXGIAdapter1) -> AdapterGpuFeatures {
     let mut device: Option<ID3D12Device> = None;
     if unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device) }.is_err() {
-        return false;
+        return AdapterGpuFeatures::default();
     }
     let Some(device) = device else {
-        return false;
+        return AdapterGpuFeatures::default();
     };
+
+    let mut features = AdapterGpuFeatures::default();
     let mut d3d12_options = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
     unsafe {
         if device
@@ -73,11 +84,42 @@ pub(super) fn query_supports_reserved_buffers(adapter: &IDXGIAdapter1) -> bool {
             )
             .is_ok()
         {
-            d3d12_options.TiledResourcesTier.0 >= 1
-        } else {
-            false
+            features.supports_reserved_buffers = d3d12_options.TiledResourcesTier.0 >= 1;
         }
     }
+
+    let mut options5 = D3D12_FEATURE_DATA_D3D12_OPTIONS5::default();
+    unsafe {
+        if device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS5,
+                &mut options5 as *mut _ as *mut _,
+                std::mem::size_of_val(&options5) as u32,
+            )
+            .is_ok()
+        {
+            features.ray_tracing_pipelines = options5.RaytracingTier.0 >= D3D12_RAYTRACING_TIER_1_0.0;
+            features.ray_query = options5.RaytracingTier.0 >= D3D12_RAYTRACING_TIER_1_1.0;
+        }
+    }
+
+    let mut options7 = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
+    unsafe {
+        if device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS7,
+                &mut options7 as *mut _ as *mut _,
+                std::mem::size_of_val(&options7) as u32,
+            )
+            .is_ok()
+        {
+            let mesh = options7.MeshShaderTier.0 >= D3D12_MESH_SHADER_TIER_1.0;
+            features.mesh_shaders = mesh;
+            features.amplification_shaders = mesh;
+        }
+    }
+
+    features
 }
 
 /// Build the public capability snapshot for a physical adapter.
@@ -87,15 +129,18 @@ pub(super) fn adapter_capabilities(adapters: &[DxgiAdapterInfo], adapter_id: u32
         host_sidecar_on_submit_worker: true,
         ..Default::default()
     };
-    if adapters
-        .iter()
-        .find(|a| a.adapter_id == adapter_id)
-        .is_some_and(|a| a.supports_reserved_buffers && !super::env_disable_reserved_buffers())
-    {
+    let Some(adapter) = adapters.iter().find(|a| a.adapter_id == adapter_id) else {
+        return caps;
+    };
+    if adapter.supports_reserved_buffers && !super::env_disable_reserved_buffers() {
         caps.buffer_resize_cost = crate::types::BufferResizeCost::PageBind;
         caps.buffer_page_size = 64 * 1024;
         caps.buffer_decommit_supported = true;
     }
+    caps.ray_query = adapter.ray_query;
+    caps.ray_tracing_pipelines = adapter.ray_tracing_pipelines;
+    caps.mesh_shaders = adapter.mesh_shaders;
+    caps.amplification_shaders = adapter.amplification_shaders;
     caps
 }
 

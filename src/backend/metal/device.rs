@@ -50,8 +50,11 @@ pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
 }
 
 /// Build the public capability snapshot for a physical adapter.
-pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCapabilities {
-    crate::device::DeviceCapabilities {
+pub(super) fn adapter_capabilities(
+    adapters: &[MetalAdapterInfo],
+    adapter_id: u32,
+) -> crate::device::DeviceCapabilities {
+    let mut caps = crate::device::DeviceCapabilities {
         has_zero_copy_storage_readback: true,
         buffer_resize_cost: crate::types::BufferResizeCost::Constant,
         buffer_page_size: 16 * 1024,
@@ -65,7 +68,24 @@ pub(super) fn adapter_capabilities(_adapter_id: u32) -> crate::device::DeviceCap
         // Classic's single-CB structure and avoids an extra commit + event wait.
         fuse_upload_with_compute_partitions: true,
         ..crate::device::DeviceCapabilities::default()
+    };
+    if let Some(entry) = adapters.iter().find(|a| a.adapter_id == adapter_id) {
+        let device = &entry.device;
+        let rt = device.supports_raytracing();
+        caps.ray_query = rt;
+        // Metal has no SBT / TraceRays; inline RayQuery is the RT path.
+        caps.ray_tracing_pipelines = false;
+        // Mesh shaders need Apple GPU family 7+ (A14 / M1 and later) or Mac GPU
+        // family 2. `Metal3` is too broad: GitHub macos-15's "Apple Paravirtual
+        // device" reports Metal3 but debug validation asserts
+        // "device does not support mesh shaders" and aborts.
+        let paravirtual = device.name().to_lowercase().contains("paravirtual");
+        let mesh = !paravirtual
+            && (device.supports_family(mtl::MTLGPUFamily::Apple7) || device.supports_family(mtl::MTLGPUFamily::Mac2));
+        caps.mesh_shaders = mesh;
+        caps.amplification_shaders = mesh;
     }
+    caps
 }
 
 /// Create a logical device from an adapter ID.
@@ -101,7 +121,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     let heap_size = INITIAL_HEAP_SIZE;
     let (heap_allocator, texture_heap) = create_heaps(&device, heap_size);
 
-    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) = create_argument_encoders(&device);
+    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder, accel_encoder) =
+        create_argument_encoders(&device);
 
     let frame_table =
         super::frame_table::MetalFrameTable::init(device.as_ref(), argument_buffer.as_ref(), argument_encoder.as_ref());
@@ -126,6 +147,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         texture_encoder,
         storage_image_encoder,
         sampler_encoder,
+        accel_encoder,
         frame_table: Mutex::new(frame_table),
         descriptors: Arc::new(Mutex::new(DescriptorRegistry::new())),
         timeline_next: Arc::new(AtomicU64::new(1)),
@@ -199,6 +221,7 @@ pub(super) fn create_argument_encoders(
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
+    Option<mtl::ArgumentEncoder>,
 ) {
     // Encoder for raw buffer pointers (RWStructuredBuffer / StructuredBuffer).
     let buffer_arg_desc = mtl::ArgumentDescriptor::new();
@@ -247,6 +270,22 @@ pub(super) fn create_argument_encoders(
     let sampler_stride = sampler_encoder.encoded_length();
     tracing::info!("Created sampler ArgumentEncoder (encoded_length={})", sampler_stride);
 
+    let accel_encoder = if device.supports_raytracing() {
+        let accel_arg_desc = mtl::ArgumentDescriptor::new();
+        accel_arg_desc.set_index(0);
+        accel_arg_desc.set_data_type(mtl::MTLDataType::InstanceAccelerationStructure);
+        accel_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
+        let accel_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[accel_arg_desc]));
+        tracing::info!(
+            "Created accel ArgumentEncoder (encoded_length={})",
+            accel_encoder.encoded_length()
+        );
+        Some(accel_encoder)
+    } else {
+        tracing::info!("Skipping accel ArgumentEncoder (device has no ray tracing)");
+        None
+    };
+
     // Every resource category in the argument buffer is laid out as
     // MAX_RESOURCES_PER_CATEGORY × 8 bytes.  ARGUMENT_BUFFER_SIZE is derived
     // from that assumption.  Fail loudly at device creation if this GPU returns
@@ -264,6 +303,7 @@ pub(super) fn create_argument_encoders(
         texture_encoder,
         storage_image_encoder,
         sampler_encoder,
+        accel_encoder,
     )
 }
 

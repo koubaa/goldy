@@ -86,7 +86,7 @@ pub(super) fn create(
     #[cfg(target_os = "ios")]
     let mut ios_hosted_as_sublayer = false;
     let (layer, width, height) = unsafe {
-        let mut layer: id = msg_send![class!(CAMetalLayer), layer];
+        let layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
         // Use RGBA8Unorm instead of BGRA8Unorm: on Apple Silicon, BGRA8Unorm
         // does not support storage-class access (compute shader UAV writes),
