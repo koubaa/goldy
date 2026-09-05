@@ -191,6 +191,12 @@ Pipeline State Object (PSO) explosion is one of the biggest pain points in moder
 
 `RenderPipelineDesc` has exactly four fields. The permutation space is `vertex_layouts × topologies × target_formats × depth_configs` — deliberately small.
 
+Compute is the one place Goldy will compile an extra program after startup: a retained
+dispatch whose `with_param` scalars hold still is moved onto a baked variant of its
+shader. That is at most one specialized pipeline per dispatch site, not a permutation of
+feature flags, and it is an implementation detail of scheme submit rather than something
+`ComputePipeline::new` enumerates. See [Shader Specialization Prediction](../design/shader-specialization.md#when-this-is-worth-expecting).
+
 ## Performance
 
 Pipelines are expensive to create (shader compilation, PSO allocation) but cheap to bind during rendering. Create them once at startup and reuse across frames.

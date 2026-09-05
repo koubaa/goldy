@@ -89,6 +89,8 @@ scheme
     .dispatch(1, 1, 1);
 ```
 
+Scalar params are the only facts the runtime can bake. A value in a `Scattered` buffer or a broadcast struct is a parcel read; Goldy cannot see the word, so it cannot specialize on it. A mode flag, loop bound, or feature toggle passed with `with_param` is already on the CPU. If it holds still across clean submits, retained-scheme prediction recompiles the dispatch with that word as a preprocessor literal — a real Slang + driver compile, not a constant patch — and the driver can delete whatever that constant makes unreachable. Gate expensive work behind those scalars (`if (has_tint != 0u) { ... }`) rather than behind a load from a constant buffer if that elision is the point. Authors do not opt sites in; putting the fact in the right place is the whole contract. Details, including when this is worth expecting, are in [Shader Specialization Prediction](../design/shader-specialization.md#what-baking-actually-compiles).
+
 ### Pass-Through Parameters
 
 In vertex and fragment shaders, the last unrecognized struct parameter passes through as a stage input (vertex attributes or interpolated varyings). It appears directly in the generated entry point signature without bindless resolution:

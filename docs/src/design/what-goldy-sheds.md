@@ -40,6 +40,8 @@ Goldy collapses most of the dimensions that drive permutation counts:
 
 What remains — shader source × vertex format × target format × depth config — is a small, manageable space. Goldy addresses pipeline variety by having fewer pipelines, not by building infrastructure to manage many variants.
 
+That stance is compatible with compiling a *predicted* specialized compute program. When a dispatch's `with_param` scalars hold still, the runtime bakes those words into a second pipeline for that site — at most one specialized program, plus the universal program that is always correct. It does not enumerate a permutation matrix, and it does not ask the caller to name flags. The worthwhile cases are the ones that gate whole code paths behind a scalar (a tint, an AA mode, a filter), not the ones that only feed arithmetic; see [What baking actually compiles](./shader-specialization.md#what-baking-actually-compiles).
+
 ## Minimal Pipeline State Management
 
 A Vulkan `VkGraphicsPipelineCreateInfo` touches blend state, depth/stencil state, rasterizer state, multisample state, input assembly, viewport/scissor, dynamic state flags, render pass, subpass, pipeline layout, and shader stages. Many of these are baked in at pipeline creation time, producing the combinatorial explosion that drives PSO caches.
