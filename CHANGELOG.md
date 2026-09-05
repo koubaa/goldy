@@ -139,6 +139,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VK_LAYER_PATH`) so a Khronos ERROR fails the suite. Metal and DX12 jobs do
   not set `GOLDY_VALIDATION_FATAL` (it is Vulkan-only).
 
+### Changed
+
+- **Docs: what baking compiles** — the shader-specialization design note now
+  states that predicted variants are a full Slang + driver recompile (not a
+  constant patch), that Slang's default opt level leaves dead blocks in SPIR-V
+  while the driver DCE's them, and when that is worth expecting. Scalar params,
+  Slang defines, "no permutation systems", compute pipelines, and
+  `GOLDY_SPECIALIZATION` point at the same distinction.
+
 ### Fixed
 
 - WebGPU bind-group cache keys include the exclusive pipeline identity so

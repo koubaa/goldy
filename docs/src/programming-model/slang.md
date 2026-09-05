@@ -72,6 +72,15 @@ let shader = ShaderModule::from_slang_with_paths_and_defines(
 )?;
 ```
 
+Use this for facts that are known at module creation and stay true for the life of the
+pipeline — a compile-time `SAMPLE_COUNT`, a debug dump. Do not grow a combinatorial
+define matrix for scene-mode flags that might hold still for a hundred frames and then
+change. Those belong on the dispatch as `with_param` scalars: the runtime's
+[specialization predictor](../design/shader-specialization.md#what-baking-actually-compiles)
+will bake a stable word into a `_GOLDY_SPEC_*` define on its own, as a full recompile of
+one predicted variant, and demote the moment the word moves. Author-supplied defines and
+runtime baking are the same compiler mechanism; they are not the same product surface.
+
 ### Full Options
 
 `ShaderModule::from_slang_with_options()` provides complete control — search paths, defines, optimization level, and layout validation checks:
