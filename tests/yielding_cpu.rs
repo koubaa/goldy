@@ -51,6 +51,11 @@ fn node_handler_resolves_on_gpu() {
 }
 
 #[test]
+fn struct_result_elements() {
+    yielding::struct_result_elements(&cpu_device());
+}
+
+#[test]
 fn validation_errors() {
     yielding::validation_errors(&cpu_device());
 }

@@ -485,6 +485,100 @@ pub fn node_handler_resolves_on_gpu(device: &Device) {
     assert_eq!(stats.rejected, 0, "GPU handlers are not counted host-side");
 }
 
+/// Struct result elements (`Resolved<Pair>`) through both a CPU and a GPU handler.
+const PAIR_SRC: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[goldy_petition(Result = BufRO<Pair>)]
+struct Ask { uint key; };
+
+struct S { uint lane; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> out, ThreadId tid) {
+    if (tid.x >= goldy_buf_len(out)) return;
+    $yield(got, Ask { tid.x }, S { tid.x });
+}
+
+[goldy_resume]
+void got(Scattered<uint> out, Resolved<Pair> r, S s) {
+    out[s.lane] = (r.is_null() || r.len() != 2u) ? 0u : r[0].a * 1000u + r[1].b;
+}
+"#;
+
+const PAIR_HANDLER_SRC: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+struct Ask { uint key; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(BufRO<Ask> petitions, Scattered<Resolution> resolutions, Scattered<Pair> arena,
+             uint count, ThreadId tid) {
+    if (tid.x >= count) return;
+    uint key = petitions[tid.x].key;
+    arena[2u * tid.x] = { key, 0u };
+    arena[2u * tid.x + 1u] = { 0u, key + 1u };
+    goldy_resolve(resolutions, tid.x, 2u * tid.x, 2u);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Ask {
+    key: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Pair {
+    a: u32,
+    b: u32,
+}
+
+impl Petition for Ask {
+    const SLANG_NAME: &'static str = "Ask";
+    type Result = Pair;
+}
+
+pub fn struct_result_elements(device: &Device) {
+    let n = 100u32;
+    let ctx = device.create_context().expect("ctx");
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let shader = ShaderModule::from_slang(device, PAIR_SRC).expect("compile");
+    let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
+    let handler_shader = ShaderModule::from_slang(device, PAIR_HANDLER_SRC).expect("compile handler");
+    let handler = ComputePipeline::new(device, &handler_shader).expect("handler pipeline");
+
+    for gpu in [false, true] {
+        let out = pool
+            .acquire_buffer_with_data(&vec![u32::MAX; n as usize], BufferKind::Scattered)
+            .expect("buffer");
+        let point = if gpu {
+            YieldPoint::node(128, 256, &handler)
+        } else {
+            YieldPoint::cpu(128, 256, |p: &Ask, promised: Promised<'_, Pair>| {
+                promised.fulfil(&[Pair { a: p.key, b: 0 }, Pair { a: 0, b: p.key + 1 }]);
+            })
+        };
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("pairs", &pipeline)
+            .with_parcel(&out, NodeAccess::Write)
+            .yield_point("got", point)
+            .dispatch(n.div_ceil(64), 1, 1);
+        scheme.submit().expect("submit").wait_until_settled().expect("settle");
+        let got = read_u32(&ctx, &out);
+        for i in 0..n {
+            assert_eq!(got[i as usize], i * 1000 + i + 1, "lane {i} (gpu handler: {gpu})");
+        }
+    }
+}
+
 /// Record-time mistakes are reported on submit.
 pub fn validation_errors(device: &Device) {
     let n = 64u32;

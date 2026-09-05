@@ -446,6 +446,13 @@ impl YieldDriver {
                 ));
             }
             let petition = refl.petition(&c.petition).expect("reflection validated petitions");
+            // Slang-side size of one `E`: a 4-byte scalar or a v0-shaped struct declared in
+            // the script; anything else is only usable with a CPU handler whose `Petition::Result`
+            // fixes the size.
+            let slang_result_bytes = scalar_result_bytes(&c.result_elem).or_else(|| {
+                refl.scalar_struct_bytes(&pipelines.script.original, &c.result_elem)
+                    .map(|b| b as usize)
+            });
             let result_bytes = match &yp.handler {
                 Handler::Cpu {
                     petition: rust_name,
@@ -465,7 +472,7 @@ impl YieldDriver {
                             petition.payload_bytes
                         ));
                     }
-                    if let Some(expect) = scalar_result_bytes(&c.result_elem) {
+                    if let Some(expect) = slang_result_bytes {
                         if *result_bytes != expect {
                             return err(format!(
                                 "`{name}`: Petition::Result is {result_bytes} bytes but the Slang result element `{}` is {expect} bytes",
@@ -475,7 +482,16 @@ impl YieldDriver {
                     }
                     *result_bytes as u32
                 }
-                Handler::Node { .. } => scalar_result_bytes(&c.result_elem).unwrap_or(4) as u32,
+                Handler::Node { .. } => match slang_result_bytes {
+                    Some(b) => b as u32,
+                    None => {
+                        return err(format!(
+                            "`{name}`: GPU handlers need a result element that is a 4-byte scalar or a struct of \
+                             them declared in the script; `{}` is neither",
+                            c.result_elem
+                        ))
+                    }
+                },
             };
             if yp.backpressure == Backpressure::Stall {
                 if yp.capacity < nx {
