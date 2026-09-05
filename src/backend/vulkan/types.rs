@@ -1278,6 +1278,8 @@ pub(crate) struct ShaderState {
     pub reflection: Option<crate::slang::ShaderReflection>,
     /// Pending struct layout validation on first stage compile; cleared after success.
     pub layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    pub stage_slot_remaps: HashMap<crate::slang::SlangStage, HashMap<String, u32>>,
+    pub remapped_modules: HashMap<(u32, u64), vk::ShaderModule>,
 }
 
 /// Graphics pipeline state.

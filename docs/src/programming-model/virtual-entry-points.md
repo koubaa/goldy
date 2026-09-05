@@ -60,7 +60,7 @@ void cs_main(SimParams params, Scattered<Particle> data, ThreadId id) {
 }
 ```
 
-In vertex and fragment shaders, the **last** unrecognized struct is treated as the stage input (vertex attributes or fragment varyings) rather than a broadcast. All preceding unrecognized structs are broadcasts.
+In vertex and fragment shaders, the **last** unrecognized struct is treated as the stage input (vertex attributes or fragment varyings) rather than a broadcast. All preceding unrecognized structs are broadcasts. Payload structs are shader-owned: define them once (or with matching semantics in each module) and Goldy links producer → consumer structurally. Rust never repeats a `Varying` type.
 
 ### System-Value Parameters
 
@@ -157,13 +157,16 @@ The `#line 1` directive is inserted between the generated wrapper and the user s
 
 ### Vertex/Fragment Example
 
+Define the interpolated payload once. Each stage lists only the resources it reads. Goldy links `VSOutput` to the fragment input by semantic (`SV_Position`, `TEXCOORD0`, …), not by struct name, and merges `scene` into one pipeline slot.
+
 ```hlsl
+struct VSOutput {
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+};
+
 [goldy_vertex]
 VSOutput vs_main(SceneUniforms scene, Scattered<Instance> instances, VertexId vid, InstanceId iid) {
-    // scene → broadcast (slot 0)
-    // instances → scattered (slot 1)
-    // vid → SV_VertexID
-    // iid → SV_InstanceID
     Instance inst = instances[iid.value];
     VSOutput out;
     // ... transform vertex ...
@@ -173,15 +176,25 @@ VSOutput vs_main(SceneUniforms scene, Scattered<Instance> instances, VertexId vi
 [goldy_fragment]
 float4 fs_main(SceneUniforms scene, Interpolated<float4> albedo, Filter samp,
                VSOutput input) : SV_Target {
-    // scene → broadcast (slot 0)
-    // albedo → texture (slot 1)
-    // samp → sampler (slot 2)
-    // input → pass-through stage varying
     return albedo.Sample(samp, input.uv) * scene.tint;
 }
 ```
 
-Both entry points share the same push-constant layout. Fragment shader slot expectations take precedence when Goldy extracts category metadata (since resource binding typically lives there in a vertex+fragment pair).
+On the CPU, bind by those parameter names:
+
+```rust
+pass.with_shader_bindings(&[
+    ShaderBinding::read("scene", &scene),
+    ShaderBinding::read("instances", &instances),
+    ShaderBinding::read("albedo", &albedo),
+    ShaderBinding::sampler("samp", &sampler),
+]);
+pass.set_pipeline(&pipeline);
+```
+
+The merged raster contract is fragment-first (`scene`, `albedo`, `samp`) then unique vertex resources (`instances`). Wrappers remap each stage onto that shared push layout, so the vertex shader still sees `scene` as its local first parameter while reading pipeline slot 0.
+
+Builtins (`VertexId`, `InstanceId`) are invocation-provided; they are not part of the resource contract.
 
 ## Preprocessor Conditionals
 

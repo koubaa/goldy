@@ -26,7 +26,8 @@ pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 /// cannot decode, so keys must miss rather than fail the compile.
 ///
 /// v6: `ResourceKind::AccelerationStructure` — AS fields were previously `Other`.
-const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v6";
+/// v8: graphics stage I/O extraction filters generated push-constant params and unwraps mesh `out vertices`.
+const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v8";
 
 /// Content hash of the `shaders/goldy_exp/*.slang` library sources, baked in at
 /// build time by `build.rs`.  Changes when any library file is edited, so compiled
@@ -427,7 +428,7 @@ mod tests {
     use super::*;
     use crate::slang::{
         ffi::SlangStage,
-        virtual_main::{effective_slang_source_for_compile, transform_virtual_main},
+        virtual_main::{effective_slang_source_for_compile, transform_virtual_main, transform_virtual_main_with_remaps, Stage},
         CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck, ShaderReflection, ShaderTarget,
     };
     use crate::types::OptimizationLevel;
@@ -868,10 +869,10 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
 
     /// Reflection schema constant is present and matches the expected version.
     #[test]
-    fn reflection_stride_schema_is_v6() {
+    fn reflection_stride_schema_is_v8() {
         assert_eq!(
-            REFLECTION_STRIDE_SCHEMA, "bind-stride-v6",
-            "schema must be v6 after AccelerationStructure resource-kind classification"
+            REFLECTION_STRIDE_SCHEMA, "bind-stride-v8",
+            "schema must be v8 after graphics stage-interface payload filtering"
         );
     }
 
@@ -889,6 +890,31 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
         let again = compile_cache_key(src, tgt, &eps, &[path.as_ref()], &defs, &layouts, opt);
         assert_eq!(with_helper, again);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compile_cache_key_sensitive_to_slot_remap_source() {
+        let src = r#"
+struct Varying { float4 position : SV_Position; };
+[goldy_vertex]
+Varying vs_main() { Varying o; return o; }
+[goldy_fragment]
+float4 fs_main(Interpolated<float4> tex, Filter smp, Varying input) : SV_Target {
+    return tex.Sample(smp, input.uv);
+}
+"#;
+        let identity = transform_virtual_main(src);
+        let mut maps = std::collections::HashMap::new();
+        let mut fs = std::collections::HashMap::new();
+        fs.insert("tex".into(), 3);
+        fs.insert("smp".into(), 4);
+        maps.insert(Stage::Fragment, fs);
+        let remapped = transform_virtual_main_with_remaps(src, Some(&maps));
+        assert_ne!(identity, remapped);
+        let ( _src, tgt, eps, defs, layouts, opt) = base_compile_args();
+        let k1 = compile_cache_key(&identity, tgt, &eps, &[], &defs, &layouts, opt);
+        let k2 = compile_cache_key(&remapped, tgt, &eps, &[], &defs, &layouts, opt);
+        assert_ne!(k1, k2);
     }
 
     #[test]

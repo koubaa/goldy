@@ -694,3 +694,23 @@ pub struct GraphicsPipelineCreateDesc<'a> {
     pub fragment_shader: ShaderHandle,
     pub raster: &'a PipelineDesc<'a>,
 }
+
+/// Transform authored Slang with a per-stage bindless slot remap, if any.
+pub fn shader_source_with_stage_remap<'a>(
+    original: &'a str,
+    stage: crate::slang::SlangStage,
+    remap: Option<&std::collections::HashMap<String, u32>>,
+) -> std::borrow::Cow<'a, str> {
+    let Some(remap) = remap.filter(|m| !m.is_empty()) else {
+        return std::borrow::Cow::Borrowed(original);
+    };
+    let Some(vm_stage) = crate::slang::slang_stage_to_virtual_main(stage) else {
+        return std::borrow::Cow::Borrowed(original);
+    };
+    let mut maps = std::collections::HashMap::new();
+    maps.insert(vm_stage, remap.clone());
+    std::borrow::Cow::Owned(crate::slang::virtual_main::transform_virtual_main_with_remaps(
+        original,
+        Some(&maps),
+    ))
+}

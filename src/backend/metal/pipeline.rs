@@ -28,13 +28,9 @@ pub(super) fn create_with_depth(
     let vs_shader = state.shaders.get(&vertex_shader).context("Invalid vertex shader")?;
     let fs_shader = state.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
 
-    let vs_library = vs_shader
-        .vertex_library
-        .as_ref()
+    let vs_library = super::shader::stage_library(vs_shader, SlangStage::Vertex)
         .expect("vertex library must be compiled before pipeline creation");
-    let fs_library = fs_shader
-        .fragment_library
-        .as_ref()
+    let fs_library = super::shader::stage_library(fs_shader, SlangStage::Fragment)
         .expect("fragment library must be compiled before pipeline creation");
 
     let vs_function = vs_library
@@ -171,16 +167,14 @@ pub(super) fn create_mesh(
     let mesh_lib = state
         .shaders
         .get(&mesh_shader)
-        .and_then(|s| s.extra_libraries.get(&SlangStage::Mesh))
+        .and_then(|s| super::shader::stage_library(s, SlangStage::Mesh))
         .context("mesh library missing after compile")?;
     let mesh_function = mesh_lib
         .get_function("mesh_main", None)
         .map_err(|e| anyhow::anyhow!("Failed to get mesh function: {e}"))?;
 
     let fs_shader = state.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
-    let fs_library = fs_shader
-        .fragment_library
-        .as_ref()
+    let fs_library = super::shader::stage_library(fs_shader, SlangStage::Fragment)
         .expect("fragment library must be compiled before pipeline creation");
     let fs_function = fs_library
         .get_function("fs_main", None)
@@ -190,7 +184,7 @@ pub(super) fn create_mesh(
         let amp_lib = state
             .shaders
             .get(&amp)
-            .and_then(|s| s.extra_libraries.get(&SlangStage::Amplification))
+            .and_then(|s| super::shader::stage_library(s, SlangStage::Amplification))
             .context("amplification library missing after compile")?;
         Some(
             amp_lib

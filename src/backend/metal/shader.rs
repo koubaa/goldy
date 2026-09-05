@@ -471,40 +471,60 @@ pub(super) fn ensure_stage_compiled(
         entry_point: &'static str,
     }
 
-    let maybe_scratch: Option<CompileScratch> = {
-        let shaders = &state.shaders;
-        let shader = shaders.get(&shader_handle).context("Invalid shader handle")?;
-        let (entry_point, need_compile) = match stage {
-            SlangStage::Vertex => ("vs_main", shader.vertex_library.is_none()),
-            SlangStage::Fragment => ("fs_main", shader.fragment_library.is_none()),
-            SlangStage::Compute => ("cs_main", shader.compute_library.is_none()),
-            SlangStage::RayGeneration
-            | SlangStage::Intersection
-            | SlangStage::AnyHit
-            | SlangStage::ClosestHit
-            | SlangStage::Miss
-            | SlangStage::Callable
-            | SlangStage::Mesh
-            | SlangStage::Amplification => {
-                let name = crate::slang::canonical_entry_point(stage)
-                    .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
-                (name, !shader.extra_libraries.contains_key(&stage))
-            }
-            other => anyhow::bail!("Unsupported shader stage: {:?}", other),
-        };
-        if !need_compile {
-            None
+    let remapped_hit = {
+        let shader = state.shaders.get(&shader_handle).context("Invalid shader handle")?;
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let fp = remap
+            .map(crate::slang::graphics_link::slot_remap_fingerprint)
+            .unwrap_or(0);
+        if fp != 0 {
+            shader.remapped_libraries.contains_key(&(stage as u32, fp))
         } else {
-            Some(CompileScratch {
-                device_handle: shader.device_handle,
-                slang_source: shader.slang_source.clone(),
-                search_paths: shader.search_paths.clone(),
-                optimization_level: shader.optimization_level,
-                defines: shader.defines.clone(),
-                layout_checks: shader.layout_checks.clone(),
-                entry_point,
-            })
+            false
         }
+    };
+    if remapped_hit {
+        return Ok(());
+    }
+
+    let maybe_scratch: Option<CompileScratch> = {
+        let shader = state.shaders.get(&shader_handle).context("Invalid shader handle")?;
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let fp = remap
+            .map(crate::slang::graphics_link::slot_remap_fingerprint)
+            .unwrap_or(0);
+        if fp == 0 {
+            let need_compile = match stage {
+                SlangStage::Vertex => shader.vertex_library.is_none(),
+                SlangStage::Fragment => shader.fragment_library.is_none(),
+                SlangStage::Compute => shader.compute_library.is_none(),
+                SlangStage::RayGeneration
+                | SlangStage::Intersection
+                | SlangStage::AnyHit
+                | SlangStage::ClosestHit
+                | SlangStage::Miss
+                | SlangStage::Callable
+                | SlangStage::Mesh
+                | SlangStage::Amplification => !shader.extra_libraries.contains_key(&stage),
+                other => anyhow::bail!("Unsupported shader stage: {:?}", other),
+            };
+            if !need_compile {
+                return Ok(());
+            }
+        }
+        let entry_point = crate::slang::canonical_entry_point(stage)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
+        let source = crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap)
+            .into_owned();
+        Some(CompileScratch {
+            device_handle: shader.device_handle,
+            slang_source: source,
+            search_paths: shader.search_paths.clone(),
+            optimization_level: shader.optimization_level,
+            defines: shader.defines.clone(),
+            layout_checks: shader.layout_checks.clone(),
+            entry_point,
+        })
     };
 
     let Some(scratch) = maybe_scratch else {
@@ -546,21 +566,15 @@ pub(super) fn ensure_stage_compiled(
         .shaders
         .get_mut(&shader_handle)
         .expect("shader handle must be valid after ensure_stage_compiled");
-    match stage {
-        SlangStage::Vertex => shader.vertex_library = Some(library),
-        SlangStage::Fragment => shader.fragment_library = Some(library),
-        SlangStage::Compute => shader.compute_library = Some(library),
-        SlangStage::RayGeneration
-        | SlangStage::Intersection
-        | SlangStage::AnyHit
-        | SlangStage::ClosestHit
-        | SlangStage::Miss
-        | SlangStage::Callable
-        | SlangStage::Mesh
-        | SlangStage::Amplification => {
-            shader.extra_libraries.insert(stage, library);
-        }
-        _ => unreachable!("stage already validated"),
+    let fp = shader
+        .stage_slot_remaps
+        .get(&stage)
+        .map(crate::slang::graphics_link::slot_remap_fingerprint)
+        .unwrap_or(0);
+    if fp != 0 {
+        shader.remapped_libraries.insert((stage as u32, fp), library);
+    } else {
+        install_metal_stage_library(shader, stage, library);
     }
 
     if shader.reflection.is_none() {
@@ -581,7 +595,42 @@ pub(super) fn ensure_stage_compiled(
     Ok(())
 }
 
-/// Create a shader handle (compilation deferred to pipeline creation).
+fn install_metal_stage_library(shader: &mut ShaderState, stage: SlangStage, library: Library) {
+    match stage {
+        SlangStage::Vertex => shader.vertex_library = Some(library),
+        SlangStage::Fragment => shader.fragment_library = Some(library),
+        SlangStage::Compute => shader.compute_library = Some(library),
+        SlangStage::RayGeneration
+        | SlangStage::Intersection
+        | SlangStage::AnyHit
+        | SlangStage::ClosestHit
+        | SlangStage::Miss
+        | SlangStage::Callable
+        | SlangStage::Mesh
+        | SlangStage::Amplification => {
+            shader.extra_libraries.insert(stage, library);
+        }
+        _ => {}
+    }
+}
+
+/// Library compiled for `stage` under the shader's current slot remap (or the identity cache).
+pub(super) fn stage_library(shader: &ShaderState, stage: SlangStage) -> Option<&Library> {
+    let fp = shader
+        .stage_slot_remaps
+        .get(&stage)
+        .map(crate::slang::graphics_link::slot_remap_fingerprint)
+        .unwrap_or(0);
+    if fp != 0 {
+        return shader.remapped_libraries.get(&(stage as u32, fp));
+    }
+    match stage {
+        SlangStage::Vertex => shader.vertex_library.as_ref(),
+        SlangStage::Fragment => shader.fragment_library.as_ref(),
+        SlangStage::Compute => shader.compute_library.as_ref(),
+        _ => shader.extra_libraries.get(&stage),
+    }
+}
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
@@ -611,6 +660,8 @@ pub(super) fn create(
             extra_libraries: HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
+            stage_slot_remaps: HashMap::new(),
+            remapped_libraries: HashMap::new(),
         },
     );
 

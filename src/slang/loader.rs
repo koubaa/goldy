@@ -95,6 +95,21 @@ pub struct SlangLibrary {
     pub reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset,
     pub reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType,
     pub reflection_type_layout_get_category: FnSpReflectionTypeLayoutGetCategory,
+    pub reflection_get_entry_point_count: FnSpReflectionGetEntryPointCount,
+    pub reflection_get_entry_point_by_index: FnSpReflectionGetEntryPointByIndex,
+    pub reflection_entry_point_get_name: FnSpReflectionEntryPointGetName,
+    pub reflection_entry_point_get_parameter_count: FnSpReflectionEntryPointGetParameterCount,
+    pub reflection_entry_point_get_parameter_by_index: FnSpReflectionEntryPointGetParameterByIndex,
+    pub reflection_entry_point_get_result_var_layout: FnSpReflectionEntryPointGetResultVarLayout,
+    pub reflection_entry_point_get_stage: FnSpReflectionEntryPointGetStage,
+    pub reflection_variable_layout_get_semantic_name: FnSpReflectionVariableLayoutGetSemanticName,
+    pub reflection_variable_layout_get_semantic_index: FnSpReflectionVariableLayoutGetSemanticIndex,
+    pub reflection_type_get_element_type: FnSpReflectionTypeGetElementType,
+    pub reflection_type_get_column_count: FnSpReflectionTypeGetColumnCount,
+    pub reflection_type_get_scalar_type: FnSpReflectionTypeGetScalarType,
+    pub reflection_type_get_field_count: FnSpReflectionTypeGetFieldCount,
+    pub reflection_type_get_field_by_index: FnSpReflectionTypeGetFieldByIndex,
+    pub reflection_variable_get_type: FnSpReflectionVariableGetType,
 }
 
 impl SlangLibrary {
@@ -269,6 +284,51 @@ impl SlangLibrary {
             let reflection_type_layout_get_category: FnSpReflectionTypeLayoutGetCategory = *library
                 .get(b"spReflectionTypeLayout_GetParameterCategory\0")
                 .context("Failed to load spReflectionTypeLayout_GetParameterCategory")?;
+            let reflection_get_entry_point_count: FnSpReflectionGetEntryPointCount = *library
+                .get(b"spReflection_getEntryPointCount\0")
+                .context("Failed to load spReflection_getEntryPointCount")?;
+            let reflection_get_entry_point_by_index: FnSpReflectionGetEntryPointByIndex = *library
+                .get(b"spReflection_getEntryPointByIndex\0")
+                .context("Failed to load spReflection_getEntryPointByIndex")?;
+            let reflection_entry_point_get_name: FnSpReflectionEntryPointGetName = *library
+                .get(b"spReflectionEntryPoint_getName\0")
+                .context("Failed to load spReflectionEntryPoint_getName")?;
+            let reflection_entry_point_get_parameter_count: FnSpReflectionEntryPointGetParameterCount = *library
+                .get(b"spReflectionEntryPoint_getParameterCount\0")
+                .context("Failed to load spReflectionEntryPoint_getParameterCount")?;
+            let reflection_entry_point_get_parameter_by_index: FnSpReflectionEntryPointGetParameterByIndex = *library
+                .get(b"spReflectionEntryPoint_getParameterByIndex\0")
+                .context("Failed to load spReflectionEntryPoint_getParameterByIndex")?;
+            let reflection_entry_point_get_result_var_layout: FnSpReflectionEntryPointGetResultVarLayout = *library
+                .get(b"spReflectionEntryPoint_getResultVarLayout\0")
+                .context("Failed to load spReflectionEntryPoint_getResultVarLayout")?;
+            let reflection_entry_point_get_stage: FnSpReflectionEntryPointGetStage = *library
+                .get(b"spReflectionEntryPoint_getStage\0")
+                .context("Failed to load spReflectionEntryPoint_getStage")?;
+            let reflection_variable_layout_get_semantic_name: FnSpReflectionVariableLayoutGetSemanticName = *library
+                .get(b"spReflectionVariableLayout_GetSemanticName\0")
+                .context("Failed to load spReflectionVariableLayout_GetSemanticName")?;
+            let reflection_variable_layout_get_semantic_index: FnSpReflectionVariableLayoutGetSemanticIndex = *library
+                .get(b"spReflectionVariableLayout_GetSemanticIndex\0")
+                .context("Failed to load spReflectionVariableLayout_GetSemanticIndex")?;
+            let reflection_type_get_element_type: FnSpReflectionTypeGetElementType = *library
+                .get(b"spReflectionType_GetElementType\0")
+                .context("Failed to load spReflectionType_GetElementType")?;
+            let reflection_type_get_column_count: FnSpReflectionTypeGetColumnCount = *library
+                .get(b"spReflectionType_GetColumnCount\0")
+                .context("Failed to load spReflectionType_GetColumnCount")?;
+            let reflection_type_get_scalar_type: FnSpReflectionTypeGetScalarType = *library
+                .get(b"spReflectionType_GetScalarType\0")
+                .context("Failed to load spReflectionType_GetScalarType")?;
+            let reflection_type_get_field_count: FnSpReflectionTypeGetFieldCount = *library
+                .get(b"spReflectionType_GetFieldCount\0")
+                .context("Failed to load spReflectionType_GetFieldCount")?;
+            let reflection_type_get_field_by_index: FnSpReflectionTypeGetFieldByIndex = *library
+                .get(b"spReflectionType_GetFieldByIndex\0")
+                .context("Failed to load spReflectionType_GetFieldByIndex")?;
+            let reflection_variable_get_type: FnSpReflectionVariableGetType = *library
+                .get(b"spReflectionVariable_GetType\0")
+                .context("Failed to load spReflectionVariable_GetType")?;
 
             goldy_event!("slang.ffi.reflection_symbols", loaded = true);
 
@@ -319,6 +379,21 @@ impl SlangLibrary {
                 reflection_variable_layout_get_offset,
                 reflection_type_layout_get_binding_type,
                 reflection_type_layout_get_category,
+                reflection_get_entry_point_count,
+                reflection_get_entry_point_by_index,
+                reflection_entry_point_get_name,
+                reflection_entry_point_get_parameter_count,
+                reflection_entry_point_get_parameter_by_index,
+                reflection_entry_point_get_result_var_layout,
+                reflection_entry_point_get_stage,
+                reflection_variable_layout_get_semantic_name,
+                reflection_variable_layout_get_semantic_index,
+                reflection_type_get_element_type,
+                reflection_type_get_column_count,
+                reflection_type_get_scalar_type,
+                reflection_type_get_field_count,
+                reflection_type_get_field_by_index,
+                reflection_variable_get_type,
             })
         }
     }

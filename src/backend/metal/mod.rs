@@ -647,6 +647,54 @@ impl GpuBackend for MetalBackend {
         pipeline::destroy(&mut self.state, pipeline);
     }
 
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.state.shaders.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+        }
+    }
+
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        super::shader::ensure_stage_compiled(&mut self.state, shader, stage)
+    }
+
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let reflection = self.state.shaders.get(&shader)?.reflection.as_ref()?;
+        let want = match stage {
+            crate::slang::SlangStage::Vertex => "vertex",
+            crate::slang::SlangStage::Fragment => "fragment",
+            crate::slang::SlangStage::Mesh => "mesh",
+            crate::slang::SlangStage::Amplification => "amplification",
+            _ => return None,
+        };
+        reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == want)
+            .cloned()
+    }
+
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(ps) = self.state.pipelines.get_mut(&pipeline) {
+            ps.push_constant_categories = contract.categories();
+            if ps.binding_element_strides.len() != contract.resources.len() {
+                ps.binding_element_strides = vec![None; contract.resources.len()];
+            }
+        }
+    }
+
     fn create_mesh_pipeline(
         &mut self,
         device: DeviceHandle,

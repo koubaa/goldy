@@ -1356,6 +1356,57 @@ impl GpuBackend for Dx12Backend {
         slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
     }
 
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.state.shaders.write().unwrap().entries.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+        }
+    }
+
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        let _ = shader::ensure_stage_compiled(&mut self.state, shader, stage)?;
+        Ok(())
+    }
+
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let shaders = self.state.shaders.read().unwrap();
+        let reflection = shaders.entries.get(&shader)?.reflection.as_ref()?;
+        let want = match stage {
+            crate::slang::SlangStage::Vertex => "vertex",
+            crate::slang::SlangStage::Fragment => "fragment",
+            crate::slang::SlangStage::Mesh => "mesh",
+            crate::slang::SlangStage::Amplification => "amplification",
+            _ => return None,
+        };
+        reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == want)
+            .cloned()
+    }
+
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&pipeline) {
+            ps.push_constant_categories = contract.categories();
+            ps.push_constant_slot_kinds = contract.resources.iter().map(|r| r.slot_kind()).collect();
+            if ps.binding_element_strides.len() != contract.resources.len() {
+                ps.binding_element_strides = vec![None; contract.resources.len()];
+            }
+        }
+    }
+
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
         for sc_arc in self.state.contexts.read().unwrap().values() {
             let mut sc = sc_arc.lock().unwrap();

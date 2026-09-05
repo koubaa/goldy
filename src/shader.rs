@@ -52,6 +52,8 @@ pub struct ShaderModule {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ShaderHandle,
+    /// Authored Slang source used for graphics linking (virtual-main parse).
+    pub(crate) slang_source: String,
 }
 
 impl ShaderModule {
@@ -274,6 +276,7 @@ impl ShaderModule {
             _device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
+            slang_source: source.to_string(),
         })
     }
 }

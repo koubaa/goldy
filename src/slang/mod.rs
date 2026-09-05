@@ -44,6 +44,7 @@
 
 pub mod compiler;
 pub mod ffi;
+pub mod graphics_link;
 mod gpu_type;
 pub mod loader;
 pub mod virtual_main;
@@ -55,13 +56,14 @@ pub use compiler::{
 };
 pub use ffi::SlangStage;
 pub use gpu_type::{GpuField, GpuFieldType, GpuType, PackedGpuField, PackedGpuLayout};
+pub use graphics_link::{
+    GraphicsPipelineInterface, InterpolationMode, PipelineResource, PipelineResourceContract, StageInterface,
+    StageIoField,
+};
 pub use virtual_main::{
     emit_wrapper_from_kernel_def, entry_def_from_kernel_def, transform_virtual_main_cpu, try_kernel_def_from_source,
 };
 
-/// Canonical Goldy entry-point name for a compiled stage (`vs_main`, `cs_main`, `rgen_main`, …).
-///
-/// Returns `None` for stages Goldy does not compile (hull / domain / geometry / none).
 pub fn canonical_entry_point(stage: SlangStage) -> Option<&'static str> {
     match stage {
         SlangStage::Vertex => Some("vs_main"),
@@ -76,6 +78,22 @@ pub fn canonical_entry_point(stage: SlangStage) -> Option<&'static str> {
         SlangStage::Mesh => Some("mesh_main"),
         SlangStage::Amplification => Some("amp_main"),
         SlangStage::None | SlangStage::Hull | SlangStage::Domain | SlangStage::Geometry => None,
+    }
+}
+
+pub(crate) fn slang_stage_to_virtual_main(stage: SlangStage) -> Option<virtual_main::Stage> {
+    match stage {
+        SlangStage::Vertex => Some(virtual_main::Stage::Vertex),
+        SlangStage::Fragment => Some(virtual_main::Stage::Fragment),
+        SlangStage::Compute => Some(virtual_main::Stage::Compute),
+        SlangStage::RayGeneration => Some(virtual_main::Stage::RayGeneration),
+        SlangStage::Intersection => Some(virtual_main::Stage::Intersection),
+        SlangStage::AnyHit => Some(virtual_main::Stage::AnyHit),
+        SlangStage::ClosestHit => Some(virtual_main::Stage::ClosestHit),
+        SlangStage::Miss => Some(virtual_main::Stage::Miss),
+        SlangStage::Mesh => Some(virtual_main::Stage::Mesh),
+        SlangStage::Amplification => Some(virtual_main::Stage::Amplification),
+        _ => None,
     }
 }
 

@@ -45,6 +45,45 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "graphics")]
+fn graphics_vm_remaps(
+    shader: &WebGpuShader,
+) -> HashMap<crate::slang::virtual_main::Stage, HashMap<String, u32>> {
+    let mut out = HashMap::new();
+    for (stage, remap) in &shader.stage_slot_remaps {
+        if remap.is_empty() {
+            continue;
+        }
+        if let Some(vm) = crate::slang::slang_stage_to_virtual_main(*stage) {
+            out.insert(vm, remap.clone());
+        }
+    }
+    out
+}
+
+#[cfg(feature = "graphics")]
+fn wgpu_layout_from_graphics_contract(
+    contract: &crate::slang::graphics_link::PipelineResourceContract,
+) -> WgpuComputeLayout {
+    WgpuComputeLayout {
+        resources: Some(
+            contract
+                .resources
+                .iter()
+                .map(|r| match r.category {
+                    ResourceCategory::Scattered => WgpuComputeResourceKind::StorageRead,
+                    ResourceCategory::Broadcast => WgpuComputeResourceKind::Uniform,
+                    ResourceCategory::Texture => WgpuComputeResourceKind::SampledTexture,
+                    ResourceCategory::StorageImage => WgpuComputeResourceKind::StorageTexture,
+                    ResourceCategory::Sampler => WgpuComputeResourceKind::Sampler,
+                    ResourceCategory::Accel => WgpuComputeResourceKind::AccelerationStructure,
+                })
+                .collect(),
+        ),
+        scalar_count: 0,
+    }
+}
+
 /// Slang's WGSL backend assigns vertex-input `@location`s from HLSL semantics
 /// (`POSITION` → 0, `TEXCOORD1` → 1, `TEXCOORD0` remapped to 2). Goldy vertex
 /// layouts number attributes in declaration order (0, 1, 2). Remap input-struct
@@ -1053,6 +1092,8 @@ struct WebGpuShader {
     compute: Option<CachedComputeWgsl>,
     #[cfg(feature = "graphics")]
     graphics: Option<CachedGraphicsWgsl>,
+    #[cfg(feature = "graphics")]
+    stage_slot_remaps: std::collections::HashMap<crate::slang::SlangStage, std::collections::HashMap<String, u32>>,
 }
 
 impl WebGpuShader {
@@ -1077,6 +1118,8 @@ impl WebGpuShader {
             compute: None,
             #[cfg(feature = "graphics")]
             graphics: None,
+            #[cfg(feature = "graphics")]
+            stage_slot_remaps: std::collections::HashMap::new(),
         }
     }
 }
@@ -1854,10 +1897,18 @@ impl WebGpuBackend {
     fn compile_graphics_wgsl_uncached(&mut self, shader: &WebGpuShader) -> Result<(String, String, WgpuComputeLayout)> {
         let has_goldy = shader.source.contains("[goldy_vertex]") || shader.source.contains("[goldy_fragment]");
         let (lowered, layout) = if has_goldy {
-            let layout = crate::slang::virtual_main::extract_webgpu_graphics_layout(&shader.source)
-                .map_err(|error| anyhow::anyhow!("WebGPU graphics shader layout failed: {error}"))?;
-            let lowered = crate::slang::virtual_main::transform_virtual_main_webgpu_graphics(&shader.source)
-                .map_err(|error| anyhow::anyhow!("WebGPU graphics shader lowering failed: {error}"))?;
+            let remaps = graphics_vm_remaps(shader);
+            let remaps_ref = (!remaps.is_empty()).then_some(&remaps);
+            let layout = crate::slang::virtual_main::extract_webgpu_graphics_layout_with_remaps(
+                &shader.source,
+                remaps_ref,
+            )
+            .map_err(|error| anyhow::anyhow!("WebGPU graphics shader layout failed: {error}"))?;
+            let lowered = crate::slang::virtual_main::transform_virtual_main_webgpu_graphics_with_remaps(
+                &shader.source,
+                remaps_ref,
+            )
+            .map_err(|error| anyhow::anyhow!("WebGPU graphics shader lowering failed: {error}"))?;
             (lowered, layout)
         } else {
             (shader.source.clone(), WgpuComputeLayout::inferred_storage())
@@ -4694,6 +4745,44 @@ impl GpuBackend for WebGpuBackend {
     #[cfg(feature = "graphics")]
     fn destroy_pipeline(&mut self, pipeline: PipelineHandle) {
         self.graphics_pipelines.remove(&pipeline);
+    }
+
+    #[cfg(feature = "graphics")]
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.shaders.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+            s.graphics = None;
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    fn compile_shader_stage(&mut self, _shader: ShaderHandle, _stage: crate::slang::SlangStage) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(feature = "graphics")]
+    fn shader_stage_interface(
+        &self,
+        _shader: ShaderHandle,
+        _stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        None
+    }
+
+    #[cfg(feature = "graphics")]
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(p) = self.graphics_pipelines.get_mut(&pipeline) {
+            p.layout = wgpu_layout_from_graphics_contract(contract);
+        }
     }
 
     #[cfg(feature = "graphics")]

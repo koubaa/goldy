@@ -225,6 +225,9 @@ pub type SlangReflectionType = c_void;
 /// Opaque reflection variable layout handle
 pub type SlangReflectionVariableLayout = c_void;
 
+/// Opaque entry-point reflection handle (`SlangReflectionEntryPoint`).
+pub type SlangReflectionEntryPoint = c_void;
+
 /// Slang type kind enum
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,6 +570,54 @@ pub type FnSpReflectionTypeLayoutGetBindingType =
 /// Get the category of a type layout
 pub type FnSpReflectionTypeLayoutGetCategory =
     unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> c_int;
+
+/// Slang scalar type (matches `SlangScalarType` in slang.h).
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlangScalarType {
+    None = 0,
+    Void = 1,
+    Bool = 2,
+    Int32 = 3,
+    Uint32 = 4,
+    Int64 = 5,
+    Uint64 = 6,
+    Float16 = 7,
+    Float32 = 8,
+    Float64 = 9,
+    Int8 = 10,
+    Uint8 = 11,
+    Int16 = 12,
+    Uint16 = 13,
+}
+
+pub type FnSpReflectionGetEntryPointCount = unsafe extern "C" fn(reflection: *mut SlangReflection) -> usize;
+pub type FnSpReflectionGetEntryPointByIndex =
+    unsafe extern "C" fn(reflection: *mut SlangReflection, index: usize) -> *mut SlangReflectionEntryPoint;
+pub type FnSpReflectionEntryPointGetName =
+    unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> *const c_char;
+pub type FnSpReflectionEntryPointGetParameterCount =
+    unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> u32;
+pub type FnSpReflectionEntryPointGetParameterByIndex = unsafe extern "C" fn(
+    entry: *mut SlangReflectionEntryPoint,
+    index: u32,
+) -> *mut SlangReflectionVariableLayout;
+pub type FnSpReflectionEntryPointGetResultVarLayout =
+    unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> *mut SlangReflectionVariableLayout;
+pub type FnSpReflectionEntryPointGetStage = unsafe extern "C" fn(entry: *mut SlangReflectionEntryPoint) -> c_int;
+pub type FnSpReflectionVariableLayoutGetSemanticName =
+    unsafe extern "C" fn(var_layout: *mut SlangReflectionVariableLayout) -> *const c_char;
+pub type FnSpReflectionVariableLayoutGetSemanticIndex =
+    unsafe extern "C" fn(var_layout: *mut SlangReflectionVariableLayout) -> usize;
+pub type FnSpReflectionTypeGetElementType =
+    unsafe extern "C" fn(type_: *mut SlangReflectionType) -> *mut SlangReflectionType;
+pub type FnSpReflectionTypeGetColumnCount = unsafe extern "C" fn(type_: *mut SlangReflectionType) -> u32;
+pub type FnSpReflectionTypeGetScalarType = unsafe extern "C" fn(type_: *mut SlangReflectionType) -> c_int;
+pub type FnSpReflectionTypeGetFieldCount = unsafe extern "C" fn(type_: *mut SlangReflectionType) -> u32;
+pub type FnSpReflectionTypeGetFieldByIndex =
+    unsafe extern "C" fn(type_: *mut SlangReflectionType, index: u32) -> *mut SlangReflectionVariable;
+pub type FnSpReflectionVariableGetType =
+    unsafe extern "C" fn(variable: *mut SlangReflectionVariable) -> *mut SlangReflectionType;
 
 // ============================================================================
 // User-defined attribute reflection

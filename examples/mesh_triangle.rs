@@ -1,12 +1,14 @@
-//! Mesh-shader triangle — same present path as `triangle`, but `[goldy_mesh]` + `dispatch_mesh`.
+//! Mesh-shader triangle — `[goldy_mesh]` + `dispatch_mesh` with automatic payload linking.
+//!
+//! `MeshOutput` and `FsIn` use different struct names; Goldy links them by `SV_Position` / `COLOR`.
 //!
 //! Skips (exit 0) when `DeviceCapabilities::mesh_shaders` is false.
 //!
 //! Run with: cargo run --example mesh_triangle --features examples
 
 use goldy::{
-    Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MeshPipeline, MeshPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MeshPipeline, RequestAdapterOptions, RetainedPool,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -100,16 +102,11 @@ impl App {
         shader: &ShaderModule,
         surface: &SurfaceExchange,
     ) -> anyhow::Result<MeshPipeline> {
-        Ok(MeshPipeline::new(
-            device,
-            &MeshPipelineDesc {
-                mesh: shader,
-                fragment: shader,
-                amplification: None,
-                target_format: surface.format(),
-                depth_stencil: None,
-            },
-        )?)
+        Ok(MeshPipeline::builder(device)
+            .mesh(shader)
+            .fragment(shader)
+            .target_format(surface.format())
+            .build()?)
     }
 
     fn record_scheme(

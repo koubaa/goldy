@@ -45,7 +45,7 @@ use crate::types::{
 #[cfg(feature = "graphics")]
 use crate::types::{DepthFormat, IndexFormat};
 use crate::validation_env;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2577,6 +2577,7 @@ impl Scheme {
             }],
             commands: Vec::new(),
             pending_push_constants: Vec::new(),
+            pending_named: HashMap::new(),
         }
     }
 }
@@ -3217,6 +3218,50 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 }
 
+/// Named or positional shader resource for a graphics draw.
+///
+/// Named bindings (`ShaderBinding::read("scene", &scene)`) are resolved against the
+/// pipeline's merged virtual-main contract at [`SchemeRenderPassBuilder::set_pipeline`].
+/// Extra names are allowed so one pass-level set can serve multiple pipeline switches.
+#[cfg(feature = "graphics")]
+pub struct ShaderBinding<'a> {
+    name: &'a str,
+    slot: ShaderResourceSlot<'a>,
+}
+
+#[cfg(feature = "graphics")]
+impl<'a> ShaderBinding<'a> {
+    /// Bind a read-only parcel to the pipeline resource named `name`.
+    pub fn read(name: &'a str, parcel: &'a Parcel) -> Self {
+        Self {
+            name,
+            slot: ShaderResourceSlot::Parcel {
+                parcel,
+                access: NodeAccess::Read,
+            },
+        }
+    }
+
+    /// Bind a writable parcel to the pipeline resource named `name`.
+    pub fn write(name: &'a str, parcel: &'a Parcel) -> Self {
+        Self {
+            name,
+            slot: ShaderResourceSlot::Parcel {
+                parcel,
+                access: NodeAccess::Write,
+            },
+        }
+    }
+
+    /// Bind a sampler to the pipeline resource named `name`.
+    pub fn sampler(name: &'a str, sampler: &'a crate::Sampler) -> Self {
+        Self {
+            name,
+            slot: ShaderResourceSlot::Sampler(sampler),
+        }
+    }
+}
+
 /// Deferred push-constant slot recorded before [`SchemeRenderPassBuilder::set_pipeline`].
 ///
 /// Read and read-write handles are captured at record time; the descriptor actually
@@ -3277,6 +3322,7 @@ pub struct SchemeRenderPassBuilder<'a> {
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
     pending_push_constants: Vec<PendingPushConstant>,
+    pending_named: HashMap<String, PendingPushConstant>,
 }
 
 #[cfg(feature = "graphics")]
@@ -3339,6 +3385,38 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self
     }
 
+    /// Bind resources by pipeline parameter name.
+    ///
+    /// Extra names are kept so the same set can serve several pipeline switches.
+    /// Missing required names and wrong resource categories are rejected when
+    /// [`Self::set_pipeline`] / [`Self::set_mesh_pipeline`] runs.
+    pub fn with_shader_bindings(&mut self, bindings: &[ShaderBinding<'_>]) -> &mut Self {
+        for binding in bindings {
+            match binding.slot {
+                ShaderResourceSlot::Parcel { parcel, access } => {
+                    self.scheme.submit_state.register_parcel_stamp(parcel);
+                    self.bindings.push(ResourceBinding {
+                        resource: parcel.resource_id(),
+                        access,
+                    });
+                    let pending = PendingPushConstant::from_parcel(parcel, access);
+                    if pending.read_handle.is_none() && pending.read_write_handle.is_none() {
+                        panic!(
+                            "ShaderBinding `{}`: mosaic parcels cannot be push-constant slots",
+                            binding.name
+                        );
+                    }
+                    self.pending_named.insert(binding.name.to_string(), pending);
+                }
+                ShaderResourceSlot::Sampler(sampler) => {
+                    self.pending_named
+                        .insert(binding.name.to_string(), PendingPushConstant::from_sampler(sampler));
+                }
+            }
+        }
+        self
+    }
+
     pub fn clear_depth(&mut self, depth: f32) -> &mut Self {
         self.commands.push(RenderCommand::ClearDepth(depth));
         self
@@ -3346,13 +3424,11 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     pub fn set_pipeline(&mut self, pipeline: &crate::RenderPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
-        if !self.pending_push_constants.is_empty() {
-            let handles: Vec<ResourceHandle> = self
-                .pending_push_constants
-                .iter()
-                .enumerate()
-                .map(|(i, pending)| pending.resolve(&pipeline.slot_access, i))
-                .collect();
+        if let Some(handles) = self.resolve_graphics_bindings(
+            pipeline.resource_contract(),
+            &pipeline.slot_access,
+            "render pipeline",
+        ) {
             self.commands.push(RenderCommand::BindResourcesTyped { handles });
         }
         self
@@ -3409,13 +3485,11 @@ impl<'a> SchemeRenderPassBuilder<'a> {
     /// Bind a [`crate::MeshPipeline`] and typed push-constant resources, like [`Self::set_pipeline`].
     pub fn set_mesh_pipeline(&mut self, pipeline: &crate::MeshPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetMeshPipeline(pipeline.handle));
-        if !self.pending_push_constants.is_empty() {
-            let handles: Vec<ResourceHandle> = self
-                .pending_push_constants
-                .iter()
-                .enumerate()
-                .map(|(i, pending)| pending.resolve(&pipeline.slot_access, i))
-                .collect();
+        if let Some(handles) = self.resolve_graphics_bindings(
+            pipeline.resource_contract(),
+            &pipeline.slot_access,
+            "mesh pipeline",
+        ) {
             self.commands.push(RenderCommand::BindResourcesTyped { handles });
         }
         self
@@ -3427,6 +3501,76 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self
     }
 
+    fn resolve_graphics_bindings(
+        &self,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+        slot_access: &[Option<ResourceAccess>],
+        kind: &str,
+    ) -> Option<Vec<ResourceHandle>> {
+        if !self.pending_named.is_empty() {
+            if contract.is_empty() {
+                panic!(
+                    "{kind}: named shader bindings were recorded but the pipeline has no virtual-main \
+                     resource contract (non-[goldy_*] shaders still use positional with_shader_resources)"
+                );
+            }
+            let provided: std::collections::HashSet<&str> = self.pending_named.keys().map(String::as_str).collect();
+            let missing = crate::slang::graphics_link::missing_required_bindings(contract, &provided);
+            if !missing.is_empty() {
+                panic!(
+                    "{kind}: missing required shader bindings [{}]. Bound names: [{}]",
+                    missing.join(", "),
+                    provided.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            let mut handles = Vec::with_capacity(contract.resources.len());
+            for (i, res) in contract.resources.iter().enumerate() {
+                let pending = self
+                    .pending_named
+                    .get(&res.name)
+                    .unwrap_or_else(|| panic!("{kind}: missing binding `{}`", res.name));
+                if let Some(handle) = pending.read_handle.or(pending.read_write_handle) {
+                    if !handle.category().is_compatible_with(res.category) {
+                        panic!(
+                            "{kind}: binding `{}` expected {} but the resource is {}. \
+                             Check BufferKind / texture / sampler against the shader parameter.",
+                            res.name,
+                            res.category.name(),
+                            handle.category().name()
+                        );
+                    }
+                }
+                handles.push(pending.resolve(slot_access, i));
+            }
+            return Some(handles);
+        }
+        if self.pending_push_constants.is_empty() {
+            return None;
+        }
+        if !contract.is_empty() && self.pending_push_constants.len() < contract.resources.len() {
+            panic!(
+                "{kind}: positional with_shader_resources has {} slots but the pipeline contract has {} \
+                 ({}). Provide the merged order (fragment-first for raster, mesh-first for mesh), \
+                 or use ShaderBinding names.",
+                self.pending_push_constants.len(),
+                contract.resources.len(),
+                contract
+                    .resources
+                    .iter()
+                    .map(|r| r.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Some(
+            self.pending_push_constants
+                .iter()
+                .enumerate()
+                .map(|(i, pending)| pending.resolve(slot_access, i))
+                .collect(),
+        )
+    }
+
     pub fn finish(self) {
         let SchemeRenderPassBuilder {
             scheme,
@@ -3436,6 +3580,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             bindings,
             commands,
             pending_push_constants: _,
+            pending_named: _,
         } = self;
         scheme.ir.nodes.push(TaskNode {
             label,

@@ -79,7 +79,7 @@ pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use retained_pool::RetainedPool;
 pub use scheme::{Lease, ReplayStats, Scheme, Submission};
 #[cfg(feature = "graphics")]
-pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, Transaction};
+pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};
 #[cfg(feature = "graphics")]
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
@@ -108,15 +108,16 @@ pub use kernel::{
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
 #[cfg(feature = "graphics")]
-pub use pipeline::{MeshPipeline, MeshPipelineDesc, RenderPipeline, RenderPipelineDesc};
+pub use pipeline::{MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc};
 pub use rt_pipeline::{RayTracingPipeline, RayTracingPipelineDesc, MAX_RAY_PAYLOAD_BYTES};
 pub use sampler::Sampler;
 pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
 pub use slang::{
-    layout_validation_enabled, GpuField, GpuFieldType, GpuType, LayoutCheck, PackedGpuField, PackedGpuLayout,
-    StructFieldLayout, StructLayout,
+    layout_validation_enabled, GpuField, GpuFieldType, GpuType, GraphicsPipelineInterface, InterpolationMode,
+    LayoutCheck, PackedGpuField, PackedGpuLayout, PipelineResource, PipelineResourceContract, StageInterface,
+    StageIoField, StructFieldLayout, StructLayout,
 };
 pub use task_graph::NodeAccess;
 pub use texture::TextureCopyFootprint;

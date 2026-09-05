@@ -1760,6 +1760,45 @@ pub(crate) trait GpuBackend:
         Vec::new()
     }
 
+    /// Record a per-stage local-name → pipeline-slot remap used when this shader stage is compiled.
+    #[cfg(feature = "graphics")]
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        let _ = (shader, stage, remap);
+    }
+
+    /// Compile a graphics shader stage so its reflection (including stage I/O) is available.
+    #[cfg(feature = "graphics")]
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        let _ = (shader, stage);
+        Ok(())
+    }
+
+    /// Reflected stage I/O after [`Self::compile_shader_stage`].
+    #[cfg(feature = "graphics")]
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let _ = (shader, stage);
+        None
+    }
+
+    /// Replace fragment/mesh-wins bindless metadata with the merged pipeline contract.
+    #[cfg(feature = "graphics")]
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        let _ = (pipeline, contract);
+    }
+
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap
     /// allocations. No-op by default.

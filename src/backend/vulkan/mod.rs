@@ -925,6 +925,56 @@ impl GpuBackend for VulkanBackend {
         pipeline::destroy(&self.state.devices, &self.state.pipelines, pipeline_handle);
     }
 
+    fn set_shader_stage_slot_remap(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        remap: std::collections::HashMap<String, u32>,
+    ) {
+        if let Some(s) = self.state.shaders.write().unwrap().entries.get_mut(&shader) {
+            s.stage_slot_remaps.insert(stage, remap);
+        }
+    }
+
+    fn compile_shader_stage(&mut self, shader: ShaderHandle, stage: crate::slang::SlangStage) -> Result<()> {
+        let _ = self.ensure_shader_stage_compiled(shader, stage)?;
+        Ok(())
+    }
+
+    fn shader_stage_interface(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Option<crate::slang::graphics_link::StageInterface> {
+        let shaders = self.state.shaders.read().unwrap();
+        let reflection = shaders.entries.get(&shader)?.reflection.as_ref()?;
+        let want = match stage {
+            crate::slang::SlangStage::Vertex => "vertex",
+            crate::slang::SlangStage::Fragment => "fragment",
+            crate::slang::SlangStage::Mesh => "mesh",
+            crate::slang::SlangStage::Amplification => "amplification",
+            _ => return None,
+        };
+        reflection
+            .stage_interfaces
+            .iter()
+            .find(|s| s.stage == want)
+            .cloned()
+    }
+
+    fn apply_graphics_resource_contract(
+        &mut self,
+        pipeline: PipelineHandle,
+        contract: &crate::slang::graphics_link::PipelineResourceContract,
+    ) {
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&pipeline) {
+            ps.push_constant_categories = contract.categories();
+            if ps.binding_element_strides.len() != contract.resources.len() {
+                ps.binding_element_strides = vec![None; contract.resources.len()];
+            }
+        }
+    }
+
     fn render_to_target(
         &mut self,
         device_handle: DeviceHandle,

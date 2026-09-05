@@ -33,6 +33,8 @@ pub(super) fn create_with_checks(
             extra_bytecode: std::collections::HashMap::new(),
             reflection: None,
             layout_checks: desc.layout_checks,
+            stage_slot_remaps: std::collections::HashMap::new(),
+            remapped_bytecode: std::collections::HashMap::new(),
         },
     );
 
@@ -52,30 +54,41 @@ pub(super) fn ensure_stage_compiled(
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,
 ) -> Result<Vec<u8>> {
-    {
+    let remap_fp = {
         let shaders_read = state.shaders.read().unwrap();
         let shader = shaders_read
             .entries
             .get(&shader_handle)
             .context("Invalid shader handle")?;
-        let cached_bytecode = match stage {
-            crate::slang::SlangStage::Vertex => shader.vertex_bytecode.clone(),
-            crate::slang::SlangStage::Fragment => shader.fragment_bytecode.clone(),
-            crate::slang::SlangStage::Compute => shader.compute_bytecode.clone(),
-            crate::slang::SlangStage::RayGeneration
-            | crate::slang::SlangStage::Intersection
-            | crate::slang::SlangStage::AnyHit
-            | crate::slang::SlangStage::ClosestHit
-            | crate::slang::SlangStage::Miss
-            | crate::slang::SlangStage::Callable
-            | crate::slang::SlangStage::Mesh
-            | crate::slang::SlangStage::Amplification => shader.extra_bytecode.get(&stage).cloned(),
-            other => anyhow::bail!("Unsupported shader stage: {:?}", other),
-        };
-        if let Some(bytecode) = cached_bytecode {
-            return Ok(bytecode);
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let fp = remap
+            .map(crate::slang::graphics_link::slot_remap_fingerprint)
+            .unwrap_or(0);
+        if fp != 0 {
+            if let Some(bytecode) = shader.remapped_bytecode.get(&(stage as u32, fp)) {
+                return Ok(bytecode.clone());
+            }
+        } else {
+            let cached_bytecode = match stage {
+                crate::slang::SlangStage::Vertex => shader.vertex_bytecode.clone(),
+                crate::slang::SlangStage::Fragment => shader.fragment_bytecode.clone(),
+                crate::slang::SlangStage::Compute => shader.compute_bytecode.clone(),
+                crate::slang::SlangStage::RayGeneration
+                | crate::slang::SlangStage::Intersection
+                | crate::slang::SlangStage::AnyHit
+                | crate::slang::SlangStage::ClosestHit
+                | crate::slang::SlangStage::Miss
+                | crate::slang::SlangStage::Callable
+                | crate::slang::SlangStage::Mesh
+                | crate::slang::SlangStage::Amplification => shader.extra_bytecode.get(&stage).cloned(),
+                other => anyhow::bail!("Unsupported shader stage: {:?}", other),
+            };
+            if let Some(bytecode) = cached_bytecode {
+                return Ok(bytecode);
+            }
         }
-    }
+        fp
+    };
 
     let entry_point_name = crate::slang::canonical_entry_point(stage)
         .ok_or_else(|| anyhow::anyhow!("Unsupported shader stage: {:?}", stage))?;
@@ -86,8 +99,11 @@ pub(super) fn ensure_stage_compiled(
             .entries
             .get(&shader_handle)
             .context("Invalid shader handle")?;
+        let remap = shader.stage_slot_remaps.get(&stage);
+        let source = crate::backend::shared::shader_source_with_stage_remap(&shader.slang_source, stage, remap)
+            .into_owned();
         (
-            shader.slang_source.clone(),
+            source,
             shader.search_paths.clone(),
             shader.optimization_level,
             shader.defines.clone(),
@@ -165,21 +181,25 @@ pub(super) fn ensure_stage_compiled(
     {
         let mut shaders_write = state.shaders.write().unwrap();
         let shader = shaders_write.entries.get_mut(&shader_handle).unwrap();
-        match stage {
-            crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
-            crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
-            crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
-            crate::slang::SlangStage::RayGeneration
-            | crate::slang::SlangStage::Intersection
-            | crate::slang::SlangStage::AnyHit
-            | crate::slang::SlangStage::ClosestHit
-            | crate::slang::SlangStage::Miss
-            | crate::slang::SlangStage::Callable
-            | crate::slang::SlangStage::Mesh
-            | crate::slang::SlangStage::Amplification => {
-                shader.extra_bytecode.insert(stage, bytecode.clone());
+        if remap_fp != 0 {
+            shader.remapped_bytecode.insert((stage as u32, remap_fp), bytecode.clone());
+        } else {
+            match stage {
+                crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
+                crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
+                crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
+                crate::slang::SlangStage::RayGeneration
+                | crate::slang::SlangStage::Intersection
+                | crate::slang::SlangStage::AnyHit
+                | crate::slang::SlangStage::ClosestHit
+                | crate::slang::SlangStage::Miss
+                | crate::slang::SlangStage::Callable
+                | crate::slang::SlangStage::Mesh
+                | crate::slang::SlangStage::Amplification => {
+                    shader.extra_bytecode.insert(stage, bytecode.clone());
+                }
+                _ => {}
             }
-            _ => {} // Already validated above
         }
 
         if !layout_checks_snapshot.is_empty() {
@@ -201,6 +221,12 @@ pub(super) fn ensure_stage_compiled(
             }
             if existing.binding_element_strides.is_empty() {
                 existing.binding_element_strides = new_reflection.binding_element_strides;
+            }
+            for iface in new_reflection.stage_interfaces {
+                if !existing.stage_interfaces.iter().any(|s| s.entry_name == iface.entry_name && s.stage == iface.stage)
+                {
+                    existing.stage_interfaces.push(iface);
+                }
             }
         } else {
             shader.reflection = Some(new_reflection);
