@@ -123,7 +123,7 @@ claim.consume()?; // present
 
 **Shipped** pixel blit: `PixelExchange` withdraws a buffer pixmap and
 `PixelClaim::consume` copies it into a `PixelSink` that is not a Goldy device
-(`HostPixelSink`, or `foreign::vulkan` offscreen). See [Pixel Exchange](../surfaces/pixel-exchange.md).
+(`HostPixelSink`, or `foreign::{vulkan,dx12,metal}` offscreen). See [Pixel Exchange](../surfaces/pixel-exchange.md).
 The CPU backend stays compute-only; graphics is a foreign singleton behind the
 exchange verb.
 

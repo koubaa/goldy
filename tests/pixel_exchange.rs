@@ -2,8 +2,8 @@
 //!
 //! Isolated crate so the env override cannot race other GPU tests. Fine writes a
 //! buffer pixmap; [`goldy::PixelExchange`] withdraws it into a [`goldy::PixelSink`].
-//! With the `vulkan` feature, a second test copies the same pixmap through a
-//! foreign Vulkan image that is **not** a Goldy device.
+//! With a graphics feature, a second test copies the same pixmap through a
+//! foreign image that is **not** a Goldy device.
 
 use goldy::{
     BufferKind, DeviceDescriptor, HostPixelSink, Instance, NodeAccess, PixelExchange, PixmapLayout,
@@ -54,20 +54,28 @@ fn fill_pixmap(device: &goldy::Device, n: u32) -> (goldy::Buffer, goldy::Context
     (buf, ctx, pool)
 }
 
+fn expected_words() -> Vec<u32> {
+    vec![0xFF000000, 0xFF000001, 0xFF000002, 0xFF000003]
+}
+
+fn consume_into_sink(ctx: &goldy::Context, buf: &goldy::Buffer, sink: Arc<dyn goldy::PixelSink>) {
+    let layout = PixmapLayout::tight(2, 2, TextureFormat::Rgba8Unorm);
+    let exchange = PixelExchange::new(ctx, sink);
+    let mut scheme = Scheme::new(ctx);
+    let tx = exchange.bind_source(&mut scheme, buf.whole(), layout).unwrap();
+    let mut submission = scheme.submit().unwrap();
+    tx.claim(&mut submission).unwrap().consume().unwrap();
+}
+
 #[test]
 fn cpu_compute_blits_to_host_sink() {
     select_cpu();
     let device = cpu_device();
     let (buf, ctx, _pool) = fill_pixmap(&device, 4);
-    let layout = PixmapLayout::tight(2, 2, TextureFormat::Rgba8Unorm);
     let sink = Arc::new(HostPixelSink::new(2, 2, TextureFormat::Rgba8Unorm).unwrap());
-    let exchange = PixelExchange::new(&ctx, sink.clone());
-    let mut scheme = Scheme::new(&ctx);
-    let tx = exchange.bind_source(&mut scheme, buf.whole(), layout).unwrap();
-    let mut submission = scheme.submit().unwrap();
-    tx.claim(&mut submission).unwrap().consume().unwrap();
+    consume_into_sink(&ctx, &buf, sink.clone());
     let words: Vec<u32> = bytemuck::cast_slice(&sink.pixels()).to_vec();
-    assert_eq!(words, vec![0xFF000000, 0xFF000001, 0xFF000002, 0xFF000003]);
+    assert_eq!(words, expected_words());
 }
 
 #[cfg(feature = "vulkan")]
@@ -82,11 +90,35 @@ fn cpu_compute_blits_to_foreign_vulkan() {
     let (buf, ctx, _pool) = fill_pixmap(&device, 4);
     let layout = PixmapLayout::tight(2, 2, TextureFormat::Rgba8Unorm);
     let surface = adapter.offscreen(2, 2, TextureFormat::Rgba8Unorm).expect("offscreen");
-    let exchange = PixelExchange::new(&ctx, Arc::new(surface.clone()));
-    let mut scheme = Scheme::new(&ctx);
-    let tx = exchange.bind_source(&mut scheme, buf.whole(), layout).unwrap();
-    let mut submission = scheme.submit().unwrap();
-    tx.claim(&mut submission).unwrap().consume().unwrap();
+    consume_into_sink(&ctx, &buf, Arc::new(surface.clone()));
     let words: Vec<u32> = bytemuck::cast_slice(&surface.snapshot(layout).expect("snapshot")).to_vec();
-    assert_eq!(words, vec![0xFF000000, 0xFF000001, 0xFF000002, 0xFF000003]);
+    assert_eq!(words, expected_words());
+}
+
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+#[test]
+fn cpu_compute_blits_to_foreign_dx12() {
+    select_cpu();
+    let adapter = goldy::foreign::dx12::try_adapter().expect("foreign DX12 adapter (WARP or hardware)");
+    let device = cpu_device();
+    let (buf, ctx, _pool) = fill_pixmap(&device, 4);
+    let layout = PixmapLayout::tight(2, 2, TextureFormat::Rgba8Unorm);
+    let surface = adapter.offscreen(2, 2, TextureFormat::Rgba8Unorm).expect("offscreen");
+    consume_into_sink(&ctx, &buf, Arc::new(surface.clone()));
+    let words: Vec<u32> = bytemuck::cast_slice(&surface.snapshot(layout).expect("snapshot")).to_vec();
+    assert_eq!(words, expected_words());
+}
+
+#[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
+#[test]
+fn cpu_compute_blits_to_foreign_metal() {
+    select_cpu();
+    let adapter = goldy::foreign::metal::try_adapter().expect("foreign Metal adapter");
+    let device = cpu_device();
+    let (buf, ctx, _pool) = fill_pixmap(&device, 4);
+    let layout = PixmapLayout::tight(2, 2, TextureFormat::Rgba8Unorm);
+    let surface = adapter.offscreen(2, 2, TextureFormat::Rgba8Unorm).expect("offscreen");
+    consume_into_sink(&ctx, &buf, Arc::new(surface.clone()));
+    let words: Vec<u32> = bytemuck::cast_slice(&surface.snapshot(layout).expect("snapshot")).to_vec();
+    assert_eq!(words, expected_words());
 }

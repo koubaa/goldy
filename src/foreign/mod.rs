@@ -6,8 +6,8 @@
 //! [`crate::PixelSink::blit`], which runs under a process-wide lock.
 //!
 //! Windowed swapchains are a later verb on the same singleton. This module
-//! ships [`HostPixelSink`] (always) and, with the `vulkan` feature, an offscreen
-//! Vulkan image sink that copies a pixmap through `vkCmdCopyBufferToImage`.
+//! ships [`HostPixelSink`] (always) and, behind the matching feature, an
+//! offscreen image sink for Vulkan, DX12 (Windows), or Metal (macOS/iOS).
 
 use crate::pixel::HostPixelSink;
 use crate::types::TextureFormat;
@@ -21,3 +21,9 @@ pub fn host_sink(width: u32, height: u32, format: TextureFormat) -> Result<Arc<H
 
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
+
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub mod dx12;
+
+#[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
+pub mod metal;

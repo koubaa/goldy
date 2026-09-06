@@ -224,6 +224,12 @@ jobs:
             done
           fi
 
+      - name: PixelExchange foreign Metal
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --test pixel_exchange -- --nocapture
+
       - name: Run all tests
         env:
           # Point to downloaded Slang library
@@ -361,6 +367,12 @@ jobs:
       # worker at a time, which avoids that path; hardware drivers do not show the issue.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+
+      - name: PixelExchange foreign DX12
+        env:
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+        run: cargo nextest run --features dx12 -E 'binary(pixel_exchange)' --test-threads=1 --no-capture
 
       - name: Run tests (DX12 + WARP)
         env:

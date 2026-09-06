@@ -13,8 +13,8 @@ There is churn happening now, it is important to keep certain architectural prin
   linear claim for externally settled handoffs (present, withdraw, pixel blit).
   Deposits settle inside graph execution and do not publish claims.
   `PixelExchange` withdraws a buffer pixmap and blits it into a `PixelSink`
-  that is *not* a Goldy device (`HostPixelSink`, or `foreign::vulkan` which owns
-  a process-wide Vulkan singleton and serialises at the verb).
+  that is *not* a Goldy device (`HostPixelSink`, or `foreign::{vulkan,dx12,metal}`
+  which each own a process-wide graphics singleton and serialise at the verb).
 - All allocations and schemes are threaded through a "context".
 - There are two kinds of pools associated with a device: "retained" and "transient". These are shared across contexts.
 - We are refactoring in the direction of removing imperative APIs (like read_to_cpu) in favor of scheme submissions as the only way to affect parcels.

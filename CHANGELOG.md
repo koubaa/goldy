@@ -72,11 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The CPU device has no textures; fine (or any host compute) writes a packed
   buffer and `PixelClaim::consume` copies it into a sink that is **not** a
   Goldy backend. [`HostPixelSink`](https://docs.rs/goldy/latest/goldy/struct.HostPixelSink.html)
-  is a `Vec<u8>`. With the `vulkan` feature, `goldy::foreign::vulkan` owns a
-  process-wide Vulkan instance/device (serialised with the Goldy Vulkan
-  backend's `vkCreateInstance` lock) and blits into an offscreen image via
-  `vkCmdCopyBufferToImage`. Windowed WSI on that singleton is a later verb.
-  See [Pixel Exchange](docs/src/surfaces/pixel-exchange.md).
+  is a `Vec<u8>`. `goldy::foreign::{vulkan,dx12,metal}` each own a process-wide
+  graphics singleton (sharing only the Goldy backend's instance/factory lock)
+  and blit into an offscreen image (`vkCmdCopyBufferToImage`,
+  `CopyTextureRegion`, `MTLBlitCommandEncoder`). Windowed WSI on that singleton
+  is a later verb. See [Pixel Exchange](docs/src/surfaces/pixel-exchange.md).
 
 - **`Interlocked*` on the CPU backend** — `goldy_exp`'s `InterlockedAdd` /
   `Or` / `Xor` / `Min` / `Max` / `Exchange` compile for the host-callable

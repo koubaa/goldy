@@ -30,11 +30,14 @@ claims become stale.
 |------|---------|------------------|
 | [`HostPixelSink`](https://docs.rs/goldy/latest/goldy/struct.HostPixelSink.html) | always | Copy into a `Vec<u8>` |
 | `foreign::vulkan::ForeignSurface` | `vulkan` | `vkCmdCopyBufferToImage` on a process-wide Vulkan singleton (offscreen image today) |
+| `foreign::dx12::ForeignSurface` | `dx12` (Windows) | `CopyTextureRegion` on a process-wide D3D12 singleton (hardware, then WARP) |
+| `foreign::metal::ForeignSurface` | `metal` (macOS/iOS) | `MTLBlitCommandEncoder` on a process-wide Metal singleton |
 
-`goldy::foreign::vulkan` creates its own `vkInstance` / `vkDevice`. It shares
-only the process-wide `vkCreateInstance` lock with the Goldy Vulkan backend. It
-does not create a Goldy `Instance`. Windowed swapchain present is a later verb
-on the same singleton.
+Each `goldy::foreign::*` adapter creates its own graphics device. Vulkan and DX12
+share only the process-wide instance/factory lock with the matching Goldy backend
+(`vkCreateInstance`, `CreateDXGIFactory2`); Metal has no equivalent constructor
+lock. None of them create a Goldy `Instance`. Windowed swapchain present is a
+later verb on the same singleton.
 
 ## Frame cycle
 

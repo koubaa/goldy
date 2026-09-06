@@ -69,8 +69,8 @@ start/end group IDs).
 
 Fine rasterization stays GPU-only until a CPU fine writes a **buffer pixmap**
 and [`PixelExchange`](../surfaces/pixel-exchange.md) blits it into a foreign
-sink (`HostPixelSink` or `foreign::vulkan`). The CPU device still has no
-textures; the graphics API is not a Goldy backend.
+sink (`HostPixelSink` or `foreign::{vulkan,dx12,metal}`). The CPU device still
+has no textures; the graphics API is not a Goldy backend.
 
 `Interlocked` / groupshared behavior follows the Slang CPU prelude (typically
 mutex or sequential atomics) and is not a substitute for GPU memory-model testing.

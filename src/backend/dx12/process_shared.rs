@@ -73,8 +73,10 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
         DXGI_CREATE_FACTORY_FLAGS(0)
     };
 
-    let factory: IDXGIFactory4 =
-        unsafe { CreateDXGIFactory2(factory_flags) }.context("Failed to create DXGI factory")?;
+    let factory: IDXGIFactory4 = {
+        let _guard = super::DXGI_FACTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { CreateDXGIFactory2(factory_flags) }.context("Failed to create DXGI factory")?
+    };
 
     let allow_tearing = factory
         .cast::<IDXGIFactory5>()
