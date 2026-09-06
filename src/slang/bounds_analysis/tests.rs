@@ -649,7 +649,11 @@ void cs_main(uint3 gtid : SV_GroupThreadID, RWStructuredBuffer<uint> out_buf)
     assert_eq!(report.diagnostics.len(), 2, "{report:?}");
     for d in &report.diagnostics {
         assert_eq!(d.index_range, Some((0, 255)), "{d}");
-        assert_eq!(d.depends_on, vec!["the result of `WaveGetLaneCount()`".to_string()], "{d}");
+        assert_eq!(
+            d.depends_on,
+            vec!["the result of `WaveGetLaneCount()`".to_string()],
+            "{d}"
+        );
     }
 }
 
@@ -746,7 +750,10 @@ void cs_main(uint3 gtid : SV_GroupThreadID, StructuredBuffer<uint> indices, RWSt
     let d = &report.diagnostics[0];
     assert_eq!(d.function, "read_slot");
     assert_eq!(d.call_path, vec!["cs_main".to_string()]);
-    assert_eq!(d.location.as_ref().unwrap().line, line_of(&unsafe_source, "return sh[slot];"));
+    assert_eq!(
+        d.location.as_ref().unwrap().line,
+        line_of(&unsafe_source, "return sh[slot];")
+    );
     assert_eq!(d.index_range, None);
     assert!(d.to_string().ends_with("in `read_slot` (called from cs_main)"), "{d}");
 }
@@ -874,12 +881,127 @@ void cs_main(Scattered<uint> out_buf, GroupThreadId gtid)
     let d = &report.diagnostics[0];
     assert_eq!(d.array, "scratch");
     assert_eq!(d.index_range, None, "{d}");
-    assert_eq!(d.location.as_ref().unwrap().line, line_of(source, "scratch[gtid.x - 1]"));
+    assert_eq!(
+        d.location.as_ref().unwrap().line,
+        line_of(source, "scratch[gtid.x - 1]")
+    );
     assert_eq!(report.checked_accesses, 2);
     assert_eq!(report.proven_safe, 1);
 
     let fixed = source.replace("scratch[gtid.x - 1]", "scratch[gtid.x ^ 1]");
     assert_clean(&analyze_with_goldy_exp(&fixed));
+}
+
+/// A generic from an imported module: `workgroup_reduce<T : IMonoid, let N : int>` is linked
+/// to its `goldy_exp` definition and analyzed with `T = uint`, `N = 64` from the call site,
+/// so `scratch[N]` has a length, `firstbitlow(N)` bounds the loop, and `T.combine` resolves
+/// through the witness table to `uint`'s conformance.
+#[test]
+fn imported_generic_is_linked_and_specialized() {
+    let source = r#"import goldy_exp;
+groupshared uint scratch[64];
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> out_buf, GroupThreadId gtid)
+{
+    out_buf[gtid.x] = workgroup_reduce(gtid.x, gtid.x, scratch);
+}
+"#;
+    let report = analyze_with_goldy_exp(source);
+    assert_clean(&report);
+    // `scratch[local_ix] = val`, `scratch[local_ix + (1u << i)]`, `scratch[local_ix] = val`.
+    assert_eq!(report.checked_accesses, 3, "{report:?}");
+
+    // The same generic with a struct monoid defined in the translation unit: `T.combine`
+    // dispatches through the shader's own witness table into `Pair.combine`, whose table
+    // lookup on a value read back from groupshared memory is reported on the full call path.
+    let source = r#"import goldy_exp;
+static const uint lut[4] = { 1, 2, 4, 8 };
+struct Pair { uint a; uint b; }
+extension Pair : IMonoid {
+    static Pair identity() { Pair p; p.a = 0; p.b = 0; return p; }
+    Pair combine(Pair o) { Pair p; p.a = a + o.a; p.b = lut[o.b]; return p; }
+}
+groupshared Pair scratch[64];
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> out_buf, GroupThreadId gtid)
+{
+    Pair p = Pair.identity();
+    p.a = gtid.x;
+    p.b = gtid.x & 3;
+    out_buf[gtid.x] = workgroup_reduce(p, gtid.x, scratch).a;
+}
+"#;
+    let report = analyze_with_goldy_exp(source);
+    assert_eq!(report.checked_accesses, 4, "{report:?}");
+    assert_eq!(report.diagnostics.len(), 1, "{report:?}");
+    let d = &report.diagnostics[0];
+    assert_eq!(d.function, "Pair.combine", "{d}");
+    assert_eq!(d.array, "lut", "{d}");
+    assert_eq!(
+        d.call_path,
+        vec![
+            "cs_main".to_string(),
+            "_goldy_user_cs_main".to_string(),
+            "workgroup_reduce".to_string()
+        ],
+        "{d}"
+    );
+    assert_eq!(d.depends_on, vec!["groupshared memory `scratch`".to_string()], "{d}");
+    assert_eq!(d.location.as_ref().unwrap().line, line_of(source, "lut[o.b]"));
+}
+
+/// An array length that is a constant expression over a generic argument
+/// (`uint prefix_sums[1 << LG_N]`) is evaluated under the substitution.
+#[test]
+fn generic_array_length_expression_is_evaluated() {
+    let source = r#"
+groupshared uint table[256];
+
+uint pick<let LG_N : int>(uint i, groupshared uint t[1 << LG_N]) { return t[i]; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 gtid : SV_GroupThreadID, RWStructuredBuffer<uint> out_buf)
+{
+    out_buf[gtid.x] = pick<8>(gtid.x, table) + pick<8>(gtid.x * 8, table);
+}
+"#;
+    let report = analyze(source);
+    assert_eq!(report.checked_accesses, 1, "{report:?}");
+    assert_eq!(report.diagnostics.len(), 1, "{report:?}");
+    let d = &report.diagnostics[0];
+    assert_eq!(d.array_length, 256, "{d}");
+    assert_eq!(d.array, "t", "{d}");
+    assert_eq!(d.index_range, Some((0, 504)), "{d}");
+}
+
+/// The provenance note follows an argument back through the caller: inside the user function
+/// the index is a field of a `ThreadId` parameter, which the `virtual_main` wrapper built
+/// from `SV_DispatchThreadID`.
+#[test]
+fn provenance_follows_wrapper_struct_argument() {
+    let source = r#"import goldy_exp;
+groupshared uint sh[64];
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> out_buf, ThreadId id)
+{
+    sh[id.x] = id.x;
+    GroupMemoryBarrierWithGroupSync();
+    out_buf[id.x] = sh[id.x ^ 1];
+}
+"#;
+    let report = analyze_with_goldy_exp(source);
+    assert_eq!(report.diagnostics.len(), 2, "{report:?}");
+    for d in &report.diagnostics {
+        assert_eq!(d.depends_on, vec!["SV_DispatchThreadID".to_string()], "{d}");
+        assert_eq!(d.array, "sh", "{d}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,7 +1205,10 @@ fn malformed_input_is_an_error() {
         analyze_container(&riff, &[]),
         Err(BoundsAnalysisError::Malformed("not a Slang module container"))
     );
-    assert!(matches!(imported_modules(&riff), Err(BoundsAnalysisError::Malformed(_))));
+    assert!(matches!(
+        imported_modules(&riff),
+        Err(BoundsAnalysisError::Malformed(_))
+    ));
 }
 
 #[test]
@@ -1093,7 +1218,10 @@ fn mangled_name_module_component() {
         module_of_mangled_name("_S9goldy_exp23goldy_frame_table_indexp4pi_ui_ui_ui_uu"),
         Some("goldy_exp")
     );
-    assert_eq!(module_of_mangled_name("_SV9goldy_exp13GroupThreadId1x"), Some("goldy_exp"));
+    assert_eq!(
+        module_of_mangled_name("_SV9goldy_exp13GroupThreadId1x"),
+        Some("goldy_exp")
+    );
     assert_eq!(module_of_mangled_name("_SW4core17DefaultDataLayout"), Some("core"));
     assert_eq!(module_of_mangled_name("nope"), None);
 }
@@ -1125,4 +1253,101 @@ fn interval_reinterpretation() {
     // Wrap collapses to the type range.
     assert_eq!(wrap(Interval::new(-1, 5), u32t), Interval::new(0, (1 << 32) - 1));
     assert_eq!(wrap(Interval::new(0, 5), u32t), Interval::new(0, 5));
+}
+
+/// Survey of the repository's `shaders/` corpus: prints one line per entry point plus every
+/// diagnostic. Run with `cargo test --lib bounds_analysis::tests::survey -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn survey() {
+    let shaders = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
+    let search = shaders.to_string_lossy().into_owned();
+    let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+    let mut files: Vec<_> = std::fs::read_dir(&shaders)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "slang"))
+        .collect();
+    files.sort();
+    let (mut entries, mut checked, mut proven, mut warnings) = (0, 0, 0, 0);
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let name = format!("shaders/{}", path.file_name().unwrap().to_string_lossy());
+        for (entry, stage) in [
+            ("cs_main", SlangStage::Compute),
+            ("vs_main", SlangStage::Vertex),
+            ("fs_main", SlangStage::Fragment),
+        ] {
+            if !source.contains(&format!(" {entry}(")) {
+                continue;
+            }
+            let t0 = std::time::Instant::now();
+            let result =
+                compiler.analyze_bounds(&source, &[(entry, stage)], &[search.as_str()], &[], ShaderTarget::Spirv);
+            let ms = t0.elapsed().as_millis();
+            match result {
+                Ok(r) => {
+                    entries += 1;
+                    checked += r.checked_accesses;
+                    proven += r.proven_safe;
+                    warnings += r.diagnostics.len();
+                    println!(
+                        "{name:<44} {entry:<8} checked={:<3} proven_safe={:<3} warnings={} ({ms} ms)",
+                        r.checked_accesses,
+                        r.proven_safe,
+                        r.diagnostics.len()
+                    );
+                    for d in &r.diagnostics {
+                        println!("    {d}");
+                    }
+                }
+                Err(e) => println!(
+                    "{name:<44} {entry:<8} ERROR: {}",
+                    e.to_string().lines().take(6).collect::<Vec<_>>().join(" | ")
+                ),
+            }
+        }
+    }
+    println!("\nTOTAL entry points={entries} checked={checked} proven_safe={proven} warnings={warnings}");
+}
+
+/// Dump the linked Slang IR the analysis sees for one shader file. Run with
+/// `GOLDY_BOUNDS_DUMP=path/to/shader.slang cargo test --lib bounds_analysis::tests::dump_ir -- --ignored --nocapture`
+/// (compute entry point `cs_main`, `shaders/` on the search path).
+#[test]
+#[ignore]
+fn dump_ir() {
+    let Ok(path) = std::env::var("GOLDY_BOUNDS_DUMP") else {
+        eprintln!("set GOLDY_BOUNDS_DUMP to a .slang file");
+        return;
+    };
+    let shaders = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("shaders")
+        .to_string_lossy()
+        .into_owned();
+    let entry = std::env::var("GOLDY_BOUNDS_DUMP_ENTRY").unwrap_or_else(|_| "cs_main".into());
+    let stage = match entry.as_str() {
+        "vs_main" => SlangStage::Vertex,
+        "fs_main" => SlangStage::Fragment,
+        _ => SlangStage::Compute,
+    };
+    let source = std::fs::read_to_string(&path).expect("read shader");
+    let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
+    let effective = crate::slang::virtual_main::effective_slang_source_for_compile(&source);
+    let defines = SlangCompiler::bindless_defines_for_target(ShaderTarget::Spirv);
+    let container = compiler
+        .compile_ir_container(
+            effective.as_ref(),
+            &[(entry.as_str(), stage)],
+            &[shaders.as_str()],
+            &defines,
+        )
+        .expect("compile");
+    let libraries = compiler.imported_library_containers(&container, &[shaders.as_str()], &defines);
+    let mut modules = ir::Module::parse_container(&container).expect("parse");
+    for lib in &libraries {
+        modules.extend(ir::Module::parse_container(lib).expect("parse library"));
+    }
+    println!("{}", ir::Module::link(modules).dump());
 }

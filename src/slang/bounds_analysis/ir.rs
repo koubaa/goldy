@@ -6,6 +6,7 @@
 //! literal payloads. This module rebuilds the instruction tree and offers the typed queries
 //! the analysis needs (decorations, name hints, integer shapes, array lengths).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use super::fossil::{Fossil, Kind};
@@ -34,7 +35,6 @@ pub(super) mod op {
     pub const TYPE_UINTPTR: u32 = 17;
     pub const TYPE_ARRAY: u32 = 27;
     pub const TYPE_UNSIZED_ARRAY: u32 = 28;
-    pub const TYPE_FUNC: u32 = 29;
     pub const TYPE_VEC: u32 = 31;
     pub const TYPE_MAT: u32 = 32;
     pub const TYPE_ATTRIBUTED: u32 = 34;
@@ -46,31 +46,26 @@ pub(super) mod op {
     pub const TYPE_PSEUDO_PTR: u32 = 60;
     pub const TYPE_OUT_PARAM: u32 = 61;
     pub const TYPE_BORROW_IN_OUT_PARAM: u32 = 62;
-    pub const TYPE_STRUCTURED_BUFFER_FIRST: u32 = 97;
-    pub const TYPE_STRUCTURED_BUFFER_LAST: u32 = 101;
     pub const TYPE_STRUCT: u32 = 117;
     // Global values and structure
     pub const FUNC: u32 = 132;
     pub const GENERIC: u32 = 133;
     pub const GLOBAL_VAR: u32 = 134;
     pub const GLOBAL_PARAM: u32 = 135;
-    pub const GLOBAL_CONSTANT: u32 = 136;
     pub const MODULE_INST: u32 = 144;
     pub const BLOCK: u32 = 145;
     pub const BOOL_LIT: u32 = 146;
     pub const INT_LIT: u32 = 147;
     pub const FLOAT_LIT: u32 = 148;
     pub const PTR_LIT: u32 = 149;
-    pub const VOID_LIT: u32 = 150;
     pub const STRING_LIT: u32 = 151;
     pub const BLOB_LIT: u32 = 152;
-    pub const POISON: u32 = 155;
-    pub const DEFAULT_CONSTRUCT: u32 = 156;
+    pub const WITNESS_TABLE: u32 = 139;
     pub const SPECIALIZE: u32 = 166;
+    pub const LOOKUP_WITNESS: u32 = 167;
     pub const MAKE_VECTOR: u32 = 173;
-    pub const MAKE_ARRAY: u32 = 178;
-    pub const MAKE_ARRAY_FROM_ELEMENT: u32 = 179;
     pub const CALL: u32 = 205;
+    pub const WITNESS_TABLE_ENTRY: u32 = 214;
     pub const PARAM: u32 = 218;
     pub const FIELD: u32 = 219;
     pub const VAR: u32 = 220;
@@ -80,10 +75,8 @@ pub(super) mod op {
     pub const GET_FIELD_ADDR: u32 = 242;
     pub const GET_ELEMENT: u32 = 243;
     pub const GET_ELEMENT_PTR: u32 = 244;
-    pub const GET_OFFSET_PTR: u32 = 245;
     pub const RW_STRUCTURED_BUFFER_GET_ELEMENT_PTR: u32 = 264;
     pub const SWIZZLE: u32 = 277;
-    pub const SWIZZLE_SET: u32 = 278;
     // Terminators
     pub const RETURN_VAL: u32 = 280;
     pub const UNCONDITIONAL_BRANCH: u32 = 282;
@@ -91,9 +84,6 @@ pub(super) mod op {
     pub const CONDITIONAL_BRANCH: u32 = 284;
     pub const IF_ELSE: u32 = 285;
     pub const SWITCH: u32 = 288;
-    pub const MISSING_RETURN: u32 = 291;
-    pub const UNREACHABLE: u32 = 292;
-    pub const DISCARD: u32 = 294;
     // Arithmetic and logic
     pub const ADD: u32 = 302;
     pub const SUB: u32 = 303;
@@ -120,6 +110,8 @@ pub(super) mod op {
     pub const BIT_CAST: u32 = 556;
     pub const INT_CAST: u32 = 561;
     pub const CAST_FLOAT_TO_INT: u32 = 564;
+    // Debug info
+    pub const DEBUG_VAR: u32 = 640;
     // Decorations
     pub const DECORATION_NAME_HINT: u32 = 375;
     pub const DECORATION_NUM_THREADS: u32 = 411;
@@ -128,6 +120,42 @@ pub(super) mod op {
     pub const DECORATION_EXPORT: u32 = 443;
     pub const DECORATION_SEMANTIC: u32 = 492;
     pub const DECORATION_TARGET_INTRINSIC: u32 = 370;
+
+    /// Fold Slang's `constexpr*` opcode variants (used for compile-time expressions such as
+    /// array lengths over generic arguments, `uint a[1 << LG_N]`) onto the ordinary
+    /// arithmetic opcodes they mirror, so the analysis evaluates them the same way.
+    pub fn normalize(opcode: u32) -> u32 {
+        let Some(suffix) = super::opcode_name(opcode).and_then(|n| n.strip_prefix("constexpr")) else {
+            return opcode;
+        };
+        match suffix {
+            "Add" => ADD,
+            "Sub" => SUB,
+            "Mul" => MUL,
+            "Div" => DIV,
+            "IRem" => IREM,
+            "Neg" => NEG,
+            "Shl" => SHL,
+            "Shr" => SHR,
+            "BitAnd" => AND,
+            "BitOr" => OR,
+            "BitXor" => XOR,
+            "BitNot" => BIT_NOT,
+            "Not" => NOT,
+            "And" => LOGICAL_AND,
+            "Or" => LOGICAL_OR,
+            "Eql" => CMP_EQ,
+            "Neq" => CMP_NE,
+            "Greater" => CMP_GT,
+            "Less" => CMP_LT,
+            "Geq" => CMP_GE,
+            "Leq" => CMP_LE,
+            "Select" => SELECT,
+            "IntCast" => INT_CAST,
+            "CastFloatToInt" => CAST_FLOAT_TO_INT,
+            _ => opcode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,11 +216,16 @@ pub(super) struct IntShape {
     pub lanes: usize,
 }
 
-/// A parsed Slang IR module plus its debug information.
+/// A parsed Slang IR module plus its debug information — or several modules linked into one
+/// instruction space by [`Module::link`].
 pub(super) struct Module {
     pub name: String,
     pub insts: Vec<Inst>,
-    pub debug: Option<DebugInfo>,
+    /// Debug information per source module: `(first instruction id, debug info)`, ascending.
+    debug: Vec<(u32, Option<DebugInfo>)>,
+    /// Instructions below this id belong to the translation unit; the rest were linked in
+    /// from library modules.
+    pub tu_end: u32,
 }
 
 impl Module {
@@ -214,10 +247,91 @@ impl Module {
             };
             let mut module = Module::parse_ir(ir.data)?;
             // The debug chunk is shared by every module in the container.
-            module.debug = debug_chunk.map(DebugInfo::parse).transpose()?;
+            module.debug = vec![(0, debug_chunk.map(DebugInfo::parse).transpose()?)];
             out.push(module);
         }
         Ok(out)
+    }
+
+    /// Link modules into one instruction space. The first module is the translation unit.
+    ///
+    /// A Slang module refers to another module's declarations through `import`-decorated
+    /// stubs (a `func` without blocks, a `witness_table` without entries, a struct `key`, an
+    /// `interface`, ...) that carry the definition's mangled name. Linking redirects every
+    /// operand and type reference from such a stub to the `export`-decorated definition when
+    /// one of the modules provides it, so calls, generic specializations, witness lookups
+    /// and struct field keys resolve across module boundaries exactly as they do inside one
+    /// module. Stubs whose definition is not available stay as they are.
+    pub fn link(modules: Vec<Module>) -> Module {
+        let mut linked = Module {
+            name: modules.first().map(|m| m.name.clone()).unwrap_or_default(),
+            insts: Vec::with_capacity(modules.iter().map(|m| m.insts.len()).sum()),
+            debug: Vec::with_capacity(modules.len()),
+            tu_end: modules.first().map_or(0, |m| m.insts.len() as u32),
+        };
+        for module in modules {
+            let base = linked.insts.len() as u32;
+            for (offset, debug) in module.debug {
+                linked.debug.push((base + offset, debug));
+            }
+            let shift = |r: &mut Option<u32>| {
+                if let Some(x) = r {
+                    *x += base;
+                }
+            };
+            for mut inst in module.insts {
+                shift(&mut inst.ty);
+                inst.operands.iter_mut().for_each(shift);
+                shift(&mut inst.parent);
+                inst.children.iter_mut().for_each(|c| *c += base);
+                linked.insts.push(inst);
+            }
+        }
+
+        let n = linked.insts.len() as u32;
+        let mut exports: HashMap<&str, u32> = HashMap::new();
+        for i in 0..n {
+            if let Some(name) = linked.export_name(i) {
+                if linked.is_definition(i) {
+                    exports.entry(name).or_insert(i);
+                }
+            }
+        }
+        let alias: Vec<u32> = (0..n)
+            .map(|i| {
+                linked
+                    .import_name(i)
+                    .and_then(|name| exports.get(name).copied())
+                    .filter(|&d| d != i)
+                    .unwrap_or(i)
+            })
+            .collect();
+        for inst in &mut linked.insts {
+            if let Some(t) = &mut inst.ty {
+                *t = alias[*t as usize];
+            }
+            for o in inst.operands.iter_mut().flatten() {
+                *o = alias[*o as usize];
+            }
+        }
+        linked
+    }
+
+    /// Whether an exported instruction is a definition worth linking to (a function needs a
+    /// body; everything else — types, keys, witness tables, generics — is its own definition).
+    fn is_definition(&self, i: u32) -> bool {
+        match self.inst(i).op {
+            op::FUNC => self.body(i).any(|c| self.inst(c).op == op::BLOCK),
+            op::GENERIC => {
+                let inner = self
+                    .body(i)
+                    .find(|&c| self.inst(c).op == op::BLOCK)
+                    .and_then(|b| self.body(b).last())
+                    .and_then(|t| self.inst(t).operand(0));
+                inner.is_none_or(|f| self.inst(f).op != op::FUNC || self.is_definition(f))
+            }
+            _ => true,
+        }
     }
 
     /// Parse one fossilized `IRModuleInfo` blob.
@@ -268,7 +382,7 @@ impl Module {
         let mut insts: Vec<Inst> = Vec::with_capacity(n);
         for i in 0..n {
             let a = alloc.get(i)?;
-            let op = a.field(0)?.u32()?;
+            let op = op::normalize(a.field(0)?.u32()?);
             let operand_count = a.field(1)?.u32()? as usize;
             let loc = match source_locs.get(i)?.deref()? {
                 Some(v) => v.u32()?,
@@ -360,8 +474,9 @@ impl Module {
 
         Ok(Module {
             name,
+            tu_end: insts.len() as u32,
             insts,
-            debug: None,
+            debug: Vec::new(),
         })
     }
 
@@ -468,10 +583,70 @@ impl Module {
             .filter(move |&i| self.inst(i).op == op::FUNC && self.body(i).any(|c| self.inst(c).op == op::BLOCK))
     }
 
+    /// Whether `i` belongs to the translation unit rather than a linked library module.
+    pub fn in_translation_unit(&self, i: u32) -> bool {
+        i < self.tu_end
+    }
+
+    /// Text dump of the instruction tree (one line per instruction, children indented), for
+    /// debugging the analysis against what Slang actually emitted.
+    #[cfg(test)]
+    pub fn dump(&self) -> String {
+        fn depth(m: &Module, mut i: u32) -> usize {
+            let mut d = 0;
+            while let Some(p) = m.inst(i).parent {
+                d += 1;
+                i = p;
+            }
+            d
+        }
+        let mut out = String::new();
+        for i in 0..self.insts.len() as u32 {
+            let inst = self.inst(i);
+            if inst.is_decoration {
+                continue;
+            }
+            let _ = write!(out, "{:indent$}%{i}", "", indent = depth(self, i) * 2);
+            if let Some(n) = self.name_hint(i) {
+                let _ = write!(out, " `{n}`");
+            }
+            let _ = write!(out, " = {}", self.op_name(i));
+            match &inst.payload {
+                Payload::Int(v) => {
+                    let _ = write!(out, " {v}");
+                }
+                Payload::Float(v) => {
+                    let _ = write!(out, " {v}");
+                }
+                Payload::Str(s) => {
+                    let _ = write!(out, " {s:?}");
+                }
+                Payload::None => {}
+            }
+            let operands: Vec<String> = inst
+                .operands
+                .iter()
+                .map(|o| o.map_or_else(|| "_".to_string(), |o| format!("%{o}")))
+                .collect();
+            if !operands.is_empty() {
+                let _ = write!(out, "({})", operands.join(", "));
+            }
+            if let Some(t) = inst.ty {
+                let _ = write!(out, " : {}", self.types().type_name(t));
+            }
+            if let Some(loc) = self.location(i) {
+                let _ = write!(out, "  @{loc}");
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     /// Source location of an instruction, falling back to the nearest earlier sibling and
     /// then to ancestors, so decorations and hoisted values still get a usable line.
     pub fn location(&self, i: u32) -> Option<SourceLocation> {
-        let debug = self.debug.as_ref()?;
+        let segment = self.debug.partition_point(|(base, _)| *base <= i).checked_sub(1)?;
+        let debug = self.debug[segment].1.as_ref()?;
         let mut cur = Some(i);
         while let Some(c) = cur {
             let inst = self.inst(c);
@@ -501,10 +676,54 @@ impl Module {
         self.inst(i).ty
     }
 
+    /// Type queries without a generic substitution.
+    pub fn types(&self) -> Types<'_> {
+        Types { m: self, subst: None }
+    }
+
+    pub fn is_group_shared(&self, ty: u32) -> bool {
+        let t = self.inst(ty);
+        t.op == op::TYPE_RATE_QUALIFIED
+            && t.operand(0)
+                .is_some_and(|r| self.inst(r).op == op::TYPE_RATE_GROUP_SHARED)
+    }
+
+    pub fn int_ty(&self, ty: u32) -> Option<IntTy> {
+        self.types().int_ty(ty)
+    }
+
+    pub fn int_shape(&self, ty: u32) -> Option<IntShape> {
+        self.types().int_shape(ty)
+    }
+}
+
+/// Type queries under a generic substitution: every type reference is first mapped through
+/// `subst` (generic parameter -> argument), so the body of `T foo<T, let N : int>(T x[N])`
+/// specialized with `<uint, 64>` sees `x` as `uint[64]`.
+#[derive(Clone, Copy)]
+pub(super) struct Types<'a> {
+    pub m: &'a Module,
+    pub subst: Option<&'a HashMap<u32, u32>>,
+}
+
+impl<'a> Types<'a> {
+    fn r(&self, id: u32) -> u32 {
+        self.subst.and_then(|s| s.get(&id).copied()).unwrap_or(id)
+    }
+
+    fn inst(&self, id: u32) -> &'a Inst {
+        self.m.inst(self.r(id))
+    }
+
+    fn int_lit(&self, id: u32) -> Option<i64> {
+        self.m.int_lit(self.r(id))
+    }
+
     /// Strip rate qualifiers and attributes from a type.
     pub fn unqualified(&self, mut ty: u32) -> u32 {
         loop {
-            let t = self.inst(ty);
+            ty = self.r(ty);
+            let t = self.m.inst(ty);
             match t.op {
                 op::TYPE_RATE_QUALIFIED => match t.operand(1) {
                     Some(inner) => ty = inner,
@@ -534,14 +753,10 @@ impl Module {
     /// Pointee of a pointer-like type.
     pub fn pointee(&self, ty: u32) -> Option<u32> {
         let ty = self.unqualified(ty);
-        self.is_pointer_type(ty).then(|| self.inst(ty).operand(0)).flatten()
-    }
-
-    pub fn is_group_shared(&self, ty: u32) -> bool {
-        let t = self.inst(ty);
-        t.op == op::TYPE_RATE_QUALIFIED
-            && t.operand(0)
-                .is_some_and(|r| self.inst(r).op == op::TYPE_RATE_GROUP_SHARED)
+        self.is_pointer_type(ty)
+            .then(|| self.inst(ty).operand(0))
+            .flatten()
+            .map(|p| self.r(p))
     }
 
     pub fn int_ty(&self, ty: u32) -> Option<IntTy> {
@@ -551,15 +766,20 @@ impl Module {
             op::TYPE_INT => IntTy { bits: 32, signed: true },
             op::TYPE_INT64 | op::TYPE_INTPTR => IntTy { bits: 64, signed: true },
             op::TYPE_UINT8 => IntTy { bits: 8, signed: false },
-            op::TYPE_UINT16 => IntTy { bits: 16, signed: false },
-            op::TYPE_UINT => IntTy { bits: 32, signed: false },
-            op::TYPE_UINT64 | op::TYPE_UINTPTR => IntTy { bits: 64, signed: false },
+            op::TYPE_UINT16 => IntTy {
+                bits: 16,
+                signed: false,
+            },
+            op::TYPE_UINT => IntTy {
+                bits: 32,
+                signed: false,
+            },
+            op::TYPE_UINT64 | op::TYPE_UINTPTR => IntTy {
+                bits: 64,
+                signed: false,
+            },
             _ => return None,
         })
-    }
-
-    pub fn is_bool_type(&self, ty: u32) -> bool {
-        self.inst(self.unqualified(ty)).op == op::TYPE_BOOL
     }
 
     /// Integer scalar/vector shape of a type.
@@ -578,25 +798,25 @@ impl Module {
     }
 
     /// Statically sized indexable type: `(element type, length)` for arrays, vectors and
-    /// matrices (rows). `None` for unsized arrays, buffers, generic lengths, ...
+    /// matrices (rows). `None` for unsized arrays, buffers, unsubstituted generic lengths, ...
     pub fn indexable(&self, ty: u32) -> Option<(u32, u64)> {
         let inst = self.inst(self.unqualified(ty));
         let (elem, count) = match inst.op {
             op::TYPE_ARRAY | op::TYPE_VEC => (inst.operand(0)?, inst.operand(1)?),
             op::TYPE_MAT => {
                 // Mat(elem, rows, cols, layout): indexing yields a row vector.
-                let elem = inst.operand(0)?;
-                let cols = inst.operand(2)?;
+                let elem = self.r(inst.operand(0)?);
+                let cols = self.r(inst.operand(2)?);
                 let rows = inst.operand(1)?;
-                let row_ty = (0..self.insts.len() as u32).find(|&i| {
-                    let t = self.inst(i);
+                let row_ty = (0..self.m.insts.len() as u32).find(|&i| {
+                    let t = self.m.inst(i);
                     t.op == op::TYPE_VEC && t.operand(0) == Some(elem) && t.operand(1) == Some(cols)
                 });
                 return Some((row_ty.unwrap_or(elem), u64::try_from(self.int_lit(rows)?).ok()?));
             }
             _ => return None,
         };
-        Some((elem, u64::try_from(self.int_lit(count)?).ok()?))
+        Some((self.r(elem), u64::try_from(self.int_lit(count)?).ok()?))
     }
 
     /// Human-readable type name (Slang spelling where practical).
@@ -611,7 +831,8 @@ impl Module {
             out.push_str("...");
             return;
         }
-        let inst = self.inst(ty);
+        let ty = self.r(ty);
+        let inst = self.m.inst(ty);
         let scalar = |o: u32| -> Option<&str> {
             Some(match o {
                 op::TYPE_VOID => "void",
@@ -671,7 +892,7 @@ impl Module {
                 }
                 out.push_str("[]");
             }
-            op::TYPE_STRUCT => match self.name_hint(ty) {
+            op::TYPE_STRUCT => match self.m.name_hint(ty) {
                 Some(n) => out.push_str(n),
                 None => out.push_str("struct"),
             },
@@ -683,9 +904,9 @@ impl Module {
                     self.write_type_name(p, out, depth + 1);
                 }
             }
-            _ => match self.name_hint(ty) {
+            _ => match self.m.name_hint(ty) {
                 Some(n) => out.push_str(n),
-                None => out.push_str(&self.op_name(ty)),
+                None => out.push_str(&self.m.op_name(ty)),
             },
         }
     }

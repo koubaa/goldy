@@ -169,7 +169,8 @@ pub fn analyze_container(container: &[u8], libraries: &[&[u8]]) -> Result<Bounds
     for lib in libraries {
         modules.extend(ir::Module::parse_container(lib)?);
     }
-    Ok(analysis::Analyzer::new(&modules).run())
+    let linked = ir::Module::link(modules);
+    Ok(analysis::Analyzer::new(&linked).run())
 }
 
 /// Names of the modules a translation unit container imports (`import foo;`), excluding
@@ -181,7 +182,9 @@ pub fn imported_modules(container: &[u8]) -> Result<Vec<String>, BoundsAnalysisE
     for m in &modules {
         for i in 0..m.insts.len() as u32 {
             let Some(mangled) = m.import_name(i) else { continue };
-            let Some(name) = module_of_mangled_name(mangled) else { continue };
+            let Some(name) = module_of_mangled_name(mangled) else {
+                continue;
+            };
             if name == "core" || name == "glsl" || name == m.name || out.iter().any(|n| *n == name) {
                 continue;
             }

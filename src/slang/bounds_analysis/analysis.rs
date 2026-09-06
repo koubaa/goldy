@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::ir::{op, Inst, IntShape, IntTy, Module};
+use super::ir::{op, Inst, IntShape, IntTy, Module, Types};
 use super::{BoundsDiagnostic, BoundsReport};
 
 /// Vulkan guarantees `SubgroupSize` in `[1, 128]`.
@@ -62,7 +62,8 @@ fn ty_range(ty: IntTy) -> Interval {
     Interval::new(lo, hi)
 }
 
-/// Interned struct field identity (linkage name of the `key`, or module-local id).
+/// Struct field identity: the `key` instruction (linked, so imported keys resolve to their
+/// definition).
 type FieldKey = u32;
 
 /// Abstract value.
@@ -349,20 +350,17 @@ struct EvalCtx {
 // Interprocedural driver
 // ============================================================================
 
-/// A function definition in some module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FnRef {
-    module: usize,
-    func: u32,
-}
+/// Generic substitution: `(generic parameter, argument)` pairs, outermost generic first.
+type Subst = Vec<(u32, u32)>;
 
-/// Calling context: function plus argument abstractions and generic substitution. For
-/// pointer (`out`/`inout`/`ref`) parameters the argument abstraction is the pointee's value.
+/// Calling context: function definition plus argument abstractions and generic
+/// substitution. For pointer (`out`/`inout`/`ref`) parameters the argument abstraction is
+/// the pointee's value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallKey {
-    f: FnRef,
+    f: u32,
     args: Vec<Abs>,
-    subst: Vec<(u32, u32)>,
+    subst: Subst,
 }
 
 /// What a function does to its caller in one context.
@@ -387,39 +385,31 @@ struct MergedDiagnostic {
     diag: BoundsDiagnostic,
 }
 
-/// Shared state for one analysis run over a set of linked modules.
+/// Reporting context for a function analyzed on a path from an entry point.
+struct Report {
+    /// Call path from the entry point, this function last.
+    path: Vec<String>,
+    /// Per parameter, what the caller's argument depends on that the analysis cannot bound
+    /// (so a callee can say "SV_DispatchThreadID" rather than "parameter `id`").
+    param_sources: Vec<Vec<String>>,
+}
+
+/// Shared state for one analysis run over a linked module.
 pub(super) struct Analyzer<'m> {
-    modules: &'m [Module],
-    /// Linkage name -> defining instruction (functions with bodies, struct keys, types).
-    exports: HashMap<&'m str, (usize, u32)>,
-    field_keys: RefCell<HashMap<String, FieldKey>>,
+    m: &'m Module,
     summaries: RefCell<HashMap<CallKey, Summary>>,
-    in_progress: RefCell<Vec<FnRef>>,
-    contexts_per_fn: RefCell<HashMap<FnRef, usize>>,
+    in_progress: RefCell<Vec<u32>>,
+    contexts_per_fn: RefCell<HashMap<u32, usize>>,
     reported: RefCell<HashSet<CallKey>>,
     analyses: Cell<u32>,
-    diagnostics: RefCell<BTreeMap<(usize, u32), MergedDiagnostic>>,
-    checked: RefCell<BTreeSet<(usize, u32)>>,
+    diagnostics: RefCell<BTreeMap<u32, MergedDiagnostic>>,
+    checked: RefCell<BTreeSet<u32>>,
 }
 
 impl<'m> Analyzer<'m> {
-    pub fn new(modules: &'m [Module]) -> Analyzer<'m> {
-        let mut exports = HashMap::new();
-        for (mi, m) in modules.iter().enumerate() {
-            for i in 0..m.insts.len() as u32 {
-                if let Some(name) = m.export_name(i) {
-                    let inst = m.inst(i);
-                    // Only definitions are worth linking to (functions need a body).
-                    if inst.op != op::FUNC || m.body(i).any(|c| m.inst(c).op == op::BLOCK) {
-                        exports.entry(name).or_insert((mi, i));
-                    }
-                }
-            }
-        }
+    pub fn new(m: &'m Module) -> Analyzer<'m> {
         Analyzer {
-            modules,
-            exports,
-            field_keys: RefCell::new(HashMap::new()),
+            m,
             summaries: RefCell::new(HashMap::new()),
             in_progress: RefCell::new(Vec::new()),
             contexts_per_fn: RefCell::new(HashMap::new()),
@@ -430,31 +420,38 @@ impl<'m> Analyzer<'m> {
         }
     }
 
-    /// Analyze every entry point of the first module (the translation unit); other modules
-    /// are only analyzed as callees. A module without entry points is treated as a library:
+    /// Analyze every entry point of the translation unit; linked library modules are only
+    /// analyzed as callees. A translation unit without entry points is treated as a library:
     /// each of its non-generic functions is analyzed with unconstrained parameters.
     pub fn run(self) -> BoundsReport {
-        let Some(tu) = self.modules.first() else {
-            return BoundsReport::default();
-        };
-        let entry_points: Vec<u32> = tu.function_defs().filter(|&f| tu.is_entry_point(f)).collect();
+        let tu = self.m;
+        let entry_points: Vec<u32> = tu
+            .function_defs()
+            .filter(|&f| tu.in_translation_unit(f) && tu.is_entry_point(f))
+            .collect();
         let roots: Vec<u32> = if entry_points.is_empty() {
             tu.function_defs()
+                .filter(|&f| tu.in_translation_unit(f))
                 .filter(|&f| tu.inst(f).parent.is_some_and(|p| tu.inst(p).op == op::MODULE_INST))
                 .collect()
         } else {
             entry_points
         };
         for f in roots {
-            let fr = FnRef { module: 0, func: f };
             let name = tu.name_hint(f).unwrap_or("<anonymous>").to_string();
             let args = self.entry_param_abs(tu, f);
             let key = CallKey {
-                f: fr,
+                f,
                 args,
                 subst: Vec::new(),
             };
-            self.analyze(&key, Some(vec![name]));
+            self.analyze(
+                &key,
+                Some(Report {
+                    path: vec![name],
+                    param_sources: Vec::new(),
+                }),
+            );
         }
         let diagnostics: Vec<BoundsDiagnostic> = self.diagnostics.into_inner().into_values().map(|d| d.diag).collect();
         let checked_accesses = self.checked.into_inner().len();
@@ -477,13 +474,11 @@ impl<'m> Analyzer<'m> {
             .map(|p| {
                 let shape = m.type_of(p).and_then(|t| m.int_shape(t));
                 match (m.semantic(p), shape, num_threads) {
-                    (Some(sem), Some(shape), Some(nt)) if sem.eq_ignore_ascii_case("SV_GroupThreadID") => {
-                        Abs::Ints(
-                            (0..shape.lanes)
-                                .map(|k| Interval::new(0, i128::from(nt[k.min(2)]) - 1))
-                                .collect(),
-                        )
-                    }
+                    (Some(sem), Some(shape), Some(nt)) if sem.eq_ignore_ascii_case("SV_GroupThreadID") => Abs::Ints(
+                        (0..shape.lanes)
+                            .map(|k| Interval::new(0, i128::from(nt[k.min(2)]) - 1))
+                            .collect(),
+                    ),
                     (Some(sem), Some(_), Some(nt)) if sem.eq_ignore_ascii_case("SV_GroupIndex") => {
                         Abs::scalar(Interval::new(0, i128::from(nt[0] * nt[1] * nt[2]) - 1))
                     }
@@ -494,84 +489,86 @@ impl<'m> Analyzer<'m> {
             .collect()
     }
 
-    fn field_key(&self, m: &Module, mi: usize, key_inst: u32) -> FieldKey {
-        let name = m
-            .import_name(key_inst)
-            .or_else(|| m.export_name(key_inst))
-            .map_or_else(|| format!("{mi}:{key_inst}"), str::to_string);
-        let mut keys = self.field_keys.borrow_mut();
-        let next = keys.len() as u32;
-        *keys.entry(name).or_insert(next)
-    }
-
-    /// Resolve the callee of a `call`: a function definition (possibly in another module,
-    /// possibly the body of a generic) together with the generic substitution, or `None`
-    /// when the callee has no analyzable body.
-    fn resolve_callee(&self, mi: usize, callee: u32) -> Option<(FnRef, Vec<(u32, u32)>)> {
-        let m = &self.modules[mi];
+    /// The `func` a call's callee operand names, with the generic substitution accumulated on
+    /// the way: through `specialize` (generic arguments, resolved in the caller's own
+    /// substitution so nested generics chain) and `lookupWitness` (the entry of the — possibly
+    /// substituted — witness table for the requirement key). `None` for anything else, such
+    /// as a witness lookup on a table the analysis does not have.
+    fn callee_func(&self, callee: u32, resolve: &dyn Fn(u32) -> u32) -> Option<(u32, Subst)> {
+        let m = self.m;
         let mut subst = Vec::new();
-        let mut cur = callee;
-        let mut guard = 0;
-        loop {
-            guard += 1;
-            if guard > 8 {
-                return None;
-            }
+        let mut cur = resolve(callee);
+        for _ in 0..8 {
             let inst = m.inst(cur);
             match inst.op {
                 op::SPECIALIZE => {
-                    let generic = inst.operand(0)?;
-                    let g = m.inst(generic);
-                    if g.op != op::GENERIC {
+                    let generic = resolve(inst.operand(0)?);
+                    if m.inst(generic).op != op::GENERIC {
                         return None;
                     }
                     let block = m.body(generic).find(|&c| m.inst(c).op == op::BLOCK)?;
                     let params: Vec<u32> = m.body(block).filter(|&c| m.inst(c).op == op::PARAM).collect();
                     for (k, p) in params.iter().enumerate() {
                         if let Some(a) = inst.operand(1 + k) {
-                            subst.push((*p, a));
+                            subst.push((*p, resolve(a)));
                         }
                     }
-                    let term = m.body(block).last()?;
-                    let t = m.inst(term);
+                    let t = m.inst(m.body(block).last()?);
                     if t.op != op::RETURN_VAL {
                         return None;
                     }
-                    cur = t.operand(0)?;
+                    cur = resolve(t.operand(0)?);
                 }
-                op::FUNC => {
-                    if m.body(cur).any(|c| m.inst(c).op == op::BLOCK) {
-                        return Some((FnRef { module: mi, func: cur }, subst));
-                    }
-                    // Declaration only: follow the import to its definition.
-                    let name = m.import_name(cur)?;
-                    let &(dm, di) = self.exports.get(name)?;
-                    if dm == mi && di == cur {
+                op::LOOKUP_WITNESS => {
+                    let table = resolve(inst.operand(0)?);
+                    let key = resolve(inst.operand(1)?);
+                    if m.inst(table).op != op::WITNESS_TABLE {
                         return None;
                     }
-                    // Substitutions are module-local instruction ids; they do not carry over.
-                    return Some((FnRef { module: dm, func: di }, Vec::new()));
+                    let entry = m.body(table).find(|&e| {
+                        let e = m.inst(e);
+                        e.op == op::WITNESS_TABLE_ENTRY && e.operand(0).map(resolve) == Some(key)
+                    })?;
+                    cur = resolve(m.inst(entry).operand(1)?);
                 }
+                op::FUNC => return Some((cur, subst)),
                 _ => return None,
             }
         }
+        None
     }
 
-    /// Summary of `key`'s function in that context. When `report_path` is given, the
-    /// callee's accesses are checked and the callee's own calls are reported.
-    fn analyze(&self, key: &CallKey, report_path: Option<Vec<String>>) -> Summary {
-        let m = &self.modules[key.f.module];
-        let name = m.name_hint(key.f.func).unwrap_or("<anonymous>").to_string();
+    /// Resolve the callee of a `call` to a function definition (possibly in a linked
+    /// library, possibly the body of a generic) together with the generic substitution, or
+    /// `None` when the callee has no analyzable body.
+    fn resolve_callee(&self, callee: u32, resolve: &dyn Fn(u32) -> u32) -> Option<(u32, Subst)> {
+        let (f, subst) = self.callee_func(callee, resolve)?;
+        self.m
+            .body(f)
+            .any(|c| self.m.inst(c).op == op::BLOCK)
+            .then_some((f, subst))
+    }
+
+    /// Summary of `key`'s function in that context. When `report` is given, the callee's
+    /// accesses are checked and the callee's own calls are reported.
+    fn analyze(&self, key: &CallKey, report: Option<Report>) -> Summary {
+        let m = self.m;
+        let name = m.name_hint(key.f).unwrap_or("<anonymous>").to_string();
         let mut key = key.clone();
         let summarized = self.summaries.borrow().get(&key).cloned();
-        let already_reported = report_path.is_none() || self.reported.borrow().contains(&key);
+        let already_reported = report.is_none() || self.reported.borrow().contains(&key);
         if let (Some(s), true) = (&summarized, already_reported) {
             return s.clone();
         }
+        let subst_map: HashMap<u32, u32> = key.subst.iter().copied().collect();
+        let types = Types {
+            m,
+            subst: Some(&subst_map),
+        };
         let ret_shape = m
-            .type_of(key.f.func)
+            .type_of(key.f)
             .and_then(|t| m.inst(t).operand(0))
-            .and_then(|r| m.int_shape(r));
+            .and_then(|r| types.int_shape(r));
         let nparams = key.args.len();
         let top = move || Summary::unknown(ret_shape.map_or(Abs::Opaque, Abs::top), nparams);
         {
@@ -581,7 +578,7 @@ impl<'m> Analyzer<'m> {
                 // Too many distinct contexts: fall back to one unconstrained analysis.
                 key.args = key.args.iter().map(|_| Abs::Opaque).collect();
                 if let Some(s) = self.summaries.borrow().get(&key) {
-                    if report_path.is_none() || self.reported.borrow().contains(&key) {
+                    if report.is_none() || self.reported.borrow().contains(&key) {
                         return s.clone();
                     }
                 }
@@ -597,33 +594,34 @@ impl<'m> Analyzer<'m> {
         }
         self.analyses.set(self.analyses.get() + 1);
         self.in_progress.borrow_mut().push(key.f);
-        if report_path.is_some() {
+        if report.is_some() {
             self.reported.borrow_mut().insert(key.clone());
         }
-        let mut fa = FunctionAnalysis::new(self, m, key.f.module, key.f.func, &key.args, &key.subst, name);
+        let mut fa = FunctionAnalysis::new(self, m, key.f, &key.args, subst_map, name);
         fa.fixpoint();
         let summary = Summary {
             ret: fa.return_range(),
             outs: fa.out_param_values(),
         };
-        if let Some(path) = report_path {
-            fa.check_accesses(&path);
-            fa.check_calls(&path);
+        if let Some(report) = report {
+            fa.param_sources = report.param_sources;
+            fa.check_accesses(&report.path);
+            fa.check_calls(&report.path);
         }
         self.in_progress.borrow_mut().pop();
         self.summaries.borrow_mut().insert(key, summary.clone());
         summary
     }
 
-    fn record_check(&self, mi: usize, inst: u32) {
-        self.checked.borrow_mut().insert((mi, inst));
+    fn record_check(&self, inst: u32) {
+        self.checked.borrow_mut().insert(inst);
     }
 
-    fn record_diagnostic(&self, mi: usize, inst: u32, diag: BoundsDiagnostic) {
+    fn record_diagnostic(&self, inst: u32, diag: BoundsDiagnostic) {
         let mut all = self.diagnostics.borrow_mut();
-        match all.get_mut(&(mi, inst)) {
+        match all.get_mut(&inst) {
             None => {
-                all.insert((mi, inst), MergedDiagnostic { diag });
+                all.insert(inst, MergedDiagnostic { diag });
             }
             Some(existing) => {
                 let d = &mut existing.diag;
@@ -649,8 +647,6 @@ impl<'m> Analyzer<'m> {
 // ============================================================================
 
 struct Block {
-    /// The `block` instruction.
-    inst: u32,
     params: Vec<u32>,
     /// Non-parameter instructions in order; the last one is the terminator.
     body: Vec<u32>,
@@ -697,7 +693,6 @@ enum Stored {
 struct FunctionAnalysis<'a, 'm> {
     ctx: &'a Analyzer<'m>,
     m: &'m Module,
-    mi: usize,
     func: u32,
     name: String,
     blocks: Vec<Block>,
@@ -723,16 +718,17 @@ struct FunctionAnalysis<'a, 'm> {
     ranges: HashMap<u32, Abs>,
     widened: HashSet<u32>,
     block_facts: RefCell<HashMap<usize, Vec<Fact>>>,
+    /// See [`Report::param_sources`]; empty unless this function is being reported.
+    param_sources: Vec<Vec<String>>,
 }
 
 impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     fn new(
         ctx: &'a Analyzer<'m>,
         m: &'m Module,
-        mi: usize,
         func: u32,
         args: &[Abs],
-        subst: &[(u32, u32)],
+        subst: HashMap<u32, u32>,
         name: String,
     ) -> Self {
         let mut blocks: Vec<Block> = Vec::new();
@@ -749,7 +745,6 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             }
             block_of.insert(b, blocks.len());
             blocks.push(Block {
-                inst: b,
                 params,
                 body,
                 preds: Vec::new(),
@@ -777,7 +772,15 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 }
                 op::LOOP => {
                     if let Some(s) = target(0) {
-                        edges.push((bi, s, t.operands[3.min(t.operands.len())..].iter().flatten().copied().collect()));
+                        edges.push((
+                            bi,
+                            s,
+                            t.operands[3.min(t.operands.len())..]
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .collect(),
+                        ));
                     }
                 }
                 op::CONDITIONAL_BRANCH | op::IF_ELSE => {
@@ -815,13 +818,14 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         }
         let (idom, rpo) = dominators(&blocks);
         let params = blocks.first().map(|b| b.params.clone()).unwrap_or_default();
+        let types = Types { m, subst: Some(&subst) };
         // For pointer parameters this is the abstraction of the pointee at the call site.
         let param_abs: Vec<Abs> = params
             .iter()
             .enumerate()
             .map(|(k, &p)| {
-                let value_ty = m.type_of(p).map(|t| m.pointee(t).unwrap_or(t));
-                let shape = value_ty.and_then(|t| m.int_shape(t));
+                let value_ty = m.type_of(p).map(|t| types.pointee(t).unwrap_or(t));
+                let shape = value_ty.and_then(|t| types.int_shape(t));
                 match args.get(k) {
                     Some(Abs::Ints(v)) if shape.is_some() => Abs::Ints(v.clone()),
                     Some(a @ Abs::Struct(_)) => a.clone(),
@@ -832,7 +836,6 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         let mut fa = FunctionAnalysis {
             ctx,
             m,
-            mi,
             func,
             name,
             blocks,
@@ -841,7 +844,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             params,
             param_abs,
             phis,
-            subst: subst.iter().copied().collect(),
+            subst,
             idom,
             rpo,
             var_stores: HashMap::new(),
@@ -851,6 +854,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             ranges: HashMap::new(),
             widened: HashSet::new(),
             block_facts: RefCell::new(HashMap::new()),
+            param_sources: Vec::new(),
         };
         fa.compute_value_numbers();
         fa.collect_var_stores();
@@ -896,13 +900,13 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     /// Whether `p` is a pointer-typed (`out`/`inout`/`ref`) parameter of this function.
     fn is_pointer_param(&self, p: u32) -> bool {
-        self.params.contains(&p) && self.type_of(p).is_some_and(|t| self.m.is_pointer_type(t))
+        self.params.contains(&p) && self.type_of(p).is_some_and(|t| self.types().is_pointer_type(t))
     }
 
     /// Whether the pointer parameter carries a value in from the caller (`inout`/`ref`, not `out`).
     fn param_has_incoming(&self, p: u32) -> bool {
         self.type_of(p)
-            .is_some_and(|t| self.inst(self.m.unqualified(t)).op != op::TYPE_OUT_PARAM)
+            .is_some_and(|t| self.inst(self.types().unqualified(t)).op != op::TYPE_OUT_PARAM)
     }
 
     fn inst(&self, id: u32) -> &'m Inst {
@@ -913,12 +917,24 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         self.subst.get(&id).copied().unwrap_or(id)
     }
 
+    /// Type queries under this function's generic substitution.
+    fn types(&self) -> Types<'_> {
+        Types {
+            m: self.m,
+            subst: Some(&self.subst),
+        }
+    }
+
     fn type_of(&self, id: u32) -> Option<u32> {
         self.m.type_of(self.resolve(id)).map(|t| self.resolve(t))
     }
 
     fn int_shape_of(&self, id: u32) -> Option<IntShape> {
-        self.type_of(id).and_then(|t| self.m.int_shape(t))
+        self.type_of(id).and_then(|t| self.types().int_shape(t))
+    }
+
+    fn resolve_callee(&self, callee: u32) -> Option<(u32, Subst)> {
+        self.ctx.resolve_callee(callee, &|x| self.resolve(x))
     }
 
     fn is_local(&self, id: u32) -> bool {
@@ -953,7 +969,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                     });
                 }
                 op::GET_FIELD_ADDR => {
-                    fields.push(self.ctx.field_key(self.m, self.mi, inst.operand(1)?));
+                    fields.push(self.resolve(inst.operand(1)?));
                     ptr = inst.operand(0)?;
                 }
                 op::GET_ELEMENT_PTR => {
@@ -989,7 +1005,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                         // its summary; anything else (intrinsics, no body) makes it escape.
                         let modeled = inst
                             .operand(0)
-                            .is_some_and(|c| self.intrinsic_name(c).is_none() && self.ctx.resolve_callee(self.mi, c).is_some());
+                            .is_some_and(|c| self.intrinsic_name(c).is_none() && self.resolve_callee(c).is_some());
                         for k in 1..inst.operands.len() {
                             let Some(path) = uses_ptr(k) else { continue };
                             if modeled {
@@ -1020,7 +1036,12 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     /// Value read through `path` from a non-escaping local (or pointer parameter): the join of
     /// everything stored into it, flow-insensitively. `skip_call` leaves out what one call
     /// wrote, to compute the value that call received.
-    fn load_local(&self, path: &VarPath, get: &mut dyn FnMut(u32) -> Option<Abs>, skip_call: Option<u32>) -> Option<Abs> {
+    fn load_local(
+        &self,
+        path: &VarPath,
+        get: &mut dyn FnMut(u32) -> Option<Abs>,
+        skip_call: Option<u32>,
+    ) -> Option<Abs> {
         if path.indexed || self.escaping_vars.contains(&path.var) {
             return None;
         }
@@ -1106,7 +1127,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             return None;
         }
         let callee = self.inst(call).operand(0)?;
-        let (target, subst) = self.ctx.resolve_callee(self.mi, callee)?;
+        let (target, subst) = self.resolve_callee(callee)?;
         self.active_call_outs.borrow_mut().push(call);
         let args = self.call_args(call, get);
         self.active_call_outs.borrow_mut().pop();
@@ -1127,7 +1148,10 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                     return None;
                 }
                 let mut get = |o: u32| self.lookup(o);
-                Some(self.load_local(&VarPath::root(p), &mut get, None).unwrap_or(Abs::Opaque))
+                Some(
+                    self.load_local(&VarPath::root(p), &mut get, None)
+                        .unwrap_or(Abs::Opaque),
+                )
             })
             .collect()
     }
@@ -1166,31 +1190,22 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     /// Name of a core-module intrinsic when `callee` is one (`min`, `WaveGetLaneCount`, ...).
     fn intrinsic_name(&self, callee: u32) -> Option<&'m str> {
-        let mut cur = callee;
-        for _ in 0..8 {
-            let inst = self.inst(cur);
-            match inst.op {
-                op::SPECIALIZE => {
-                    let generic = inst.operand(0)?;
-                    let block = self.m.body(generic).find(|&c| self.inst(c).op == op::BLOCK)?;
-                    let term = self.m.body(block).last()?;
-                    cur = self.inst(term).operand(0)?;
-                }
-                op::FUNC => {
-                    if self.m.body(cur).any(|c| self.inst(c).op == op::BLOCK) {
-                        return None;
-                    }
-                    let imported_from_core = self.m.import_name(cur).is_some_and(|n| n.contains("4core"));
-                    let intrinsic = self.m.decoration(cur, op::DECORATION_TARGET_INTRINSIC).is_some();
-                    return (imported_from_core || intrinsic).then(|| self.m.name_hint(cur)).flatten();
-                }
-                _ => return None,
-            }
+        let (f, _) = self.ctx.callee_func(callee, &|x| self.resolve(x))?;
+        if self.m.body(f).any(|c| self.inst(c).op == op::BLOCK) {
+            return None;
         }
-        None
+        let imported_from_core = self.m.import_name(f).is_some_and(|n| n.contains("4core"));
+        let intrinsic = self.m.decoration(f, op::DECORATION_TARGET_INTRINSIC).is_some();
+        (imported_from_core || intrinsic).then(|| self.m.name_hint(f)).flatten()
     }
 
-    fn intrinsic_call(&self, name: &str, ty: IntTy, args: &[u32], get: &mut dyn FnMut(u32) -> Option<Abs>) -> Option<Abs> {
+    fn intrinsic_call(
+        &self,
+        name: &str,
+        ty: IntTy,
+        args: &[u32],
+        get: &mut dyn FnMut(u32) -> Option<Abs>,
+    ) -> Option<Abs> {
         let r = ty_range(ty);
         let minmax = |get: &mut dyn FnMut(u32) -> Option<Abs>, is_max: bool| {
             let a = get(*args.first()?)?;
@@ -1226,8 +1241,26 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             "WaveGetLaneCount" => Abs::scalar(Interval::new(1, MAX_SUBGROUP_SIZE)),
             "WaveGetLaneIndex" => Abs::scalar(Interval::new(0, MAX_SUBGROUP_SIZE - 1)),
             "WaveActiveCountBits" | "WavePrefixCountBits" => Abs::scalar(Interval::new(0, MAX_SUBGROUP_SIZE)),
-            "countbits" => Abs::scalar(Interval::new(0, i128::from(ty.bits))),
-            "firstbithigh" | "firstbitlow" => Abs::scalar(Interval::new(r.lo.max(-1), i128::from(ty.bits) - 1)),
+            "countbits" | "firstbithigh" | "firstbitlow" => {
+                // Exact on a constant (`firstbitlow(N)` is how generic code spells log2(N)).
+                let arg = args.first().and_then(|a| get(*a)).and_then(|a| a.as_scalar());
+                let bits = i128::from(ty.bits);
+                match arg {
+                    Some(c) if c.lo == c.hi && c.lo >= 0 => {
+                        let v = c.lo as u128;
+                        let exact = match name {
+                            "countbits" => i128::from(v.count_ones()),
+                            "firstbitlow" if v == 0 => -1,
+                            "firstbitlow" => i128::from(v.trailing_zeros()),
+                            _ if v == 0 => -1,
+                            _ => 127 - i128::from(v.leading_zeros()),
+                        };
+                        Abs::scalar(Interval::point(if exact < 0 { r.hi.max(-1) } else { exact }))
+                    }
+                    _ if name == "countbits" => Abs::scalar(Interval::new(0, bits)),
+                    _ => Abs::scalar(Interval::new(r.lo.max(-1), bits - 1)),
+                }
+            }
             _ => return None,
         })
     }
@@ -1246,8 +1279,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 op::LOAD => self.load(opnd(0), get).unwrap_or(Abs::Opaque),
                 op::GET_FIELD => {
                     let base = get(opnd(0)?)?;
-                    let key = self.ctx.field_key(self.m, self.mi, opnd(1)?);
-                    base.field(key).cloned().unwrap_or(Abs::Opaque)
+                    base.field(opnd(1)?).cloned().unwrap_or(Abs::Opaque)
                 }
                 op::SELECT if ops.len() >= 3 => {
                     let a = get(opnd(1)?)?;
@@ -1275,8 +1307,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             op::CALL => Some(self.call_result(id, &ops, get).map_or(top, fix)),
             op::GET_FIELD => {
                 let base = get(opnd(0)?)?;
-                let key = self.ctx.field_key(self.m, self.mi, opnd(1)?);
-                Some(base.field(key).cloned().map_or(top, fix))
+                Some(base.field(opnd(1)?).cloned().map_or(top, fix))
             }
             op::SELECT if ops.len() >= 3 => {
                 let a = get(opnd(1)?)?;
@@ -1299,7 +1330,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 let idx = opnd(1).and_then(|i| self.m.int_lit(i));
                 let base_is_vector = opnd(0)
                     .and_then(|b| self.type_of(b))
-                    .is_some_and(|t| self.inst(self.m.unqualified(t)).op == op::TYPE_VEC);
+                    .is_some_and(|t| self.inst(self.types().unqualified(t)).op == op::TYPE_VEC);
                 match (idx, base_is_vector) {
                     (Some(c), true) => Some(base.lane(usize::try_from(c).ok()?).map_or(top, Abs::scalar)),
                     _ => Some(top),
@@ -1447,9 +1478,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         }
         let mut fields = BTreeMap::new();
         for (k, o) in keys.iter().zip(ops) {
-            let key = self.ctx.field_key(self.m, self.mi, *k);
             if let Some(v) = get((*o)?) {
-                fields.insert(key, v);
+                fields.insert(self.resolve(*k), v);
             }
         }
         Some(Abs::Struct(fields))
@@ -1466,7 +1496,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             }
             return None;
         }
-        let (target, subst) = self.ctx.resolve_callee(self.mi, callee)?;
+        let (target, subst) = self.resolve_callee(callee)?;
         let key = CallKey {
             f: target,
             args: self.call_args(id, get)?,
@@ -1696,7 +1726,9 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     /// Facts from `pred`'s terminator for the edge `pred -> succ`.
     fn branch_facts(&self, pred: usize, succ: usize, out: &mut Vec<Fact>) {
-        let Some(term) = self.blocks[pred].terminator() else { return };
+        let Some(term) = self.blocks[pred].terminator() else {
+            return;
+        };
         let t = self.inst(term);
         let target = |k: usize| t.operand(k).and_then(|x| self.block_of.get(&x).copied());
         match t.op {
@@ -1777,7 +1809,15 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     // Refined (path-sensitive) evaluation
     // ------------------------------------------------------------------
 
-    fn refine_with_fact(&self, r: Interval, ty: IntTy, rel: Rel, signed: bool, other: Interval, other_ty: IntTy) -> Interval {
+    fn refine_with_fact(
+        &self,
+        r: Interval,
+        ty: IntTy,
+        rel: Rel,
+        signed: bool,
+        other: Interval,
+        other_ty: IntTy,
+    ) -> Interval {
         let view = ty.with_signed(signed);
         let rv = reinterpret(r, ty, view);
         let ov = reinterpret(other, other_ty, other_ty.with_signed(signed));
@@ -1912,7 +1952,15 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         out
     }
 
-    fn apply_facts(&self, id: u32, mut value: Abs, shape: IntShape, facts: &[Fact], depth: u32, ctx: &mut EvalCtx) -> Abs {
+    fn apply_facts(
+        &self,
+        id: u32,
+        mut value: Abs,
+        shape: IntShape,
+        facts: &[Fact],
+        depth: u32,
+        ctx: &mut EvalCtx,
+    ) -> Abs {
         if shape.lanes != 1 || depth > REFINE_DEPTH_LIMIT {
             return value;
         }
@@ -1975,25 +2023,32 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 if self.intrinsic_name(callee).is_some() {
                     continue;
                 }
-                let Some((target, subst)) = self.ctx.resolve_callee(self.mi, callee) else {
+                let Some((target, subst)) = self.resolve_callee(callee) else {
                     continue;
                 };
                 let facts = self.facts_for_block(bi);
                 let mut ctx = EvalCtx::default();
                 let mut get = |a: u32| Some(self.eval(a, &facts, 0, &mut ctx));
-                let Some(args) = self.call_args(i, &mut get) else { continue };
-                let key = CallKey {
-                    f: target,
-                    args,
-                    subst,
+                let Some(args) = self.call_args(i, &mut get) else {
+                    continue;
                 };
-                let callee_name = self.ctx.modules[target.module]
-                    .name_hint(target.func)
-                    .unwrap_or("<anonymous>")
-                    .to_string();
+                let param_sources = inst
+                    .operands
+                    .iter()
+                    .skip(1)
+                    .map(|a| a.map(|a| self.unknown_sources(a)).unwrap_or_default())
+                    .collect();
+                let key = CallKey { f: target, args, subst };
+                let callee_name = self.m.name_hint(target).unwrap_or("<anonymous>").to_string();
                 let mut new_path = path.to_vec();
                 new_path.push(callee_name);
-                self.ctx.analyze(&key, Some(new_path));
+                self.ctx.analyze(
+                    &key,
+                    Some(Report {
+                        path: new_path,
+                        param_sources,
+                    }),
+                );
             }
         }
     }
@@ -2024,6 +2079,24 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                     Some(b) => base = b,
                     None => break,
                 },
+                // Slang copies by-value aggregate parameters into an unnamed local; name the
+                // access after what was copied in when that is unambiguous.
+                op::VAR if self.m.name_hint(base).is_none() => {
+                    let mut whole = self
+                        .var_stores
+                        .get(&base)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(p, _)| p.fields.is_empty() && !p.indexed)
+                        .filter_map(|(_, st)| match st {
+                            Stored::Value(v) => Some(*v),
+                            Stored::CallOut { .. } => None,
+                        });
+                    match (whole.next(), whole.next()) {
+                        (Some(v), None) => base = v,
+                        _ => break,
+                    }
+                }
                 _ => break,
             }
         }
@@ -2092,7 +2165,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 op::PARAM => {
                     if let Some(k) = self.params.iter().position(|&p| p == id) {
                         if self.param_abs[k].is_top_for(self.int_shape_of(id)) {
-                            push(self.describe_param(id), &mut out);
+                            self.push_param_sources(k, id, None, &mut out);
                         }
                     }
                 }
@@ -2101,10 +2174,15 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                     let name = callee.and_then(|c| self.callee_display_name(c)).unwrap_or_default();
                     if let Some(name) = callee.and_then(|c| self.intrinsic_name(c)) {
                         push(format!("the result of `{name}()`"), &mut out);
-                    } else if callee.is_some_and(|c| self.ctx.resolve_callee(self.mi, c).is_some()) {
-                        // Analyzed in context: only worth naming when that gave nothing.
-                        if self.global(id).is_top_for(self.int_shape_of(id)) {
-                            push(format!("the result of calling `{name}`"), &mut out);
+                    } else if callee.is_some_and(|c| self.resolve_callee(c).is_some()) {
+                        // Analyzed in context: only worth naming when that gave nothing. An
+                        // aggregate result (a constructor, typically) depends on its arguments.
+                        match self.global(id) {
+                            Abs::Ints(_) if self.global(id).is_top_for(self.int_shape_of(id)) => {
+                                push(format!("the result of calling `{name}`"), &mut out);
+                            }
+                            Abs::Ints(_) => {}
+                            _ => work.extend(inst.operands.iter().skip(1).flatten().copied()),
                         }
                     } else {
                         push(format!("the result of calling `{name}` (no body available)"), &mut out);
@@ -2114,19 +2192,26 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 op::LOAD => {
                     let Some(ptr) = inst.operand(0) else { continue };
                     let (root, _) = self.aggregate_root(ptr);
-                    push(self.describe_memory(root), &mut out);
+                    match self.params.iter().position(|&p| p == root) {
+                        Some(k) if self.param_sources.get(k).is_some_and(|s| !s.is_empty()) => {
+                            self.push_param_sources(k, root, None, &mut out);
+                        }
+                        _ => push(self.describe_memory(root), &mut out),
+                    }
                 }
                 op::GET_FIELD => {
                     if let Some(b) = inst.operand(0) {
                         let root = self.aggregate_root(b).0;
                         if let Some(pos) = self.params.iter().position(|&p| p == root) {
-                            let key = inst.operand(1).map(|k| self.ctx.field_key(self.m, self.mi, k));
-                            let known = key.is_some_and(|k| self.param_abs[pos].field(k).is_some());
-                            if !known {
+                            let key = inst.operand(1).map(|k| self.resolve(k));
+                            let bounded = key
+                                .and_then(|k| self.param_abs[pos].field(k))
+                                .is_some_and(|a| !a.is_top_for(self.int_shape_of(id)));
+                            if !bounded {
                                 let fname = inst.operand(1).and_then(|k| self.m.name_hint(k)).unwrap_or("?");
-                                push(format!("field `{fname}` of {}", self.describe_param(root)), &mut out);
-                                continue;
+                                self.push_param_sources(pos, root, Some(fname), &mut out);
                             }
+                            continue;
                         }
                         work.push(b);
                     }
@@ -2150,21 +2235,25 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         out
     }
 
-    fn callee_display_name(&self, callee: u32) -> Option<String> {
-        let mut cur = callee;
-        for _ in 0..8 {
-            let inst = self.inst(cur);
-            match inst.op {
-                op::SPECIALIZE => {
-                    let generic = inst.operand(0)?;
-                    let block = self.m.body(generic).find(|&c| self.inst(c).op == op::BLOCK)?;
-                    cur = self.inst(self.m.body(block).last()?).operand(0)?;
-                }
-                op::FUNC => return self.m.name_hint(cur).map(str::to_string),
-                _ => return None,
+    /// Name what parameter `k` (or its field `field`) depends on: the caller's sources when
+    /// this function is reported on a call path, the parameter itself otherwise.
+    fn push_param_sources(&self, k: usize, param: u32, field: Option<&str>, out: &mut Vec<String>) {
+        let from_caller = self.param_sources.get(k).filter(|s| !s.is_empty());
+        let sources: Vec<String> = match (from_caller, field) {
+            (Some(s), _) => s.clone(),
+            (None, Some(f)) => vec![format!("field `{f}` of {}", self.describe_param(param))],
+            (None, None) => vec![self.describe_param(param)],
+        };
+        for s in sources {
+            if !out.contains(&s) {
+                out.push(s);
             }
         }
-        None
+    }
+
+    fn callee_display_name(&self, callee: u32) -> Option<String> {
+        let (f, _) = self.ctx.callee_func(callee, &|x| self.resolve(x))?;
+        self.m.name_hint(f).map(str::to_string)
     }
 
     fn describe_memory(&self, root: u32) -> String {
@@ -2193,6 +2282,40 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         }
     }
 
+    /// Static length of an indexable type, including array lengths that are constant
+    /// expressions over generic arguments (`uint prefix_sums[1 << LG_N]`).
+    fn aggregate_len(&self, ty: u32) -> Option<u64> {
+        if let Some((_, len)) = self.types().indexable(ty) {
+            return Some(len);
+        }
+        let t = self.inst(self.types().unqualified(ty));
+        if t.op != op::TYPE_ARRAY {
+            return None;
+        }
+        u64::try_from(self.const_int(t.operand(1)?)?).ok()
+    }
+
+    /// Value of a constant expression over literals and generic arguments, when it folds to
+    /// one integer.
+    fn const_int(&self, id: u32) -> Option<i128> {
+        let point = |a: Abs| a.as_scalar().filter(|i| i.lo == i.hi).map(|i| i.lo);
+        let id = self.resolve(id);
+        if let Some(c) = self.constant_abs(id) {
+            return point(c);
+        }
+        if self.is_local(id) || !is_pure(self.inst(id).op) {
+            return None;
+        }
+        let mut get = |o: u32| self.const_int(o).map(|v| Abs::scalar(Interval::point(v)));
+        point(self.transfer(id, &mut get)?)
+    }
+
+    /// Whether an address is rooted at a `DebugVar`: with debug info Slang mirrors stores into
+    /// by-value aggregate parameters onto a debug variable, which is not a real access.
+    fn is_debug_only(&self, base: u32) -> bool {
+        self.inst(self.aggregate_root(base).0).op == op::DEBUG_VAR
+    }
+
     fn is_widened(&self, id: u32) -> bool {
         if !self.widened.contains(&id) {
             return false;
@@ -2218,21 +2341,23 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                     _ => continue,
                 };
                 let idx = self.resolve(idx);
-                if self.constant_abs(idx).is_some() {
+                if self.constant_abs(idx).is_some() || self.is_debug_only(base) {
                     continue;
                 }
                 let Some(base_ty) = self.type_of(base) else { continue };
                 let agg_ty = if inst.op == op::GET_ELEMENT_PTR {
-                    match self.m.pointee(base_ty) {
-                        Some(t) => self.resolve(t),
+                    match self.types().pointee(base_ty) {
+                        Some(t) => t,
                         None => continue,
                     }
                 } else {
                     base_ty
                 };
-                let Some((_, len)) = self.m.indexable(agg_ty) else { continue };
+                let Some(len) = self.aggregate_len(agg_ty) else {
+                    continue;
+                };
 
-                self.ctx.record_check(self.mi, i);
+                self.ctx.record_check(i);
                 let facts = self.facts_for_block(bi);
                 let mut ctx = EvalCtx::default();
                 let value = self.eval(idx, &facts, 0, &mut ctx);
@@ -2248,11 +2373,10 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                         continue;
                     }
                 }
-                let type_name = self.m.type_name(agg_ty);
+                let type_name = self.types().type_name(agg_ty);
                 let mut call_path = path.to_vec();
                 call_path.pop();
                 self.ctx.record_diagnostic(
-                    self.mi,
                     i,
                     BoundsDiagnostic {
                         function: self.name.clone(),

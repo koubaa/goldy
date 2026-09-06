@@ -146,7 +146,10 @@ impl DebugInfo {
     }
 
     fn string(&self, index: u32) -> Option<&str> {
-        self.strings.get(index as usize).map(String::as_str).filter(|s| !s.is_empty())
+        self.strings
+            .get(index as usize)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
     }
 
     /// Decode a serial source location (0 means "no location").

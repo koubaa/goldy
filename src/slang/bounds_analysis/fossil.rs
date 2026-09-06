@@ -211,7 +211,11 @@ impl<'a, 'l> Val<'a, 'l> {
     /// Field `i` of a struct/tuple, located inline.
     pub fn field(&self, i: usize) -> Result<Val<'a, 'l>, BoundsAnalysisError> {
         self.expect(&[Kind::Struct, Kind::Tuple], "fossil: expected record")?;
-        let (layout, off) = self.layout.fields.get(i).ok_or(malformed("fossil: record field index"))?;
+        let (layout, off) = self
+            .layout
+            .fields
+            .get(i)
+            .ok_or(malformed("fossil: record field index"))?;
         let layout = layout.as_ref().ok_or(malformed("fossil: record field layout elided"))?;
         Ok(Val {
             f: self.f,
@@ -230,14 +234,21 @@ impl<'a, 'l> Val<'a, 'l> {
     /// content, everything else inline.
     pub fn deref(&self) -> Result<Option<Val<'a, 'l>>, BoundsAnalysisError> {
         self.expect(&[Kind::Ptr, Kind::OptionalObj], "fossil: expected pointer")?;
-        let mut elem = self.layout.elem.as_deref().ok_or(malformed("fossil: pointer element layout elided"))?;
+        let mut elem = self
+            .layout
+            .elem
+            .as_deref()
+            .ok_or(malformed("fossil: pointer element layout elided"))?;
         let Some(t) = self.f.rel(self.off)? else {
             return Ok(None);
         };
         // A pointer to an optional is a single indirection: the optional's content lives at
         // the target (Slang writes `Optional<T>` as "pointer to T").
         while elem.kind == Kind::OptionalObj {
-            elem = elem.elem.as_deref().ok_or(malformed("fossil: optional element layout elided"))?;
+            elem = elem
+                .elem
+                .as_deref()
+                .ok_or(malformed("fossil: optional element layout elided"))?;
         }
         Ok(Some(Val {
             f: self.f,
@@ -319,12 +330,6 @@ impl<'a, 'l> Val<'a, 'l> {
         self.expect(&[Kind::Int64, Kind::UInt64], "fossil: expected 64-bit integer")?;
         self.f.u64(self.off)
     }
-
-    /// Raw bytes of a `UInt8` array (object position already resolved by `Array`).
-    pub fn u8(&self) -> Result<u8, BoundsAnalysisError> {
-        self.expect(&[Kind::UInt8, Kind::Int8, Kind::Bool], "fossil: expected byte")?;
-        self.f.bytes.get(self.off).copied().ok_or(malformed("fossil read past end"))
-    }
 }
 
 pub(super) struct Array<'a, 'l> {
@@ -358,10 +363,9 @@ impl<'a, 'l> Array<'a, 'l> {
         if self.stride != 1 && self.len != 0 {
             return Err(malformed("fossil: expected byte array"));
         }
-        self.f.bytes.get(self.off..self.off + self.len).ok_or(malformed("fossil: array bytes"))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = Result<Val<'a, 'l>, BoundsAnalysisError>> + '_ {
-        (0..self.len).map(move |i| self.get(i))
+        self.f
+            .bytes
+            .get(self.off..self.off + self.len)
+            .ok_or(malformed("fossil: array bytes"))
     }
 }

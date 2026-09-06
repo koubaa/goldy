@@ -513,7 +513,7 @@ impl SlangCompiler {
     }
 
     /// Get preprocessor defines for the given target.
-    fn bindless_defines_for_target(target: ShaderTarget) -> Vec<(&'static str, &'static str)> {
+    pub(super) fn bindless_defines_for_target(target: ShaderTarget) -> Vec<(&'static str, &'static str)> {
         match target {
             ShaderTarget::Spirv => vec![("__SPIRV__", "1")],
             ShaderTarget::Dxil => vec![("__DX12__", "1")],
@@ -948,7 +948,7 @@ impl SlangCompiler {
 
     /// Compile `source` to Slang's front-end IR container (`.slang-module` bytes) with standard
     /// debug info. No target code is generated; `target` only selects the preprocessor defines.
-    fn compile_ir_container(
+    pub(super) fn compile_ir_container(
         &self,
         source: &str,
         entry_points: &[(&str, SlangStage)],
@@ -981,7 +981,7 @@ impl SlangCompiler {
     /// `<name>.slang` on `search_paths` with the same defines and cached by source content.
     /// Modules that cannot be found or compiled are skipped with a debug log; the analysis
     /// then treats calls into them as unknown.
-    fn imported_library_containers(
+    pub(super) fn imported_library_containers(
         &self,
         container: &[u8],
         search_paths: &[&str],
