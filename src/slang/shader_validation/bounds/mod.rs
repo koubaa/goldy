@@ -7,19 +7,12 @@
 //! vectors, matrices) stays inside `0 <= index < length`, and reports every access it could
 //! *not* prove, with the Slang source location and the call path that reaches it.
 //!
-//! The analysis is opt-in (`GOLDY_VALIDATION=bounds`) and never fails a compile: findings are
-//! warnings. See `docs/src/design/shader-bounds-analysis.md` for the integration decision
-//! (Slang IR vs SPIR-V), the analysis model, and known false positives.
-//!
-//! # Input
-//!
-//! The analysis runs on Slang's *front-end* IR: the `.slang-module` container Slang produces
-//! for a translation unit (`spSetOutputContainerFormat` + `spGetContainerCode`), compiled with
-//! standard debug info so instructions carry source locations. That IR is what the Slang
-//! front end produced after semantic checking and SSA construction, before any target
-//! lowering: names, struct fields, generics, structured control flow and calls are all
-//! intact. Imported modules are not embedded in a translation unit's IR, so their containers
-//! are passed alongside and linked by mangled name.
+//! One rule of [`crate::slang::shader_validation`] (`GOLDY_SHADER_VALIDATION=bounds`); it
+//! never fails a compile, findings are warnings. The input is a linked `Module` from the
+//! shared IR toolkit ([`crate::slang::ir`]): the translation unit plus
+//! the modules it imports, with debug info so findings carry source locations. See
+//! `docs/src/design/shader-bounds-analysis.md` for the integration decision (Slang IR vs
+//! SPIR-V), the analysis model, and known false positives.
 //!
 //! # Analysis model
 //!
@@ -46,30 +39,9 @@
 
 use std::fmt;
 
+use crate::slang::ir::{Module, SourceLocation};
+
 mod analysis;
-mod fossil;
-mod ir;
-mod riff;
-mod source_loc;
-mod stable_names;
-
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Slang source location recovered from the module's debug information.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceLocation {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-}
-
-impl fmt::Display for SourceLocation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.file, self.line, self.column)
-    }
-}
 
 /// One dynamic array access the analysis could not prove in bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +100,8 @@ impl fmt::Display for BoundsDiagnostic {
     }
 }
 
-/// Result of [`analyze_container`].
+/// Result of the bounds check over one shader (see
+/// [`validate`](crate::slang::shader_validation::validate)).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BoundsReport {
     /// Accesses that could not be proven safe.
@@ -148,60 +121,13 @@ impl BoundsReport {
     }
 }
 
-/// Analysis failure (malformed container). Never raised for shaders the analysis merely
-/// cannot reason about — those produce diagnostics or are skipped.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum BoundsAnalysisError {
-    #[error("malformed Slang module container: {0}")]
-    Malformed(&'static str),
-}
-
-/// Analyze the translation unit serialized in `container` (a `.slang-module` RIFF blob).
+/// Check every dynamic index in `module` (a translation unit linked with its imports).
 ///
-/// `libraries` are containers of the modules the translation unit imports, in any order;
-/// calls into them are resolved by mangled name. Missing libraries do not fail the analysis:
-/// the called functions are treated as unknown and named in the diagnostics.
-pub fn analyze_container(container: &[u8], libraries: &[&[u8]]) -> Result<BoundsReport, BoundsAnalysisError> {
-    let mut modules = ir::Module::parse_container(container)?;
-    if modules.is_empty() {
-        return Err(BoundsAnalysisError::Malformed("container without IR modules"));
-    }
-    for lib in libraries {
-        modules.extend(ir::Module::parse_container(lib)?);
-    }
-    let linked = ir::Module::link(modules);
-    Ok(analysis::Analyzer::new(&linked).run())
-}
-
-/// Names of the modules a translation unit container imports (`import foo;`), excluding
-/// Slang's own `core` and `glsl` modules. Derived from the mangled names on `import`
-/// decorations, so only modules that are actually referenced are listed.
-pub fn imported_modules(container: &[u8]) -> Result<Vec<String>, BoundsAnalysisError> {
-    let modules = ir::Module::parse_container(container)?;
-    let mut out: Vec<String> = Vec::new();
-    for m in &modules {
-        for i in 0..m.insts.len() as u32 {
-            let Some(mangled) = m.import_name(i) else { continue };
-            let Some(name) = module_of_mangled_name(mangled) else {
-                continue;
-            };
-            if name == "core" || name == "glsl" || name == m.name || out.iter().any(|n| *n == name) {
-                continue;
-            }
-            out.push(name.to_string());
-        }
-    }
-    Ok(out)
-}
-
-/// Module component of a Slang mangled name: `_S<kind letters><len><module>...`.
-fn module_of_mangled_name(mangled: &str) -> Option<&str> {
-    let rest = mangled.strip_prefix("_S")?;
-    let digits_at = rest.find(|c: char| c.is_ascii_digit())?;
-    let rest = &rest[digits_at..];
-    let len_end = rest.find(|c: char| !c.is_ascii_digit())?;
-    let len: usize = rest[..len_end].parse().ok()?;
-    rest.get(len_end..len_end + len)
+/// Entry points and, when the translation unit has none, its exported functions are the
+/// analysis roots; everything reachable through calls is analyzed in the calling context.
+#[must_use]
+pub(crate) fn analyze(module: &Module) -> BoundsReport {
+    analysis::Analyzer::new(module).run()
 }
 
 #[cfg(test)]

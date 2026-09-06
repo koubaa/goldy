@@ -1,4 +1,5 @@
-//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS`).
+//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS`,
+//! `GOLDY_SHADER_VALIDATION`).
 //!
 //! **Semantics**
 //! - `GOLDY_VALIDATE_LAYOUTS=1|true|yes` — unchanged; enables Rust/Slang layout and buffer
@@ -18,12 +19,15 @@
 //!     plus graph-level lifetime checks (Accel built in this scheme before TraceRay /
 //!     RayQuery). Cycle detection, mesh/draw mix-ups, and BLAS/TLAS misuse always run.
 //!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
-//!   - `bounds` / `shader_bounds` — static bounds analysis of dynamic array indices over
-//!     Slang IR (warnings only; see `docs/src/design/shader-bounds-analysis.md`)
-//!   - `all` — layout, GPU API, timeline, scheme, host_access, and bounds
+//!   - `all` — layout, GPU API, timeline, scheme, and host_access
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
+//! - `GOLDY_SHADER_VALIDATION` — static checks over Slang IR at shader compile time
+//!   (`all`, `bounds`, `-bounds`; see [`crate::slang::shader_validation`]). Separate from
+//!   `GOLDY_VALIDATION` and **not** implied by `GOLDY_VALIDATION=all`: these cost a second
+//!   compile plus a whole-program analysis per shader and report "not proven" rather than
+//!   invariant violations.
 //! - `GOLDY_DISABLE_CB_REUSE=1|true|yes` — disable the CB-retention facility entirely:
 //!   no retention fingerprints, no backend CB store/resubmit, no retained-allocator
 //!   retire waits, no topology-dirty registration for replay. Each submit re-records
@@ -38,7 +42,6 @@ struct ParsedValidation {
     timeline: bool,
     scheme: bool,
     host_access: bool,
-    bounds: bool,
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -79,14 +82,12 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                     out.timeline = true;
                     out.scheme = true;
                     out.host_access = true;
-                    out.bounds = true;
                 }
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
                 "timeline" => out.timeline = true,
                 "scheme" | "readback" | "graph" => out.scheme = true,
                 "host_access" | "host-access" => out.host_access = true,
-                "bounds" | "shader_bounds" | "shader-bounds" => out.bounds = true,
                 _ => {}
             }
         }
@@ -145,11 +146,15 @@ pub fn validation_fatal_enabled() -> bool {
     env_truthy("GOLDY_VALIDATION_FATAL")
 }
 
-/// Static bounds analysis of dynamic array indices over Slang IR
-/// (`GOLDY_VALIDATION=bounds`). Warnings only; never fails a compile.
+/// Static checks to run over Slang IR at shader compile time (`GOLDY_SHADER_VALIDATION`).
+///
+/// Empty unless the variable is set; `GOLDY_VALIDATION` never turns these on. Findings are
+/// warnings and never fail a compile.
 #[must_use]
-pub fn bounds_validation_enabled() -> bool {
-    from_goldy_validation_var().bounds
+pub fn shader_validation_checks() -> crate::slang::ShaderChecks {
+    std::env::var("GOLDY_SHADER_VALIDATION")
+        .map(|s| crate::slang::ShaderChecks::parse(&s))
+        .unwrap_or_default()
 }
 
 /// Page-protect CPU-visible GPU copies so stray host pointers fault.
@@ -273,12 +278,7 @@ mod tests {
         assert!(p.gpu_api);
         assert!(p.timeline);
         assert!(p.scheme);
-        assert!(p.bounds);
-
-        let p = parse_validation_list("bounds");
-        assert!(p.bounds);
-        assert!(!p.layout);
-        assert!(!p.gpu_api);
+        assert!(p.host_access);
 
         let p = parse_validation_list("api,fatal");
         assert!(p.gpu_api);

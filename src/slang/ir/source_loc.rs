@@ -7,7 +7,7 @@
 //! at least one location, so a serial location decodes to `path:line:column`. Lines affected
 //! by `#line` directives are stored separately with their adjusted line number and path.
 
-use super::{riff::Chunk, BoundsAnalysisError, SourceLocation};
+use super::{riff::Chunk, IrError, SourceLocation};
 
 #[derive(Debug, Clone, Copy)]
 struct LineInfo {
@@ -42,18 +42,18 @@ pub(super) struct DebugInfo {
     sources: Vec<SourceInfo>,
 }
 
-fn u32_at(b: &[u8], off: usize) -> Result<u32, BoundsAnalysisError> {
+fn u32_at(b: &[u8], off: usize) -> Result<u32, IrError> {
     b.get(off..off + 4)
         .map(|x| u32::from_le_bytes(x.try_into().unwrap()))
-        .ok_or(BoundsAnalysisError::Malformed("debug chunk truncated"))
+        .ok_or(IrError::Malformed("debug chunk truncated"))
 }
 
 /// `SerialRiffUtil::writeArrayChunk`: a `u32` count followed by the entries.
-fn array_entries(data: &[u8], entry_size: usize) -> Result<impl Iterator<Item = &[u8]>, BoundsAnalysisError> {
+fn array_entries(data: &[u8], entry_size: usize) -> Result<impl Iterator<Item = &[u8]>, IrError> {
     let n = u32_at(data, 0)? as usize;
     let body = &data[4..];
     if body.len() < n * entry_size {
-        return Err(BoundsAnalysisError::Malformed("debug array chunk truncated"));
+        return Err(IrError::Malformed("debug array chunk truncated"));
     }
     Ok(body.chunks_exact(entry_size).take(n))
 }
@@ -97,14 +97,14 @@ fn decode_string_table(table: &[u8]) -> Vec<String> {
 
 impl DebugInfo {
     /// Decode a `LIST/Sdeb` chunk.
-    pub fn parse(chunk: &Chunk<'_>) -> Result<DebugInfo, BoundsAnalysisError> {
+    pub fn parse(chunk: &Chunk<'_>) -> Result<DebugInfo, IrError> {
         let mut info = DebugInfo::default();
         if let Some(c) = chunk.data_child(b"Sdst") {
             let n = u32_at(c.data, 0)? as usize;
             let table = c
                 .data
                 .get(4..4 + n)
-                .ok_or(BoundsAnalysisError::Malformed("debug string table truncated"))?;
+                .ok_or(IrError::Malformed("debug string table truncated"))?;
             info.strings = decode_string_table(table);
         } else {
             info.strings = vec![String::new(), String::new()];

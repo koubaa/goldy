@@ -12,11 +12,11 @@ use std::fmt::Write as _;
 use super::fossil::{Fossil, Kind};
 use super::source_loc::DebugInfo;
 use super::stable_names::opcode_name;
-use super::{BoundsAnalysisError, SourceLocation};
+use super::{IrError, SourceLocation};
 
 /// Slang IR opcodes the analysis interprets, by stable name
 /// (`source/slang/slang-ir-insts-stable-names.lua`).
-pub(super) mod op {
+pub(crate) mod op {
     // Types
     pub const TYPE_VOID: u32 = 2;
     pub const TYPE_BOOL: u32 = 3;
@@ -159,7 +159,7 @@ pub(super) mod op {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum Payload {
+pub(crate) enum Payload {
     None,
     Int(i64),
     Float(f64),
@@ -167,7 +167,7 @@ pub(super) enum Payload {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Inst {
+pub(crate) struct Inst {
     /// Opcode stable name.
     pub op: u32,
     /// Instruction index of the result type (`None` for untyped instructions such as decorations).
@@ -191,7 +191,7 @@ impl Inst {
 
 /// Integer type: bit width and signedness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct IntTy {
+pub(crate) struct IntTy {
     pub bits: u32,
     pub signed: bool,
 }
@@ -211,14 +211,14 @@ impl IntTy {
 
 /// Integer scalar or vector shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct IntShape {
+pub(crate) struct IntShape {
     pub ty: IntTy,
     pub lanes: usize,
 }
 
 /// A parsed Slang IR module plus its debug information — or several modules linked into one
 /// instruction space by [`Module::link`].
-pub(super) struct Module {
+pub(crate) struct Module {
     pub name: String,
     pub insts: Vec<Inst>,
     /// Debug information per source module: `(first instruction id, debug info)`, ascending.
@@ -231,15 +231,15 @@ pub(super) struct Module {
 impl Module {
     /// Parse a `.slang-module` container. All modules in the container are read; Slang
     /// puts one module per translation unit there.
-    pub fn parse_container(bytes: &[u8]) -> Result<Vec<Module>, BoundsAnalysisError> {
+    pub fn parse_container(bytes: &[u8]) -> Result<Vec<Module>, IrError> {
         let root = super::riff::parse(bytes)?;
         if &root.kind != b"SLmc" {
-            return Err(BoundsAnalysisError::Malformed("not a Slang module container"));
+            return Err(IrError::Malformed("not a Slang module container"));
         }
         let debug_chunk = root.find_list(b"Sdeb");
         let module_list = root
             .find_list(b"SLml")
-            .ok_or(BoundsAnalysisError::Malformed("container without module list"))?;
+            .ok_or(IrError::Malformed("container without module list"))?;
         let mut out = Vec::new();
         for m in module_list.lists(b"smod") {
             let Some(ir) = m.lists(b"ir  ").next().and_then(|l| l.data_child(b"ir  ")) else {
@@ -335,36 +335,36 @@ impl Module {
     }
 
     /// Parse one fossilized `IRModuleInfo` blob.
-    fn parse_ir(bytes: &[u8]) -> Result<Module, BoundsAnalysisError> {
+    fn parse_ir(bytes: &[u8]) -> Result<Module, IrError> {
         let fossil = Fossil::new(bytes)?;
         let (layout, root_off) = fossil.root()?;
         let info = fossil.val(root_off, &layout);
         // IRModuleInfo { serializationVersion, fullVersion, module }
         if info.kind() != Kind::Struct || info.field_count() < 3 {
-            return Err(BoundsAnalysisError::Malformed("IRModuleInfo layout"));
+            return Err(IrError::Malformed("IRModuleInfo layout"));
         }
         let module = info
             .field(2)?
             .deref()?
-            .ok_or(BoundsAnalysisError::Malformed("IRModuleInfo without module"))?;
+            .ok_or(IrError::Malformed("IRModuleInfo without module"))?;
         // IRModule { m_name, m_version, m_moduleInst: FlatInstTable }
         if module.kind() != Kind::Struct || module.field_count() < 3 {
-            return Err(BoundsAnalysisError::Malformed("IRModule layout"));
+            return Err(IrError::Malformed("IRModule layout"));
         }
         let name = String::from_utf8_lossy(module.field(0)?.deref()?.map_or(Ok(&[][..]), |v| v.string())?).into_owned();
         let flat = module.field(2)?;
         if flat.kind() != Kind::Struct || flat.field_count() < 7 {
-            return Err(BoundsAnalysisError::Malformed("FlatInstTable layout"));
+            return Err(IrError::Malformed("FlatInstTable layout"));
         }
-        let array_field = |i: usize| -> Result<_, BoundsAnalysisError> {
+        let array_field = |i: usize| -> Result<_, IrError> {
             let f = flat.field(i)?;
             match f.kind() {
                 Kind::Ptr => f
                     .deref()?
-                    .ok_or(BoundsAnalysisError::Malformed("FlatInstTable array missing"))?
+                    .ok_or(IrError::Malformed("FlatInstTable array missing"))?
                     .array(),
                 Kind::ArrayObj => f.array(),
-                _ => Err(BoundsAnalysisError::Malformed("FlatInstTable field is not an array")),
+                _ => Err(IrError::Malformed("FlatInstTable field is not an array")),
             }
         };
         let alloc = array_field(0)?;
@@ -377,7 +377,7 @@ impl Module {
 
         let n = alloc.len();
         if child_counts.len() != n || source_locs.len() != n {
-            return Err(BoundsAnalysisError::Malformed("FlatInstTable table lengths disagree"));
+            return Err(IrError::Malformed("FlatInstTable table lengths disagree"));
         }
         let mut insts: Vec<Inst> = Vec::with_capacity(n);
         for i in 0..n {
@@ -406,13 +406,13 @@ impl Module {
         let mut lit_at = 0usize;
         let mut str_at = 0usize;
         let mut chars_at = 0usize;
-        let read_ref = |operand_at: &mut usize| -> Result<Option<u32>, BoundsAnalysisError> {
+        let read_ref = |operand_at: &mut usize| -> Result<Option<u32>, IrError> {
             let v = operand_indices.get(*operand_at)?.i64()?;
             *operand_at += 1;
             match v {
                 -1 => Ok(None),
                 x if x >= 0 && (x as usize) < n => Ok(Some(x as u32)),
-                _ => Err(BoundsAnalysisError::Malformed("operand index out of range")),
+                _ => Err(IrError::Malformed("operand index out of range")),
             }
         };
         for inst in insts.iter_mut().take(n) {
@@ -442,7 +442,7 @@ impl Module {
                     str_at += 1;
                     let s = string_chars
                         .get(chars_at..chars_at + len)
-                        .ok_or(BoundsAnalysisError::Malformed("string literal exceeds table"))?;
+                        .ok_or(IrError::Malformed("string literal exceeds table"))?;
                     chars_at += len;
                     Payload::Str(String::from_utf8_lossy(s).into_owned())
                 }
@@ -466,7 +466,7 @@ impl Module {
                 insts[i].parent = Some(parent);
                 insts[parent as usize].children.push(i as u32);
             } else if i != 0 {
-                return Err(BoundsAnalysisError::Malformed("instruction tree has several roots"));
+                return Err(IrError::Malformed("instruction tree has several roots"));
             }
             stack.push((i as u32, remaining));
         }
@@ -700,7 +700,7 @@ impl Module {
 /// `subst` (generic parameter -> argument), so the body of `T foo<T, let N : int>(T x[N])`
 /// specialized with `<uint, 64>` sees `x` as `uint[64]`.
 #[derive(Clone, Copy)]
-pub(super) struct Types<'a> {
+pub(crate) struct Types<'a> {
     pub m: &'a Module,
     pub subst: Option<&'a HashMap<u32, u32>>,
 }

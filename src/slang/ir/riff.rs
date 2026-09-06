@@ -2,7 +2,7 @@
 //! (`source/core/slang-riff.{h,cpp}`): 8-byte aligned chunks, `RIFF`/`LIST` chunks carry a
 //! FourCC sub-type and nest, everything else is a data chunk.
 
-use super::BoundsAnalysisError;
+use super::IrError;
 
 /// One parsed chunk. Data chunks have `children.is_empty()` and `data` set to their payload;
 /// list chunks carry their children and `data` covers the list body.
@@ -44,15 +44,15 @@ fn align8(v: usize) -> usize {
 }
 
 /// Parse a complete RIFF file. The top-level chunk must be `RIFF`.
-pub(super) fn parse(bytes: &[u8]) -> Result<Chunk<'_>, BoundsAnalysisError> {
+pub(super) fn parse(bytes: &[u8]) -> Result<Chunk<'_>, IrError> {
     let mut top = parse_range(bytes, 0, bytes.len())?;
     match top.len() {
         1 if &top[0].tag == b"RIFF" => Ok(top.remove(0)),
-        _ => Err(BoundsAnalysisError::Malformed("container is not a single RIFF chunk")),
+        _ => Err(IrError::Malformed("container is not a single RIFF chunk")),
     }
 }
 
-fn parse_range(bytes: &[u8], mut off: usize, end: usize) -> Result<Vec<Chunk<'_>>, BoundsAnalysisError> {
+fn parse_range(bytes: &[u8], mut off: usize, end: usize) -> Result<Vec<Chunk<'_>>, IrError> {
     let mut out = Vec::new();
     while off + 8 <= end {
         let tag: [u8; 4] = bytes[off..off + 4].try_into().unwrap();
@@ -61,10 +61,10 @@ fn parse_range(bytes: &[u8], mut off: usize, end: usize) -> Result<Vec<Chunk<'_>
         let body_end = body
             .checked_add(size)
             .filter(|e| *e <= end)
-            .ok_or(BoundsAnalysisError::Malformed("RIFF chunk exceeds its parent"))?;
+            .ok_or(IrError::Malformed("RIFF chunk exceeds its parent"))?;
         if &tag == b"RIFF" || &tag == b"LIST" {
             if size < 4 {
-                return Err(BoundsAnalysisError::Malformed("RIFF list chunk without sub-type"));
+                return Err(IrError::Malformed("RIFF list chunk without sub-type"));
             }
             let kind: [u8; 4] = bytes[body..body + 4].try_into().unwrap();
             let children = parse_range(bytes, align8(body + 4), body_end)?;

@@ -400,8 +400,8 @@ pub struct SlangCompiler {
     library: Arc<SlangLibrary>,
     global_session: *mut IGlobalSession,
     shader_disk_cache: std::sync::Mutex<crate::shader_cache::ShaderBytecodeDiskCache>,
-    /// Compile keys already run through the opt-in bounds analysis (one report per shader).
-    bounds_analyzed: std::sync::Mutex<std::collections::HashSet<u64>>,
+    /// Compile keys already run through the opt-in static shader checks (one report per shader).
+    shader_validated: std::sync::Mutex<std::collections::HashSet<u64>>,
     /// IR containers of imported library modules, keyed by module name, source and defines.
     ir_library_cache: std::sync::Mutex<std::collections::HashMap<u64, Arc<Vec<u8>>>>,
 }
@@ -453,7 +453,7 @@ impl SlangCompiler {
             library,
             global_session,
             shader_disk_cache: std::sync::Mutex::new(crate::shader_cache::ShaderBytecodeDiskCache::new_load_or_empty()),
-            bounds_analyzed: std::sync::Mutex::new(std::collections::HashSet::new()),
+            shader_validated: std::sync::Mutex::new(std::collections::HashSet::new()),
             ir_library_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -877,8 +877,16 @@ impl SlangCompiler {
                 drop(disk);
                 // Diagnostics are opt-in and independent of the cached bytecode, so a cache
                 // hit must still surface them.
-                if crate::validation_env::bounds_validation_enabled() {
-                    self.report_bounds_analysis(effective_source, target, entry_points, search_paths, defines);
+                let checks = crate::validation_env::shader_validation_checks();
+                if !checks.is_empty() {
+                    self.report_shader_validation(
+                        effective_source,
+                        target,
+                        entry_points,
+                        search_paths,
+                        defines,
+                        checks,
+                    );
                 }
                 return hit.with_context(|| "decode shader disk cache");
             }
@@ -939,8 +947,9 @@ impl SlangCompiler {
             }
         }
 
-        if crate::validation_env::bounds_validation_enabled() {
-            self.report_bounds_analysis(effective_source, target, entry_points, search_paths, defines);
+        let checks = crate::validation_env::shader_validation_checks();
+        if !checks.is_empty() {
+            self.report_shader_validation(effective_source, target, entry_points, search_paths, defines, checks);
         }
 
         Ok(out)
@@ -989,7 +998,7 @@ impl SlangCompiler {
     ) -> Vec<Arc<Vec<u8>>> {
         let mut out: Vec<Arc<Vec<u8>>> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut pending = match super::bounds_analysis::imported_modules(container) {
+        let mut pending = match super::ir::imported_modules(container) {
             Ok(names) => names,
             Err(e) => {
                 tracing::debug!(?e, "could not list imported modules");
@@ -1038,7 +1047,7 @@ impl SlangCompiler {
                     }
                 },
             };
-            if let Ok(more) = super::bounds_analysis::imported_modules(&lib) {
+            if let Ok(more) = super::ir::imported_modules(&lib) {
                 pending.extend(more);
             }
             out.push(lib);
@@ -1046,21 +1055,25 @@ impl SlangCompiler {
         out
     }
 
-    /// Compile `source` to Slang IR (with standard debug info) and run the static bounds
-    /// analysis over it and the modules it imports.
+    /// Compile `source` to Slang IR (with standard debug info) and run the selected static
+    /// `checks` over it and the modules it imports.
     ///
     /// This is a separate Slang request from the production compile so the bytecode handed
-    /// to the driver is unchanged; the IR build only feeds the analysis. `target` selects the
+    /// to the driver is unchanged; the IR build only feeds the checks. `target` selects the
     /// preprocessor defines the shader is analyzed under. Returns the report, or the
     /// compile/analysis error.
-    pub fn analyze_bounds(
+    pub fn validate_shader(
         &self,
         source: &str,
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
         defines: &[(&str, &str)],
         target: ShaderTarget,
-    ) -> Result<super::bounds_analysis::BoundsReport> {
+        checks: super::ShaderChecks,
+    ) -> Result<super::ShaderValidationReport> {
+        if checks.is_empty() {
+            return Ok(super::ShaderValidationReport::default());
+        }
         let mut all_defines = Self::bindless_defines_for_target(target);
         for d in defines {
             if !all_defines.contains(d) {
@@ -1073,25 +1086,26 @@ impl SlangCompiler {
             let dir = std::path::Path::new(&dump_dir);
             let _ = std::fs::create_dir_all(dir);
             let name = entry_points.first().map(|(n, _)| *n).unwrap_or("shader");
-            let path = dir.join(format!("{name}_bounds.slang-module"));
+            let path = dir.join(format!("{name}_ir.slang-module"));
             if std::fs::write(&path, &container).is_ok() {
-                tracing::info!("Dumped Slang IR container for bounds analysis to {}", path.display());
+                tracing::info!("Dumped Slang IR container for shader validation to {}", path.display());
             }
         }
         let libraries = self.imported_library_containers(&container, search_paths, &all_defines);
         let library_refs: Vec<&[u8]> = libraries.iter().map(|l| l.as_slice()).collect();
-        Ok(super::bounds_analysis::analyze_container(&container, &library_refs)?)
+        Ok(super::shader_validation::validate(&container, &library_refs, checks)?)
     }
 
-    /// Opt-in (`GOLDY_VALIDATION=bounds`) hook: analyze once per distinct compile and log
-    /// every unproven dynamic index as a warning. Never fails the compile.
-    fn report_bounds_analysis(
+    /// Opt-in (`GOLDY_SHADER_VALIDATION`) hook: run the checks once per distinct compile and
+    /// log every finding as a warning. Never fails the compile.
+    fn report_shader_validation(
         &self,
         effective_source: &str,
         target: ShaderTarget,
         entry_points: &[(&str, SlangStage)],
         search_paths: &[&str],
         defines: &[(&str, &str)],
+        checks: super::ShaderChecks,
     ) {
         let key = crate::shader_cache::compile_cache_key(
             effective_source,
@@ -1103,28 +1117,30 @@ impl SlangCompiler {
             OptimizationLevel::Default,
         );
         {
-            let mut seen = self.bounds_analyzed.lock().unwrap_or_else(|p| p.into_inner());
+            let mut seen = self.shader_validated.lock().unwrap_or_else(|p| p.into_inner());
             if !seen.insert(key) {
                 return;
             }
         }
         let t0 = std::time::Instant::now();
-        // `analyze_bounds` re-applies the virtual-main rewrite; on already-effective source
+        // `validate_shader` re-applies the virtual-main rewrite; on already-effective source
         // that is a no-op, so pass it straight through.
-        match self.analyze_bounds(effective_source, entry_points, search_paths, defines, target) {
+        match self.validate_shader(effective_source, entry_points, search_paths, defines, target, checks) {
             Ok(report) => {
-                crate::shader_timing::record("slang.bounds_analysis", "", t0.elapsed());
-                tracing::debug!(
-                    checked = report.checked_accesses,
-                    proven_safe = report.proven_safe,
-                    unproven = report.diagnostics.len(),
-                    "shader bounds analysis"
-                );
-                for d in &report.diagnostics {
-                    tracing::warn!("shader bounds: {d}");
+                crate::shader_timing::record("slang.shader_validation", "", t0.elapsed());
+                if let Some(b) = &report.bounds {
+                    tracing::debug!(
+                        checked = b.checked_accesses,
+                        proven_safe = b.proven_safe,
+                        unproven = b.diagnostics.len(),
+                        "shader validation: bounds"
+                    );
+                }
+                for (check, finding) in report.findings() {
+                    tracing::warn!("shader validation ({check}): {finding}");
                 }
             }
-            Err(e) => tracing::debug!(?e, "shader bounds analysis skipped"),
+            Err(e) => tracing::debug!(?e, "shader validation skipped"),
         }
     }
 

@@ -6,9 +6,11 @@
 //! unknown-range coverage, and the interprocedural cases Slang IR makes possible.
 
 use super::analysis::{reinterpret, wrap, Interval};
-use super::ir::IntTy;
 use super::*;
-use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
+use crate::slang::ir::IntTy;
+use crate::slang::{ShaderChecks, ShaderTarget, SlangCompiler, SlangStage};
+
+const BOUNDS_ONLY: ShaderChecks = ShaderChecks { bounds: true };
 
 fn analyze(source: &str) -> BoundsReport {
     analyze_stage(source, "cs_main", SlangStage::Compute)
@@ -17,8 +19,10 @@ fn analyze(source: &str) -> BoundsReport {
 fn analyze_stage(source: &str, entry: &str, stage: SlangStage) -> BoundsReport {
     let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
     compiler
-        .analyze_bounds(source, &[(entry, stage)], &[], &[], ShaderTarget::Spirv)
+        .validate_shader(source, &[(entry, stage)], &[], &[], ShaderTarget::Spirv, BOUNDS_ONLY)
         .expect("compile + analyze")
+        .bounds
+        .expect("bounds check ran")
 }
 
 /// Analyze with the repository's `shaders/` directory on the search path (for `goldy_exp`).
@@ -29,14 +33,17 @@ fn analyze_with_goldy_exp(source: &str) -> BoundsReport {
         .into_owned();
     let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
     compiler
-        .analyze_bounds(
+        .validate_shader(
             source,
             &[("cs_main", SlangStage::Compute)],
             &[shaders.as_str()],
             &[],
             ShaderTarget::Spirv,
+            BOUNDS_ONLY,
         )
         .expect("compile + analyze")
+        .bounds
+        .expect("bounds check ran")
 }
 
 /// 1-based line of the first source line containing `needle`.
@@ -1192,41 +1199,6 @@ fn diagnostic_display_is_actionable() {
 }
 
 #[test]
-fn malformed_input_is_an_error() {
-    assert!(matches!(
-        analyze_container(&[1, 2, 3], &[]),
-        Err(BoundsAnalysisError::Malformed(_))
-    ));
-    // A RIFF file that is not a Slang module container.
-    let mut riff = b"RIFF".to_vec();
-    riff.extend_from_slice(&4u32.to_le_bytes());
-    riff.extend_from_slice(b"WAVE");
-    assert_eq!(
-        analyze_container(&riff, &[]),
-        Err(BoundsAnalysisError::Malformed("not a Slang module container"))
-    );
-    assert!(matches!(
-        imported_modules(&riff),
-        Err(BoundsAnalysisError::Malformed(_))
-    ));
-}
-
-#[test]
-fn mangled_name_module_component() {
-    assert_eq!(module_of_mangled_name("_ST4core17IBufferDataLayout"), Some("core"));
-    assert_eq!(
-        module_of_mangled_name("_S9goldy_exp23goldy_frame_table_indexp4pi_ui_ui_ui_uu"),
-        Some("goldy_exp")
-    );
-    assert_eq!(
-        module_of_mangled_name("_SV9goldy_exp13GroupThreadId1x"),
-        Some("goldy_exp")
-    );
-    assert_eq!(module_of_mangled_name("_SW4core17DefaultDataLayout"), Some("core"));
-    assert_eq!(module_of_mangled_name("nope"), None);
-}
-
-#[test]
 fn interval_reinterpretation() {
     let u32t = IntTy {
         bits: 32,
@@ -1256,7 +1228,7 @@ fn interval_reinterpretation() {
 }
 
 /// Survey of the repository's `shaders/` corpus: prints one line per entry point plus every
-/// diagnostic. Run with `cargo test --lib bounds_analysis::tests::survey -- --ignored --nocapture`.
+/// diagnostic. Run with `cargo test --lib shader_validation::bounds::tests::survey -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn survey() {
@@ -1283,10 +1255,16 @@ fn survey() {
                 continue;
             }
             let t0 = std::time::Instant::now();
-            let result =
-                compiler.analyze_bounds(&source, &[(entry, stage)], &[search.as_str()], &[], ShaderTarget::Spirv);
+            let result = compiler.validate_shader(
+                &source,
+                &[(entry, stage)],
+                &[search.as_str()],
+                &[],
+                ShaderTarget::Spirv,
+                BOUNDS_ONLY,
+            );
             let ms = t0.elapsed().as_millis();
-            match result {
+            match result.map(|r| r.bounds.expect("bounds check ran")) {
                 Ok(r) => {
                     entries += 1;
                     checked += r.checked_accesses;
@@ -1310,44 +1288,4 @@ fn survey() {
         }
     }
     println!("\nTOTAL entry points={entries} checked={checked} proven_safe={proven} warnings={warnings}");
-}
-
-/// Dump the linked Slang IR the analysis sees for one shader file. Run with
-/// `GOLDY_BOUNDS_DUMP=path/to/shader.slang cargo test --lib bounds_analysis::tests::dump_ir -- --ignored --nocapture`
-/// (compute entry point `cs_main`, `shaders/` on the search path).
-#[test]
-#[ignore]
-fn dump_ir() {
-    let Ok(path) = std::env::var("GOLDY_BOUNDS_DUMP") else {
-        eprintln!("set GOLDY_BOUNDS_DUMP to a .slang file");
-        return;
-    };
-    let shaders = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("shaders")
-        .to_string_lossy()
-        .into_owned();
-    let entry = std::env::var("GOLDY_BOUNDS_DUMP_ENTRY").unwrap_or_else(|_| "cs_main".into());
-    let stage = match entry.as_str() {
-        "vs_main" => SlangStage::Vertex,
-        "fs_main" => SlangStage::Fragment,
-        _ => SlangStage::Compute,
-    };
-    let source = std::fs::read_to_string(&path).expect("read shader");
-    let compiler = SlangCompiler::new().expect("Slang compiler unavailable");
-    let effective = crate::slang::virtual_main::effective_slang_source_for_compile(&source);
-    let defines = SlangCompiler::bindless_defines_for_target(ShaderTarget::Spirv);
-    let container = compiler
-        .compile_ir_container(
-            effective.as_ref(),
-            &[(entry.as_str(), stage)],
-            &[shaders.as_str()],
-            &defines,
-        )
-        .expect("compile");
-    let libraries = compiler.imported_library_containers(&container, &[shaders.as_str()], &defines);
-    let mut modules = ir::Module::parse_container(&container).expect("parse");
-    for lib in &libraries {
-        modules.extend(ir::Module::parse_container(lib).expect("parse library"));
-    }
-    println!("{}", ir::Module::link(modules).dump());
 }

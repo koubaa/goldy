@@ -7,8 +7,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::ir::{op, Inst, IntShape, IntTy, Module, Types};
 use super::{BoundsDiagnostic, BoundsReport};
+use crate::slang::ir::{op, Cfg, Inst, IntShape, IntTy, Module, Types};
 
 /// Vulkan guarantees `SubgroupSize` in `[1, 128]`.
 const MAX_SUBGROUP_SIZE: i128 = 128;
@@ -646,20 +646,6 @@ impl<'m> Analyzer<'m> {
 // Per-function analysis
 // ============================================================================
 
-struct Block {
-    params: Vec<u32>,
-    /// Non-parameter instructions in order; the last one is the terminator.
-    body: Vec<u32>,
-    preds: Vec<usize>,
-    succs: Vec<usize>,
-}
-
-impl Block {
-    fn terminator(&self) -> Option<u32> {
-        self.body.last().copied()
-    }
-}
-
 /// Where a pointer points: a local `var` (or a pointer-typed parameter of this function)
 /// plus the field path taken from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -695,18 +681,11 @@ struct FunctionAnalysis<'a, 'm> {
     m: &'m Module,
     func: u32,
     name: String,
-    blocks: Vec<Block>,
-    block_of: HashMap<u32, usize>,
-    /// Block index of each instruction defined in this function (params included).
-    inst_block: HashMap<u32, usize>,
+    cfg: Cfg,
     /// Entry-block parameters, positionally.
     params: Vec<u32>,
     param_abs: Vec<Abs>,
-    /// Incoming `(pred block, value)` pairs for every non-entry block parameter.
-    phis: HashMap<u32, Vec<(usize, u32)>>,
     subst: HashMap<u32, u32>,
-    idom: Vec<Option<usize>>,
-    rpo: Vec<usize>,
     /// Stores into non-escaping locals, keyed by variable.
     var_stores: HashMap<u32, Vec<(VarPath, Stored)>>,
     escaping_vars: HashSet<u32>,
@@ -731,93 +710,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         subst: HashMap<u32, u32>,
         name: String,
     ) -> Self {
-        let mut blocks: Vec<Block> = Vec::new();
-        let mut block_of = HashMap::new();
-        for b in m.body(func).filter(|&c| m.inst(c).op == op::BLOCK) {
-            let mut params = Vec::new();
-            let mut body = Vec::new();
-            for c in m.body(b) {
-                if m.inst(c).op == op::PARAM {
-                    params.push(c);
-                } else {
-                    body.push(c);
-                }
-            }
-            block_of.insert(b, blocks.len());
-            blocks.push(Block {
-                params,
-                body,
-                preds: Vec::new(),
-                succs: Vec::new(),
-            });
-        }
-        let mut inst_block = HashMap::new();
-        for (bi, b) in blocks.iter().enumerate() {
-            for &p in b.params.iter().chain(b.body.iter()) {
-                inst_block.insert(p, bi);
-            }
-        }
-        // CFG edges and block-parameter incomings.
-        let mut phis: HashMap<u32, Vec<(usize, u32)>> = HashMap::new();
-        let mut edges: Vec<(usize, usize, Vec<u32>)> = Vec::new();
-        for (bi, b) in blocks.iter().enumerate() {
-            let Some(term) = b.terminator() else { continue };
-            let t = m.inst(term);
-            let target = |k: usize| t.operand(k).and_then(|x| block_of.get(&x).copied());
-            match t.op {
-                op::UNCONDITIONAL_BRANCH => {
-                    if let Some(s) = target(0) {
-                        edges.push((bi, s, t.operands[1..].iter().flatten().copied().collect()));
-                    }
-                }
-                op::LOOP => {
-                    if let Some(s) = target(0) {
-                        edges.push((
-                            bi,
-                            s,
-                            t.operands[3.min(t.operands.len())..]
-                                .iter()
-                                .flatten()
-                                .copied()
-                                .collect(),
-                        ));
-                    }
-                }
-                op::CONDITIONAL_BRANCH | op::IF_ELSE => {
-                    for k in 1..=2 {
-                        if let Some(s) = target(k) {
-                            edges.push((bi, s, Vec::new()));
-                        }
-                    }
-                }
-                op::SWITCH => {
-                    if let Some(s) = target(2) {
-                        edges.push((bi, s, Vec::new()));
-                    }
-                    let mut k = 4;
-                    while k < t.operands.len() {
-                        if let Some(s) = target(k) {
-                            edges.push((bi, s, Vec::new()));
-                        }
-                        k += 2;
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (from, to, args) in edges {
-            if !blocks[from].succs.contains(&to) {
-                blocks[from].succs.push(to);
-            }
-            blocks[to].preds.push(from);
-            for (k, &p) in blocks[to].params.iter().enumerate() {
-                if let Some(&a) = args.get(k) {
-                    phis.entry(p).or_default().push((from, a));
-                }
-            }
-        }
-        let (idom, rpo) = dominators(&blocks);
-        let params = blocks.first().map(|b| b.params.clone()).unwrap_or_default();
+        let cfg = Cfg::build(m, func);
+        let params = cfg.params();
         let types = Types { m, subst: Some(&subst) };
         // For pointer parameters this is the abstraction of the pointee at the call site.
         let param_abs: Vec<Abs> = params
@@ -838,15 +732,10 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             m,
             func,
             name,
-            blocks,
-            block_of,
-            inst_block,
+            cfg,
             params,
             param_abs,
-            phis,
             subst,
-            idom,
-            rpo,
             var_stores: HashMap::new(),
             escaping_vars: HashSet::new(),
             value_number: HashMap::new(),
@@ -872,8 +761,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         type Shape = (u32, Option<u32>, Vec<Option<u32>>);
         let mut table: HashMap<Shape, u32> = HashMap::new();
         let mut numbers = HashMap::new();
-        for &bi in &self.rpo {
-            for &i in &self.blocks[bi].body {
+        for &bi in &self.cfg.rpo {
+            for &i in &self.cfg.blocks[bi].body {
                 let inst = self.inst(i);
                 if !is_pure(inst.op) {
                     continue;
@@ -940,7 +829,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     }
 
     fn is_local(&self, id: u32) -> bool {
-        self.inst_block.contains_key(&id)
+        self.cfg.inst_block.contains_key(&id)
     }
 
     // ------------------------------------------------------------------
@@ -987,7 +876,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     fn collect_var_stores(&mut self) {
         let mut stores: HashMap<u32, Vec<(VarPath, Stored)>> = HashMap::new();
         let mut escaping = HashSet::new();
-        for b in &self.blocks {
+        for b in &self.cfg.blocks {
             for &i in &b.body {
                 let inst = self.inst(i);
                 let uses_ptr = |k: usize| inst.operand(k).and_then(|p| self.var_path(p));
@@ -1447,7 +1336,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             }
             return Some(self.param_abs[k].clone());
         }
-        let incoming = self.phis.get(&id)?;
+        let incoming = self.cfg.phis.get(&id)?;
         let mut out: Option<Abs> = None;
         for &(_, v) in incoming {
             if let Some(a) = get(v) {
@@ -1513,8 +1402,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     fn fixpoint(&mut self) {
         let mut all: Vec<u32> = Vec::new();
-        for &bi in &self.rpo {
-            let b = &self.blocks[bi];
+        for &bi in &self.cfg.rpo {
+            let b = &self.cfg.blocks[bi];
             all.extend(b.params.iter().copied());
             all.extend(b.body.iter().copied());
         }
@@ -1570,12 +1459,12 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     /// One transfer step for `id` from the current `self.ranges`; `None` is bottom.
     fn recompute(&self, id: u32, force_top: bool) -> Option<Abs> {
-        if let Some(incoming) = self.phis.get(&id) {
+        if let Some(incoming) = self.cfg.phis.get(&id) {
             let shape = self.int_shape_of(id);
             if force_top {
                 return Some(shape.map_or(Abs::Opaque, Abs::top));
             }
-            let block = self.inst_block[&id];
+            let block = self.cfg.inst_block[&id];
             return self.phi_incoming_join(id, block, incoming);
         }
         let mut get = |o: u32| self.lookup(o);
@@ -1659,11 +1548,11 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
             return;
         }
         let cond = self.resolve(cond);
-        if let Some(incoming) = self.phis.get(&cond) {
+        if let Some(incoming) = self.cfg.phis.get(&cond) {
             // `a && b` is lowered to control flow with a bool block parameter. It is true only
             // via an incoming edge whose value can be true; with exactly one such edge, that
             // edge's condition and value both hold.
-            let block = self.inst_block[&cond];
+            let block = self.cfg.inst_block[&cond];
             let mut candidates = Vec::new();
             for &(pred, v) in incoming {
                 let v = self.resolve(v);
@@ -1728,11 +1617,11 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
 
     /// Facts from `pred`'s terminator for the edge `pred -> succ`.
     fn branch_facts(&self, pred: usize, succ: usize, out: &mut Vec<Fact>) {
-        let Some(term) = self.blocks[pred].terminator() else {
+        let Some(term) = self.cfg.blocks[pred].terminator() else {
             return;
         };
         let t = self.inst(term);
-        let target = |k: usize| t.operand(k).and_then(|x| self.block_of.get(&x).copied());
+        let target = |k: usize| t.operand(k).and_then(|x| self.cfg.block_of.get(&x).copied());
         match t.op {
             op::CONDITIONAL_BRANCH | op::IF_ELSE => {
                 let (Some(c), Some(tb), Some(fb)) = (t.operand(0), target(1), target(2)) else {
@@ -1788,10 +1677,10 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         let mut facts = Vec::new();
         let mut cur = Some(block);
         while let Some(b) = cur {
-            if let [p] = self.blocks[b].preds[..] {
+            if let [p] = self.cfg.blocks[b].preds[..] {
                 self.branch_facts(p, b, &mut facts);
             }
-            cur = self.idom[b];
+            cur = self.cfg.idom[b];
         }
         facts
     }
@@ -1873,8 +1762,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
         ctx.visiting.push(id);
         let mut base = global.clone();
         let inst = self.inst(id);
-        if let Some(incoming) = self.phis.get(&id) {
-            let block = self.inst_block[&id];
+        if let Some(incoming) = self.cfg.phis.get(&id) {
+            let block = self.cfg.inst_block[&id];
             let mut out: Option<Abs> = None;
             for &(pred, v) in incoming {
                 let mut edge = facts.to_vec();
@@ -1997,7 +1886,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     /// Join of every `return_val` operand, evaluated under the facts of its block.
     fn return_range(&self) -> Abs {
         let mut out: Option<Abs> = None;
-        for (bi, b) in self.blocks.iter().enumerate() {
+        for (bi, b) in self.cfg.blocks.iter().enumerate() {
             let Some(term) = b.terminator() else { continue };
             let t = self.inst(term);
             if t.op != op::RETURN_VAL {
@@ -2015,8 +1904,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     /// Re-analyze every callee in the argument ranges that hold at its call site, reporting
     /// the callee's accesses under `path + callee`.
     fn check_calls(&self, path: &[String]) {
-        for &bi in &self.rpo {
-            for &i in &self.blocks[bi].body {
+        for &bi in &self.cfg.rpo {
+            for &i in &self.cfg.blocks[bi].body {
                 let inst = self.inst(i);
                 if inst.op != op::CALL {
                     continue;
@@ -2156,7 +2045,7 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
                 continue;
             }
             let inst = self.inst(id);
-            if let Some(incoming) = self.phis.get(&id) {
+            if let Some(incoming) = self.cfg.phis.get(&id) {
                 if self.is_widened(id) {
                     push("a loop-carried value the analysis could not bound".into(), &mut out);
                 }
@@ -2332,8 +2221,8 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     }
 
     fn check_accesses(&self, path: &[String]) {
-        for &bi in &self.rpo {
-            for &i in &self.blocks[bi].body {
+        for &bi in &self.cfg.rpo {
+            for &i in &self.cfg.blocks[bi].body {
                 let inst = self.inst(i);
                 let (base, idx) = match inst.op {
                     op::GET_ELEMENT_PTR | op::GET_ELEMENT => match (inst.operand(0), inst.operand(1)) {
@@ -2429,75 +2318,4 @@ fn is_pure(opcode: u32) -> bool {
             | op::BIT_CAST
             | op::CAST_FLOAT_TO_INT
     )
-}
-
-// ============================================================================
-// Dominators (Cooper, Harvey & Kennedy)
-// ============================================================================
-
-fn dominators(blocks: &[Block]) -> (Vec<Option<usize>>, Vec<usize>) {
-    let n = blocks.len();
-    let mut idom: Vec<Option<usize>> = vec![None; n];
-    if n == 0 {
-        return (idom, Vec::new());
-    }
-    let mut post: Vec<usize> = Vec::with_capacity(n);
-    let mut visited = vec![false; n];
-    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
-    visited[0] = true;
-    while let Some(top) = stack.last_mut() {
-        let b = top.0;
-        let succs = &blocks[b].succs;
-        if top.1 < succs.len() {
-            let s = succs[top.1];
-            top.1 += 1;
-            if !visited[s] {
-                visited[s] = true;
-                stack.push((s, 0));
-            }
-        } else {
-            post.push(b);
-            stack.pop();
-        }
-    }
-    let rpo: Vec<usize> = post.iter().rev().copied().collect();
-    let mut rpo_index = vec![usize::MAX; n];
-    for (i, &b) in rpo.iter().enumerate() {
-        rpo_index[b] = i;
-    }
-    idom[0] = Some(0);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo.iter().skip(1) {
-            let mut new_idom: Option<usize> = None;
-            for &p in &blocks[b].preds {
-                if idom[p].is_none() {
-                    continue;
-                }
-                new_idom = Some(match new_idom {
-                    None => p,
-                    Some(cur) => intersect(&idom, &rpo_index, p, cur),
-                });
-            }
-            if new_idom.is_some() && idom[b] != new_idom {
-                idom[b] = new_idom;
-                changed = true;
-            }
-        }
-    }
-    idom[0] = None;
-    (idom, rpo)
-}
-
-fn intersect(idom: &[Option<usize>], rpo_index: &[usize], mut a: usize, mut b: usize) -> usize {
-    while a != b {
-        while rpo_index[a] > rpo_index[b] {
-            a = idom[a].unwrap_or(0);
-        }
-        while rpo_index[b] > rpo_index[a] {
-            b = idom[b].unwrap_or(0);
-        }
-    }
-    a
 }

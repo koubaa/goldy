@@ -3,7 +3,7 @@
 //! carrying its own layout. Values are navigated with the embedded layout, so the reader
 //! validates the shape it expects instead of assuming field offsets.
 
-use super::BoundsAnalysisError;
+use super::IrError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -97,26 +97,26 @@ const MAGIC: &[u8; 5] = b"\xABfoss";
 const HEADER_SIZE: usize = 32;
 const MAX_LAYOUT_DEPTH: u32 = 32;
 
-fn malformed(what: &'static str) -> BoundsAnalysisError {
-    BoundsAnalysisError::Malformed(what)
+fn malformed(what: &'static str) -> IrError {
+    IrError::Malformed(what)
 }
 
 impl<'a> Fossil<'a> {
-    pub fn new(bytes: &'a [u8]) -> Result<Fossil<'a>, BoundsAnalysisError> {
+    pub fn new(bytes: &'a [u8]) -> Result<Fossil<'a>, IrError> {
         if bytes.len() < HEADER_SIZE || &bytes[..5] != MAGIC {
             return Err(malformed("fossil blob header"));
         }
         Ok(Fossil { bytes })
     }
 
-    fn u32(&self, off: usize) -> Result<u32, BoundsAnalysisError> {
+    fn u32(&self, off: usize) -> Result<u32, IrError> {
         self.bytes
             .get(off..off + 4)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
             .ok_or(malformed("fossil read past end"))
     }
 
-    fn u64(&self, off: usize) -> Result<u64, BoundsAnalysisError> {
+    fn u64(&self, off: usize) -> Result<u64, IrError> {
         self.bytes
             .get(off..off + 8)
             .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
@@ -124,7 +124,7 @@ impl<'a> Fossil<'a> {
     }
 
     /// Relative pointer at `off`; `None` when null.
-    fn rel(&self, off: usize) -> Result<Option<usize>, BoundsAnalysisError> {
+    fn rel(&self, off: usize) -> Result<Option<usize>, IrError> {
         let r = self.u32(off)? as i32;
         if r == 0 {
             return Ok(None);
@@ -136,7 +136,7 @@ impl<'a> Fossil<'a> {
         Ok(Some(t as usize))
     }
 
-    fn layout_at(&self, off: Option<usize>, depth: u32) -> Result<Option<Layout>, BoundsAnalysisError> {
+    fn layout_at(&self, off: Option<usize>, depth: u32) -> Result<Option<Layout>, IrError> {
         let Some(off) = off else { return Ok(None) };
         if depth > MAX_LAYOUT_DEPTH {
             return Err(malformed("fossil layout nesting too deep"));
@@ -173,7 +173,7 @@ impl<'a> Fossil<'a> {
     }
 
     /// The root value (always a variant) and its layout.
-    pub fn root(&'a self) -> Result<(Layout, usize), BoundsAnalysisError> {
+    pub fn root(&'a self) -> Result<(Layout, usize), IrError> {
         let root = self.rel(28)?.ok_or(malformed("fossil root pointer"))?;
         if root < 4 {
             return Err(malformed("fossil root variant"));
@@ -200,7 +200,7 @@ impl<'a, 'l> Val<'a, 'l> {
         self.layout.kind
     }
 
-    fn expect(&self, kinds: &[Kind], what: &'static str) -> Result<(), BoundsAnalysisError> {
+    fn expect(&self, kinds: &[Kind], what: &'static str) -> Result<(), IrError> {
         if kinds.contains(&self.layout.kind) {
             Ok(())
         } else {
@@ -209,7 +209,7 @@ impl<'a, 'l> Val<'a, 'l> {
     }
 
     /// Field `i` of a struct/tuple, located inline.
-    pub fn field(&self, i: usize) -> Result<Val<'a, 'l>, BoundsAnalysisError> {
+    pub fn field(&self, i: usize) -> Result<Val<'a, 'l>, IrError> {
         self.expect(&[Kind::Struct, Kind::Tuple], "fossil: expected record")?;
         let (layout, off) = self
             .layout
@@ -232,7 +232,7 @@ impl<'a, 'l> Val<'a, 'l> {
     /// Follow a pointer or optional. `None` when null. The target holds the element: object
     /// kinds (strings, arrays, ...) as the object itself, optionals transparently as their
     /// content, everything else inline.
-    pub fn deref(&self) -> Result<Option<Val<'a, 'l>>, BoundsAnalysisError> {
+    pub fn deref(&self) -> Result<Option<Val<'a, 'l>>, IrError> {
         self.expect(&[Kind::Ptr, Kind::OptionalObj], "fossil: expected pointer")?;
         let mut elem = self
             .layout
@@ -259,7 +259,7 @@ impl<'a, 'l> Val<'a, 'l> {
     }
 
     /// Address of the object a string/array value refers to, or `None` for an empty one.
-    fn object(&self) -> Result<Option<usize>, BoundsAnalysisError> {
+    fn object(&self) -> Result<Option<usize>, IrError> {
         if !self.layout.kind.is_object() {
             return Err(malformed("fossil: expected object"));
         }
@@ -271,7 +271,7 @@ impl<'a, 'l> Val<'a, 'l> {
     }
 
     /// Bytes of a string.
-    pub fn string(&self) -> Result<&'a [u8], BoundsAnalysisError> {
+    pub fn string(&self) -> Result<&'a [u8], IrError> {
         self.expect(&[Kind::StringObj], "fossil: expected string")?;
         let Some(t) = self.object()? else {
             return Ok(&[]);
@@ -284,7 +284,7 @@ impl<'a, 'l> Val<'a, 'l> {
     }
 
     /// Elements of an array.
-    pub fn array(&self) -> Result<Array<'a, 'l>, BoundsAnalysisError> {
+    pub fn array(&self) -> Result<Array<'a, 'l>, IrError> {
         self.expect(&[Kind::ArrayObj], "fossil: expected array")?;
         let Some(t) = self.object()? else {
             return Ok(Array {
@@ -316,17 +316,17 @@ impl<'a, 'l> Val<'a, 'l> {
         })
     }
 
-    pub fn u32(&self) -> Result<u32, BoundsAnalysisError> {
+    pub fn u32(&self) -> Result<u32, IrError> {
         self.expect(&[Kind::UInt32, Kind::Int32], "fossil: expected 32-bit integer")?;
         self.f.u32(self.off)
     }
 
-    pub fn i64(&self) -> Result<i64, BoundsAnalysisError> {
+    pub fn i64(&self) -> Result<i64, IrError> {
         self.expect(&[Kind::Int64, Kind::UInt64], "fossil: expected 64-bit integer")?;
         Ok(self.f.u64(self.off)? as i64)
     }
 
-    pub fn u64(&self) -> Result<u64, BoundsAnalysisError> {
+    pub fn u64(&self) -> Result<u64, IrError> {
         self.expect(&[Kind::Int64, Kind::UInt64], "fossil: expected 64-bit integer")?;
         self.f.u64(self.off)
     }
@@ -345,7 +345,7 @@ impl<'a, 'l> Array<'a, 'l> {
         self.len
     }
 
-    pub fn get(&self, i: usize) -> Result<Val<'a, 'l>, BoundsAnalysisError> {
+    pub fn get(&self, i: usize) -> Result<Val<'a, 'l>, IrError> {
         if i >= self.len {
             return Err(malformed("fossil: array index"));
         }
@@ -359,7 +359,7 @@ impl<'a, 'l> Array<'a, 'l> {
     }
 
     /// Contiguous bytes of a byte array.
-    pub fn bytes(&self) -> Result<&'a [u8], BoundsAnalysisError> {
+    pub fn bytes(&self) -> Result<&'a [u8], IrError> {
         if self.stride != 1 && self.len != 0 {
             return Err(malformed("fossil: expected byte array"));
         }
