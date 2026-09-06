@@ -258,14 +258,13 @@ fn alloc_mapped(
     .map_err(|e| GoldyError::Backend(anyhow::anyhow!("CreateCommittedResource(buffer): {e}")))?;
     let resource = resource.ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("null mapped buffer")))?;
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-    let cpu_no_read = D3D12_RANGE { Begin: 0, End: 0 };
-    let read_range = if heap == D3D12_HEAP_TYPE_UPLOAD {
-        Some(&cpu_no_read)
+    let map_hr = if heap == D3D12_HEAP_TYPE_UPLOAD {
+        let cpu_no_read = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { resource.Map(0, Some(&cpu_no_read), Some(&mut mapped)) }
     } else {
-        None
+        unsafe { resource.Map(0, None, Some(&mut mapped)) }
     };
-    unsafe { resource.Map(0, read_range, Some(&mut mapped)) }
-        .map_err(|e| GoldyError::Backend(anyhow::anyhow!("Map: {e}")))?;
+    map_hr.map_err(|e| GoldyError::Backend(anyhow::anyhow!("Map: {e}")))?;
     Ok(MappedBuffer {
         resource,
         ptr: mapped as *mut u8,
