@@ -10,18 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Static shader bounds analysis** (`GOLDY_VALIDATION=bounds`, also part of
-  `all`) — an opt-in interval analysis over Slang-generated SPIR-V that
-  reports every dynamic index into a fixed-length array / vector it cannot
-  prove to satisfy `0 <= index < length`, with the Slang source location and a
-  note on what the index depends on (`SV_VertexID`, `WaveGetLaneCount()`, a
-  buffer load, a float conversion, ...). Understands dominating guards
+  `all`) — an opt-in interval analysis over Slang's front-end IR that reports
+  every dynamic index into a fixed-length array / vector / matrix it cannot
+  prove to satisfy `0 <= index < length`, with the Slang source location, the
+  call path from the entry point, and a note on what the index depends on
+  (`SV_VertexID`, `WaveGetLaneCount()`, a buffer load, a float conversion,
+  ...). Interprocedural: helpers, generics (per specialization, including
+  `let N : int` array lengths), interface dispatch through witness tables and
+  `out`/`inout` parameters are analyzed in their calling context, across
+  `import`ed modules (`goldy_exp`). Understands dominating guards
   (`if (i >= 0)`, `&&` conjunctions), clamps (`max`/`min`/`&`/`%`), workgroup
   scan patterns, padded-dispatch early-outs and counted loops; flags the eager
-  `select(cond, arr[i], x)` form. Warnings only; never fails a compile. Public
-  entry point: `SlangCompiler::analyze_spirv_bounds` → `BoundsReport`. See
-  `docs/src/design/shader-bounds-analysis.md` for the integration decision
-  (SPIR-V in Goldy vs. Slang IR upstream), the corpus evaluation over
-  `shaders/`, and known limitations.
+  `select(cond, arr[i], x)` form. Runs regardless of the shader target and
+  optimization level. Warnings only; never fails a compile. Public entry point:
+  `SlangCompiler::analyze_bounds` → `BoundsReport` /
+  `goldy::slang::bounds_analysis::analyze_container` for a `.slang-module`
+  blob. See `docs/src/design/shader-bounds-analysis.md` for the integration
+  decision (Slang IR vs. SPIR-V), the corpus evaluation over `shaders/`, and
+  known limitations.
 
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead

@@ -18,8 +18,8 @@
 //!     plus graph-level lifetime checks (Accel built in this scheme before TraceRay /
 //!     RayQuery). Cycle detection, mesh/draw mix-ups, and BLAS/TLAS misuse always run.
 //!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
-//!   - `bounds` / `shader_bounds` — static bounds analysis of dynamic array indices in
-//!     Slang-generated SPIR-V (warnings only; see `docs/src/design/shader-bounds-analysis.md`)
+//!   - `bounds` / `shader_bounds` — static bounds analysis of dynamic array indices over
+//!     Slang IR (warnings only; see `docs/src/design/shader-bounds-analysis.md`)
 //!   - `all` — layout, GPU API, timeline, scheme, host_access, and bounds
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
@@ -145,7 +145,7 @@ pub fn validation_fatal_enabled() -> bool {
     env_truthy("GOLDY_VALIDATION_FATAL")
 }
 
-/// Static bounds analysis of dynamic array indices in Slang-generated SPIR-V
+/// Static bounds analysis of dynamic array indices over Slang IR
 /// (`GOLDY_VALIDATION=bounds`). Warnings only; never fails a compile.
 #[must_use]
 pub fn bounds_validation_enabled() -> bool {
