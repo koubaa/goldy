@@ -1,7 +1,7 @@
 //! Vulkan as a foreign graphics object: no Goldy device, verbs under one lock.
 //!
-//! Creates its own `vkInstance` / `vkDevice` (serialised with
-//! [`crate::backend::vulkan::VK_INSTANCE_LOCK`]). Offscreen surfaces hold a
+//! Creates its own `vkInstance` / `vkDevice` (serialised with the Goldy Vulkan
+//! backend's process-wide `vkCreateInstance` lock). Offscreen surfaces hold a
 //! transfer-dst image plus persistently mapped staging. [`ForeignSurface::blit`]
 //! copies host pixels through `vkCmdCopyBufferToImage` and a copy-back into a
 //! host-visible readback so [`ForeignSurface::snapshot`] can assert GPU contents.
