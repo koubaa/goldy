@@ -104,10 +104,10 @@ ERROR-severity messages then surface as `Err` from submit/wait/create and panic 
 | `GOLDY_VALIDATION=layout,api` or `layout api` or `layout;api` | Layout plus graphics API validation (separators: comma, semicolon, or whitespace). |
 | `GOLDY_VALIDATION=timeline` | WSI timeline invariants: post-wait semaphore counter check in Vulkan `acquire()`. |
 | `GOLDY_VALIDATION=scheme` or `readback` | Retained-scheme grant readback invariants (frame/grant pairing, staging pool checks). |
-| `GOLDY_VALIDATION=bounds` | Static bounds analysis of dynamic array indices over Slang IR (see [Static shader bounds analysis](#static-shader-bounds-analysis-goldy_validationbounds)). |
-| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme + host_access + bounds (same as listing those tokens). |
+| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme + host_access (same as listing those tokens). Static shader checks are a separate switch, see below. |
 | `GOLDY_VALIDATION_FATAL=1` | Separate switch: with GPU API validation on, Vulkan ERROR messages fail Goldy `Result` calls and panic on backend drop. |
 | `GOLDY_VALIDATION=1` / `true` / `yes` | **GPU API only** — does **not** enable layout checks (keeps dispatch-time layout work off unless you opt in). |
+| `GOLDY_SHADER_VALIDATION=bounds` / `all` / `all,-bounds` | Static checks over Slang IR at shader compile time (see [Static shader validation](#static-shader-validation-goldy_shader_validation)). Not implied by `GOLDY_VALIDATION=all`. |
 
 The **`api`** token selects Goldy’s graphics-API validation path (Vulkan validation layer + `VK_EXT_debug_utils` where built; Metal `MTL_SHADER_VALIDATION` when applicable). For Vulkan you can still set **`VK_INSTANCE_LAYERS`**, **`VK_LAYER_PATH`**, etc. yourself if you prefer the loader directly. **`GOLDY_VALIDATE_LAYOUTS=1`** still works unchanged and is equivalent to enabling the layout family only.
 
@@ -180,13 +180,17 @@ This is **off by default** (no per-dispatch cost). Turn it on when results look 
 
 The check compares the buffer’s recorded stride (from `Buffer::with_data`, `with_bytes_stride`, `new_with_stride`, etc.) against Slang’s reflected size of `T` for each `goldy_*<T>(slot)` call. If reflection cannot resolve a type name, that slot is skipped with a warning in the `goldy::slang` tracing target.
 
-### Static shader bounds analysis (`GOLDY_VALIDATION=bounds`)
+### Static shader validation (`GOLDY_SHADER_VALIDATION`)
 
-Slang rejects constant out-of-bounds indices, but `links[link]` with a dynamic `link` is only "checked" by the GPU — usually as garbage, a hang, or a device loss. With `GOLDY_VALIDATION=bounds` Goldy compiles each shader a second time to Slang's front-end IR (with debug info, plus the modules it imports), runs an interval analysis over it, and logs every dynamic index into a fixed-length array / vector / matrix it cannot prove to satisfy `0 <= index < length`:
+`GOLDY_SHADER_VALIDATION` selects static checks that run over Slang's front-end IR when a shader is compiled. It is a separate variable from `GOLDY_VALIDATION`, and `GOLDY_VALIDATION=all` does not turn it on: the runtime categories are cheap checks on Goldy's own invariants, while these compile every shader a second time to IR and analyze it whole-program (the cost scales with shader size), and a finding means "not proven" rather than "wrong". The value is a list of check names processed left to right — `all` (or `1`/`true`/`yes`), a name such as `bounds`, `-name` to exclude one (`all,-bounds`), `none`. Findings never fail a compile; each is logged as `shader validation (<check>): ...`.
+
+#### `bounds` — static bounds analysis
+
+Slang rejects constant out-of-bounds indices, but `links[link]` with a dynamic `link` is only "checked" by the GPU — usually as garbage, a hang, or a device loss. With `GOLDY_SHADER_VALIDATION=bounds` Goldy compiles each shader to Slang's front-end IR (with debug info, plus the modules it imports), runs an interval analysis over it, and logs every dynamic index into a fixed-length array / vector / matrix it cannot prove to satisfy `0 <= index < length`:
 
 ```text
-WARN goldy::slang: shader bounds: possible out-of-bounds index into `links[256]`: index range [-2, 253] (may be negative) (depends on SV_GroupThreadID) at shader.slang:11:1 in `cs_main`
-WARN goldy::slang: shader bounds: possible out-of-bounds index into `scratch_wave_totals[32]`: index range [0, 255] (may exceed 31) (depends on the result of `WaveGetLaneCount()`) at shaders/goldy_exp/collectives.slang:123:28 in `workgroup_inclusive_scan_wave_uint_sum` (called from cs_main -> _goldy_user_cs_main)
+WARN goldy::slang: shader validation (bounds): possible out-of-bounds index into `links[256]`: index range [-2, 253] (may be negative) (depends on SV_GroupThreadID) at shader.slang:11:1 in `cs_main`
+WARN goldy::slang: shader validation (bounds): possible out-of-bounds index into `scratch_wave_totals[32]`: index range [0, 255] (may exceed 31) (depends on the result of `WaveGetLaneCount()`) at shaders/goldy_exp/collectives.slang:123:28 in `workgroup_inclusive_scan_wave_uint_sum` (called from cs_main -> _goldy_user_cs_main)
 ```
 
 The analysis is interprocedural: helpers, generics (per specialization) and interface methods are analyzed with the argument ranges of each call site, so a finding inside a library function names the call path that reaches it.
@@ -203,7 +207,7 @@ Typical causes and fixes:
 | `depends on groupshared memory` / `a buffer load` | The index was read back from memory the analysis does not model. | Clamp after the load. |
 | `depends on the result of calling `f` (no body available)` | `f` comes from a module whose source was not found on the search paths, or is a target intrinsic. | Make the module's `.slang` file reachable from a search path, or clamp the result. |
 
-Findings are warnings only and are logged once per distinct compile (also on shader disk-cache hits), whatever the shader target and optimization level. `GOLDY_DUMP_SHADERS` additionally writes the IR container it analyzed as `{entry}_bounds.slang-module`; `cargo test --lib bounds_analysis::tests::dump_ir -- --ignored --nocapture` with `GOLDY_BOUNDS_DUMP=path/to/shader.slang` prints the linked IR as text, and `cargo test --lib bounds_analysis::tests::survey -- --ignored --nocapture` re-runs the corpus evaluation over `shaders/`. Design, corpus evaluation, and limitations: [docs/src/design/shader-bounds-analysis.md](docs/src/design/shader-bounds-analysis.md).
+Findings are warnings only and are logged once per distinct compile (also on shader disk-cache hits), whatever the shader target and optimization level. `GOLDY_DUMP_SHADERS` additionally writes the IR container the checks analyzed as `{entry}_ir.slang-module`; `cargo test --lib slang::ir::tests::dump_ir -- --ignored --nocapture` with `GOLDY_IR_DUMP=path/to/shader.slang` prints the linked IR as text, and `cargo test --lib shader_validation::bounds::tests::survey -- --ignored --nocapture` re-runs the corpus evaluation over `shaders/`. Design, corpus evaluation, and limitations: [docs/src/design/shader-bounds-analysis.md](docs/src/design/shader-bounds-analysis.md).
 
 ## Inspecting Compiled Shader Assembly
 
@@ -223,7 +227,7 @@ GOLDY_DUMP_SHADERS=/tmp/shaders cargo run --example game_of_life
 This writes compiled bytecode for each shader entry point:
 - `{entry}_dx12.dxil` - DirectX 12 (DXIL)
 - `{entry}_vulkan.spv` - Vulkan (SPIR-V)
-- `{entry}_bounds.slang-module` - Slang IR container (with debug info) analyzed by `GOLDY_VALIDATION=bounds`
+- `{entry}_ir.slang-module` - Slang IR container (with debug info) analyzed by `GOLDY_SHADER_VALIDATION`
 - `{idx}_{entry}.metal` - Metal (MSL)
 - `{entry}_h{handle}_{spec}_cuda.cu` - CUDA C++ generated by Slang
 - `{entry}_h{handle}_{spec}_cuda.ptx` - PTX loaded by the CUDA driver (`cuModuleLoadData`)

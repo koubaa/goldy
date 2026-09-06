@@ -1,7 +1,7 @@
 # Static Shader Bounds Analysis
 
-> Status: prototype, opt-in (`GOLDY_VALIDATION=bounds`). Warnings only; a
-> finding never fails a compile. Tracking issue:
+> Status: prototype, opt-in (`GOLDY_SHADER_VALIDATION=bounds`). Warnings only;
+> a finding never fails a compile. Tracking issue:
 > [#290](https://github.com/koubaa/goldy/issues/290).
 
 Slang rejects *constant* out-of-bounds array indices at compile time, but a
@@ -111,10 +111,25 @@ analysis; it runs for every target.
 
 ## Analysis model
 
-Implemented in `src/slang/bounds_analysis.rs` (`analyze_container`) with the
-reader in `bounds_analysis/{riff,fossil,ir,source_loc}.rs` and the analysis
-in `bounds_analysis/analysis.rs`; `SlangCompiler::analyze_bounds` drives the
-compiles.
+The code is split into a rule-agnostic IR toolkit and the rules that use it:
+
+- `src/slang/ir/` — the reader and everything a static check over Slang IR
+  needs regardless of what it checks: `riff.rs` / `fossil.rs` (container and
+  serialization format), `module.rs` (instruction tree, decorations, name
+  hints, types with generic substitution, linking a translation unit with its
+  imports into one instruction space), `source_loc.rs` (`Sdeb` debug chunks),
+  `cfg.rs` (per-function CFG, block-parameter incomings, dominators).
+- `src/slang/shader_validation/` — the checks. `mod.rs` parses
+  `GOLDY_SHADER_VALIDATION` into a `ShaderChecks` set and runs the selected
+  rules over a linked module (`validate`); `bounds/` is the rule described
+  here (`bounds/analysis.rs` holds the interval domain and the analysis).
+- `SlangCompiler::validate_shader` drives the compiles (the translation unit
+  and, transitively, the modules it imports) and `SlangCompiler` logs the
+  findings once per distinct compile.
+
+Adding another check means another rule module under `shader_validation/`, a
+flag in `ShaderChecks`, and a field in `ShaderValidationReport`; the IR
+toolkit does not change.
 
 1. **Values.** Every integer scalar/vector gets an interval per lane; structs
    are tracked field by field; everything else is opaque. Entry-point
@@ -155,8 +170,8 @@ the `SV_DispatchThreadID` the wrapper built it from.
 
 ## What the prototype proves and reports
 
-Covered by `src/slang/bounds_analysis/tests.rs` (every case compiles real
-Slang):
+Covered by `src/slang/shader_validation/bounds/tests.rs` (every case
+compiles real Slang):
 
 | Pattern | Result |
 |---------|--------|
@@ -212,7 +227,7 @@ differ only because the front-end IR has one access per source expression
 per entry point including the extra compiles.
 
 Re-run with
-`cargo test --lib bounds_analysis::tests::survey -- --ignored --nocapture`.
+`cargo test --lib shader_validation::bounds::tests::survey -- --ignored --nocapture`.
 
 ## Known limitations
 
@@ -266,32 +281,40 @@ with an eye to upstreaming the *generic* pieces.
 
 ## Running it
 
+Static shader checks have their own variable, `GOLDY_SHADER_VALIDATION`, and
+are deliberately *not* part of `GOLDY_VALIDATION=all`: the runtime categories
+there are cheap invariant checks on Goldy's own state, whereas this is a
+second compile plus a whole-program analysis per shader whose findings mean
+"not proven", not "wrong". The value is a list of check names processed left
+to right: `all`, `bounds`, `-bounds` (exclude), `none`.
+
 ```bash
 # Warn on every dynamic index the analysis cannot prove in bounds
-GOLDY_VALIDATION=bounds cargo run --features examples --example metaballs
-RUST_LOG=goldy::slang=debug GOLDY_VALIDATION=bounds cargo test
+GOLDY_SHADER_VALIDATION=bounds cargo run --features examples --example metaballs
+RUST_LOG=goldy::slang=debug GOLDY_SHADER_VALIDATION=all cargo test
 
-# Included in `all`
-GOLDY_VALIDATION=all cargo test
+# Runtime validation and static checks are independent
+GOLDY_VALIDATION=all GOLDY_SHADER_VALIDATION=all cargo test
 
-# Keep the IR container the analysis looked at
-GOLDY_DUMP_SHADERS=/tmp/shaders GOLDY_VALIDATION=bounds cargo run ...   # {entry}_bounds.slang-module
+# Keep the IR container the checks looked at
+GOLDY_DUMP_SHADERS=/tmp/shaders GOLDY_SHADER_VALIDATION=bounds cargo run ...   # {entry}_ir.slang-module
 
 # Print the linked IR as text / re-run the corpus survey
-GOLDY_BOUNDS_DUMP=shaders/test_collectives.slang cargo test --lib bounds_analysis::tests::dump_ir -- --ignored --nocapture
-cargo test --lib bounds_analysis::tests::survey -- --ignored --nocapture
+GOLDY_IR_DUMP=shaders/test_collectives.slang cargo test --lib slang::ir::tests::dump_ir -- --ignored --nocapture
+cargo test --lib shader_validation::bounds::tests::survey -- --ignored --nocapture
 ```
 
 Findings are logged once per distinct compile (including shader disk-cache
-hits) at `warn` under the `goldy::slang` target:
+hits) at `warn` under the `goldy::slang` target, tagged with the check:
 
 ```text
-shader bounds: possible out-of-bounds index into `links[256]`: index range [-2, 253] (may be negative) (depends on SV_GroupThreadID) at shader.slang:11:1 in `cs_main`
-shader bounds: possible out-of-bounds index into `scratch_wave_totals[32]`: index range [0, 255] (may exceed 31) (depends on the result of `WaveGetLaneCount()`) at shaders/goldy_exp/collectives.slang:123:28 in `workgroup_inclusive_scan_wave_uint_sum` (called from cs_main -> _goldy_user_cs_main)
+shader validation (bounds): possible out-of-bounds index into `links[256]`: index range [-2, 253] (may be negative) (depends on SV_GroupThreadID) at shader.slang:11:1 in `cs_main`
+shader validation (bounds): possible out-of-bounds index into `scratch_wave_totals[32]`: index range [0, 255] (may exceed 31) (depends on the result of `WaveGetLaneCount()`) at shaders/goldy_exp/collectives.slang:123:28 in `workgroup_inclusive_scan_wave_uint_sum` (called from cs_main -> _goldy_user_cs_main)
 ```
 
-Programmatic access: `SlangCompiler::analyze_bounds` compiles a shader (and
-the modules it imports) and returns a `BoundsReport` with `checked_accesses`,
-`proven_safe` and the list of `BoundsDiagnostic`s;
-`goldy::slang::bounds_analysis::analyze_container` runs the analysis on
+Programmatic access: `SlangCompiler::validate_shader(.., ShaderChecks)`
+compiles a shader (and the modules it imports) and returns a
+`ShaderValidationReport`; its `bounds` field is the `BoundsReport` with
+`checked_accesses`, `proven_safe` and the list of `BoundsDiagnostic`s.
+`goldy::slang::shader_validation::validate` runs the checks on
 `.slang-module` bytes produced elsewhere.

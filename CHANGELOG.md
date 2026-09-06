@@ -9,8 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Static shader bounds analysis** (`GOLDY_VALIDATION=bounds`, also part of
-  `all`) — an opt-in interval analysis over Slang's front-end IR that reports
+- **Static shader validation** (`GOLDY_SHADER_VALIDATION`) — opt-in static
+  checks over Slang's front-end IR, run at shader compile time. A separate
+  variable from `GOLDY_VALIDATION` and *not* implied by `GOLDY_VALIDATION=all`:
+  these cost a second compile plus a whole-program analysis per shader and
+  report "not proven" rather than invariant violations. Value grammar:
+  `all`, a check name (`bounds`), `-name` to exclude (`all,-bounds`). The
+  reader and rule-agnostic pieces (RIFF/fossil container, instruction tree,
+  linking, debug info, CFG/dominators) live in `goldy::slang::ir`; each check
+  is a rule under `goldy::slang::shader_validation`. Public entry points:
+  `SlangCompiler::validate_shader(.., ShaderChecks)` →
+  `ShaderValidationReport`, and `shader_validation::validate` for
+  `.slang-module` bytes produced elsewhere.
+- **Bounds check** (`GOLDY_SHADER_VALIDATION=bounds`) — the first rule: an
+  interval analysis over Slang's front-end IR that reports
   every dynamic index into a fixed-length array / vector / matrix it cannot
   prove to satisfy `0 <= index < length`, with the Slang source location, the
   call path from the entry point, and a note on what the index depends on
@@ -22,12 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`if (i >= 0)`, `&&` conjunctions), clamps (`max`/`min`/`&`/`%`), workgroup
   scan patterns, padded-dispatch early-outs and counted loops; flags the eager
   `select(cond, arr[i], x)` form. Runs regardless of the shader target and
-  optimization level. Warnings only; never fails a compile. Public entry point:
-  `SlangCompiler::analyze_bounds` → `BoundsReport` /
-  `goldy::slang::bounds_analysis::analyze_container` for a `.slang-module`
-  blob. See `docs/src/design/shader-bounds-analysis.md` for the integration
-  decision (Slang IR vs. SPIR-V), the corpus evaluation over `shaders/`, and
-  known limitations.
+  optimization level. Warnings only; never fails a compile. Report type:
+  `BoundsReport` (`ShaderValidationReport::bounds`). See
+  `docs/src/design/shader-bounds-analysis.md` for the integration decision
+  (Slang IR vs. SPIR-V), the corpus evaluation over `shaders/`, and known
+  limitations.
 
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
