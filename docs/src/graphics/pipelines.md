@@ -167,7 +167,7 @@ For reverse-Z rendering, use `CompareFunction::Greater` and clear depth to `0.0`
 
 ## Compute Pipelines
 
-`ComputePipeline` wraps a single compute shader. See the [compute documentation](../compute/overview.md) for the full compute API.
+`ComputePipeline` wraps a single compute shader. See [Your First Compute Shader](../tutorial/first-compute.md) for the full compute API.
 
 ```rust
 use goldy::{ComputePipeline, ShaderModule};
@@ -190,6 +190,12 @@ Pipeline State Object (PSO) explosion is one of the biggest pain points in moder
 | Target format | Baked | Baked (unavoidable) |
 
 `RenderPipelineDesc` has exactly four fields. The permutation space is `vertex_layouts × topologies × target_formats × depth_configs` — deliberately small.
+
+Compute is the one place Goldy will compile an extra program after startup: a retained
+dispatch whose `with_param` scalars hold still is moved onto a baked variant of its
+shader. That is at most one specialized pipeline per dispatch site, not a permutation of
+feature flags, and it is an implementation detail of scheme submit rather than something
+`ComputePipeline::new` enumerates. See [Shader Specialization Prediction](../design/shader-specialization.md#when-this-is-worth-expecting).
 
 ## Performance
 

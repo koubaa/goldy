@@ -48,7 +48,6 @@ use crate::types::{
 #[cfg(feature = "graphics")]
 use crate::types::{DepthFormat, IndexFormat};
 use crate::validation_env;
-#[cfg(feature = "graphics")]
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -842,6 +841,8 @@ pub struct Scheme {
     prior_built_accels: HashSet<u64>,
     /// Per-dispatch-site shader specialization predictor (see `specialization.rs`).
     specialization: crate::specialization::SchemePredictor,
+    /// Counters of yielding nodes, keyed by node index.
+    yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -887,7 +888,19 @@ impl Scheme {
             present_transactions: Vec::new(),
             record_errors: Vec::new(),
             prior_built_accels: HashSet::new(),
+            yield_stats: HashMap::new(),
         }
+    }
+
+    /// Counters from the last submission of a yielding node (see [`crate::petition`]).
+    ///
+    /// `None` when `node` is not a yielding dispatch of this scheme. Zeroed until the
+    /// scheme has been submitted.
+    pub fn yield_stats(&self, node: NodeId) -> Option<crate::petition::YieldStats> {
+        if node.scheme_id != self.scheme_id {
+            return None;
+        }
+        self.yield_stats.get(&node.index).map(|s| *s.lock().unwrap())
     }
 
     /// Context this scheme submits on.
@@ -1620,17 +1633,34 @@ impl Scheme {
         label: &'static str,
         pipeline: &crate::compute::ComputePipeline,
     ) -> SchemeNodeBuilder<'a> {
+        let mut builder = self.node_from_parts(label, &PipelineParts::of(pipeline));
+        builder.yielding = pipeline.yielding.clone();
+        builder
+    }
+
+    /// [`Self::node`] over a pipeline's copied parts (handle, slot access, provenance).
+    ///
+    /// Used by the yielding-script driver, which records sub-scheme nodes for pipelines
+    /// it does not own. The resulting node is never itself a yielding dispatch.
+    pub(crate) fn node_from_parts<'a>(
+        &'a mut self,
+        label: &'static str,
+        parts: &PipelineParts,
+    ) -> SchemeNodeBuilder<'a> {
         self.mark_structure_dirty();
         SchemeNodeBuilder {
             scheme: self,
             label,
-            pipeline: pipeline.handle,
+            pipeline: parts.handle,
             rt_pipeline: None,
             bindings: Vec::new(),
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
-            slot_access: pipeline.slot_access.clone(),
-            provenance: Some(std::sync::Arc::clone(&pipeline.provenance)),
+            slot_access: parts.slot_access.clone(),
+            provenance: Some(std::sync::Arc::clone(&parts.provenance)),
+            yielding: None,
+            yield_parcels: Vec::new(),
+            yield_points: Vec::new(),
         }
     }
 
@@ -1655,6 +1685,9 @@ impl Scheme {
             user_slots: Vec::new(),
             slot_access: pipeline.slot_access.clone(),
             provenance: None,
+            yielding: None,
+            yield_parcels: Vec::new(),
+            yield_points: Vec::new(),
         }
     }
 
@@ -3168,6 +3201,11 @@ pub(crate) trait SchemeBindable {
     fn prior_built_accel_handle(&self) -> Option<u64> {
         None
     }
+
+    /// The buffer parcel behind this bindable, when a yielding driver can re-bind it.
+    fn buffer_parcel(&self) -> Option<Parcel> {
+        None
+    }
 }
 
 impl SchemeBindable for Parcel {
@@ -3176,6 +3214,10 @@ impl SchemeBindable for Parcel {
             Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
         )
+    }
+
+    fn buffer_parcel(&self) -> Option<Parcel> {
+        self.buffer_handle().is_some().then(|| self.clone())
     }
 }
 
@@ -3186,6 +3228,10 @@ impl SchemeBindable for crate::Buffer {
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
         )
+    }
+
+    fn buffer_parcel(&self) -> Option<Parcel> {
+        Some(self.whole().clone())
     }
 }
 
@@ -3274,6 +3320,30 @@ pub struct SchemeNodeBuilder<'a> {
     /// Shader provenance of `pipeline`, so the pushed node can register with the
     /// specialization predictor. `None` for ray-tracing dispatches.
     provenance: Option<std::sync::Arc<crate::shader::ShaderProvenance>>,
+    /// Present when `pipeline` is a yielding script; [`Self::dispatch`] then records a
+    /// host-driven node instead of a plain dispatch.
+    yielding: Option<Arc<crate::petition::YieldPipelines>>,
+    /// Buffer parcels behind each `with_parcel` call (yielding scripts only).
+    yield_parcels: Vec<Option<(Parcel, NodeAccess)>>,
+    yield_points: Vec<(String, crate::petition::YieldPoint)>,
+}
+
+/// The parts of a [`crate::ComputePipeline`] a scheme node copies at record time.
+#[derive(Clone)]
+pub(crate) struct PipelineParts {
+    pub(crate) handle: crate::backend::ComputePipelineHandle,
+    pub(crate) slot_access: Vec<Option<ResourceAccess>>,
+    pub(crate) provenance: Arc<crate::shader::ShaderProvenance>,
+}
+
+impl PipelineParts {
+    pub(crate) fn of(pipeline: &crate::compute::ComputePipeline) -> Self {
+        Self {
+            handle: pipeline.handle,
+            slot_access: pipeline.slot_access.clone(),
+            provenance: Arc::clone(&pipeline.provenance),
+        }
+    }
 }
 
 impl<'a> SchemeNodeBuilder<'a> {
@@ -3319,6 +3389,25 @@ impl<'a> SchemeNodeBuilder<'a> {
             self.bindings.push(ResourceBinding { resource, access });
         }
         self.resource_slots.push(slot);
+        if self.yielding.is_some() {
+            self.yield_parcels.push(bindable.buffer_parcel().map(|p| (p, access)));
+        }
+        self
+    }
+
+    /// Bind the handler for continuation `name` of a yielding script.
+    ///
+    /// Every `[goldy_resume]` function of the pipeline's script needs exactly one yield
+    /// point before [`Self::dispatch`]; see [`crate::petition`]. Diagnostics surface on
+    /// [`Scheme::submit`] as [`GoldyError::Validation`].
+    pub fn yield_point(mut self, name: &str, point: crate::petition::YieldPoint) -> Self {
+        if self.yielding.is_none() {
+            self.scheme.record_errors.push(format!(
+                "yield_point(\"{name}\") on `{}`: the pipeline is not a yielding script (no `$yield` / [goldy_resume])",
+                self.label
+            ));
+        }
+        self.yield_points.push((name.to_string(), point));
         self
     }
 
@@ -3398,7 +3487,63 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// The returned [`NodeId`] addresses this node in [`Scheme::set_node_pipeline`],
     /// [`Scheme::set_node_dispatch`], and [`Scheme::set_node_param`].
     pub fn dispatch(self, x: u32, y: u32, z: u32) -> NodeId {
+        if self.yielding.is_some() {
+            return self.push_yield_driver((x, y, z));
+        }
         self.push_dispatch_node(DispatchDim::Direct { x, y, z })
+    }
+
+    /// Record a yielding script as a host-driven node (see [`crate::petition`]).
+    ///
+    /// The node keeps the user's bindings for graph ordering but stages nothing: the
+    /// driver re-binds the same parcels in the sub-schemes it submits.
+    fn push_yield_driver(self, dispatch: (u32, u32, u32)) -> NodeId {
+        let pipelines = self.yielding.expect("push_yield_driver on a yielding builder");
+        let record = crate::petition::YieldRecord {
+            label: self.label,
+            pipelines,
+            prologue: PipelineParts {
+                handle: self.pipeline,
+                slot_access: self.slot_access,
+                provenance: self.provenance.expect("compute pipelines carry provenance"),
+            },
+            parcels: self.yield_parcels,
+            scalars: self.user_slots,
+            points: self.yield_points,
+            dispatch,
+        };
+        let scheme = self.scheme;
+        let node_index = scheme.ir.nodes.len() as u32;
+        match crate::petition::YieldDriver::build(&scheme.ctx, record) {
+            Ok((driver, stats)) => {
+                let cpu_id = scheme.cpu_dispatches.len() as u32;
+                scheme.cpu_dispatches.push(CpuDispatchExec::new_host_driver(
+                    self.label,
+                    crate::petition::driver_main(Arc::new(driver)),
+                ));
+                scheme.yield_stats.insert(node_index, stats);
+                scheme.ir.nodes.push(TaskNode {
+                    label: self.label,
+                    bindings: self.bindings,
+                    kind: NodeKind::CpuDispatch { cpu_id },
+                });
+            }
+            Err(msg) => {
+                scheme.record_errors.push(msg);
+                // Keep node numbering stable for the caller: an inert node stands in.
+                scheme.ir.nodes.push(TaskNode {
+                    label: self.label,
+                    bindings: Vec::new(),
+                    kind: NodeKind::Dispatch {
+                        pipeline: self.pipeline,
+                        resource_slots: Vec::new(),
+                        user_slots: Vec::new(),
+                        dispatch: DispatchDim::Direct { x: 0, y: 0, z: 0 },
+                    },
+                });
+            }
+        }
+        scheme.last_node_id()
     }
 
     /// Finalize the node with a device-resident [`DispatchShape`] parcel (indirect dispatch).
@@ -3409,6 +3554,12 @@ impl<'a> SchemeNodeBuilder<'a> {
         if self.rt_pipeline.is_some() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "trace_rays does not support indirect DispatchShape parcels; use dispatch(width, height, depth)"
+            )));
+        }
+        if self.yielding.is_some() {
+            return Err(GoldyError::Validation(format!(
+                "`{}`: yielding scripts do not support indirect DispatchShape parcels in v0; use dispatch(x, y, z)",
+                self.label
             )));
         }
         let offset = validate_dispatch_shape_parcel(parcel)?;

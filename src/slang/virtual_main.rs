@@ -1893,7 +1893,7 @@ fn find_enclosing_function_span(source: &str, pos: usize) -> Option<(usize, usiz
     None
 }
 
-fn match_brace(source: &str, open_brace: usize) -> Option<usize> {
+pub(crate) fn match_brace(source: &str, open_brace: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     if bytes.get(open_brace) != Some(&b'{') {
         return None;
@@ -2380,7 +2380,7 @@ fn strip_line_comments(s: &str) -> String {
 /// Inline `//` comments are stripped first — without this, trailing comments on
 /// parameter lines become part of the next parameter's type string, producing
 /// invalid generated code that causes Slang ICEs.
-fn parse_params(params_str: &str) -> Vec<Param> {
+pub(crate) fn parse_params(params_str: &str) -> Vec<Param> {
     let cleaned = strip_line_comments(params_str);
     let mut params = Vec::new();
     let mut current = String::new();
@@ -2683,7 +2683,7 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
 }
 
 /// Classify a Slang type string into a `ParamKind`.
-fn classify_type(ty: &str) -> ParamKind {
+pub(crate) fn classify_type(ty: &str) -> ParamKind {
     let ty = ty.trim();
 
     // Resource wrappers (generic).
@@ -3282,7 +3282,7 @@ fn rewrite_graphics_scattered_as_bufro(source: &mut String, entries: &[&EntryDef
 }
 
 /// Advance `pos` past any whitespace in `source`, stopping before non-whitespace.
-fn skip_whitespace_in_source(source: &str, pos: usize) -> usize {
+pub(crate) fn skip_whitespace_in_source(source: &str, pos: usize) -> usize {
     let bytes = source.as_bytes();
     let mut p = pos;
     while p < bytes.len() && (bytes[p] == b' ' || bytes[p] == b'\t' || bytes[p] == b'\n' || bytes[p] == b'\r') {
@@ -3297,12 +3297,12 @@ fn skip_whitespace_in_source(source: &str, pos: usize) -> usize {
 
 /// Find `needle` in `source` starting at `from`. Returns the byte offset of
 /// the first character of the match.
-fn find_substr(source: &str, from: usize, needle: &str) -> Option<usize> {
+pub(crate) fn find_substr(source: &str, from: usize, needle: &str) -> Option<usize> {
     source[from..].find(needle).map(|i| from + i)
 }
 
 /// Return true if position `pos` in `source` is inside a `//` line comment.
-fn is_in_line_comment(source: &str, pos: usize) -> bool {
+pub(crate) fn is_in_line_comment(source: &str, pos: usize) -> bool {
     // Find the start of the line.
     let line_start = source[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let line = &source[line_start..pos];
@@ -3311,7 +3311,7 @@ fn is_in_line_comment(source: &str, pos: usize) -> bool {
 }
 
 /// Skip whitespace and `//` line comments in `source` starting at `pos`.
-fn skip_whitespace_and_comments(source: &str, mut pos: usize) -> usize {
+pub(crate) fn skip_whitespace_and_comments(source: &str, mut pos: usize) -> usize {
     let bytes = source.as_bytes();
     loop {
         // Skip whitespace.
@@ -3346,7 +3346,7 @@ fn skip_whitespace_and_comments(source: &str, mut pos: usize) -> usize {
 
 /// Scan an identifier (letters, digits, underscores) at `pos` in `source`.
 /// Returns `(identifier, new_pos)`.
-fn scan_identifier(source: &str, pos: usize) -> Option<(String, usize)> {
+pub(crate) fn scan_identifier(source: &str, pos: usize) -> Option<(String, usize)> {
     let bytes = source.as_bytes();
     let start = pos;
     let mut end = pos;
@@ -3362,7 +3362,7 @@ fn scan_identifier(source: &str, pos: usize) -> Option<(String, usize)> {
 
 /// Scan the contents of a `[...]` block.  `pos` must point at `[`.
 /// Returns `(inner_content, pos_after_closing_bracket)`.
-fn scan_bracket_block(source: &str, pos: usize) -> Option<(String, usize)> {
+pub(crate) fn scan_bracket_block(source: &str, pos: usize) -> Option<(String, usize)> {
     let close = find_matching_close(source, pos, '[', ']')?;
     let inner = source[pos + 1..close].to_string();
     Some((inner, close + 1))
@@ -3370,7 +3370,7 @@ fn scan_bracket_block(source: &str, pos: usize) -> Option<(String, usize)> {
 
 /// Find the matching closing bracket for the open bracket at `open_pos`.
 /// Handles nesting of the same pair; ignores other bracket types.
-fn find_matching_close(source: &str, open_pos: usize, open: char, close: char) -> Option<usize> {
+pub(crate) fn find_matching_close(source: &str, open_pos: usize, open: char, close: char) -> Option<usize> {
     let bytes = source.as_bytes();
     if bytes.get(open_pos) != Some(&(open as u8)) {
         return None;
@@ -3393,7 +3393,7 @@ fn find_matching_close(source: &str, open_pos: usize, open: char, close: char) -
 /// Find the start of the attribute group that contains the `[goldy_*]` at
 /// `attr_start`. An attribute group is a sequence of `[...]` blocks separated
 /// only by whitespace/comments with no other code in between.
-fn find_attr_group_start(source: &str, attr_start: usize) -> usize {
+pub(crate) fn find_attr_group_start(source: &str, attr_start: usize) -> usize {
     // Walk backward from attr_start.
     let mut pos = attr_start;
     loop {
@@ -3454,7 +3454,11 @@ fn find_matching_open(source: &str, close_pos: usize, open: char, close: char) -
 }
 
 /// Find a `[numthreads(...)]` attribute in `source[start..end]`.
-fn find_numthreads_in_range(source: &str, start: usize, end: usize) -> Option<((u32, u32, u32), Range<usize>)> {
+pub(crate) fn find_numthreads_in_range(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Option<((u32, u32, u32), Range<usize>)> {
     let slice = &source[start..end];
     let needle = "numthreads";
     let rel_pos = slice.find(needle)?;
@@ -3572,7 +3576,7 @@ fn parse_outputtopology(s: &str) -> Option<String> {
 }
 
 /// Parse `numthreads(X, Y, Z)` from the inner content of `[numthreads(...)]`.
-fn parse_numthreads(s: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn parse_numthreads(s: &str) -> Option<(u32, u32, u32)> {
     let [x, y, z] = super::parse_numthreads(s)?;
     Some((x, y, z))
 }

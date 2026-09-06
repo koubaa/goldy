@@ -272,6 +272,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      - name: Install mdBook
+        run: |
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.43/mdbook-v0.4.43-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz --directory /usr/local/bin
+
+      - name: Build book
+        run: scripts/check_docs_book.sh
+
   # Windows build check (no GPU tests, just compilation)
   build-windows:
     name: Windows Build

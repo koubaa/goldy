@@ -1,84 +1,106 @@
 # Examples Gallery
 
-Goldy ships with **23 Rust examples** demonstrating scheme recording, compute-to-surface, graphics pipelines, ray query, mesh shaders, and multi-window workflows. Every example uses [Slang](https://shader-slang.org/) shaders and runs on shipped backends (Vulkan 1.4+, DX12, Metal Tier 2+) when the adapter exposes the needed optional caps. CUDA and WebGPU backends are in progress; Tenstorrent is planned.
+Goldy ships **23 Rust examples**, each a complete runnable program. Every example has a page
+here with a recording of it running, plus its Rust and Slang source inlined straight from the
+repository — so what you watch is what the code does, and what you read is what compiles.
+
+The clips are not screen-captured by hand. `scripts/record_example_captures.sh` builds the
+examples, runs each one against a real backend on a virtual display, and grabs the window with
+ffmpeg. Rerun it after changing an example's visuals.
 
 ## Running Examples
 
 ```bash
-cd goldy
 cargo run --features examples --example <name> --release
 ```
 
-All windowed examples support **Escape** to exit and automatic window-resize handling.
+All windowed examples exit on **Escape**, handle window resizes, and auto-exit after a soak
+period that `GOLDY_EXAMPLE_TIMEOUT` overrides. To run every example back to back:
 
----
+```bash
+./run_all_examples.sh
+GOLDY_BACKEND=webgpu ./run_all_examples.sh
+EXAMPLE_TIMEOUT=10 ./run_all_examples.sh
+```
+
+## Backends
+
+The examples run on every shipped backend — Vulkan 1.4+, DX12, and Metal Tier 2+ — and on the
+in-progress WebGPU backend, selected with `GOLDY_BACKEND` (see
+[Backend Architecture](../backends/overview.md)):
+
+```bash
+GOLDY_BACKEND=webgpu cargo run --no-default-features --features webgpu,examples --example triangle
+```
+
+Two examples probe capabilities and exit cleanly when they are missing:
+[`mesh_triangle`](./mesh_triangle.md) needs mesh shaders and [`ray_query`](./ray_query.md) needs
+ray query, neither of which the WebGPU backend implements. Those two pages carry source but no
+recording.
+
+WebGPU is what the recordings run on, because it is the one backend that can present to X11 on
+Linux — Goldy's Vulkan surface path is Wayland-only. Software rendering (lavapipe) is enough:
+the clips are wall-clock captures, not benchmarks.
 
 ## Bindless Basics
 
-These examples cover fundamental Goldy patterns: vertex buffers, surfaces, uniforms, and fragment shaders.
+Fundamental Goldy patterns: vertex buffers, surfaces, uniforms, and fragment shaders.
 
-| Example | What it demonstrates | Source |
-|---------|---------------------|--------|
-| **`triangle`** | Minimal windowed program: retained scheme, offscreen render pass, present via `SurfaceExchange`. | [`triangle.rs`](https://github.com/koubaa/goldy/blob/main/examples/triangle.rs) |
-| **`mesh_triangle`** | Same present path as `triangle`, using `MeshPipeline` + `dispatch_mesh`. Skips when `mesh_shaders` is false. | [`mesh_triangle.rs`](https://github.com/koubaa/goldy/blob/main/examples/mesh_triangle.rs) |
-| **`gradient`** | Animated full-screen gradient driven by a time uniform. Uses vertex-less rendering and optional `GOLDY_VALIDATE_LAYOUTS`. | [`gradient.rs`](https://github.com/koubaa/goldy/blob/main/examples/gradient.rs) |
-| **`checkerboard`** | Procedural animated checkerboard via UV distortion in a fragment shader. | [`checkerboard.rs`](https://github.com/koubaa/goldy/blob/main/examples/checkerboard.rs) |
+| Example | What it demonstrates |
+|---------|---------------------|
+| [**`triangle`**](./triangle.md) | Minimal windowed program: retained scheme, offscreen render pass, present via `SurfaceExchange`. |
+| [**`mesh_triangle`**](./mesh_triangle.md) | The `triangle` present path driven by `MeshPipeline` and `dispatch_mesh`. |
+| [**`gradient`**](./gradient.md) | Animated fullscreen gradient from a time uniform, with vertex-less rendering. |
+| [**`checkerboard`**](./checkerboard.md) | Procedural animated checkerboard via UV distortion in a fragment shader. |
 
 ## Compute Workflows
 
-Examples that use `ComputePipeline` and `Scheme` for GPU-side data processing, including compute-to-surface.
+`ComputePipeline` and `Scheme` for GPU-side data processing, including compute-to-surface.
 
-| Example | What it demonstrates | Source |
-|---------|---------------------|--------|
-| **`compute_particles`** | Compute updates particle positions; graphics renders instanced quads. Retained scheme scheduling. | [`compute_particles.rs`](https://github.com/koubaa/goldy/blob/main/examples/compute_particles.rs) |
-| **`game_of_life`** | Conway's Game of Life on the GPU with ping-pong sub-views in one retained mosaic parcel. | [`game_of_life.rs`](https://github.com/koubaa/goldy/blob/main/examples/game_of_life.rs) |
-| **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`. Writes swapchain via `SurfaceExchange::bind_destination`. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/examples/compute_to_surface.rs) |
-| **`ray_query`** | Triangle BLAS/TLAS + inline `RayQuery` in `[goldy_compute]`, written to the swapchain. Skips when `ray_query` is false. | [`ray_query.rs`](https://github.com/koubaa/goldy/blob/main/examples/ray_query.rs) |
+| Example | What it demonstrates |
+|---------|---------------------|
+| [**`compute_particles`**](./compute_particles.md) | Compute updates particle positions; graphics renders instanced quads. |
+| [**`game_of_life`**](./game_of_life.md) | Conway's Game of Life with ping-pong sub-views in one retained mosaic parcel. |
+| [**`compute_to_surface`**](./compute_to_surface.md) | Pure compute rendering — no `RenderPipeline`, writes the drawable directly. |
+| [**`ray_query`**](./ray_query.md) | Triangle BLAS/TLAS with inline `RayQuery` in `[goldy_compute]`. |
 
 ## Graphics Pipelines
 
 Classic rendering techniques: depth testing, textures, instancing, and 3D projection.
 
-| Example | What it demonstrates | Source |
-|---------|---------------------|--------|
-| **`solid_cube`** | Solid 3D cube with per-face colors and depth buffer. | [`solid_cube.rs`](https://github.com/koubaa/goldy/blob/main/examples/solid_cube.rs) |
-| **`spinning_cube`** | 3D wireframe cube using line primitives. | [`spinning_cube.rs`](https://github.com/koubaa/goldy/blob/main/examples/spinning_cube.rs) |
-| **`depth_quads`** | Depth buffer proves draw-order independence. | [`depth_quads.rs`](https://github.com/koubaa/goldy/blob/main/examples/depth_quads.rs) |
-| **`textured_quad`** | Procedural checkerboard texture on a quad. | [`textured_quad.rs`](https://github.com/koubaa/goldy/blob/main/examples/textured_quad.rs) |
-| **`instancing`** | GPU-driven instancing with compute-updated transforms. | [`instancing.rs`](https://github.com/koubaa/goldy/blob/main/examples/instancing.rs) |
-| **`bouncing_lines`** | `LINE_LIST` topology with simple physics. | [`bouncing_lines.rs`](https://github.com/koubaa/goldy/blob/main/examples/bouncing_lines.rs) |
-| **`waveform`** | `LINE_STRIP` waveform visualizer. | [`waveform.rs`](https://github.com/koubaa/goldy/blob/main/examples/waveform.rs) |
+| Example | What it demonstrates |
+|---------|---------------------|
+| [**`solid_cube`**](./solid_cube.md) | Solid 3D cube with per-face colours and a depth buffer. |
+| [**`spinning_cube`**](./spinning_cube.md) | 3D wireframe cube using line primitives. |
+| [**`depth_quads`**](./depth_quads.md) | Depth buffer proves draw-order independence. |
+| [**`textured_quad`**](./textured_quad.md) | Procedural texture on a quad with stage-local resources. |
+| [**`instancing`**](./instancing.md) | GPU-driven instancing with compute-updated transforms. |
+| [**`bouncing_lines`**](./bouncing_lines.md) | `LINE_LIST` topology with simple compute-driven physics. |
+| [**`waveform`**](./waveform.md) | `LINE_STRIP` waveform visualizer. |
 
-## Advanced Patterns
+## Fragment Shader Effects
 
-### Fragment Shader Effects
+Screen-space effects with no geometry beyond a fullscreen triangle.
 
-| Example | What it demonstrates | Source |
-|---------|---------------------|--------|
-| **`plasma`** | Demoscene plasma effect. | [`plasma.rs`](https://github.com/koubaa/goldy/blob/main/examples/plasma.rs) |
-| **`tunnel`** | Flying-through-a-tunnel polar-coordinate effect. | [`tunnel.rs`](https://github.com/koubaa/goldy/blob/main/examples/tunnel.rs) |
-| **`metaballs`** | Metaball field rendering. | [`metaballs.rs`](https://github.com/koubaa/goldy/blob/main/examples/metaballs.rs) |
-| **`mandelbrot`** | Interactive Mandelbrot explorer. | [`mandelbrot.rs`](https://github.com/koubaa/goldy/blob/main/examples/mandelbrot.rs) |
+| Example | What it demonstrates |
+|---------|---------------------|
+| [**`plasma`**](./plasma.md) | Demoscene plasma effect. |
+| [**`tunnel`**](./tunnel.md) | Flying-through-a-tunnel polar-coordinate effect. |
+| [**`metaballs`**](./metaballs.md) | Metaball field rendering. |
+| [**`mandelbrot`**](./mandelbrot.md) | Interactive Mandelbrot explorer. |
 
-### Interactive and Multi-Window
+## Interactive and Multi-Window
 
-| Example | What it demonstrates | Source |
-|---------|---------------------|--------|
-| **`digital_clock`** | 7-segment clock display. | [`digital_clock.rs`](https://github.com/koubaa/goldy/blob/main/examples/digital_clock.rs) |
-| **`starfield`** | 3D starfield with depth. | [`starfield.rs`](https://github.com/koubaa/goldy/blob/main/examples/starfield.rs) |
-| **`particles`** | Rain/snow particle system. | [`particles.rs`](https://github.com/koubaa/goldy/blob/main/examples/particles.rs) |
-| **`multi_window`** | Multiple windows sharing one device. | [`multi_window.rs`](https://github.com/koubaa/goldy/blob/main/examples/multi_window.rs) |
+Input handling, runtime state changes, and more than one surface per device.
 
-## Headless and Validation
+| Example | What it demonstrates |
+|---------|---------------------|
+| [**`digital_clock`**](./digital_clock.md) | Seven-segment clock display with CPU-generated geometry. |
+| [**`starfield`**](./starfield.md) | 3D starfield with compute-driven star recycling. |
+| [**`particles`**](./particles.md) | Rain and snow particle system with a runtime mode switch. |
+| [**`multi_window`**](./multi_window.md) | Three windows sharing one device. |
 
-| Example | What it demonstrates | Source |
-|---------|---------------------|--------|
-| **`headless_triangle`** | Offscreen render + CPU readback via `MemoryExchange`. | [`headless_triangle.rs`](https://github.com/koubaa/goldy/blob/main/examples/headless_triangle.rs) |
-| **`scheme_screenshot`** | Scheme-based screenshot capture for tests. | [`scheme_screenshot.rs`](https://github.com/koubaa/goldy/blob/main/examples/scheme_screenshot.rs) |
+## Shared Code
 
-Run all windowed examples interactively:
-
-```bash
-./run_all_examples.sh
-ONLY=mesh_triangle,ray_query ./run_all_examples.sh
-```
+Examples share a small amount of scaffolding — FPS reporting, run limits, hidden-window
+creation, and surface-matched pipeline rebuilds. See [Shared Helpers](./shared-helpers.md).

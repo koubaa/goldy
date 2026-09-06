@@ -2,7 +2,7 @@
 
 This tutorial renders an animated plasma effect by dispatching a compute shader directly to a swapchain drawable — no graphics pipeline, no vertex buffers, no render passes.
 
-See [`examples/compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) for the full source.
+See [`examples/compute_to_surface.rs`](../examples/compute_to_surface.md) for the full source.
 
 ## The Shader
 
@@ -161,4 +161,4 @@ You should see an animated plasma pattern filling the window, rendered entirely 
 ## Next Steps
 
 - [Compute to Surface](../compute/compute-to-surface.md) — present-on-scheme details
-- [Examples](../examples/overview.md) — particles, game of life, and more compute examples
+- [Examples Gallery](../examples/gallery.md) — particles, game of life, and more compute examples

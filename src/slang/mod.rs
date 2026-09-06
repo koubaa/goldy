@@ -50,6 +50,7 @@ pub mod ir;
 pub mod loader;
 pub mod shader_validation;
 pub mod virtual_main;
+pub mod yielding;
 
 pub use compiler::{
     layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout, LayoutCheck,

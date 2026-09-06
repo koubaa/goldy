@@ -40,6 +40,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Slang IR vs. SPIR-V), the corpus evaluation over `shaders/`, and known
   limitations.
 
+- **Examples in the book** — every `[[example]]` target now has a page under
+  Examples in the mdBook, with its description, run command, controls, a
+  recording of it running, and full Rust plus Slang source inlined from
+  `examples/` and `shaders/` via mdBook includes. The gallery becomes the index
+  and its two phantom entries (`headless_triangle`, `scheme_screenshot`) are
+  gone.
+
+- **`scripts/record_example_captures.sh`** — builds the examples, runs each one
+  on a virtual X11 display, and grabs the window with ffmpeg into
+  `docs/src/assets/examples/*.webm`. Defaults to the WebGPU backend, the only
+  one whose surface path reaches X11 on Linux.
+
+- **Yielding scripts** — a `[goldy_compute]` shader may suspend a lane with
+  `$yield(continuation, payload, state)` and resume it in a `[goldy_resume]`
+  function with the result of a host or GPU *handler*. Payload types are
+  declared with `[goldy_petition(Result = BufRO<E>)]`; continuations receive a
+  `Resolved<E>` window into a runtime-owned result arena (`is_null()` on
+  rejection). On the host, `ComputePipeline::new` compiles the continuation
+  entry points alongside the prologue, `SchemeNodeBuilder::yield_point(name,
+  YieldPoint)` binds a handler per continuation (`YieldPoint::cpu` closure over
+  `Petition` + `Promised<E>`, or `YieldPoint::node` compute dispatch),
+  `Backpressure::{Stall, Drop}` picks the overflow policy, and
+  `Scheme::yield_stats(node)` reports per-submission counters. The dispatch is
+  recorded as a single host-driven node that runs the yield/service/resume
+  rounds as sub-schemes on the same context (double-buffered mailboxes, so a
+  continuation may yield to itself). See
+  [Yielding Scripts](docs/src/programming-model/yielding-scripts.md).
+
+- **`Interlocked*` on the CPU backend** — `goldy_exp`'s `InterlockedAdd` /
+  `Or` / `Xor` / `Min` / `Max` / `Exchange` compile for the host-callable
+  target as plain read-modify-write (the CPU backend runs lanes serially).
+
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead
   of structurally dirty. The next submit recomputes partition fingerprints and
@@ -170,6 +202,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VK_LAYER_PATH`) so a Khronos ERROR fails the suite. Metal and DX12 jobs do
   not set `GOLDY_VALIDATION_FATAL` (it is Vulkan-only).
 
+### Changed
+
+- **Docs: what baking compiles** — the shader-specialization design note now
+  states that predicted variants are a full Slang + driver recompile (not a
+  constant patch), that Slang's default opt level leaves dead blocks in SPIR-V
+  while the driver DCE's them, and when that is worth expecting. Scalar params,
+  Slang defines, "no permutation systems", compute pipelines, and
+  `GOLDY_SPECIALIZATION` point at the same distinction.
+
 ### Fixed
 
 - **Slang diagnostics pointed one or two lines early in virtual-main shaders.**
@@ -177,6 +218,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function dropped their newlines, shifting every line after them relative to
   the `#line 1` directive. The removed spans now keep their newlines.
 
+- **`mandelbrot` ignored the run limit** — the example sets
+  `ControlFlow::Wait`, so with no input it idled past `GOLDY_EXAMPLE_TIMEOUT` /
+  `EXAMPLE_TIMEOUT` forever and hung `run_all_examples.sh`. It now polls when a
+  run limit is set.
 - WebGPU bind-group cache keys include the exclusive pipeline identity so
   structurally identical layouts from different PSOs are not reused.
 - Tight (`src_row_pitch == 0`) `copy_buffer_to_texture_parcel` resubmits are

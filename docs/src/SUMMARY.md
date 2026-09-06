@@ -14,6 +14,7 @@
 - [Virtual Entry Points](./programming-model/virtual-entry-points.md)
 - [Rust Compute Kernels](./programming-model/rust-kernels.md)
 - [CPU Dispatches](./programming-model/cpu-dispatch.md)
+- [Yielding Scripts](./programming-model/yielding-scripts.md)
 - [Slang in One Source](./programming-model/slang.md)
 
 # Compute Workflows
@@ -61,6 +62,30 @@
 # Examples
 
 - [Examples Gallery](./examples/gallery.md)
+  - [triangle](./examples/triangle.md)
+  - [mesh_triangle](./examples/mesh_triangle.md)
+  - [gradient](./examples/gradient.md)
+  - [checkerboard](./examples/checkerboard.md)
+  - [compute_particles](./examples/compute_particles.md)
+  - [game_of_life](./examples/game_of_life.md)
+  - [compute_to_surface](./examples/compute_to_surface.md)
+  - [ray_query](./examples/ray_query.md)
+  - [solid_cube](./examples/solid_cube.md)
+  - [spinning_cube](./examples/spinning_cube.md)
+  - [depth_quads](./examples/depth_quads.md)
+  - [textured_quad](./examples/textured_quad.md)
+  - [instancing](./examples/instancing.md)
+  - [bouncing_lines](./examples/bouncing_lines.md)
+  - [waveform](./examples/waveform.md)
+  - [plasma](./examples/plasma.md)
+  - [tunnel](./examples/tunnel.md)
+  - [metaballs](./examples/metaballs.md)
+  - [mandelbrot](./examples/mandelbrot.md)
+  - [digital_clock](./examples/digital_clock.md)
+  - [starfield](./examples/starfield.md)
+  - [particles](./examples/particles.md)
+  - [multi_window](./examples/multi_window.md)
+  - [Shared Helpers](./examples/shared-helpers.md)
 
 # Design & Philosophy
 

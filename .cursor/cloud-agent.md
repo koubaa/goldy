@@ -33,10 +33,27 @@ cargo test --features vulkan
 
 The Cloud VM has no physical GPU. **Lavapipe** (Mesa's Vulkan 1.4 software renderer) provides the Vulkan backend. All unit tests, integration tests, and screenshot tests pass headlessly.
 
-Interactive examples (Surface API / `winit`) require Wayland and will not work under Xvfb (X11 only). To test rendering output headlessly, use:
+To test rendering output headlessly, use:
 
 ```bash
 cargo run --bin update-screenshots --features update-screenshots
 ```
 
 This renders triangles, Game of Life, and depth-occlusion scenes to PNG files in `tests/screenshots/`.
+
+### Interactive examples under Xvfb
+
+The Vulkan backend's surface path is Wayland-only, so interactive examples fail on X11 with
+"Expected Wayland window/display handles on Linux". The WebGPU backend reaches X11 through
+`wgpu`, so examples do run under Xvfb with `GOLDY_BACKEND=webgpu`:
+
+```bash
+Xvfb :99 -screen 0 800x600x24 &
+DISPLAY=:99 GOLDY_BACKEND=webgpu GOLDY_EXAMPLE_TIMEOUT=6 \
+  cargo run --release --no-default-features --features webgpu,examples --example triangle
+```
+
+`scripts/record_example_captures.sh` wraps this to record the book's example clips.
+
+A VM that lacks them needs `mesa-vulkan-drivers` (lavapipe ICD) and `libxkbcommon-x11-0`
+(winit's X11 keyboard handling) before any of this works.

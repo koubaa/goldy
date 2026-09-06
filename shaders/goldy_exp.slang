@@ -34,3 +34,6 @@ __include "goldy_exp/primitives";
 __include "goldy_exp/descriptor_handle";
 __include "goldy_exp/bindless_resources";
 __include "goldy_exp/access";
+#if defined(GOLDY_YIELD)
+__include "goldy_exp/petition";
+#endif

@@ -2,7 +2,7 @@
 
 This tutorial draws a colored triangle in a window using Goldy's render pipeline and present-on-scheme API (`SurfaceExchange` + `Scheme` + `Transaction`).
 
-See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the full source.
+See [`examples/triangle.rs`](../examples/triangle.md) for the full source.
 
 ## Recording the Scheme
 
@@ -118,4 +118,4 @@ You should see a window with a colored triangle on a dark blue background.
 ## Next Steps
 
 - [Your First Compute Shader](./first-compute.md) — bypass the graphics pipeline entirely
-- [Examples](../examples/overview.md) — more complex demos
+- [Examples Gallery](../examples/gallery.md) — more complex demos
