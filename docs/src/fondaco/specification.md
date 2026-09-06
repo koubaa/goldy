@@ -196,7 +196,7 @@ Loose analogues for readers familiar with other models. The Fondaco terms above 
 | Claims | Descriptor set, root signature, argument buffer | Names mapped to parcels with ownership |
 | Parcel | Buffer, texture, resource | Stable identity; medium may move |
 | Ledger | Resource-state / hazard tracker | Conserved across schemes; not merchant-addressable |
-| Exchange | Swapchain present, DMA, host-visible mapping | Linear per-execution settlement |
+| Exchange | Swapchain present, DMA, host-visible mapping, pixel blit | Linear per-execution settlement |
 | Ownership (public) | SRV, sampled image, read-only binding | Concurrent reads |
 | Ownership (private) | UAV, storage image, read-write binding | Exclusive tenant |
 | Ownership (private-inaugural) | Discard/clear load op | Exclusive write; prior state abandoned |

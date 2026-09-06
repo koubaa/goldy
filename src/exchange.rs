@@ -1,12 +1,15 @@
 //! Erased exchange transactions and claims.
 //!
-//! Concrete exchanges ([`SurfaceExchange`], [`MemoryExchange`]) bind a relationship into a
-//! scheme and return a reusable transaction. Each successful [`crate::Scheme::submit`] may
-//! publish a claim for relationships that settle outside graph execution.
+//! Concrete exchanges ([`SurfaceExchange`], [`MemoryExchange`], [`crate::PixelExchange`])
+//! bind a relationship into a scheme and return a reusable transaction. Each successful
+//! [`crate::Scheme::submit`] may publish a claim for relationships that settle outside
+//! graph execution.
 //!
 //! - Surface present: [`Transaction::claim`] → erased [`Claim`] → [`Claim::consume`] / discard
 //! - Memory withdraw: [`WithdrawTransaction::claim`] → [`WithdrawClaim`] → [`WithdrawBytes`]
 //! - Memory deposit: graph execution settles the upload; there is no claim
+//! - Pixel blit: [`crate::PixelTransaction::claim`] → [`crate::PixelClaim`] → foreign
+//!   [`crate::PixelSink::blit`] (host pixmap or a graphics API that is not a Goldy device)
 
 use crate::context::Context;
 use crate::error::GoldyError;

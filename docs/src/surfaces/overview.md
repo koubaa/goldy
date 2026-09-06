@@ -2,7 +2,11 @@
 
 Windowed rendering uses **present-on-scheme**: [`SurfaceExchange`](https://docs.rs/goldy/latest/goldy/struct.SurfaceExchange.html) + [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html) + [`Claim`](https://docs.rs/goldy/latest/goldy/struct.Claim.html). Record copy or compute-to-present once in a retained [`Scheme`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html); submit each frame and settle the claim.
 
-All windowed Rust examples use this path.
+CPU compute (`GOLDY_BACKEND=cpu`) has no swapchain. Headless or foreign present
+uses [`PixelExchange`](./pixel-exchange.md): the scheme writes a buffer pixmap and
+consume blits into a [`PixelSink`](https://docs.rs/goldy/latest/goldy/trait.PixelSink.html).
+
+All windowed Rust examples use the `SurfaceExchange` path.
 
 ## SurfaceExchange
 

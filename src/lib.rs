@@ -41,7 +41,9 @@ pub mod types;
 
 pub mod cpu_dispatch;
 pub mod cpu_shaders;
+pub mod foreign;
 pub(crate) mod host_access;
+pub mod pixel;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
 pub mod slang;
@@ -80,6 +82,7 @@ pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawCl
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
+pub use pixel::{HostPixelSink, PixelClaim, PixelExchange, PixelSink, PixelTransaction, PixmapLayout};
 pub use retained_pool::RetainedPool;
 pub use scheme::{Lease, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission};
 #[cfg(feature = "graphics")]

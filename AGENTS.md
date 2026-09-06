@@ -8,10 +8,13 @@ There is churn happening now, it is important to keep certain architectural prin
 
 - A "parcel" is a stable identity for data held by the runtime in trust for the program, generic enough to span lifecycle (leased vs owned) and type (buffers, textures, images, ...).
 - An "exchange" is the mediated relationship with an external subsystem
-  (`SurfaceExchange`, `MemoryExchange`). Bind once into a scheme as a
-  `Transaction` / withdraw or deposit transaction; each submission may produce a
-  linear claim for externally settled handoffs (present, withdraw). Deposits
-  settle inside graph execution and do not publish claims.
+  (`SurfaceExchange`, `MemoryExchange`, `PixelExchange`). Bind once into a scheme as a
+  `Transaction` / withdraw / pixel transaction; each submission may produce a
+  linear claim for externally settled handoffs (present, withdraw, pixel blit).
+  Deposits settle inside graph execution and do not publish claims.
+  `PixelExchange` withdraws a buffer pixmap and blits it into a `PixelSink`
+  that is *not* a Goldy device (`HostPixelSink`, or `foreign::vulkan` which owns
+  a process-wide Vulkan singleton and serialises at the verb).
 - All allocations and schemes are threaded through a "context".
 - There are two kinds of pools associated with a device: "retained" and "transient". These are shared across contexts.
 - We are refactoring in the direction of removing imperative APIs (like read_to_cpu) in favor of scheme submissions as the only way to affect parcels.

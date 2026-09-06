@@ -68,6 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continuation may yield to itself). See
   [Yielding Scripts](docs/src/programming-model/yielding-scripts.md).
 
+- **`PixelExchange`** — buffer pixmap → foreign [`PixelSink`](https://docs.rs/goldy/latest/goldy/trait.PixelSink.html).
+  The CPU device has no textures; fine (or any host compute) writes a packed
+  buffer and `PixelClaim::consume` copies it into a sink that is **not** a
+  Goldy backend. [`HostPixelSink`](https://docs.rs/goldy/latest/goldy/struct.HostPixelSink.html)
+  is a `Vec<u8>`. With the `vulkan` feature, `goldy::foreign::vulkan` owns a
+  process-wide Vulkan instance/device (serialised with the Goldy Vulkan
+  backend's `vkCreateInstance` lock) and blits into an offscreen image via
+  `vkCmdCopyBufferToImage`. Windowed WSI on that singleton is a later verb.
+  See [Pixel Exchange](docs/src/surfaces/pixel-exchange.md).
+
 - **`Interlocked*` on the CPU backend** — `goldy_exp`'s `InterlockedAdd` /
   `Or` / `Xor` / `Min` / `Max` / `Exchange` compile for the host-callable
   target as plain read-modify-write (the CPU backend runs lanes serially).
