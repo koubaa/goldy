@@ -3210,16 +3210,29 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
         Box::leak(new_fn_name.into_boxed_str()),
     ));
 
+    // Removed spans keep their newlines so that, after the `#line 1` directive, user-source
+    // line numbers in Slang diagnostics (and Goldy's bounds analysis) stay accurate.
+    let removal = |start: usize, end: usize, keep: &str| -> &'static str {
+        let newlines = source[start..end].matches('\n').count();
+        let text = match (keep.is_empty(), newlines) {
+            (true, _) => "\n".repeat(newlines),
+            (false, 0) => format!("{keep} "),
+            (false, n) => format!("{keep}{}", "\n".repeat(n)),
+        };
+        // leak is fine — these strings live for the duration of compilation
+        Box::leak(text.into_boxed_str())
+    };
+
     // 3. Remove [numthreads(...)] / [outputtopology] from the helper.
     //    They live on the generated wrapper, not the user function.
     if let Some(ref nr) = entry.numthreads_attr_range {
         // Include any trailing whitespace/newline.
         let end = skip_whitespace_in_source(source, nr.end);
-        replacements.push((nr.start, end, ""));
+        replacements.push((nr.start, end, removal(nr.start, end, "")));
     }
     if let Some(ref or) = entry.outputtopology_attr_range {
         let end = skip_whitespace_in_source(source, or.end);
-        replacements.push((or.start, end, ""));
+        replacements.push((or.start, end, removal(or.start, end, "")));
     }
 
     // 4. Remove the [goldy_*] attribute. Mesh/amplification helpers get
@@ -3227,12 +3240,16 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
     //    entry after inlining `goldy_mesh(...)`.
     {
         let end = skip_whitespace_in_source(source, entry.goldy_attr_range.end);
-        let replacement = if matches!(entry.stage, Stage::Mesh | Stage::Amplification) {
-            "[ForceInline]\n"
+        let keep = if matches!(entry.stage, Stage::Mesh | Stage::Amplification) {
+            "[ForceInline]"
         } else {
             ""
         };
-        replacements.push((entry.goldy_attr_range.start, end, replacement));
+        replacements.push((
+            entry.goldy_attr_range.start,
+            end,
+            removal(entry.goldy_attr_range.start, end, keep),
+        ));
     }
 
     // Sort by start position descending, apply.
@@ -4113,6 +4130,39 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         assert!(
             line1_pos < user_src_pos,
             "#line 1 must come before the user function definition"
+        );
+    }
+
+    /// Stripping `[goldy_compute]` / `[numthreads]` must not shift the user's lines: after
+    /// `#line 1`, every user statement has to sit on its original line number so Slang
+    /// diagnostics and the bounds analysis point at the right place.
+    #[test]
+    fn stripped_attributes_preserve_user_line_numbers() {
+        let src = r#"import goldy_exp;
+groupshared uint scratch[64];
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    scratch[id.x] = 0;
+    data[id.x] = scratch[id.x ^ 1];
+}
+"#;
+        let result = transform_virtual_main(src);
+        let user_part = result.split("#line 1\n").nth(1).expect("#line 1 directive");
+        let line_of = |text: &str, needle: &str| {
+            text.lines()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` not found"))
+                + 1
+        };
+        for needle in ["groupshared uint scratch", "scratch[id.x] = 0;", "data[id.x] = scratch"] {
+            assert_eq!(line_of(user_part, needle), line_of(src, needle), "line of `{needle}`");
+        }
+        assert_eq!(
+            line_of(user_part, "void _goldy_user_cs_main("),
+            line_of(src, "void cs_main("),
+            "entry point line"
         );
     }
 

@@ -117,6 +117,32 @@ buffer element-stride mismatch in shader `my_shader`:
   slot 0: shader expects element stride 16 but buffer has 4
 ```
 
+### `GOLDY_SHADER_VALIDATION` — Static Shader Checks
+
+Static checks over Slang's front-end IR, run at shader compile time. They
+have their own variable because they are a different kind of thing from the
+runtime categories above: each shader is compiled a second time to IR and
+analyzed whole-program (cost grows with shader size, not with what the app
+does), and a finding means "not proven", not "definitely wrong". For that
+reason `GOLDY_VALIDATION=all` does **not** turn them on.
+
+The value is a list of check names processed left to right:
+
+| Value | Effect |
+|-------|--------|
+| `bounds` | [Static bounds analysis](../design/shader-bounds-analysis.md): every dynamic array / vector / matrix index that cannot be proven inside `0 <= index < length` is logged as a warning with its Slang source location and call path (interprocedural, across imported modules) |
+| `all` (or `1`/`true`/`yes`) | Every check |
+| `-bounds` | Remove a check enabled earlier in the list (`all,-bounds`) |
+| `none` | Nothing |
+
+```bash
+GOLDY_SHADER_VALIDATION=bounds cargo run --example triangle
+GOLDY_VALIDATION=all GOLDY_SHADER_VALIDATION=all cargo test
+```
+
+Findings never fail a compile; they are logged once per distinct shader
+compile (including disk-cache hits) as `shader validation (bounds): ...`.
+
 ## DX12-Specific Debugging
 
 ### DX12 Debug Layer
@@ -248,6 +274,7 @@ RUST_LOG=goldy::render=trace cargo run --example triangle
 | `GOLDY_VALIDATION` | `api`, `layout`, `host_access`, `all`, `1`/`true`/`yes` | Enable validation categories |
 | `GOLDY_VALIDATION_FATAL` | `1`, `true`, `yes` | Fail on Vulkan Khronos ERROR messages |
 | `GOLDY_VALIDATE_LAYOUTS` | `1`, `true`, `yes` | Enable layout validation (legacy; prefer `GOLDY_VALIDATION=layout`) |
+| `GOLDY_SHADER_VALIDATION` | `bounds`, `all`, `-bounds`, `none` | Static shader checks over Slang IR (separate from `GOLDY_VALIDATION`) |
 | `GOLDY_DX12_FORCE_WARP` | `1` | Use WARP software rasterizer |
 | `GOLDY_DX12_DEBUG` | `1` | Force-enable D3D12 debug layer in release |
 | `GOLDY_DX12_NO_DEBUG` | `1` | Disable D3D12 debug layer |

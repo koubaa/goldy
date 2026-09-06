@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Static shader validation** (`GOLDY_SHADER_VALIDATION`) — opt-in static
+  checks over Slang's front-end IR, run at shader compile time. A separate
+  variable from `GOLDY_VALIDATION` and *not* implied by `GOLDY_VALIDATION=all`:
+  these cost a second compile plus a whole-program analysis per shader and
+  report "not proven" rather than invariant violations. Value grammar:
+  `all`, a check name (`bounds`), `-name` to exclude (`all,-bounds`). The
+  reader and rule-agnostic pieces (RIFF/fossil container, instruction tree,
+  linking, debug info, CFG/dominators) live in `goldy::slang::ir`; each check
+  is a rule under `goldy::slang::shader_validation`. Public entry points:
+  `SlangCompiler::validate_shader(.., ShaderChecks)` →
+  `ShaderValidationReport`, and `shader_validation::validate` for
+  `.slang-module` bytes produced elsewhere.
+- **Bounds check** (`GOLDY_SHADER_VALIDATION=bounds`) — the first rule: an
+  interval analysis over Slang's front-end IR that reports
+  every dynamic index into a fixed-length array / vector / matrix it cannot
+  prove to satisfy `0 <= index < length`, with the Slang source location, the
+  call path from the entry point, and a note on what the index depends on
+  (`SV_VertexID`, `WaveGetLaneCount()`, a buffer load, a float conversion,
+  ...). Interprocedural: helpers, generics (per specialization, including
+  `let N : int` array lengths), interface dispatch through witness tables and
+  `out`/`inout` parameters are analyzed in their calling context, across
+  `import`ed modules (`goldy_exp`). Understands dominating guards
+  (`if (i >= 0)`, `&&` conjunctions), clamps (`max`/`min`/`&`/`%`), workgroup
+  scan patterns, padded-dispatch early-outs and counted loops; flags the eager
+  `select(cond, arr[i], x)` form. Runs regardless of the shader target and
+  optimization level. Warnings only; never fails a compile. Report type:
+  `BoundsReport` (`ShaderValidationReport::bounds`). See
+  `docs/src/design/shader-bounds-analysis.md` for the integration decision
+  (Slang IR vs. SPIR-V), the corpus evaluation over `shaders/`, and known
+  limitations.
+
 - **Examples in the book** — every `[[example]]` target now has a page under
   Examples in the mdBook, with its description, run command, controls, a
   recording of it running, and full Rust plus Slang source inlined from
@@ -181,6 +212,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GOLDY_SPECIALIZATION` point at the same distinction.
 
 ### Fixed
+
+- **Slang diagnostics pointed one or two lines early in virtual-main shaders.**
+  Stripping `[goldy_*]` / `[numthreads]` / `[outputtopology]` from the user
+  function dropped their newlines, shifting every line after them relative to
+  the `#line 1` directive. The removed spans now keep their newlines.
 
 - **`mandelbrot` ignored the run limit** — the example sets
   `ControlFlow::Wait`, so with no input it idled past `GOLDY_EXAMPLE_TIMEOUT` /

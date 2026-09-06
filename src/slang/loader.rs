@@ -71,6 +71,9 @@ pub struct SlangLibrary {
     pub get_entry_point_code_blob: FnSpGetEntryPointCodeBlob,
     pub get_target_code_blob: FnSpGetTargetCodeBlob,
     pub get_entry_point_host_callable: FnSpGetEntryPointHostCallable,
+    pub set_output_container_format: FnSpSetOutputContainerFormat,
+    pub get_container_code: FnSpGetContainerCode,
+    pub process_command_line_arguments: FnSpProcessCommandLineArguments,
     // Reflection API
     pub get_reflection: FnSpGetReflection,
     pub reflection_find_type_by_name: FnSpReflectionFindTypeByName,
@@ -207,6 +210,15 @@ impl SlangLibrary {
             let get_entry_point_host_callable: FnSpGetEntryPointHostCallable = *library
                 .get(b"spGetEntryPointHostCallable\0")
                 .context("Failed to load spGetEntryPointHostCallable")?;
+            let set_output_container_format: FnSpSetOutputContainerFormat = *library
+                .get(b"spSetOutputContainerFormat\0")
+                .context("Failed to load spSetOutputContainerFormat")?;
+            let get_container_code: FnSpGetContainerCode = *library
+                .get(b"spGetContainerCode\0")
+                .context("Failed to load spGetContainerCode")?;
+            let process_command_line_arguments: FnSpProcessCommandLineArguments = *library
+                .get(b"spProcessCommandLineArguments\0")
+                .context("Failed to load spProcessCommandLineArguments")?;
 
             goldy_event!("slang.ffi.core_symbols", loaded = true);
 
@@ -355,6 +367,9 @@ impl SlangLibrary {
                 get_entry_point_code_blob,
                 get_target_code_blob,
                 get_entry_point_host_callable,
+                set_output_container_format,
+                get_container_code,
+                process_command_line_arguments,
                 // Reflection API
                 get_reflection,
                 reflection_find_type_by_name,

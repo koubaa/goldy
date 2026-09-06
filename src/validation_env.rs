@@ -1,4 +1,5 @@
-//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS`).
+//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS`,
+//! `GOLDY_SHADER_VALIDATION`).
 //!
 //! **Semantics**
 //! - `GOLDY_VALIDATE_LAYOUTS=1|true|yes` — unchanged; enables Rust/Slang layout and buffer
@@ -22,6 +23,11 @@
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
+//! - `GOLDY_SHADER_VALIDATION` — static checks over Slang IR at shader compile time
+//!   (`all`, `bounds`, `-bounds`; see [`crate::slang::shader_validation`]). Separate from
+//!   `GOLDY_VALIDATION` and **not** implied by `GOLDY_VALIDATION=all`: these cost a second
+//!   compile plus a whole-program analysis per shader and report "not proven" rather than
+//!   invariant violations.
 //! - `GOLDY_DISABLE_CB_REUSE=1|true|yes` — disable the CB-retention facility entirely:
 //!   no retention fingerprints, no backend CB store/resubmit, no retained-allocator
 //!   retire waits, no topology-dirty registration for replay. Each submit re-records
@@ -138,6 +144,17 @@ pub(crate) fn scheme_validation_enabled() -> bool {
 #[must_use]
 pub fn validation_fatal_enabled() -> bool {
     env_truthy("GOLDY_VALIDATION_FATAL")
+}
+
+/// Static checks to run over Slang IR at shader compile time (`GOLDY_SHADER_VALIDATION`).
+///
+/// Empty unless the variable is set; `GOLDY_VALIDATION` never turns these on. Findings are
+/// warnings and never fail a compile.
+#[must_use]
+pub fn shader_validation_checks() -> crate::slang::ShaderChecks {
+    std::env::var("GOLDY_SHADER_VALIDATION")
+        .map(|s| crate::slang::ShaderChecks::parse(&s))
+        .unwrap_or_default()
 }
 
 /// Page-protect CPU-visible GPU copies so stray host pointers fault.
@@ -261,6 +278,7 @@ mod tests {
         assert!(p.gpu_api);
         assert!(p.timeline);
         assert!(p.scheme);
+        assert!(p.host_access);
 
         let p = parse_validation_list("api,fatal");
         assert!(p.gpu_api);
