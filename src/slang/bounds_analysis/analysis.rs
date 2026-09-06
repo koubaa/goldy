@@ -586,7 +586,7 @@ impl<'m> Analyzer<'m> {
                 *n += 1;
             }
         }
-        if self.in_progress.borrow().iter().any(|f| *f == key.f)
+        if self.in_progress.borrow().contains(&key.f)
             || self.in_progress.borrow().len() as u32 >= MAX_CALL_DEPTH
             || self.analyses.get() >= MAX_FUNCTION_ANALYSES
         {
@@ -868,7 +868,9 @@ impl<'a, 'm> FunctionAnalysis<'a, 'm> {
     }
 
     fn compute_value_numbers(&mut self) {
-        let mut table: HashMap<(u32, Option<u32>, Vec<Option<u32>>), u32> = HashMap::new();
+        // (opcode, canonical type, canonical operands) -> representative instruction.
+        type Shape = (u32, Option<u32>, Vec<Option<u32>>);
+        let mut table: HashMap<Shape, u32> = HashMap::new();
         let mut numbers = HashMap::new();
         for &bi in &self.rpo {
             for &i in &self.blocks[bi].body {

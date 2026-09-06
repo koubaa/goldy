@@ -415,14 +415,14 @@ impl Module {
                 _ => Err(BoundsAnalysisError::Malformed("operand index out of range")),
             }
         };
-        for i in 0..n {
+        for inst in insts.iter_mut().take(n) {
             let ty = read_ref(&mut operand_at)?;
-            let count = insts[i].operands.len();
+            let count = inst.operands.len();
             let mut operands = Vec::with_capacity(count);
             for _ in 0..count {
                 operands.push(read_ref(&mut operand_at)?);
             }
-            let payload = match insts[i].op {
+            let payload = match inst.op {
                 op::BOOL_LIT | op::INT_LIT => {
                     let bits = literals.get(lit_at)?.u64()?;
                     lit_at += 1;
@@ -448,7 +448,6 @@ impl Module {
                 }
                 _ => Payload::None,
             };
-            let inst = &mut insts[i];
             inst.ty = ty;
             inst.operands = operands;
             inst.payload = payload;
