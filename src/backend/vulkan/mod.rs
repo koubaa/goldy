@@ -56,7 +56,13 @@ use std::sync::{Arc, Mutex, RwLock};
 /// regardless.  Holding this lock only for the duration of instance
 /// creation/destruction adds negligible overhead in production (instances are
 /// long-lived) while making tests safe under the default parallel test runner.
-static VK_INSTANCE_LOCK: Mutex<()> = Mutex::new(());
+///
+/// Shared with the foreign Vulkan adapter (`goldy::foreign::vulkan`): that
+/// module creates a separate Vulkan instance (not a Goldy device) and must
+/// serialise against this backend.
+pub(crate) static VK_INSTANCE_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) use utils::{find_memory_type, format_to_vk};
 
 /// Extract push-constant slot categories for a render pipeline from shader
 /// reflection. Fragment shader data takes precedence; vertex is a fallback.

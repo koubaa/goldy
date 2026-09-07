@@ -39,6 +39,8 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use types::MetalState;
 
+pub(crate) use utils::format_to_mtl;
+
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     state.devices.iter().all(|(device, ld)| {

@@ -9,6 +9,19 @@
 
 implementing goldy_exp;
 
+// Host-callable JIT (slang-llvm) cannot resolve HLSL group barriers; empty on
+// `__CPU__` so `import goldy_exp` does not emit an unresolved external. This is
+// not a correct workgroup. See `host_callable_workgroup_reduce_uint`.
+#if defined(__CPU__)
+[ForceInline]
+void goldy_group_barrier() {}
+#else
+[ForceInline]
+void goldy_group_barrier() {
+    GroupMemoryBarrierWithGroupSync();
+}
+#endif
+
 /// Inclusive right-reduce: each thread accumulates values from higher-indexed
 /// neighbors. After completion, thread 0 holds the total over the workgroup.
 ///
@@ -20,10 +33,10 @@ public T workgroup_reduce<T : IMonoid, let N : int>(
 ) {
     scratch[local_ix] = val;
     for (uint i = 0; i < firstbitlow(N); i++) {
-        GroupMemoryBarrierWithGroupSync();
+        goldy_group_barrier();
         if (local_ix + (1u << i) < N)
             val = val.combine(scratch[local_ix + (1u << i)]);
-        GroupMemoryBarrierWithGroupSync();
+        goldy_group_barrier();
         scratch[local_ix] = val;
     }
     return val;
@@ -57,12 +70,12 @@ public T workgroup_inclusive_scan<T : IMonoid, let N : int>(
 ) {
     scratch[local_ix] = val;
     for (uint i = 0; i < firstbitlow(N); i++) {
-        GroupMemoryBarrierWithGroupSync();
+        goldy_group_barrier();
         if (local_ix >= (1u << i)) {
             T other = scratch[local_ix - (1u << i)];
             val = other.combine(val);
         }
-        GroupMemoryBarrierWithGroupSync();
+        goldy_group_barrier();
         scratch[local_ix] = val;
     }
     return val;
@@ -73,7 +86,7 @@ public T workgroup_inclusive_scan<T : IMonoid, let N : int>(
 [ForceInline]
 public T workgroup_broadcast<T>(T value, uint local_ix, groupshared T slot[1]) {
     if (local_ix == 0) slot[0] = value;
-    GroupMemoryBarrierWithGroupSync();
+    goldy_group_barrier();
     return slot[0];
 }
 
@@ -122,7 +135,7 @@ public uint workgroup_inclusive_scan_wave_uint_sum<let WG_SIZE_PARAM : int>(
     if (WaveIsFirstLane())
         scratch_wave_totals[wave_ix] = wave_total;
 
-    GroupMemoryBarrierWithGroupSync();
+    goldy_group_barrier();
 
     if (local_ix == 0) {
         uint run = 0;
@@ -133,7 +146,7 @@ public uint workgroup_inclusive_scan_wave_uint_sum<let WG_SIZE_PARAM : int>(
         }
     }
 
-    GroupMemoryBarrierWithGroupSync();
+    goldy_group_barrier();
 
     uint exclusive_between_waves = scratch_wave_totals[wave_ix];
     return exclusive_between_waves + inclusive_in_wave;

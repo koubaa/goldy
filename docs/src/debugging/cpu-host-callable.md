@@ -67,9 +67,24 @@ start/end group IDs).
 | Goldy bindless frame table (native wrapper) | CPU uses the CUDA-shaped typed `uniform` preamble; scheme submit maps bindless indices onto host `{data, count}` views |
 | Broadcast / textures / graphics | Still unsupported on `GOLDY_BACKEND=cpu` |
 
-Fine rasterization stays GPU-only until textures work. `Interlocked` / groupshared
-behavior follows the Slang CPU prelude (typically mutex or sequential atomics)
-and is not a substitute for GPU memory-model testing.
+Fine rasterization stays GPU-only until a CPU fine writes a **buffer pixmap**
+and [`PixelExchange`](../surfaces/pixel-exchange.md) blits it into a foreign
+sink (`HostPixelSink`, `foreign::{vulkan,dx12,metal}` offscreen, or
+[`foreign::windowed`](../surfaces/pixel-exchange.md) on Metal). The CPU device
+still has no textures; the graphics API is not a Goldy backend.
+
+`Interlocked` / groupshared behavior follows the Slang CPU prelude (typically
+mutex or sequential atomics) and is not a substitute for GPU memory-model testing.
+Host-callable compiles pass Slang `-ignore-capabilities` so HLSL group barriers
+are accepted. slang-llvm's JIT does **not** look up process symbols — only a
+fixed math/`memcpy` table — so Goldy drops `GroupMemoryBarrier*` calls from the
+CPU-transformed source instead of emitting an unresolved external. Workgroups
+still run as serial loops, so barrier-based reductions are not a correct CPU
+model of the GPU algorithm. Capture that with ignored tests
+`cpu_shaders::tests::host_callable_workgroup_reduce_uint` and
+`host_callable_workgroup_inclusive_scan_uint` (and the same kernels on
+`GOLDY_BACKEND=cpu` in `tests/cpu_backend.rs`). Same-lane
+`host_callable_groupshared_with_barrier` is not sufficient.
 
 ## Related
 
