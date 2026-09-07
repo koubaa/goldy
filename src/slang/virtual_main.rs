@@ -590,12 +590,16 @@ pub fn transform_virtual_main_cpu(source: &str) -> Result<String, String> {
         return Err("CPU host-callable debug path supports [goldy_compute] only (no vertex/fragment/rt/mesh)".into());
     }
     if !has_compute {
-        return Ok(source.to_string());
+        let mut source = source.to_string();
+        strip_cpu_group_barriers(&mut source);
+        return Ok(source);
     }
 
     let entries = find_all_entries(source);
     if entries.is_empty() {
-        return Ok(source.to_string());
+        let mut source = source.to_string();
+        strip_cpu_group_barriers(&mut source);
+        return Ok(source);
     }
     for entry in &entries {
         if entry.stage != Stage::Compute {
@@ -614,8 +618,26 @@ pub fn transform_virtual_main_cpu(source: &str) -> Result<String, String> {
     for entry in entries.iter().rev() {
         apply_entry_transforms(&mut modified, entry);
     }
+    strip_cpu_group_barriers(&mut modified);
 
     Ok(wrapper_block + "#line 1\n" + &modified)
+}
+
+/// slang-llvm's JIT only resolves a hard-coded math/`memcpy` table. HLSL group
+/// barriers lower to an external `GroupMemoryBarrierWithGroupSync()` call that is
+/// not in that table, so the first barrier is a jump to null (`SIGSEGV`).
+/// Workgroups already run as serial loops, so the calls are dropped.
+fn strip_cpu_group_barriers(source: &mut String) {
+    for name in [
+        "GroupMemoryBarrierWithGroupSync",
+        "GroupMemoryBarrier",
+        "AllMemoryBarrierWithGroupSync",
+        "DeviceMemoryBarrierWithGroupSync",
+        "AllMemoryBarrier",
+        "DeviceMemoryBarrier",
+    ] {
+        *source = source.replace(&format!("{name}()"), "");
+    }
 }
 
 fn cpu_check_entry(entry: &EntryDef) -> Result<(), String> {
@@ -3722,6 +3744,26 @@ float4 fs_main() : SV_Target { return float4(1, 0, 0, 1); }
         assert!(out.contains("SV_DispatchThreadID"), "{out}");
         assert!(!out.contains("_bw0"), "must not emit bindless words: {out}");
         assert!(out.contains("_goldy_user_cs_main"), "{out}");
+    }
+
+    #[test]
+    fn cpu_wrapper_strips_group_barriers() {
+        let src = r#"
+            import goldy_exp;
+            groupshared uint sh[4];
+            [goldy_compute]
+            [numthreads(4, 1, 1)]
+            void cs_main(Scattered<uint> data, GroupThreadId local_id) {
+                sh[local_id.x] = local_id.x;
+                GroupMemoryBarrierWithGroupSync();
+                data[local_id.x] = sh[local_id.x];
+            }
+        "#;
+        let out = transform_virtual_main_cpu(src).expect("cpu transform");
+        assert!(
+            !out.contains("GroupMemoryBarrierWithGroupSync()"),
+            "barrier must not reach slang-llvm: {out}"
+        );
     }
 
     #[test]

@@ -31,13 +31,16 @@ claims become stale.
 | [`HostPixelSink`](https://docs.rs/goldy/latest/goldy/struct.HostPixelSink.html) | always | Copy into a `Vec<u8>` |
 | `foreign::vulkan::ForeignSurface` | `vulkan` | `vkCmdCopyBufferToImage` on a process-wide Vulkan singleton (offscreen image today) |
 | `foreign::dx12::ForeignSurface` | `dx12` (Windows) | `CopyTextureRegion` on a process-wide D3D12 singleton (hardware, then WARP) |
-| `foreign::metal::ForeignSurface` | `metal` (macOS/iOS) | `MTLBlitCommandEncoder` on a process-wide Metal singleton |
+| `foreign::metal::ForeignSurface` | `metal` (macOS/iOS) | Offscreen blit, or `nextDrawable` + present when created with [`foreign::windowed`](https://docs.rs/goldy/latest/goldy/foreign/fn.windowed.html) |
 
 Each `goldy::foreign::*` adapter creates its own graphics device. Vulkan and DX12
 share only the process-wide instance/factory lock with the matching Goldy backend
 (`vkCreateInstance`, `CreateDXGIFactory2`); Metal has no equivalent constructor
-lock. None of them create a Goldy `Instance`. Windowed swapchain present is a
-later verb on the same singleton.
+lock. None of them create a Goldy `Instance`.
+
+Windowed present: [`foreign::windowed`](https://docs.rs/goldy/latest/goldy/foreign/fn.windowed.html)
+attaches a Metal `CAMetalLayer`. `blit` copies into the drawable and presents.
+Vulkan/DX12 WSI on the same singleton is not wired yet.
 
 ## Frame cycle
 

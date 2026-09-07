@@ -721,6 +721,17 @@ impl SlangCompiler {
             if !slang_succeeded(result) {
                 anyhow::bail!("Failed to configure Slang request for IR output (result={result})");
             }
+        } else if target == ShaderTarget::HostCallable {
+            // Group barriers are `require(cuda_glsl_hlsl_metal_spirv_wgsl)` and error as
+            // E36107 on the C++ host-callable target. CPU-transformed source drops the
+            // calls (slang-llvm cannot resolve them); ignore the capability so leftovers
+            // still compile.
+            let ignore = CString::new("-ignore-capabilities").unwrap();
+            let args: [*const c_char; 1] = [ignore.as_ptr()];
+            let result = unsafe { (self.library.process_command_line_arguments)(request, args.as_ptr(), 1) };
+            if !slang_succeeded(result) {
+                anyhow::bail!("Failed to set -ignore-capabilities for host-callable compile");
+            }
         }
 
         let result = unsafe { (self.library.compile)(request) };
