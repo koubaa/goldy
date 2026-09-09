@@ -1,8 +1,9 @@
-//! Conway's Game of Life — hybrid Scheme (compute + render + present).
+//! Conway's Game of Life — two retained schemes, alternating resubmit.
 //!
 //! Ping-pong cell grids live in one retained record buffer (fields `"a"` / `"b"`).
-//! Each simulation step runs an ephemeral compute scheme; the display scheme is
-//! rebuilt when the active field flips.
+//! Orientation AB reads `a` and writes `b`; BA is the swap. Each is recorded once
+//! (and again on resize). Simulation steps alternate which scheme submits. Idle
+//! redraws skip submit and leave the last present on the surface.
 //!
 //! Run with: `cargo run --example game_of_life`
 
@@ -21,44 +22,75 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
-use common::FrameSink;
+use common::{FrameSink, FrameTicket};
 
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: u32 = GRID_WIDTH * GRID_HEIGHT;
 
-fn run_compute_step(
-    ctx: &Context,
-    cells: &Buffer,
-    read_field: &str,
-    write_field: &str,
-    pipeline: &ComputePipeline,
-) -> Result<()> {
-    let mut scheme = Scheme::new(ctx);
-    scheme
-        .node("game_of_life", pipeline)
-        .with_parcel(&cells[read_field], NodeAccess::Read)
-        .with_parcel(&cells[write_field], NodeAccess::Overwrite)
-        .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
-    scheme.submit()?;
-    Ok(())
-}
-
-fn record_display_scheme(
+fn record_scheme(
     scheme: &mut Scheme,
     sink: &mut FrameSink,
     cells: &Buffer,
-    current_field: &str,
+    read_field: &str,
+    write_field: &str,
+    compute_pipeline: &ComputePipeline,
     render_pipeline: &RenderPipeline,
     scene_rt: &Lease<LeaseRenderTarget>,
 ) -> anyhow::Result<()> {
-    let current = &cells[current_field];
+    scheme
+        .node("game_of_life", compute_pipeline)
+        .with_parcel(&cells[read_field], NodeAccess::Read)
+        .with_parcel(&cells[write_field], NodeAccess::Overwrite)
+        .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
+
     let mut pass = scheme.render_pass("game_of_life_render", scene_rt, TargetLoad::Discard);
-    pass.with_parcel(current, NodeAccess::Read);
+    pass.with_parcel(&cells[write_field], NodeAccess::Read);
     pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();
     sink.bind_render_target(scheme, scene_rt)
+}
+
+fn build_scheme(
+    ctx: &Context,
+    sink: &mut FrameSink,
+    cells: &Buffer,
+    read_field: &str,
+    write_field: &str,
+    compute_pipeline: &ComputePipeline,
+    render_pipeline: &RenderPipeline,
+) -> anyhow::Result<(Scheme, FrameTicket)> {
+    let mut scheme = Scheme::new(ctx);
+    let (width, height) = sink.size();
+    let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+    record_scheme(
+        &mut scheme,
+        sink,
+        cells,
+        read_field,
+        write_field,
+        compute_pipeline,
+        render_pipeline,
+        &scene_rt,
+    )?;
+    let ticket = sink
+        .take_ticket()
+        .ok_or_else(|| anyhow::anyhow!("FrameSink missing bind ticket"))?;
+    Ok((scheme, ticket))
+}
+
+fn build_schemes(
+    ctx: &Context,
+    sink: &mut FrameSink,
+    cells: &Buffer,
+    compute_pipeline: &ComputePipeline,
+    render_pipeline: &RenderPipeline,
+) -> anyhow::Result<((Scheme, FrameTicket), (Scheme, FrameTicket))> {
+    Ok((
+        build_scheme(ctx, sink, cells, "a", "b", compute_pipeline, render_pipeline)?,
+        build_scheme(ctx, sink, cells, "b", "a", compute_pipeline, render_pipeline)?,
+    ))
 }
 
 fn create_initial_state() -> Vec<u32> {
@@ -160,8 +192,10 @@ struct RenderState {
     window: Option<Arc<Window>>,
     ctx: Context,
     sink: FrameSink,
-    scene_rt: Lease<LeaseRenderTarget>,
-    display_scheme: Scheme,
+    scheme_ab: Scheme,
+    scheme_ba: Scheme,
+    ticket_ab: FrameTicket,
+    ticket_ba: FrameTicket,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
@@ -173,6 +207,19 @@ struct RenderState {
 }
 
 impl RenderState {
+    fn record_orientations(&mut self) -> Result<()> {
+        let (ab, ba) = build_schemes(
+            &self.ctx,
+            &mut self.sink,
+            &self.cells,
+            &self.compute_pipeline,
+            &self.render_pipeline,
+        )?;
+        (self.scheme_ab, self.ticket_ab) = ab;
+        (self.scheme_ba, self.ticket_ba) = ba;
+        Ok(())
+    }
+
     fn new(window: Option<Arc<Window>>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
@@ -206,10 +253,8 @@ impl RenderState {
             },
         )?;
 
-        let mut display_scheme = Scheme::new(&ctx);
-        let (width, height) = sink.size();
-        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
-        record_display_scheme(&mut display_scheme, &mut sink, &cells, "a", &render_pipeline, &scene_rt)?;
+        let ((scheme_ab, ticket_ab), (scheme_ba, ticket_ba)) =
+            build_schemes(&ctx, &mut sink, &cells, &compute_pipeline, &render_pipeline)?;
 
         println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
         println!("Features Gosper Glider Gun + random cells");
@@ -219,8 +264,10 @@ impl RenderState {
             window,
             ctx,
             sink,
-            scene_rt,
-            display_scheme,
+            scheme_ab,
+            scheme_ba,
+            ticket_ab,
+            ticket_ba,
             compute_pipeline,
             render_pipeline,
             _retained_pool: retained_pool,
@@ -232,40 +279,28 @@ impl RenderState {
         })
     }
 
-    fn rebuild_display_scheme(&mut self) -> Result<()> {
-        let current_field = if self.use_buffer_a { "a" } else { "b" };
-        let mut display_scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.sink.size();
-        self.scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), self.sink.format(), None)?;
-        record_display_scheme(
-            &mut display_scheme,
-            &mut self.sink,
-            &self.cells,
-            current_field,
-            &self.render_pipeline,
-            &self.scene_rt,
-        )?;
-        self.display_scheme = display_scheme;
+    fn step(&mut self) -> Result<()> {
+        let (scheme, ticket) = if self.use_buffer_a {
+            (&mut self.scheme_ab, &self.ticket_ab)
+        } else {
+            (&mut self.scheme_ba, &self.ticket_ba)
+        };
+        let mut submission = scheme.submit()?;
+        self.sink.settle_ticket(&mut submission, ticket)?;
+        self.use_buffer_a = !self.use_buffer_a;
         Ok(())
     }
 
     fn render(&mut self) -> Result<()> {
-        self.frame_count += 1;
-
         let now = std::time::Instant::now();
-        let should_update = self.sink.is_capture() || now.duration_since(self.last_update).as_millis() > 33;
+        let should_step =
+            self.sink.is_capture() || self.frame_count == 0 || now.duration_since(self.last_update).as_millis() > 33;
 
-        if should_update {
+        if should_step {
             self.last_update = now;
-
-            let (read_field, write_field) = if self.use_buffer_a { ("a", "b") } else { ("b", "a") };
-            run_compute_step(&self.ctx, &self.cells, read_field, write_field, &self.compute_pipeline)?;
-            self.use_buffer_a = !self.use_buffer_a;
-            self.rebuild_display_scheme()?;
+            self.step()?;
+            self.frame_count += 1;
         }
-
-        let mut submission = self.display_scheme.submit()?;
-        self.sink.settle(&mut submission)?;
 
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -338,9 +373,13 @@ impl ApplicationHandler for App {
                             tracing::error!("Failed to resize surface: {e}");
                             return;
                         }
-                        if let Err(e) = state.rebuild_display_scheme() {
-                            tracing::error!("Failed to rebuild display scheme: {e}");
+                        if let Err(e) = state.record_orientations() {
+                            tracing::error!("Failed to rerecord schemes: {e}");
+                            return;
                         }
+                        state.last_update = std::time::Instant::now()
+                            .checked_sub(std::time::Duration::from_millis(34))
+                            .unwrap_or(state.last_update);
                     }
                 }
             }

@@ -129,7 +129,8 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-enum FrameTicket {
+#[derive(Clone)]
+pub enum FrameTicket {
     Present(Transaction),
     Withdraw(WithdrawTransaction),
 }
@@ -363,6 +364,12 @@ impl FrameSink {
         Ok(())
     }
 
+    /// Take the ticket produced by the last bind. Needed when several schemes share
+    /// one sink: each bind overwrites [`Self::settle`]'s singleton.
+    pub fn take_ticket(&mut self) -> Option<FrameTicket> {
+        self.ticket.take()
+    }
+
     /// Windowed `bind_destination`, or a Direct compute colour target for capture.
     pub fn compute_color_target(
         &mut self,
@@ -421,18 +428,21 @@ impl FrameSink {
 
     /// Present or write one RGBA frame. Capture stops after `GOLDY_EXAMPLE_CAPTURE_FRAMES`.
     pub fn settle(&mut self, submission: &mut Submission) -> anyhow::Result<()> {
-        let pixels = {
-            let ticket = self
-                .ticket
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("FrameSink has no bind ticket"))?;
-            match ticket {
-                FrameTicket::Present(tx) => {
-                    tx.claim(submission)?.consume()?;
-                    None
-                }
-                FrameTicket::Withdraw(tx) => Some(tx.claim(submission)?.consume()?),
+        let ticket = self
+            .ticket
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("FrameSink has no bind ticket"))?;
+        self.settle_ticket(submission, &ticket)
+    }
+
+    /// Settle a ticket recorded into a specific scheme (e.g. ping-pong resubmits).
+    pub fn settle_ticket(&mut self, submission: &mut Submission, ticket: &FrameTicket) -> anyhow::Result<()> {
+        let pixels = match ticket {
+            FrameTicket::Present(tx) => {
+                tx.claim(submission)?.consume()?;
+                None
             }
+            FrameTicket::Withdraw(tx) => Some(tx.claim(submission)?.consume()?),
         };
         if let Some(pixels) = pixels {
             self.write_rgba(&pixels)?;
