@@ -68,9 +68,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continuation may yield to itself). See
   [Yielding Scripts](docs/src/programming-model/yielding-scripts.md).
 
+- **`PixelExchange`** — buffer pixmap → foreign [`PixelSink`](https://docs.rs/goldy/latest/goldy/trait.PixelSink.html).
+  The CPU device has no textures; fine (or any host compute) writes a packed
+  buffer and `PixelClaim::consume` copies it into a sink that is **not** a
+  Goldy backend. [`HostPixelSink`](https://docs.rs/goldy/latest/goldy/struct.HostPixelSink.html)
+  is a `Vec<u8>`. `goldy::foreign::{vulkan,dx12,metal}` each own a process-wide
+  graphics singleton (sharing only the Goldy backend's instance/factory lock)
+  and blit into an offscreen image (`vkCmdCopyBufferToImage`,
+  `CopyTextureRegion`, `MTLBlitCommandEncoder`). Windowed Metal present is
+  [`foreign::windowed`](https://docs.rs/goldy/latest/goldy/foreign/fn.windowed.html)
+  (Metal `CAMetalLayer`). See [Pixel Exchange](docs/src/surfaces/pixel-exchange.md).
+
 - **`Interlocked*` on the CPU backend** — `goldy_exp`'s `InterlockedAdd` /
   `Or` / `Xor` / `Min` / `Max` / `Exchange` compile for the host-callable
   target as plain read-modify-write (the CPU backend runs lanes serially).
+- **CPU group barriers** — slang-llvm's JIT symbol map is math/`memcpy` only
+  (process `#[no_mangle]` stubs are never found). Host-callable compiles pass
+  `-ignore-capabilities` and Goldy drops `GroupMemoryBarrier*` from CPU-
+  transformed source; `goldy_exp` collectives no-op `goldy_group_barrier` when
+  `__CPU__` is set. Serial workgroup loops remain; ignored tests
+  `host_callable_workgroup_reduce_uint` / `inclusive_scan` are the contract.
 
 - **Params-only scheme dirtiness** — `Scheme::set_node_pipeline`,
   `set_node_dispatch`, and `set_node_param` mark a scheme params-dirty instead

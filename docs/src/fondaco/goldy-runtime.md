@@ -33,8 +33,8 @@ That split is a substrate artifact, not a machine requirement.
 | Ownership / claims | `NodeAccess` → derived precedences | **Shipped** |
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | **Shipped** (internal) |
 | Gate | Submission gate, `Context::boundary_crossed` | **Shipped** |
-| Exchange | `SurfaceExchange`, `MemoryExchange` | **Shipped** |
-| Exchange claim | `Transaction` → `Claim` → `consume` / `discard` | **Shipped** |
+| Exchange | `SurfaceExchange`, `MemoryExchange`, `PixelExchange` | **Shipped** |
+| Exchange claim | `Claim`, `WithdrawClaim`, `PixelClaim` → `consume` / `discard` | **Shipped** |
 | Warehouse / budget | `BudgetPolicy`, `VramAllocator` | **Shipped** (partial) |
 | Growable buffers | `Buffer::resize_to`, stable handles | **Shipped** |
 | Retained resubmit | Clean schemes replay with zero re-record | **Shipped** |
@@ -121,7 +121,14 @@ claim.consume()?; // present
 
 **Shipped** CPU readback: `MemoryExchange` with `WithdrawTransaction` / `WithdrawClaim`. See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
-**Designed**: video-encoder exchange (foreign read continues after enqueue).
+**Shipped** pixel blit: `PixelExchange` withdraws a buffer pixmap and
+`PixelClaim::consume` copies it into a `PixelSink` that is not a Goldy device
+(`HostPixelSink`, or `foreign::{vulkan,dx12,metal}` offscreen). See [Pixel Exchange](../surfaces/pixel-exchange.md).
+The CPU backend stays compute-only; graphics is a foreign singleton behind the
+exchange verb.
+
+**Designed**: video-encoder exchange (foreign read continues after enqueue);
+windowed WSI on the foreign Vulkan/DX12/Metal singleton.
 
 ## 7. Schemes and GraphIR
 
@@ -204,7 +211,7 @@ Capability queries report backend, residency model, resize cost, zero-copy readb
 | Script | Slang shader |
 | Parcel | `Buffer` / `Texture` handle |
 | Merchant | Program |
-| Exchange | `SurfaceExchange`, `MemoryExchange` |
+| Exchange | `SurfaceExchange`, `MemoryExchange`, `PixelExchange` |
 | Claim (exchange) | `Claim`, `WithdrawClaim` |
 | Gate | Fence epoch, `boundary_crossed` |
 | Warehouse | `BudgetPolicy`, `VramAllocator` |

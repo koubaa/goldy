@@ -20,7 +20,9 @@
 //! Broadcast / `gpu::Uniform` structs, `ByteAddress`, `Interpolated` textures,
 //! `DirectSpatial` storage images, samplers, `Interlocked` atomics beyond what
 //! the Slang CPU prelude provides, and any `[goldy_vertex]` / `[goldy_fragment]`
-//! stage. Fine rasterization stays GPU-only.
+//! stage. Fine can write a packed pixmap for [`crate::PixelExchange`]; there is
+//! no CPU texture device. Workgroup barriers are dropped (slang-llvm cannot
+//! resolve them); serial lanes are not a GPU workgroup.
 
 use anyhow::{Context, Result};
 use std::ffi::CString;
@@ -529,6 +531,122 @@ mod tests {
         "#;
         let kernel = compile(&compiler, src, "cs_main", [1, 1, 1], &[]).expect("compile empty CPU kernel");
         kernel.dispatch([1, 1, 1], &mut []).expect("dispatch empty");
+    }
+
+    /// Same-lane read after a barrier. Does **not** prove workgroup scans: that is
+    /// `host_callable_workgroup_reduce_uint` (ignored until CPU lanes sync).
+    #[test]
+    fn host_callable_groupshared_with_barrier() {
+        let compiler = SlangCompiler::new().expect("Slang");
+        let src = r#"
+            import goldy_exp;
+            groupshared uint sh[4];
+            [goldy_compute]
+            [numthreads(4, 1, 1)]
+            void cs_main(Scattered<uint> data, GroupThreadId local_id) {
+                sh[local_id.x] = local_id.x;
+                GroupMemoryBarrierWithGroupSync();
+                data[local_id.x] = sh[local_id.x];
+            }
+        "#;
+        let kernel = compile_shader(&compiler, src, &[&shader_search_path()], &[], OptimizationLevel::None)
+            .expect("compile groupshared+barrier CPU kernel");
+        let mut data = [0u32; 4];
+        kernel
+            .dispatch_1d(4, &mut [CpuBinding::u32s(&mut data)])
+            .expect("dispatch");
+        assert_eq!(data, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn host_callable_groupshared_no_barrier() {
+        let compiler = SlangCompiler::new().expect("Slang");
+        let src = r#"
+            import goldy_exp;
+            groupshared uint sh[4];
+            [goldy_compute]
+            [numthreads(4, 1, 1)]
+            void cs_main(Scattered<uint> data, GroupThreadId local_id) {
+                sh[local_id.x] = local_id.x;
+                data[local_id.x] = sh[local_id.x];
+            }
+        "#;
+        let kernel = compile_shader(&compiler, src, &[&shader_search_path()], &[], OptimizationLevel::None)
+            .expect("compile groupshared CPU kernel");
+        let mut data = [0u32; 4];
+        kernel
+            .dispatch_1d(4, &mut [CpuBinding::u32s(&mut data)])
+            .expect("dispatch");
+        assert_eq!(data, [0, 1, 2, 3]);
+    }
+
+    /// Hillis–Steele reduce (same kernel as GPU `scheme_workgroup_reduce_uint_correct`).
+    /// Serial CPU lanes make this wrong; slang-llvm also cannot resolve the barrier
+    /// symbol. Un-ignore when CPU workgroups match GPU.
+    #[test]
+    #[ignore = "CPU workgroups are serial loops; barrier reduce is not implemented"]
+    fn host_callable_workgroup_reduce_uint() {
+        let compiler = SlangCompiler::new().expect("Slang");
+        let src = r#"
+            import goldy_exp;
+            groupshared uint sh_scratch[64];
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+                uint ix  = local_id.x;
+                uint val = 1u;
+                sh_scratch[ix] = val;
+                for (uint i = 0; i < 6; i++) {
+                    GroupMemoryBarrierWithGroupSync();
+                    if (ix + (1u << i) < 64u)
+                        val = val + sh_scratch[ix + (1u << i)];
+                    GroupMemoryBarrierWithGroupSync();
+                    sh_scratch[ix] = val;
+                }
+                OUT[ix] = val;
+            }
+        "#;
+        let kernel = compile_shader(&compiler, src, &[&shader_search_path()], &[], OptimizationLevel::None)
+            .expect("compile reduce");
+        let mut out = [0u32; 64];
+        kernel
+            .dispatch_1d(64, &mut [CpuBinding::u32s(&mut out)])
+            .expect("dispatch");
+        assert_eq!(out[0], 64, "thread 0 holds the workgroup sum");
+    }
+
+    #[test]
+    #[ignore = "CPU workgroups are serial loops; barrier scan is not implemented"]
+    fn host_callable_workgroup_inclusive_scan_uint() {
+        let compiler = SlangCompiler::new().expect("Slang");
+        let src = r#"
+            import goldy_exp;
+            groupshared uint sh_scratch[64];
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+                uint ix  = local_id.x;
+                uint val = 1u;
+                sh_scratch[ix] = val;
+                for (uint i = 0; i < 6; i++) {
+                    GroupMemoryBarrierWithGroupSync();
+                    if (ix >= (1u << i))
+                        val = sh_scratch[ix - (1u << i)] + val;
+                    GroupMemoryBarrierWithGroupSync();
+                    sh_scratch[ix] = val;
+                }
+                OUT[ix] = val;
+            }
+        "#;
+        let kernel = compile_shader(&compiler, src, &[&shader_search_path()], &[], OptimizationLevel::None)
+            .expect("compile scan");
+        let mut out = [0u32; 64];
+        kernel
+            .dispatch_1d(64, &mut [CpuBinding::u32s(&mut out)])
+            .expect("dispatch");
+        for i in 0..64u32 {
+            assert_eq!(out[i as usize], i + 1, "inclusive scan[{i}]");
+        }
     }
 
     #[test]

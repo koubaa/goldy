@@ -66,6 +66,15 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+pub(crate) use utils::format_to_dxgi;
+
+/// Process-global lock serialising `CreateDXGIFactory2`.
+///
+/// DXGI factory creation with `DXGI_CREATE_FACTORY_DEBUG` must not run concurrently
+/// (`DXGI_ERROR_INVALID_CALL`). Shared with the foreign DX12 adapter
+/// (`goldy::foreign::dx12`), which creates its own factory (not a Goldy device).
+pub(crate) static DXGI_FACTORY_LOCK: Mutex<()> = Mutex::new(());
+
 /// Adapter ID for the WARP device from `IDXGIFactory4::EnumWarpAdapter`.
 /// Used when `GOLDY_DX12_FORCE_WARP=1`.
 pub const WARP_ADAPTER_ID: u32 = u32::MAX;

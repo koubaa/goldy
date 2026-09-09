@@ -32,6 +32,7 @@
 # Surfaces and Render Targets
 
 - [Rendering Outputs](./surfaces/overview.md)
+- [Pixel Exchange](./surfaces/pixel-exchange.md)
 
 # Resources at Scale
 
