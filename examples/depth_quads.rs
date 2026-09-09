@@ -204,9 +204,11 @@ impl App {
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
-        let size = self.window.as_ref().unwrap().inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
+        if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            if size.width == 0 || size.height == 0 {
+                return Ok(());
+            }
         }
 
         let t = self.frame_count as f32 * 0.04;

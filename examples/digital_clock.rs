@@ -222,6 +222,11 @@ impl App {
     }
 
     fn elapsed_secs(&self) -> u64 {
+        if let Some(sink) = self.sink.as_ref() {
+            if sink.is_capture() {
+                return sink.time(self.start_time) as u64;
+            }
+        }
         if self.clock_state.paused {
             self.clock_state.accumulated_secs
         } else {
@@ -240,10 +245,12 @@ impl App {
     fn render_frame(&mut self) -> anyhow::Result<()> {
         self.frame_count += 1;
 
-        let window = self.window.as_ref().unwrap();
-        let size = window.inner_size();
-        let width = size.width;
-        let height = size.height;
+        let (width, height) = if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            (size.width, size.height)
+        } else {
+            self.sink.as_ref().unwrap().size()
+        };
 
         if width == 0 || height == 0 {
             return Ok(());

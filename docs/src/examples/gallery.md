@@ -35,8 +35,8 @@ GOLDY_BACKEND=webgpu cargo run --no-default-features --features webgpu,examples 
 
 Two examples probe capabilities and exit cleanly when they are missing:
 [`mesh_triangle`](./mesh_triangle.md) needs mesh shaders and [`ray_query`](./ray_query.md) needs
-ray query. Those two pages carry source but no recording when the adapter used for capture
-lacks the capability.
+ray query. Capture skips writing a clip when the adapter used for recording lacks the
+capability.
 
 Headless capture does not present to a window, so it works on Vulkan (including lavapipe)
 without a Wayland or X11 display. `GOLDY_BACKEND` still selects the backend when you want
