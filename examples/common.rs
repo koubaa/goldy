@@ -4,11 +4,13 @@
 //! into pixels that `scripts/record_example_captures.sh` stitches with ffmpeg.
 //! Optional: `GOLDY_EXAMPLE_CAPTURE_FRAMES` (default 75), `GOLDY_EXAMPLE_CAPTURE_FPS`
 //! (default 15), `GOLDY_EXAMPLE_CAPTURE_WIDTH` / `HEIGHT` (default 640×480).
+//!
+//! Capture is file I/O plus a retained RGBA texture. Present still goes through
+//! [`SurfaceExchange`] / [`MemoryExchange`] in each example.
 
 use goldy::{
-    Context, Device, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, PresentLease, RenderPipeline,
-    RenderPipelineDesc, RetainedPool, Scheme, ShaderModule, Submission, SurfaceConfig, SurfaceExchange, Texture,
-    TextureFlags, TextureFormat, TextureKind, Transaction, WithdrawTransaction,
+    Device, RenderPipeline, RenderPipelineDesc, RetainedPool, ShaderModule, SurfaceExchange, Texture, TextureFlags,
+    TextureFormat, TextureKind,
 };
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -129,71 +131,20 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-#[derive(Clone)]
-pub enum FrameTicket {
-    Present(Transaction),
-    Withdraw(WithdrawTransaction),
-}
-
-enum CaptureWriter {
-    File(BufWriter<File>),
-    Memory,
-}
-
-#[allow(clippy::large_enum_variant)]
-enum SinkKind {
-    Window {
-        surface: SurfaceExchange,
-    },
-    Capture {
-        path: PathBuf,
-        writer: CaptureWriter,
-        last: Option<Vec<u8>>,
-        fps: f32,
-        frames: u32,
-        written: u32,
-        readback: Option<Texture>,
-        compute: Option<Texture>,
-    },
-}
-
-/// Window swapchain or a raw-RGBA dump that ffmpeg can stitch.
-pub struct FrameSink {
-    format: TextureFormat,
+/// Packed-RGBA dump for mdBook clips (`GOLDY_EXAMPLE_CAPTURE`). Not a Goldy type.
+pub struct CaptureDump {
+    path: PathBuf,
+    writer: Option<BufWriter<File>>,
+    last: Option<Vec<u8>>,
+    fps: f32,
+    frames: u32,
+    written: u32,
     width: u32,
     height: u32,
-    kind: SinkKind,
-    ticket: Option<FrameTicket>,
-}
-
-/// Colour target for compute-to-surface examples (`with_present` vs `with_parcel`).
-pub enum ComputeColorTarget {
-    Present(PresentLease),
-    Texture,
 }
 
 #[allow(dead_code)]
-impl FrameSink {
-    /// Windowed present when `window` is `Some`; otherwise a capture dump from env.
-    pub fn open(ctx: &Context, pool: &mut RetainedPool, window: Option<&Window>) -> anyhow::Result<Self> {
-        match window {
-            Some(window) => Self::from_window(ctx, window),
-            None => Self::from_env(ctx, pool),
-        }
-    }
-
-    fn from_window(ctx: &Context, window: &Window) -> anyhow::Result<Self> {
-        let surface = SurfaceExchange::new(ctx, window, SurfaceConfig::default())?;
-        let (width, height) = surface.size();
-        Ok(Self {
-            format: surface.format(),
-            width: width.max(1),
-            height: height.max(1),
-            kind: SinkKind::Window { surface },
-            ticket: None,
-        })
-    }
-
+impl CaptureDump {
     fn capture_size() -> (u32, u32, u32, f32) {
         (
             env_u32("GOLDY_EXAMPLE_CAPTURE_WIDTH", 640),
@@ -203,48 +154,8 @@ impl FrameSink {
         )
     }
 
-    fn acquire_readback(pool: &mut RetainedPool, width: u32, height: u32) -> anyhow::Result<Texture> {
-        pool.acquire_texture(
-            width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
-            None,
-        )
-    }
-
-    fn from_env(_ctx: &Context, pool: &mut RetainedPool) -> anyhow::Result<Self> {
-        let path = std::env::var("GOLDY_EXAMPLE_CAPTURE").expect("GOLDY_EXAMPLE_CAPTURE");
-        let path = PathBuf::from(path);
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let (width, height, frames, fps) = Self::capture_size();
-        let readback = Self::acquire_readback(pool, width, height)?;
-        let file = File::create(&path)?;
-        Ok(Self {
-            format: TextureFormat::Rgba8Unorm,
-            width,
-            height,
-            kind: SinkKind::Capture {
-                path,
-                writer: CaptureWriter::File(BufWriter::new(file)),
-                last: None,
-                fps,
-                frames,
-                written: 0,
-                readback: Some(readback),
-                compute: None,
-            },
-            ticket: None,
-        })
-    }
-
-    /// Packed-RGBA file from env, no GPU resource — stitch panels with [`write_rgba`].
-    pub fn rgba_file() -> anyhow::Result<Self> {
+    /// File dump from `GOLDY_EXAMPLE_CAPTURE`.
+    pub fn from_env() -> anyhow::Result<Self> {
         let path = std::env::var("GOLDY_EXAMPLE_CAPTURE").expect("GOLDY_EXAMPLE_CAPTURE");
         let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {
@@ -255,51 +166,30 @@ impl FrameSink {
         let (width, height, frames, fps) = Self::capture_size();
         let file = File::create(&path)?;
         Ok(Self {
-            format: TextureFormat::Rgba8Unorm,
+            path,
+            writer: Some(BufWriter::new(file)),
+            last: None,
+            fps,
+            frames,
+            written: 0,
             width,
             height,
-            kind: SinkKind::Capture {
-                path,
-                writer: CaptureWriter::File(BufWriter::new(file)),
-                last: None,
-                fps,
-                frames,
-                written: 0,
-                readback: None,
-                compute: None,
-            },
-            ticket: None,
         })
     }
 
-    /// Offscreen RGBA readback that does not write a file (e.g. `multi_window` panels).
-    pub fn memory(pool: &mut RetainedPool, width: u32, height: u32) -> anyhow::Result<Self> {
+    /// In-memory frames only (e.g. `multi_window` panels before hstack).
+    pub fn memory(width: u32, height: u32) -> Self {
         let fps = env_f32("GOLDY_EXAMPLE_CAPTURE_FPS", 15.0);
-        let readback = Self::acquire_readback(pool, width, height)?;
-        Ok(Self {
-            format: TextureFormat::Rgba8Unorm,
+        Self {
+            path: PathBuf::new(),
+            writer: None,
+            last: None,
+            fps,
+            frames: u32::MAX,
+            written: 0,
             width,
             height,
-            kind: SinkKind::Capture {
-                path: PathBuf::new(),
-                writer: CaptureWriter::Memory,
-                last: None,
-                fps,
-                frames: u32::MAX,
-                written: 0,
-                readback: Some(readback),
-                compute: None,
-            },
-            ticket: None,
-        })
-    }
-
-    pub fn format(&self) -> TextureFormat {
-        self.format
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
+        }
     }
 
     pub fn width(&self) -> u32 {
@@ -310,147 +200,27 @@ impl FrameSink {
         self.height
     }
 
-    pub fn is_capture(&self) -> bool {
-        matches!(self.kind, SinkKind::Capture { .. })
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
     }
 
-    /// Wall-clock time in a window; virtual `written / fps` while capturing.
-    pub fn time(&self, start: Instant) -> f32 {
-        match &self.kind {
-            SinkKind::Capture { fps, written, .. } => *written as f32 / *fps,
-            SinkKind::Window { .. } => start.elapsed().as_secs_f32(),
-        }
+    pub fn format() -> TextureFormat {
+        TextureFormat::Rgba8Unorm
     }
 
-    /// Frame delta: `1 / fps` while capturing, otherwise elapsed since `last`.
-    pub fn dt(&self, last: Instant) -> f32 {
-        match &self.kind {
-            SinkKind::Capture { fps, .. } => 1.0 / *fps,
-            SinkKind::Window { .. } => last.elapsed().as_secs_f32(),
-        }
+    /// Virtual clock `written / fps` so clips are deterministic.
+    pub fn time(&self) -> f32 {
+        self.written as f32 / self.fps
+    }
+
+    pub fn dt(&self) -> f32 {
+        1.0 / self.fps
     }
 
     pub fn finished(&self) -> bool {
-        match &self.kind {
-            SinkKind::Capture { frames, written, .. } => *written >= *frames,
-            SinkKind::Window { .. } => false,
-        }
+        self.written >= self.frames
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) -> anyhow::Result<()> {
-        if width == 0 || height == 0 {
-            return Ok(());
-        }
-        if let SinkKind::Window { surface } = &self.kind {
-            surface.resize(width, height)?;
-            self.width = width;
-            self.height = height;
-            self.format = surface.format();
-        }
-        Ok(())
-    }
-
-    /// After the offscreen pass: copy-to-present, or copy-to-readback + withdraw.
-    pub fn bind_render_target(&mut self, scheme: &mut Scheme, rt: &Lease<LeaseRenderTarget>) -> anyhow::Result<()> {
-        let ticket = match &mut self.kind {
-            SinkKind::Window { surface } => FrameTicket::Present(surface.bind_render_target(scheme, rt)?),
-            SinkKind::Capture { readback, .. } => {
-                let readback = readback.as_ref().expect("capture readback texture");
-                scheme.copy_to_texture(rt, readback)?;
-                FrameTicket::Withdraw(MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?)
-            }
-        };
-        self.ticket = Some(ticket);
-        Ok(())
-    }
-
-    /// Take the ticket produced by the last bind. Needed when several schemes share
-    /// one sink: each bind overwrites [`Self::settle`]'s singleton.
-    pub fn take_ticket(&mut self) -> Option<FrameTicket> {
-        self.ticket.take()
-    }
-
-    /// Windowed `bind_destination`, or a Direct compute colour target for capture.
-    pub fn compute_color_target(
-        &mut self,
-        scheme: &mut Scheme,
-        pool: &mut RetainedPool,
-    ) -> anyhow::Result<ComputeColorTarget> {
-        let (width, height, format) = (self.width, self.height, self.format);
-        let (target, ticket) = match &mut self.kind {
-            SinkKind::Window { surface } => {
-                let (lease, tx) = surface.bind_destination(scheme)?;
-                (ComputeColorTarget::Present(lease), Some(FrameTicket::Present(tx)))
-            }
-            SinkKind::Capture { compute, .. } => {
-                if compute.is_none() {
-                    *compute = Some(pool.acquire_texture(
-                        width,
-                        height,
-                        format,
-                        TextureKind::Direct,
-                        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
-                        None,
-                    )?);
-                }
-                (ComputeColorTarget::Texture, None)
-            }
-        };
-        if let Some(ticket) = ticket {
-            self.ticket = Some(ticket);
-        }
-        Ok(target)
-    }
-
-    pub fn compute_texture(&self) -> &Texture {
-        match &self.kind {
-            SinkKind::Capture { compute, .. } => compute.as_ref().expect("compute_color_target first"),
-            SinkKind::Window { .. } => panic!("compute_texture is capture-only"),
-        }
-    }
-
-    /// After recording the compute dispatch: bind a withdraw on the compute target.
-    pub fn complete_compute(&mut self, scheme: &mut Scheme) -> anyhow::Result<()> {
-        let ticket = match &self.kind {
-            SinkKind::Capture { compute, .. } => {
-                let tex = compute.as_ref().expect("compute_color_target first");
-                Some(FrameTicket::Withdraw(
-                    MemoryExchange::new(scheme.context()).bind_withdraw(scheme, tex)?,
-                ))
-            }
-            SinkKind::Window { .. } => None,
-        };
-        if let Some(ticket) = ticket {
-            self.ticket = Some(ticket);
-        }
-        Ok(())
-    }
-
-    /// Present or write one RGBA frame. Capture stops after `GOLDY_EXAMPLE_CAPTURE_FRAMES`.
-    pub fn settle(&mut self, submission: &mut Submission) -> anyhow::Result<()> {
-        let ticket = self
-            .ticket
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("FrameSink has no bind ticket"))?;
-        self.settle_ticket(submission, &ticket)
-    }
-
-    /// Settle a ticket recorded into a specific scheme (e.g. ping-pong resubmits).
-    pub fn settle_ticket(&mut self, submission: &mut Submission, ticket: &FrameTicket) -> anyhow::Result<()> {
-        let pixels = match ticket {
-            FrameTicket::Present(tx) => {
-                tx.claim(submission)?.consume()?;
-                None
-            }
-            FrameTicket::Withdraw(tx) => Some(tx.claim(submission)?.consume()?),
-        };
-        if let Some(pixels) = pixels {
-            self.write_rgba(&pixels)?;
-        }
-        Ok(())
-    }
-
-    /// Append packed RGBA8 (`width * height * 4` bytes) as one capture frame.
     pub fn write_rgba(&mut self, pixels: &[u8]) -> anyhow::Result<()> {
         let expected = (self.width as usize)
             .saturating_mul(self.height as usize)
@@ -462,50 +232,42 @@ impl FrameSink {
             self.width,
             self.height
         );
-        let (width, height) = (self.width, self.height);
-        let SinkKind::Capture {
-            writer,
-            last,
-            written,
-            frames,
-            path,
-            ..
-        } = &mut self.kind
-        else {
-            return Ok(());
-        };
-        match writer {
-            CaptureWriter::File(file) => file.write_all(pixels)?,
-            CaptureWriter::Memory => {}
+        if let Some(file) = &mut self.writer {
+            file.write_all(pixels)?;
         }
-        *last = Some(pixels.to_vec());
-        *written += 1;
-        if let CaptureWriter::File(file) = writer {
-            if *written >= *frames {
+        self.last = Some(pixels.to_vec());
+        self.written += 1;
+        if let Some(file) = &mut self.writer {
+            if self.written >= self.frames {
                 file.flush()?;
                 println!(
-                    "GOLDY_CAPTURE: wrote {written} frames ({width}x{height} rgba) to {}",
-                    path.display()
+                    "GOLDY_CAPTURE: wrote {} frames ({}x{} rgba) to {}",
+                    self.written,
+                    self.width,
+                    self.height,
+                    self.path.display()
                 );
             }
         }
         Ok(())
     }
 
-    /// Last packed RGBA frame from a capture/`memory` sink.
     pub fn take_rgba(&mut self) -> Option<Vec<u8>> {
-        match &mut self.kind {
-            SinkKind::Capture { last, .. } => last.take(),
-            SinkKind::Window { .. } => None,
-        }
+        self.last.take()
     }
+}
 
-    pub fn as_surface(&self) -> Option<&SurfaceExchange> {
-        match &self.kind {
-            SinkKind::Window { surface } => Some(surface),
-            SinkKind::Capture { .. } => None,
-        }
-    }
+/// Retained RGBA8 texture for `copy_to_texture` + [`goldy::MemoryExchange::bind_withdraw`].
+#[allow(dead_code)]
+pub fn capture_readback(pool: &mut RetainedPool, width: u32, height: u32) -> anyhow::Result<Texture> {
+    pool.acquire_texture(
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+        None,
+    )
 }
 
 /// Horizontal concat of equal-sized packed RGBA panels (for `multi_window` capture).
@@ -530,18 +292,6 @@ pub fn hstack_rgba(panels: &[&[u8]], width: u32, height: u32) -> anyhow::Result<
         }
     }
     Ok(out)
-}
-
-#[allow(dead_code)]
-pub fn bind_compute_node<'a>(
-    node: goldy::SchemeNodeBuilder<'a>,
-    target: &'a ComputeColorTarget,
-    sink: &'a FrameSink,
-) -> goldy::SchemeNodeBuilder<'a> {
-    match target {
-        ComputeColorTarget::Present(lease) => node.with_present(lease),
-        ComputeColorTarget::Texture => node.with_parcel(sink.compute_texture(), NodeAccess::Write),
-    }
 }
 
 /// Run limit in seconds from `GOLDY_EXAMPLE_TIMEOUT` or `EXAMPLE_TIMEOUT`.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Examples present through Goldy types** — windowed examples bind
+  `SurfaceExchange` and consume `Transaction` claims (or
+  `MemoryExchange::bind_withdraw` under `GOLDY_EXAMPLE_CAPTURE`) instead of a
+  shared `FrameSink` helper. Book-clip file I/O remains `CaptureDump` in
+  `examples/common.rs`.
+
 ### Added
 
 - **Static shader validation** (`GOLDY_SHADER_VALIDATION`) — opt-in static

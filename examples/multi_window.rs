@@ -7,10 +7,11 @@
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, TargetLoad, VertexAttribute, VertexBufferLayout, VertexFormat,
+    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
 };
 mod common;
-use common::FrameSink;
+use common::CaptureDump;
 
 const PLASMA_VERTEX_TIME: &str = r#"
 struct VertexInput {
@@ -225,7 +226,11 @@ impl EffectType {
 struct WindowState {
     window: Option<Arc<Window>>,
     ctx: goldy::Context,
-    sink: FrameSink,
+    surface: Option<SurfaceExchange>,
+    present: Option<Transaction>,
+    capture: Option<CaptureDump>,
+    readback: Option<Texture>,
+    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     pipeline: RenderPipeline,
@@ -245,7 +250,7 @@ impl WindowState {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        format: goldy::TextureFormat,
+        format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
         common::render_pipeline(
             device,
@@ -258,72 +263,97 @@ impl WindowState {
         )
     }
 
-    fn record_scheme(
+    fn record_pass(
         scheme: &mut Scheme,
-        sink: &mut FrameSink,
         pipeline: &RenderPipeline,
         vertex_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         label: &'static str,
-    ) -> anyhow::Result<()> {
+    ) {
         let mut pass = scheme.render_pass(label, scene_rt, TargetLoad::Clear(Color::BLACK));
         pass.with_parcel(vertex_parcel, NodeAccess::Read);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..6, 0..1);
         pass.finish();
-        sink.bind_render_target(scheme, scene_rt)
+    }
+
+    fn bind_frame(
+        scheme: &mut Scheme,
+        scene_rt: &Lease<LeaseRenderTarget>,
+        surface: Option<&SurfaceExchange>,
+        readback: Option<&Texture>,
+    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+        if let Some(surface) = surface {
+            let present = surface.bind_render_target(scheme, scene_rt)?;
+            Ok((Some(present), None))
+        } else {
+            let readback = readback.expect("capture readback");
+            scheme.copy_to_texture(scene_rt, readback)?;
+            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
+            Ok((None, Some(withdraw)))
+        }
+    }
+
+    fn output_size(&self) -> (u32, u32) {
+        if let Some(surface) = &self.surface {
+            surface.size()
+        } else {
+            self.capture.as_ref().expect("capture").size()
+        }
+    }
+
+    fn output_format(&self) -> TextureFormat {
+        if let Some(surface) = &self.surface {
+            surface.format()
+        } else {
+            CaptureDump::format()
+        }
     }
 
     fn rerecord_scheme(&mut self) {
         let mut scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.sink.size();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.sink.format(), None) {
-            self.scene_rt = rt;
-            if Self::record_scheme(
+        let (width, height) = self.output_size();
+        let format = self.output_format();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+            Self::record_pass(
                 &mut scheme,
-                &mut self.sink,
                 &self.pipeline,
                 &self.vertex_parcel,
-                &self.scene_rt,
+                &rt,
                 self.effect_type.title(),
-            )
-            .is_ok()
+            );
+            if let Ok((present, withdraw)) =
+                Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
             {
+                self.present = present;
+                self.withdraw = withdraw;
+                self.scene_rt = rt;
                 self.scheme = scheme;
             }
         }
     }
 
-    fn new(
-        window: Option<Arc<Window>>,
+    fn windowed(
+        window: Arc<Window>,
         ctx: &goldy::Context,
         device: &Arc<goldy::Device>,
         effect_type: EffectType,
-        capture_size: Option<(u32, u32)>,
     ) -> anyhow::Result<Self> {
         let mut retained_pool = RetainedPool::new(device.clone());
-        let mut sink = match (window.as_deref(), capture_size) {
-            (None, Some((width, height))) => FrameSink::memory(&mut retained_pool, width, height)?,
-            (_, _) => FrameSink::open(ctx, &mut retained_pool, window.as_deref())?,
-        };
+        let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
+        let format = surface.format();
+        let (width, height) = surface.size();
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
-        let pipeline = Self::create_pipeline(device, &shader, sink.format())?;
+        let pipeline = Self::create_pipeline(device, &shader, format)?;
 
         let vertex_parcel =
             retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
-        let (width, height) = sink.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
-        Self::record_scheme(
-            &mut scheme,
-            &mut sink,
-            &pipeline,
-            &vertex_parcel,
-            &scene_rt,
-            effect_type.title(),
-        )?;
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, effect_type.title());
+        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, Some(&surface), None)?;
 
         let mut upload_scheme = Scheme::new(ctx);
         let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
@@ -333,9 +363,66 @@ impl WindowState {
         )?;
 
         Ok(Self {
-            window,
+            window: Some(window),
             ctx: ctx.clone(),
-            sink,
+            surface: Some(surface),
+            present,
+            capture: None,
+            readback: None,
+            withdraw,
+            scheme,
+            scene_rt,
+            pipeline,
+            effect_type,
+            start_time: Instant::now(),
+            paused: false,
+            paused_at: 0.0,
+            time_multiplier: 1.0,
+            _retained_pool: retained_pool,
+            vertex_parcel,
+            upload_scheme,
+            vertex_deposit,
+            has_focus: false,
+        })
+    }
+
+    fn capture_panel(
+        ctx: &goldy::Context,
+        device: &Arc<goldy::Device>,
+        effect_type: EffectType,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Self> {
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let capture = CaptureDump::memory(width, height);
+        let format = CaptureDump::format();
+        let readback = common::capture_readback(&mut retained_pool, width, height)?;
+        let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
+        let pipeline = Self::create_pipeline(device, &shader, format)?;
+
+        let vertex_parcel =
+            retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+
+        let mut scheme = Scheme::new(ctx);
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, effect_type.title());
+        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, None, Some(&readback))?;
+
+        let mut upload_scheme = Scheme::new(ctx);
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+            &mut upload_scheme,
+            &vertex_parcel,
+            vertex_parcel.byte_size(),
+        )?;
+
+        Ok(Self {
+            window: None,
+            ctx: ctx.clone(),
+            surface: None,
+            present,
+            capture: Some(capture),
+            readback: Some(readback),
+            withdraw,
             scheme,
             scene_rt,
             pipeline,
@@ -353,8 +440,8 @@ impl WindowState {
     }
 
     fn current_time(&self) -> f32 {
-        if self.sink.is_capture() {
-            return self.sink.time(self.start_time);
+        if let Some(capture) = &self.capture {
+            return capture.time();
         }
         if self.paused {
             self.paused_at
@@ -410,7 +497,12 @@ impl WindowState {
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
-        self.sink.settle(&mut submission)?;
+        if let Some(present) = &self.present {
+            present.claim(&mut submission)?.consume()?;
+        } else {
+            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            self.capture.as_mut().unwrap().write_rgba(&pixels)?;
+        }
         Ok(())
     }
 
@@ -418,13 +510,16 @@ impl WindowState {
         if width == 0 || height == 0 {
             return;
         }
-        let (prev_w, prev_h) = self.sink.size();
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        let (prev_w, prev_h) = surface.size();
         // Pipeline does not depend on surface size; skip no-op Resized events
         // (winit often fires these on reveal) so we don't recompile Slang→DXIL.
         if prev_w == width && prev_h == height {
             return;
         }
-        let _ = self.sink.resize(width, height);
+        let _ = surface.resize(width, height);
         self.rerecord_scheme();
     }
 }
@@ -470,7 +565,7 @@ impl App {
         let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
 
-        let mut state = WindowState::new(Some(window.clone()), ctx, &device, effect_type, None)?;
+        let mut state = WindowState::windowed(window.clone(), ctx, &device, effect_type)?;
         state.render(ctx)?;
         common::reveal_window(&window);
         window.request_redraw();
@@ -627,14 +722,14 @@ fn capture_panels() -> anyhow::Result<()> {
             .request_device(&DeviceDescriptor::default())?,
     );
     let ctx = device.create_context()?;
-    let mut output = FrameSink::rgba_file()?;
+    let mut output = CaptureDump::from_env()?;
     let (out_w, out_h) = output.size();
     anyhow::ensure!(out_w % 3 == 0, "multi_window capture width must be divisible by 3");
     let panel = (out_w / 3, out_h);
     let effects = [EffectType::Plasma, EffectType::Tunnel, EffectType::Starfield];
     let mut panels = Vec::new();
     for effect in effects {
-        panels.push(WindowState::new(None, &ctx, &device, effect, Some(panel))?);
+        panels.push(WindowState::capture_panel(&ctx, &device, effect, panel.0, panel.1)?);
     }
     while !output.finished() {
         let mut frames = Vec::with_capacity(3);
@@ -642,8 +737,9 @@ fn capture_panels() -> anyhow::Result<()> {
             panel_state.render(&ctx)?;
             frames.push(
                 panel_state
-                    .sink
-                    .take_rgba()
+                    .capture
+                    .as_mut()
+                    .and_then(CaptureDump::take_rgba)
                     .ok_or_else(|| anyhow::anyhow!("missing panel pixels"))?,
             );
         }

@@ -9,9 +9,10 @@
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    TargetLoad, VertexBufferLayout,
+    field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -22,7 +23,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
-use common::{FrameSink, FrameTicket};
+use common::CaptureDump;
 
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
@@ -30,14 +31,13 @@ const CELL_COUNT: u32 = GRID_WIDTH * GRID_HEIGHT;
 
 fn record_scheme(
     scheme: &mut Scheme,
-    sink: &mut FrameSink,
     cells: &Buffer,
     read_field: &str,
     write_field: &str,
     compute_pipeline: &ComputePipeline,
     render_pipeline: &RenderPipeline,
     scene_rt: &Lease<LeaseRenderTarget>,
-) -> anyhow::Result<()> {
+) {
     scheme
         .node("game_of_life", compute_pipeline)
         .with_parcel(&cells[read_field], NodeAccess::Read)
@@ -49,47 +49,76 @@ fn record_scheme(
     pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();
-    sink.bind_render_target(scheme, scene_rt)
+}
+
+struct FrameBind<'a> {
+    format: TextureFormat,
+    width: u32,
+    height: u32,
+    surface: Option<&'a SurfaceExchange>,
+    readback: Option<&'a Texture>,
+}
+
+struct Recorded {
+    scheme: Scheme,
+    present: Option<Transaction>,
+    withdraw: Option<WithdrawTransaction>,
+}
+
+fn bind_frame(
+    scheme: &mut Scheme,
+    scene_rt: &Lease<LeaseRenderTarget>,
+    bind: &FrameBind<'_>,
+) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    if let Some(surface) = bind.surface {
+        let present = surface.bind_render_target(scheme, scene_rt)?;
+        Ok((Some(present), None))
+    } else {
+        let readback = bind.readback.expect("capture readback");
+        scheme.copy_to_texture(scene_rt, readback)?;
+        let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
+        Ok((None, Some(withdraw)))
+    }
 }
 
 fn build_scheme(
     ctx: &Context,
-    sink: &mut FrameSink,
     cells: &Buffer,
     read_field: &str,
     write_field: &str,
     compute_pipeline: &ComputePipeline,
     render_pipeline: &RenderPipeline,
-) -> anyhow::Result<(Scheme, FrameTicket)> {
+    bind: &FrameBind<'_>,
+) -> anyhow::Result<Recorded> {
     let mut scheme = Scheme::new(ctx);
-    let (width, height) = sink.size();
-    let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+    let scene_rt = scheme.lease_render_target(bind.width.max(1), bind.height.max(1), bind.format, None)?;
     record_scheme(
         &mut scheme,
-        sink,
         cells,
         read_field,
         write_field,
         compute_pipeline,
         render_pipeline,
         &scene_rt,
-    )?;
-    let ticket = sink
-        .take_ticket()
-        .ok_or_else(|| anyhow::anyhow!("FrameSink missing bind ticket"))?;
-    Ok((scheme, ticket))
+    );
+    let (present, withdraw) = bind_frame(&mut scheme, &scene_rt, bind)?;
+    Ok(Recorded {
+        scheme,
+        present,
+        withdraw,
+    })
 }
 
 fn build_schemes(
     ctx: &Context,
-    sink: &mut FrameSink,
     cells: &Buffer,
     compute_pipeline: &ComputePipeline,
     render_pipeline: &RenderPipeline,
-) -> anyhow::Result<((Scheme, FrameTicket), (Scheme, FrameTicket))> {
+    bind: &FrameBind<'_>,
+) -> anyhow::Result<(Recorded, Recorded)> {
     Ok((
-        build_scheme(ctx, sink, cells, "a", "b", compute_pipeline, render_pipeline)?,
-        build_scheme(ctx, sink, cells, "b", "a", compute_pipeline, render_pipeline)?,
+        build_scheme(ctx, cells, "a", "b", compute_pipeline, render_pipeline, bind)?,
+        build_scheme(ctx, cells, "b", "a", compute_pipeline, render_pipeline, bind)?,
     ))
 }
 
@@ -168,7 +197,7 @@ fn main() -> Result<()> {
 
     if common::capture_requested() {
         let mut state = RenderState::new(None)?;
-        while !state.sink.finished() {
+        while !state.capture_done() {
             state.render()?;
         }
         return Ok(());
@@ -191,11 +220,15 @@ struct App {
 struct RenderState {
     window: Option<Arc<Window>>,
     ctx: Context,
-    sink: FrameSink,
+    surface: Option<SurfaceExchange>,
+    capture: Option<CaptureDump>,
+    readback: Option<Texture>,
     scheme_ab: Scheme,
     scheme_ba: Scheme,
-    ticket_ab: FrameTicket,
-    ticket_ba: FrameTicket,
+    present_ab: Option<Transaction>,
+    present_ba: Option<Transaction>,
+    withdraw_ab: Option<WithdrawTransaction>,
+    withdraw_ba: Option<WithdrawTransaction>,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
@@ -207,16 +240,43 @@ struct RenderState {
 }
 
 impl RenderState {
+    fn target(&self) -> (TextureFormat, u32, u32) {
+        if let Some(surface) = &self.surface {
+            let (width, height) = surface.size();
+            (surface.format(), width, height)
+        } else {
+            let capture = self.capture.as_ref().expect("capture dump");
+            let (width, height) = capture.size();
+            (CaptureDump::format(), width, height)
+        }
+    }
+
+    fn capture_done(&self) -> bool {
+        self.capture.as_ref().is_none_or(CaptureDump::finished)
+    }
+
     fn record_orientations(&mut self) -> Result<()> {
+        let (format, width, height) = self.target();
+        let bind = FrameBind {
+            format,
+            width,
+            height,
+            surface: self.surface.as_ref(),
+            readback: self.readback.as_ref(),
+        };
         let (ab, ba) = build_schemes(
             &self.ctx,
-            &mut self.sink,
             &self.cells,
             &self.compute_pipeline,
             &self.render_pipeline,
+            &bind,
         )?;
-        (self.scheme_ab, self.ticket_ab) = ab;
-        (self.scheme_ba, self.ticket_ba) = ba;
+        self.scheme_ab = ab.scheme;
+        self.present_ab = ab.present;
+        self.withdraw_ab = ab.withdraw;
+        self.scheme_ba = ba.scheme;
+        self.present_ba = ba.present;
+        self.withdraw_ba = ba.withdraw;
         Ok(())
     }
 
@@ -229,7 +289,25 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let mut retained_pool = RetainedPool::new(device.clone());
-        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window.as_deref())?;
+
+        let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
+            let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
+            let format = surface.format();
+            let (width, height) = surface.size();
+            (Some(surface), None, None, format, width, height)
+        } else {
+            let capture = CaptureDump::from_env()?;
+            let (width, height) = capture.size();
+            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            (
+                None,
+                Some(capture),
+                Some(readback),
+                CaptureDump::format(),
+                width,
+                height,
+            )
+        };
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
@@ -248,13 +326,19 @@ impl RenderState {
             &RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::default(),
                 topology: PrimitiveTopology::TriangleList,
-                target_format: sink.format(),
+                target_format: format,
                 ..Default::default()
             },
         )?;
 
-        let ((scheme_ab, ticket_ab), (scheme_ba, ticket_ba)) =
-            build_schemes(&ctx, &mut sink, &cells, &compute_pipeline, &render_pipeline)?;
+        let bind = FrameBind {
+            format,
+            width,
+            height,
+            surface: surface.as_ref(),
+            readback: readback.as_ref(),
+        };
+        let (ab, ba) = build_schemes(&ctx, &cells, &compute_pipeline, &render_pipeline, &bind)?;
 
         println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
         println!("Features Gosper Glider Gun + random cells");
@@ -263,11 +347,15 @@ impl RenderState {
         Ok(Self {
             window,
             ctx,
-            sink,
-            scheme_ab,
-            scheme_ba,
-            ticket_ab,
-            ticket_ba,
+            surface,
+            capture,
+            readback,
+            scheme_ab: ab.scheme,
+            scheme_ba: ba.scheme,
+            present_ab: ab.present,
+            present_ba: ba.present,
+            withdraw_ab: ab.withdraw,
+            withdraw_ba: ba.withdraw,
             compute_pipeline,
             render_pipeline,
             _retained_pool: retained_pool,
@@ -279,14 +367,39 @@ impl RenderState {
         })
     }
 
-    fn step(&mut self) -> Result<()> {
-        let (scheme, ticket) = if self.use_buffer_a {
-            (&mut self.scheme_ab, &self.ticket_ab)
+    fn settle(
+        present: Option<&Transaction>,
+        withdraw: Option<&WithdrawTransaction>,
+        capture: Option<&mut CaptureDump>,
+        submission: &mut Submission,
+    ) -> Result<()> {
+        if let Some(present) = present {
+            present.claim(submission)?.consume()?;
         } else {
-            (&mut self.scheme_ba, &self.ticket_ba)
-        };
-        let mut submission = scheme.submit()?;
-        self.sink.settle_ticket(&mut submission, ticket)?;
+            let pixels = withdraw.expect("capture withdraw").claim(submission)?.consume()?;
+            capture.expect("capture dump").write_rgba(&pixels)?;
+        }
+        Ok(())
+    }
+
+    fn step(&mut self) -> Result<()> {
+        if self.use_buffer_a {
+            let mut submission = self.scheme_ab.submit()?;
+            Self::settle(
+                self.present_ab.as_ref(),
+                self.withdraw_ab.as_ref(),
+                self.capture.as_mut(),
+                &mut submission,
+            )?;
+        } else {
+            let mut submission = self.scheme_ba.submit()?;
+            Self::settle(
+                self.present_ba.as_ref(),
+                self.withdraw_ba.as_ref(),
+                self.capture.as_mut(),
+                &mut submission,
+            )?;
+        }
         self.use_buffer_a = !self.use_buffer_a;
         Ok(())
     }
@@ -294,7 +407,7 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         let now = std::time::Instant::now();
         let should_step =
-            self.sink.is_capture() || self.frame_count == 0 || now.duration_since(self.last_update).as_millis() > 33;
+            self.capture.is_some() || self.frame_count == 0 || now.duration_since(self.last_update).as_millis() > 33;
 
         if should_step {
             self.last_update = now;
@@ -369,7 +482,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        if let Err(e) = state.sink.resize(size.width, size.height) {
+                        let Some(surface) = state.surface.as_ref() else {
+                            return;
+                        };
+                        if let Err(e) = surface.resize(size.width, size.height) {
                             tracing::error!("Failed to resize surface: {e}");
                             return;
                         }
