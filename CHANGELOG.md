@@ -48,9 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone.
 
 - **`scripts/record_example_captures.sh`** — builds the examples, runs each one
-  on a virtual X11 display, and grabs the window with ffmpeg into
-  `docs/src/assets/examples/*.webm`. Defaults to the WebGPU backend, the only
-  one whose surface path reaches X11 on Linux.
+  headlessly (`GOLDY_EXAMPLE_CAPTURE` packed RGBA), and stitches the frames with
+  ffmpeg into `docs/src/assets/examples/*.webm`. Defaults to the crate's usual
+  backend (Vulkan). No Xvfb / x11grab.
 
 - **Yielding scripts** — a `[goldy_compute]` shader may suspend a lane with
   `$yield(continuation, payload, state)` and resume it in a `[goldy_resume]`

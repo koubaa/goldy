@@ -8,8 +8,7 @@ use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
-    VertexBufferLayout,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -20,6 +19,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
+use common::FrameSink;
 
 const NUM_PARTICLES: u32 = 1000;
 
@@ -60,6 +60,15 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    if common::capture_requested() {
+        let mut state = RenderState::new(None)?;
+        while !state.sink.finished() {
+            state.render()?;
+        }
+        return Ok(());
+    }
+
     println!("Goldy Particles Example");
     println!("  Space - Toggle rain/snow");
     println!("  Escape - Exit");
@@ -79,11 +88,10 @@ struct App {
 }
 
 struct RenderState {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     device: Arc<goldy::Device>,
     ctx: goldy::Context,
-    surface: SurfaceExchange,
-    present: Transaction,
+    sink: FrameSink,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
@@ -103,31 +111,31 @@ impl RenderState {
     fn create_render_pipeline(
         device: &goldy::Device,
         render_shader: &ShaderModule,
-        surface: &SurfaceExchange,
+        sink: &mut FrameSink,
     ) -> Result<RenderPipeline> {
-        common::render_pipeline_for_surface(
+        common::render_pipeline(
             device,
             render_shader,
-            surface,
+            sink.format(),
             RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
         )
-        .map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_scheme(
         scheme: &mut Scheme,
-        surface: &SurfaceExchange,
+        sink: &mut FrameSink,
         compute_pipeline: &ComputePipeline,
         render_pipeline: &RenderPipeline,
         particle_buffer: &Buffer,
         params_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         bg_color: Color,
-    ) -> anyhow::Result<Transaction> {
+    ) -> anyhow::Result<()> {
         scheme
             .node("update_particles", compute_pipeline)
             .with_parcel(particle_buffer, NodeAccess::ReadWrite)
@@ -141,7 +149,7 @@ impl RenderState {
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish();
 
-        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
+        sink.bind_render_target(scheme, scene_rt)
     }
 
     fn background_color(is_snow: bool) -> Color {
@@ -164,26 +172,27 @@ impl RenderState {
 
     fn rerecord_scheme(&mut self) {
         let mut scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.surface.size();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.surface.format(), None) {
+        let (width, height) = self.sink.size();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.sink.format(), None) {
             self.scene_rt = rt;
-            if let Ok(present) = Self::record_scheme(
+            if Self::record_scheme(
                 &mut scheme,
-                &self.surface,
+                &mut self.sink,
                 &self.compute_pipeline,
                 &self.render_pipeline,
                 &self.particle_buffer,
                 &self.params_buffer,
                 &self.scene_rt,
                 Self::background_color(self.is_snow),
-            ) {
-                self.present = present;
+            )
+            .is_ok()
+            {
                 self.scheme = scheme;
             }
         }
     }
 
-    fn new(window: Arc<Window>) -> Result<Self> {
+    fn new(window: Option<Arc<Window>>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
             instance
@@ -191,26 +200,26 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window.as_deref())?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
 
         let particles = Self::create_particles(false);
-        let mut retained_pool = RetainedPool::new(device.clone());
         let particle_buffer = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
         let params_buffer =
             retained_pool.acquire_buffer_sized::<ParticleParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
-        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &surface)?;
+        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &mut sink)?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = surface.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
-        let present = Self::record_scheme(
+        let (width, height) = sink.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        Self::record_scheme(
             &mut scheme,
-            &surface,
+            &mut sink,
             &compute_pipeline,
             &render_pipeline,
             &particle_buffer,
@@ -232,8 +241,7 @@ impl RenderState {
             window,
             device,
             ctx,
-            surface,
-            present,
+            sink,
             scheme,
             scene_rt,
             compute_pipeline,
@@ -296,10 +304,12 @@ impl RenderState {
         particle_deposit.write(&mut particle_upload, 0, bytemuck::cast_slice(&particles))?;
         particle_upload.submit()?;
 
-        self.window.set_title(&format!(
-            "Goldy - {} (Space to toggle)",
-            if self.is_snow { "Snow" } else { "Rain" }
-        ));
+        if let Some(window) = &self.window {
+            window.set_title(&format!(
+                "Goldy - {} (Space to toggle)",
+                if self.is_snow { "Snow" } else { "Rain" }
+            ));
+        }
 
         self.rerecord_scheme();
         Ok(())
@@ -320,9 +330,11 @@ impl RenderState {
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
-        self.present.claim(&mut submission)?.consume()?;
+        self.sink.settle(&mut submission)?;
 
-        self.window.request_redraw();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
         Ok(())
     }
 }
@@ -351,7 +363,7 @@ impl ApplicationHandler for App {
                     .expect("Failed to create window"),
             );
 
-            match RenderState::new(window.clone()) {
+            match RenderState::new(Some(window.clone())) {
                 Ok(mut state) => {
                     if let Err(e) = state.render() {
                         tracing::error!("First frame error: {e}");
@@ -393,13 +405,13 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        let (prev_w, prev_h) = state.surface.size();
+                        let (prev_w, prev_h) = state.sink.size();
                         if size.width == prev_w && size.height == prev_h {
                             return;
                         }
-                        state.surface.resize(size.width, size.height).ok();
+                        state.sink.resize(size.width, size.height).ok();
                         if let Ok(pipeline) =
-                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.surface)
+                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &mut state.sink)
                         {
                             state.render_pipeline = pipeline;
                         }

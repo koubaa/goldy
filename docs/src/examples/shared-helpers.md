@@ -6,8 +6,15 @@ each example pulls them in with `mod common;` and friends.
 ## `examples/common.rs`
 
 Run limits (`GOLDY_EXAMPLE_TIMEOUT` / `EXAMPLE_TIMEOUT`), the trailing FPS window used by the
-`GOLDY_PERF` line, hidden-window creation so the first frame is never a blank flash, and
-`render_pipeline_for_surface`, which rebuilds a pipeline against the current surface format.
+`GOLDY_PERF` line, hidden-window creation so the first frame is never a blank flash,
+`FrameSink` (window present or a packed-RGBA dump for book clips), and
+`render_pipeline` / `render_pipeline_for_surface`, which rebuild a pipeline against the
+current colour-target format.
+
+Set `GOLDY_EXAMPLE_CAPTURE` to a raw-RGBA output path to skip the window and write pixels that
+`scripts/record_example_captures.sh` stitches with ffmpeg. Optional:
+`GOLDY_EXAMPLE_CAPTURE_FRAMES` (default 75), `GOLDY_EXAMPLE_CAPTURE_FPS` (default 15),
+`GOLDY_EXAMPLE_CAPTURE_WIDTH` / `HEIGHT` (default 640×480).
 
 ```rust,noplayground
 {{#include ../../../examples/common.rs}}

@@ -41,11 +41,20 @@ cargo run --bin update-screenshots --features update-screenshots
 
 This renders triangles, Game of Life, and depth-occlusion scenes to PNG files in `tests/screenshots/`.
 
-### Interactive examples under Xvfb
+### Headless example captures
 
-The Vulkan backend's surface path is Wayland-only, so interactive examples fail on X11 with
-"Expected Wayland window/display handles on Linux". The WebGPU backend reaches X11 through
-`wgpu`, so examples do run under Xvfb with `GOLDY_BACKEND=webgpu`:
+Windowed examples dump packed RGBA when `GOLDY_EXAMPLE_CAPTURE` is set, so book clips
+do not need a display:
+
+```bash
+GOLDY_EXAMPLE_CAPTURE=/tmp/triangle.rgba GOLDY_EXAMPLE_CAPTURE_FRAMES=8 \
+  GOLDY_EXAMPLE_CAPTURE_WIDTH=320 GOLDY_EXAMPLE_CAPTURE_HEIGHT=240 \
+  cargo run --release --features examples --example triangle
+```
+
+`scripts/record_example_captures.sh` runs that path for every example and stitches
+WebM with ffmpeg. Interactive windowed runs still need a surface: the Vulkan backend
+is Wayland-only on Linux, so under Xvfb use WebGPU:
 
 ```bash
 Xvfb :99 -screen 0 800x600x24 &
@@ -53,7 +62,5 @@ DISPLAY=:99 GOLDY_BACKEND=webgpu GOLDY_EXAMPLE_TIMEOUT=6 \
   cargo run --release --no-default-features --features webgpu,examples --example triangle
 ```
 
-`scripts/record_example_captures.sh` wraps this to record the book's example clips.
-
 A VM that lacks them needs `mesa-vulkan-drivers` (lavapipe ICD) and `libxkbcommon-x11-0`
-(winit's X11 keyboard handling) before any of this works.
+(winit's X11 keyboard handling) before windowed WebGPU examples work.

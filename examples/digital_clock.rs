@@ -10,7 +10,7 @@ use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, Tim
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
     MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout, VertexFormat,
+    ShaderModule, TargetLoad, TextureFormat, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,6 +22,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
+use common::FrameSink;
 
 /// Upper bound on seven-segment clock vertices (8 glyphs × 7 segments × 6 verts).
 const MAX_CLOCK_VERTICES: usize = 384;
@@ -67,8 +68,7 @@ struct App {
     vertex_deposit: Option<DepositTransaction>,
 
     window: Option<Arc<Window>>,
-    surface: Option<SurfaceExchange>,
-    present: Option<Transaction>,
+    sink: Option<FrameSink>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
 
@@ -90,8 +90,7 @@ impl App {
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
-            present: None,
+            sink: None,
             scene_rt: None,
             scheme: None,
             start_time: Instant::now(),
@@ -110,12 +109,12 @@ impl App {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        surface: &SurfaceExchange,
+        format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
-        common::render_pipeline_for_surface(
+        common::render_pipeline(
             device,
             shader,
-            surface,
+            format,
             RenderPipelineDesc {
                 vertex_layout: clock_vertex_layout(),
                 ..Default::default()
@@ -125,46 +124,38 @@ impl App {
 
     fn record_scheme(
         scheme: &mut Scheme,
-        surface: &SurfaceExchange,
+        sink: &mut FrameSink,
         pipeline: &RenderPipeline,
         vertex_parcel: &Buffer,
         vertex_count: u32,
         bg_color: Color,
         scene_rt: &Lease<LeaseRenderTarget>,
-    ) -> anyhow::Result<Transaction> {
+    ) -> anyhow::Result<()> {
         let mut pass = scheme.render_pass("digital_clock", scene_rt, TargetLoad::Clear(bg_color));
         pass.with_parcel(vertex_parcel, NodeAccess::Read);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..vertex_count, 0..1);
         pass.finish();
-        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
+        sink.bind_render_target(scheme, scene_rt)
     }
 
     fn rerecord_scheme_if_needed(&mut self, vertex_count: u32, bg_color: Color) {
         if vertex_count == self.recorded_vertex_count && bg_color == self.recorded_bg_color {
             return;
         }
-        if let (Some(ctx), Some(pipeline), Some(vertex_parcel), Some(surface)) = (
+        if let (Some(ctx), Some(pipeline), Some(vertex_parcel), Some(sink)) = (
             self.ctx.as_ref(),
             self.pipeline.as_ref(),
             self.vertex_parcel.as_ref(),
-            self.surface.as_ref(),
+            self.sink.as_mut(),
         ) {
             let mut scheme = Scheme::new(ctx);
-            let (width, height) = surface.size();
-            if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None) {
-                if let Ok(present) = Self::record_scheme(
-                    &mut scheme,
-                    surface,
-                    pipeline,
-                    vertex_parcel,
-                    vertex_count,
-                    bg_color,
-                    &rt,
-                ) {
+            let (width, height) = sink.size();
+            if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
+                if Self::record_scheme(&mut scheme, sink, pipeline, vertex_parcel, vertex_count, bg_color, &rt).is_ok()
+                {
                     self.scheme = Some(scheme);
-                    self.present = Some(present);
                     self.recorded_vertex_count = vertex_count;
                     self.recorded_bg_color = bg_color;
                     self.scene_rt = Some(rt);
@@ -173,19 +164,19 @@ impl App {
         }
     }
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
+    fn init_gpu(&mut self, window: Option<&Window>) -> anyhow::Result<()> {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window)?;
 
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
-        let pipeline = Self::create_pipeline(&device, &shader, &surface)?;
+        let pipeline = Self::create_pipeline(&device, &shader, sink.format())?;
 
-        let mut retained_pool = RetainedPool::new(device.clone());
         let vertex_parcel = retained_pool.acquire_buffer_sized::<ClockVertex>(
             MAX_CLOCK_VERTICES as u64,
             BufferKind::Scattered,
@@ -194,9 +185,17 @@ impl App {
 
         let bg_color = self.clock_state.background_color();
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = surface.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
-        let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &vertex_parcel, 1, bg_color, &scene_rt)?;
+        let (width, height) = sink.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        Self::record_scheme(
+            &mut scheme,
+            &mut sink,
+            &pipeline,
+            &vertex_parcel,
+            1,
+            bg_color,
+            &scene_rt,
+        )?;
 
         self.ctx = Some(ctx);
         let ctx = self.ctx.as_ref().unwrap();
@@ -214,8 +213,7 @@ impl App {
         )?;
         self.upload_scheme = Some(upload_scheme);
         self.vertex_deposit = Some(vertex_deposit);
-        self.surface = Some(surface);
-        self.present = Some(present);
+        self.sink = Some(sink);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         self.recorded_vertex_count = 1;
@@ -267,44 +265,43 @@ impl App {
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
-        let present = self.present.as_ref().unwrap();
         let mut submission = scheme.submit()?;
-        present.claim(&mut submission)?.consume()?;
+        self.sink.as_mut().unwrap().settle(&mut submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(sink) = self.sink.as_mut() {
+                let _ = sink.resize(new_size.width, new_size.height);
             }
-            if let (Some(ctx), Some(device), Some(surface), Some(shader), Some(vertex_parcel)) = (
+            if let (Some(ctx), Some(device), Some(sink), Some(shader), Some(vertex_parcel)) = (
                 self.ctx.as_ref(),
                 self.device.as_ref(),
-                self.surface.as_ref(),
+                self.sink.as_mut(),
                 self.shader.as_ref(),
                 self.vertex_parcel.as_ref(),
             ) {
-                if let Ok(pipeline) = Self::create_pipeline(device, shader, surface) {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, sink.format()) {
                     self.pipeline = Some(pipeline);
                     if let Some(pipeline) = self.pipeline.as_ref() {
                         let bg_color = self.clock_state.background_color();
                         let vertex_count = self.recorded_vertex_count.max(1);
                         let mut scheme = Scheme::new(ctx);
-                        let (width, height) = surface.size();
-                        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)
-                        {
-                            if let Ok(present) = Self::record_scheme(
+                        let (width, height) = sink.size();
+                        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
+                            if Self::record_scheme(
                                 &mut scheme,
-                                surface,
+                                sink,
                                 pipeline,
                                 vertex_parcel,
                                 vertex_count,
                                 bg_color,
                                 &rt,
-                            ) {
+                            )
+                            .is_ok()
+                            {
                                 self.scheme = Some(scheme);
-                                self.present = Some(present);
                                 self.recorded_vertex_count = vertex_count;
                                 self.recorded_bg_color = bg_color;
                                 self.scene_rt = Some(rt);
@@ -344,7 +341,7 @@ impl ApplicationHandler for App {
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
             self.window = Some(window.clone());
 
-            if let Err(e) = self.init_gpu(&window) {
+            if let Err(e) = self.init_gpu(Some(window.as_ref())) {
                 tracing::error!("Failed to initialize GPU: {}", e);
             } else if let Err(e) = self.render_frame() {
                 tracing::error!("First frame error: {e}");
@@ -398,6 +395,15 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    if common::capture_requested() {
+        let mut app = App::new()?;
+        app.init_gpu(None)?;
+        while !app.sink.as_ref().is_none_or(common::FrameSink::finished) {
+            app.render_frame()?;
+        }
+        return Ok(());
+    }
 
     println!("Goldy Clock Example (retained scheme)");
     println!("==================================================================");

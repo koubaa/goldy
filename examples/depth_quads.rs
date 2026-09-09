@@ -9,8 +9,8 @@ use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTransaction, DepthFormat, DepthStencilState,
     DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
-    TargetLoad, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, TextureFormat,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -21,6 +21,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
+use common::FrameSink;
 
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
@@ -78,8 +79,7 @@ struct App {
     upload_scheme: Option<Scheme>,
     warm_deposit: Option<DepositTransaction>,
     cool_deposit: Option<DepositTransaction>,
-    surface: Option<SurfaceExchange>,
-    present: Option<Transaction>,
+    sink: Option<FrameSink>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     window: Option<Arc<Window>>,
@@ -101,8 +101,7 @@ impl App {
             upload_scheme: None,
             warm_deposit: None,
             cool_deposit: None,
-            surface: None,
-            present: None,
+            sink: None,
             scene_rt: None,
             scheme: None,
             window: None,
@@ -114,12 +113,12 @@ impl App {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        surface: &SurfaceExchange,
+        format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
-        common::render_pipeline_for_surface(
+        common::render_pipeline(
             device,
             shader,
-            surface,
+            format,
             RenderPipelineDesc {
                 vertex_layout: depth_vertex_layout(),
                 depth_stencil: Some(DepthStencilState {
@@ -134,12 +133,12 @@ impl App {
 
     fn record_scheme(
         scheme: &mut Scheme,
-        surface: &SurfaceExchange,
+        sink: &mut FrameSink,
         pipeline: &RenderPipeline,
         warm_parcel: &Buffer,
         cool_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
-    ) -> anyhow::Result<Transaction> {
+    ) -> anyhow::Result<()> {
         let mut pass = scheme.render_pass("depth_quads", scene_rt, TargetLoad::Clear(Color::BLACK));
         pass.with_parcel(warm_parcel, NodeAccess::Read);
         pass.with_parcel(cool_parcel, NodeAccess::Read);
@@ -150,36 +149,36 @@ impl App {
         pass.set_vertex_buffer(0, cool_parcel);
         pass.draw(0..6, 0..1);
         pass.finish();
-        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
+        sink.bind_render_target(scheme, scene_rt)
     }
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
+    fn init_gpu(&mut self, window: Option<&Window>) -> anyhow::Result<()> {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window)?;
 
         let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
-        let pipeline = Self::create_pipeline(&device, &shader, &surface)?;
+        let pipeline = Self::create_pipeline(&device, &shader, sink.format())?;
 
-        let mut retained_pool = RetainedPool::new(device.clone());
         let warm_parcel =
             retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
         let cool_parcel =
             retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = surface.size();
+        let (width, height) = sink.size();
         let scene_rt = scheme.lease_render_target(
             width.max(1),
             height.max(1),
-            surface.format(),
+            sink.format(),
             Some(DepthFormat::Depth32Float),
         )?;
-        let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &warm_parcel, &cool_parcel, &scene_rt)?;
+        Self::record_scheme(&mut scheme, &mut sink, &pipeline, &warm_parcel, &cool_parcel, &scene_rt)?;
 
         self.ctx = Some(ctx);
         let ctx = self.ctx.as_ref().unwrap();
@@ -198,8 +197,7 @@ impl App {
         self.upload_scheme = Some(upload_scheme);
         self.warm_deposit = Some(warm_deposit);
         self.cool_deposit = Some(cool_deposit);
-        self.surface = Some(surface);
-        self.present = Some(present);
+        self.sink = Some(sink);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         Ok(())
@@ -237,7 +235,7 @@ impl App {
 
         let scheme = self.scheme.as_mut().unwrap();
         let mut submission = scheme.submit()?;
-        self.present.as_ref().unwrap().claim(&mut submission)?.consume()?;
+        self.sink.as_mut().unwrap().settle(&mut submission)?;
 
         self.frame_count += 1;
         Ok(())
@@ -245,31 +243,30 @@ impl App {
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(sink) = self.sink.as_mut() {
+                let _ = sink.resize(new_size.width, new_size.height);
             }
-            if let (Some(ctx), Some(device), Some(surface), Some(shader), Some(warm), Some(cool)) = (
+            if let (Some(ctx), Some(device), Some(sink), Some(shader), Some(warm), Some(cool)) = (
                 self.ctx.as_ref(),
                 self.device.as_ref(),
-                self.surface.as_ref(),
+                self.sink.as_mut(),
                 self.shader.as_ref(),
                 self.warm_parcel.as_ref(),
                 self.cool_parcel.as_ref(),
             ) {
-                if let Ok(pipeline) = Self::create_pipeline(device, shader, surface) {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, sink.format()) {
                     self.pipeline = Some(pipeline);
                     if let Some(pipeline) = self.pipeline.as_ref() {
                         let mut scheme = Scheme::new(ctx);
-                        let (width, height) = surface.size();
+                        let (width, height) = sink.size();
                         if let Ok(rt) = scheme.lease_render_target(
                             width.max(1),
                             height.max(1),
-                            surface.format(),
+                            sink.format(),
                             Some(DepthFormat::Depth32Float),
                         ) {
-                            if let Ok(present) = Self::record_scheme(&mut scheme, surface, pipeline, warm, cool, &rt) {
+                            if Self::record_scheme(&mut scheme, sink, pipeline, warm, cool, &rt).is_ok() {
                                 self.scheme = Some(scheme);
-                                self.present = Some(present);
                                 self.scene_rt = Some(rt);
                             }
                         }
@@ -308,7 +305,7 @@ impl ApplicationHandler for App {
                     .unwrap(),
             );
             self.window = Some(window.clone());
-            self.init_gpu(&window).unwrap();
+            self.init_gpu(Some(window.as_ref())).unwrap();
             if let Err(e) = self.render_frame() {
                 tracing::error!("First frame error: {e}");
             }
@@ -355,6 +352,15 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    if common::capture_requested() {
+        let mut app = App::new()?;
+        app.init_gpu(None)?;
+        while !app.sink.as_ref().is_none_or(common::FrameSink::finished) {
+            app.render_frame()?;
+        }
+        return Ok(());
+    }
 
     println!("Goldy Depth Quads Example (Scheme + Present)");
     println!("Press Escape or close window to exit.\n");

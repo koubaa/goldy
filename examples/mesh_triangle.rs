@@ -8,7 +8,7 @@
 
 use goldy::{
     Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MeshPipeline, RequestAdapterOptions, RetainedPool,
-    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Transaction,
+    Scheme, ShaderModule, TargetLoad, TextureFormat,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,7 +20,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
-use common::FpsWindow;
+use common::{FpsWindow, FrameSink};
 
 const MESH_SLANG: &str = r#"
 import goldy_exp;
@@ -60,8 +60,7 @@ struct App {
     pipeline: Option<MeshPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
-    surface: Option<SurfaceExchange>,
-    present: Option<Transaction>,
+    sink: Option<FrameSink>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     frame_count: u64,
@@ -79,8 +78,7 @@ impl App {
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
-            present: None,
+            sink: None,
             scene_rt: None,
             scheme: None,
             frame_count: 0,
@@ -100,30 +98,30 @@ impl App {
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
-        surface: &SurfaceExchange,
+        format: TextureFormat,
     ) -> anyhow::Result<MeshPipeline> {
         Ok(MeshPipeline::builder(device)
             .mesh(shader)
             .fragment(shader)
-            .target_format(surface.format())
+            .target_format(format)
             .build()?)
     }
 
     fn record_scheme(
         scheme: &mut Scheme,
-        surface: &SurfaceExchange,
+        sink: &mut FrameSink,
         pipeline: &MeshPipeline,
         scene_rt: &Lease<LeaseRenderTarget>,
         bg_color: Color,
-    ) -> anyhow::Result<Transaction> {
+    ) -> anyhow::Result<()> {
         let mut pass = scheme.render_pass("mesh", scene_rt, TargetLoad::Clear(bg_color));
         pass.set_mesh_pipeline(pipeline);
         pass.dispatch_mesh(1, 1, 1);
         pass.finish();
-        surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
+        sink.bind_render_target(scheme, scene_rt)
     }
 
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
+    fn init_gpu(&mut self, window: Option<&Window>) -> anyhow::Result<()> {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
@@ -134,29 +132,28 @@ impl App {
             std::process::exit(0);
         }
         let ctx = device.create_context()?;
-        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
-        let retained_pool = RetainedPool::new(device.clone());
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window)?;
         let shader = ShaderModule::from_slang(&device, MESH_SLANG)?;
-        let pipeline = Self::create_pipeline(&device, &shader, &surface)?;
+        let pipeline = Self::create_pipeline(&device, &shader, sink.format())?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = surface.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
+        let (width, height) = sink.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
             b: 0.2,
             a: 1.0,
         };
-        let present = Self::record_scheme(&mut scheme, &surface, &pipeline, &scene_rt, bg_color)?;
+        Self::record_scheme(&mut scheme, &mut sink, &pipeline, &scene_rt, bg_color)?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);
         self._retained_pool = Some(retained_pool);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
-        self.present = Some(present);
+        self.sink = Some(sink);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         self.perf_start = Some(Instant::now());
@@ -164,14 +161,15 @@ impl App {
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
-        let window = self.window.as_ref().unwrap();
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
+        if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            if size.width == 0 || size.height == 0 {
+                return Ok(());
+            }
         }
         let scheme = self.scheme.as_mut().unwrap();
         let mut submission = scheme.submit()?;
-        self.present.as_ref().unwrap().claim(&mut submission)?.consume()?;
+        self.sink.as_mut().unwrap().settle(&mut submission)?;
         self.frame_count += 1;
         if self.perf_start.is_some() {
             self.fps_window.record(Instant::now());
@@ -183,30 +181,29 @@ impl App {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
-        if let Some(surface) = &self.surface {
-            let _ = surface.resize(new_size.width, new_size.height);
+        if let Some(sink) = self.sink.as_mut() {
+            let _ = sink.resize(new_size.width, new_size.height);
         }
-        if let (Some(ctx), Some(device), Some(surface), Some(shader)) = (
+        if let (Some(ctx), Some(device), Some(sink), Some(shader)) = (
             self.ctx.as_ref(),
             self.device.as_ref(),
-            self.surface.as_ref(),
+            self.sink.as_mut(),
             self.shader.as_ref(),
         ) {
-            if let Ok(pipeline) = Self::create_pipeline(device, shader, surface) {
+            if let Ok(pipeline) = Self::create_pipeline(device, shader, sink.format()) {
                 self.pipeline = Some(pipeline);
                 if let Some(pipeline) = self.pipeline.as_ref() {
                     let mut scheme = Scheme::new(ctx);
-                    let (width, height) = surface.size();
-                    if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None) {
+                    let (width, height) = sink.size();
+                    if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
                         let bg_color = Color {
                             r: 0.1,
                             g: 0.1,
                             b: 0.2,
                             a: 1.0,
                         };
-                        if let Ok(present) = Self::record_scheme(&mut scheme, surface, pipeline, &rt, bg_color) {
+                        if Self::record_scheme(&mut scheme, sink, pipeline, &rt, bg_color).is_ok() {
                             self.scheme = Some(scheme);
-                            self.present = Some(present);
                             self.scene_rt = Some(rt);
                         }
                     }
@@ -242,7 +239,7 @@ impl ApplicationHandler for App {
                     .unwrap(),
             );
             self.window = Some(window.clone());
-            self.init_gpu(&window).unwrap();
+            self.init_gpu(Some(window.as_ref())).unwrap();
             if let Err(e) = self.render_frame() {
                 tracing::error!("First frame error: {e}");
             }
@@ -287,6 +284,15 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    if common::capture_requested() {
+        let mut app = App::new()?;
+        app.init_gpu(None)?;
+        while !app.sink.as_ref().is_none_or(common::FrameSink::finished) {
+            app.render_frame()?;
+        }
+        return Ok(());
+    }
 
     println!("Goldy Mesh Triangle (set_mesh_pipeline + dispatch_mesh)");
     println!("Press Escape or close window to exit.\n");
