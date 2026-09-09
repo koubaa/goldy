@@ -91,7 +91,7 @@ fn build_scheme(
     bind: &FrameBind<'_>,
 ) -> anyhow::Result<Recorded> {
     let mut scheme = Scheme::new(ctx);
-    let scene_rt = scheme.lease_render_target(bind.width.max(1), bind.height.max(1), bind.format, None)?;
+    let scene_rt = ctx.lease_render_target(bind.width.max(1), bind.height.max(1), bind.format, None)?;
     record_scheme(
         &mut scheme,
         cells,

@@ -206,7 +206,7 @@ fn cuda_raster_rgba8_triangle_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba8Unorm, None)
         .expect("rgba8 render target");
     {
@@ -290,7 +290,7 @@ fn cuda_raster_triangle_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -428,7 +428,7 @@ fn cuda_raster_depth_occlusion_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, Some(DepthFormat::Depth32Float))
         .expect("depth render target");
     {
@@ -518,7 +518,7 @@ fn cuda_raster_indexed_triangle_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -613,7 +613,7 @@ fn cuda_raster_to_present_multi_frame() {
         let mut scheme = Scheme::new(&ctx);
         let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
         let (w, h) = surface.size();
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(w, h, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         {
@@ -722,7 +722,7 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
         .node("gen_verts", &compute)
         .with_parcel(&vertex_buffer, goldy::NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -836,7 +836,7 @@ fn cuda_compute_generated_indices_raster() {
         .node("gen_indices", &compute)
         .with_parcel(&index_buffer, goldy::NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -935,7 +935,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
         .expect("deposit");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1078,7 +1078,7 @@ fn cuda_raster_goldy_vertex_color_2d() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1224,7 +1224,7 @@ fn cuda_raster_bindless_buffer_tint() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1333,7 +1333,7 @@ fn cuda_raster_bindless_tint_change_rerecords() {
 
     // Frame 1: green tint.
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1367,7 +1367,7 @@ fn cuda_raster_bindless_tint_change_rerecords() {
 
     // Frame 2: blue tint — changed bindings must not replay the green list.
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1476,7 +1476,7 @@ fn cuda_raster_bindless_sampled_texture() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {

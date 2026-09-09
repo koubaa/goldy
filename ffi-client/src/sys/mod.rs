@@ -32,6 +32,17 @@ pub unsafe fn goldy_context_destroy(ctx: *mut GoldyContext) {
     (lib().goldy_context_destroy)(ctx)
 }
 
+pub unsafe fn goldy_context_lease_render_target(
+    ctx: *const GoldyContext,
+    width: u32,
+    height: u32,
+    format: GoldyTextureFormat,
+    has_depth: bool,
+    depth_format: GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease {
+    (lib().goldy_context_lease_render_target)(ctx, width, height, format, has_depth, depth_format)
+}
+
 pub unsafe fn goldy_device_adapter_id(device: *const GoldyDevice) -> u32 {
     (lib().goldy_device_adapter_id)(device)
 }

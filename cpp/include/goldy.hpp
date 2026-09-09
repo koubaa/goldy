@@ -14,7 +14,7 @@
  *   goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
  *   goldy::Context ctx(device);
  *   goldy::Scheme scheme(ctx);
- *   auto rt = scheme.lease_render_target(800, 600);
+ *   auto rt = ctx.lease_render_target(800, 600);
  *   // ...
  */
 
@@ -515,6 +515,10 @@ public:
     Context& operator=(Context&&) = default;
 
     GoldyContext* get() const { return ptr_.get(); }
+
+    [[nodiscard]] SchemeRenderTargetLease lease_render_target(
+        uint32_t width, uint32_t height, GoldyTextureFormat format,
+        bool has_depth = false, GoldyDepthFormat depth_format = GOLDY_DEPTH_FORMAT_DEPTH24_PLUS) const;
 
 private:
     std::unique_ptr<GoldyContext, detail::ContextDeleter> ptr_;
@@ -1225,7 +1229,7 @@ private:
 };
 
 /**
- * @brief Stable render-target lease declared on a Scheme.
+ * @brief Stable render-target lease minted by a Context.
  */
 class SchemeRenderTargetLease {
 public:
@@ -1241,9 +1245,21 @@ public:
     GoldySchemeRenderTargetLease* get() const { return ptr_.get(); }
 
 private:
+    friend class Context;
     friend class Scheme;
     std::unique_ptr<GoldySchemeRenderTargetLease, detail::SchemeRenderTargetLeaseDeleter> ptr_;
 };
+
+inline SchemeRenderTargetLease Context::lease_render_target(
+    uint32_t width, uint32_t height, GoldyTextureFormat format,
+    bool has_depth, GoldyDepthFormat depth_format) const {
+    GoldySchemeRenderTargetLease* lease = goldy_context_lease_render_target(
+        ptr_.get(), width, height, format, has_depth, depth_format);
+    if (!lease) {
+        throw Exception::from_last_error();
+    }
+    return SchemeRenderTargetLease{lease};
+}
 
 /**
  * @brief Stable present lease from a SurfaceExchange.
@@ -1433,7 +1449,8 @@ public:
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
 
-    [[nodiscard]] SchemeRenderTargetLease lease_render_target(
+    [[nodiscard]] [[deprecated("mint from the lessor: Context::lease_render_target")]]
+    SchemeRenderTargetLease lease_render_target(
         uint32_t width, uint32_t height, GoldyTextureFormat format,
         bool has_depth = false, GoldyDepthFormat depth_format = GOLDY_DEPTH_FORMAT_DEPTH24_PLUS) {
         GoldySchemeRenderTargetLease* lease = goldy_scheme_lease_render_target(

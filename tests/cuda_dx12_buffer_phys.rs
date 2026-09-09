@@ -111,7 +111,7 @@ fn draw_and_readback(
 ) -> Vec<u8> {
     let _ = device;
     let mut scheme = Scheme::new(ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -317,7 +317,7 @@ fn compute_then_raster_lands_native_and_twin() {
         .node("gen", &compute)
         .with_parcel(&vertex_buffer, goldy::NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("rt");
     {
@@ -401,7 +401,7 @@ fn shared_then_kernel_promotes_without_invalidating_schemes() {
         .node("recolor", &recolor)
         .with_parcel(&vertex_buffer, goldy::NodeAccess::ReadWrite)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("rt");
     {

@@ -123,8 +123,7 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx)?;
         let (width, height) = surface.size();
-        let scene_rt =
-            scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
@@ -204,7 +203,7 @@ impl App {
                 };
                 let (width, height) = surface.size();
                 if let Ok(rt) =
-                    scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)
+                    ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)
                 {
                     let bg_color = Color {
                         r: 0.1,

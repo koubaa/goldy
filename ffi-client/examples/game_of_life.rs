@@ -165,7 +165,7 @@ fn build_scheme(
 ) -> goldy_ffi_client::Result<(Scheme, Transaction)> {
     let mut scheme = Scheme::new(ctx)?;
     let (width, height) = surface.size();
-    let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
+    let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
     let present = record_scheme(
         &mut scheme,
         surface,

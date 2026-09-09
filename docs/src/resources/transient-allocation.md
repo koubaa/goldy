@@ -15,9 +15,10 @@ Goldy exposes one transient door per [`Context`](../compute/settlement.md):
 | `Context::acquire_transient_buffer` | `Context::return_transient_buffer` |
 | `Context::acquire_transient_texture` | `Context::return_transient_texture` |
 
-Scheme leases (`Scheme::lease_buffer` / `lease_texture`) realize through the same
-pool. Relinquished retained parcels enter via `StampedParcel` / `ready_after`;
-the pool reissues only after every stamped epoch has retired.
+Context leases (`Context::lease_buffer` / `lease_texture` / `lease_render_target`)
+realize through the same pool. Relinquished retained parcels enter via
+`StampedParcel` / `ready_after`; the pool reissues only after every stamped epoch
+has retired.
 
 ```rust
 let scratch = ctx.acquire_transient_buffer(

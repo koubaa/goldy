@@ -185,7 +185,7 @@ impl App {
             (self.ctx.as_ref(), self.pipeline.as_ref(), self.vertex_parcel.as_ref())
         {
             let mut scheme = Scheme::new(ctx);
-            if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+            if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                 Self::record_pass(&mut scheme, pipeline, vertex_parcel, vertex_count, bg_color, &rt);
                 if let Ok((present, withdraw)) =
                     Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
@@ -240,7 +240,7 @@ impl App {
 
         let bg_color = self.clock_state.background_color();
         let mut scheme = Scheme::new(&ctx);
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, 1, bg_color, &scene_rt);
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
@@ -357,7 +357,7 @@ impl App {
                     let bg_color = self.clock_state.background_color();
                     let vertex_count = self.recorded_vertex_count.max(1);
                     let mut scheme = Scheme::new(ctx);
-                    if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+                    if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                         Self::record_pass(&mut scheme, pipeline, vertex_parcel, vertex_count, bg_color, &rt);
                         if let Ok((present, withdraw)) =
                             Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())

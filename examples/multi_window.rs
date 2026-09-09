@@ -315,7 +315,7 @@ impl WindowState {
         let mut scheme = Scheme::new(&self.ctx);
         let (width, height) = self.output_size();
         let format = self.output_format();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+        if let Ok(rt) = self.ctx.lease_render_target(width.max(1), height.max(1), format, None) {
             Self::record_pass(
                 &mut scheme,
                 &self.pipeline,
@@ -351,7 +351,7 @@ impl WindowState {
             retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, effect_type.title());
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, Some(&surface), None)?;
 
@@ -404,7 +404,7 @@ impl WindowState {
             retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, effect_type.title());
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, None, Some(&readback))?;
 

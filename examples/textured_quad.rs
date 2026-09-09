@@ -260,7 +260,7 @@ impl App {
 
         let vertex_buffer = retained_pool.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
         let mut scheme = Scheme::new(&ctx);
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_buffer, &texture, &sampler, &scene_rt);
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
@@ -328,7 +328,7 @@ impl App {
                 self.pipeline = Some(pipeline);
                 if let Some(pipeline) = self.pipeline.as_ref() {
                     let mut scheme = Scheme::new(ctx);
-                    if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+                    if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                         Self::record_pass(&mut scheme, pipeline, vertex_buffer, texture, sampler, &rt);
                         if let Ok((present, withdraw)) =
                             Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())

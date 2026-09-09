@@ -1,5 +1,6 @@
 //! Scheme render-pass FFI (`copy_to_texture`, render-pass recording).
 
+use crate::context::GoldyContext;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
@@ -59,10 +60,51 @@ impl GoldyScheme {
     }
 }
 
-/// Declare a render-target lease on `scheme` (N=1 backing).
+fn mint_render_target_lease(
+    ctx: &goldy::Context,
+    width: u32,
+    height: u32,
+    format: GoldyTextureFormat,
+    has_depth: bool,
+    depth_format: GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease {
+    let depth = if has_depth { Some(depth_format.into()) } else { None };
+    match ctx.lease_render_target(width, height, format.into(), depth) {
+        Ok(lease) => Box::into_raw(Box::new(GoldySchemeRenderTargetLease { lease })),
+        Err(e) => {
+            set_last_error(format!("{e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Declare a render-target lease on `ctx` (the lessor).
 ///
 /// Returns a heap-allocated lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
-/// The lease is valid until the scheme is destroyed.
+/// The lease is self-describing and may be bound by any scheme on this context.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_context_lease_render_target(
+    ctx: *const GoldyContext,
+    width: u32,
+    height: u32,
+    format: GoldyTextureFormat,
+    has_depth: bool,
+    depth_format: GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease {
+    if ctx.is_null() {
+        set_last_error("Context pointer is null");
+        return std::ptr::null_mut();
+    }
+    mint_render_target_lease(&(*ctx).inner, width, height, format, has_depth, depth_format)
+}
+
+/// Declare a render-target lease on `scheme`'s context.
+///
+/// Forwarder for [`goldy_context_lease_render_target`]. Returns a heap-allocated
+/// lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
 ///
 /// # Safety
 /// `scheme` must be valid.
@@ -83,19 +125,20 @@ pub unsafe extern "C" fn goldy_scheme_lease_render_target(
         set_last_error("Cannot lease_render_target while recording a node");
         return std::ptr::null_mut();
     }
-    let depth = if has_depth { Some(depth_format.into()) } else { None };
-    match (*scheme).inner.lease_render_target(width, height, format.into(), depth) {
-        Ok(lease) => Box::into_raw(Box::new(GoldySchemeRenderTargetLease { lease })),
-        Err(e) => {
-            set_last_error(format!("{e}"));
-            std::ptr::null_mut()
-        }
-    }
+    mint_render_target_lease(
+        (*scheme).inner.context(),
+        width,
+        height,
+        format,
+        has_depth,
+        depth_format,
+    )
 }
 
 /// Destroy a render-target lease handle.
 ///
-/// Does not remove the lease from the scheme; the backing remains until the scheme is dropped.
+/// Drops this handle. The backing stays alive while any scheme still holds an interned
+/// clone; pool return (or RT free) happens when the last clone is gone.
 ///
 /// # Safety
 /// `lease` must be valid and not used after this call.
@@ -131,12 +174,13 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_begin(
         Ok(l) => (*scheme).intern_label(&l),
         Err(e) => return e,
     };
-    (*scheme).active_render_pass = Some(RenderPassRecord::new_for_scheme_lease(
+    let pass = RenderPassRecord::new_for_scheme_lease(
         label,
-        &(*scheme).inner,
+        &mut (*scheme).inner,
         &(*lease).lease,
         map_target_load(load, clear_color),
-    ));
+    );
+    (*scheme).active_render_pass = Some(pass);
     GoldyResult::Ok
 }
 

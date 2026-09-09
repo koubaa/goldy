@@ -63,7 +63,7 @@ readback = retained_pool.acquire_texture(
 )
 
 scheme = goldy.Scheme(ctx)
-rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
+rt = ctx.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
 with scheme.render_pass("triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))) as rp:
     rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
     rp.set_pipeline(pipeline)
@@ -226,7 +226,7 @@ parcel.byte_size                            # int (bytes)
 
 ```python
 scheme = goldy.Scheme(ctx)
-rt = scheme.lease_render_target(w, h, goldy.TextureFormat.RGBA8_UNORM)
+rt = ctx.lease_render_target(w, h, goldy.TextureFormat.RGBA8_UNORM)
 
 with scheme.render_pass("main", rt, goldy.TargetLoad.clear(goldy.Color.BLACK)) as rp:
     rp.with_parcel(buf, goldy.NodeAccess.READ)

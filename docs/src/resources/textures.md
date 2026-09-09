@@ -127,7 +127,7 @@ assert!(!borrowed.is_owned());
 
 ## Depth Textures
 
-Depth textures are created through `SurfaceConfig` or [`Scheme::lease_render_target`], not directly via `Texture::new`. Available depth formats:
+Depth textures are created through `SurfaceConfig` or [`Context::lease_render_target`], not directly via `Texture::new`. Available depth formats:
 
 | Format | Bits | Stencil |
 |--------|------|---------|

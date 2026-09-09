@@ -174,7 +174,7 @@ impl RenderState {
     fn rerecord_scheme(&mut self) {
         let mut scheme = Scheme::new(&self.ctx);
         let (format, width, height) = self.target();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+        if let Ok(rt) = self.ctx.lease_render_target(width.max(1), height.max(1), format, None) {
             self.scene_rt = rt;
             Self::record_scheme(
                 &mut scheme,
@@ -255,7 +255,7 @@ impl RenderState {
         let render_pipeline = Self::create_render_pipeline(&device, &render_shader, format)?;
 
         let mut scheme = Scheme::new(&ctx);
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), format, None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_scheme(
             &mut scheme,
             &compute_pipeline,

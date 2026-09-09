@@ -43,7 +43,17 @@ macro_rules! impl_kernel_bindable {
 
 impl_kernel_bindable!(crate::parcel::Parcel, crate::Buffer, crate::Sampler, crate::Texture,);
 
-impl<T> KernelBindable for crate::scheme::Lease<T> {
+impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseTexture> {
+    fn __goldy_bind_kernel<'a>(
+        &self,
+        start: SchemeNodeStart<'a>,
+        access: crate::task_graph::NodeAccess,
+    ) -> SchemeNodeStart<'a> {
+        start.bind_resource(self, access)
+    }
+}
+
+impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseBuffer> {
     fn __goldy_bind_kernel<'a>(
         &self,
         start: SchemeNodeStart<'a>,

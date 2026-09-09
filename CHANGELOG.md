@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MemoryExchange::bind_withdraw` under `GOLDY_EXAMPLE_CAPTURE`) instead of a
   shared `FrameSink` helper. Book-clip file I/O remains `CaptureDump` in
   `examples/common.rs`.
+- **Leases are minted by the lessor.** `Lease<T>` is now self-describing (`Arc`
+  to its backing and context), matching `PresentLease`. Mint with
+  `Context::lease_texture` / `lease_buffer` / `lease_render_target`. Schemes
+  intern a clone on first use (`with_parcel`, `render_pass`, `copy_to_present`,
+  …) so the backing outlives IR handles. Pool return happens when the last clone
+  is dropped, epoch-gated by `parcel.last_referenced()`. `Scheme::lease_*`
+  remains as deprecated forwarders. A lease may be bound by more than one scheme
+  on the same context. FFI adds `goldy_context_lease_render_target` and keeps
+  `goldy_scheme_lease_render_target` as a forwarder.
 
 ### Added
 

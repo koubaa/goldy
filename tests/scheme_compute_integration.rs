@@ -1457,7 +1457,7 @@ mod imp {
             .expect("output");
 
         let mut scheme = Scheme::new(&ctx);
-        let scratch = scheme.lease_buffer(byte_size).expect("lease scratch");
+        let scratch = ctx.lease_buffer(byte_size).expect("lease scratch");
 
         scheme
             .node("write_iota", &write_pipe)
@@ -1533,7 +1533,7 @@ mod imp {
 
         {
             let mut scheme = Scheme::new(&ctx);
-            let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_a");
+            let scratch = ctx.lease_buffer(byte_size).expect("lease scratch_a");
             scheme
                 .node("write_iota", &iota_pipe)
                 .with_parcel(&scratch, NodeAccess::Write)
@@ -1564,7 +1564,7 @@ mod imp {
 
         {
             let mut scheme = Scheme::new(&ctx);
-            let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_b");
+            let scratch = ctx.lease_buffer(byte_size).expect("lease scratch_b");
             assert_eq!(
                 ctx.transient_buffer_alloc_count(),
                 alloc_count_before + 1,
@@ -5209,7 +5209,7 @@ mod imp {
             .unwrap();
 
         let mut scheme = Scheme::new(&ctx);
-        let scratch = scheme.lease_buffer(64 * 4).expect("lease");
+        let scratch = ctx.lease_buffer(64 * 4).expect("lease");
         scheme
             .node("to_scratch", &copy_pipe)
             .with_parcel(&input, NodeAccess::Read)

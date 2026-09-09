@@ -465,7 +465,7 @@ fn lease_texture_scheme_resubmits_without_rerecord() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let mut scheme = Scheme::new(&ctx);
-    let lease = scheme
+    let lease = ctx
         .lease_texture(
             4,
             4,
@@ -502,8 +502,8 @@ fn lease_backing_pool_hygiene() {
     let alloc_count_before = ctx.transient_texture_alloc_count();
 
     {
-        let mut scheme = Scheme::new(&ctx);
-        let _lease = scheme
+        let _scheme = Scheme::new(&ctx);
+        let _lease = ctx
             .lease_texture(
                 4,
                 4,
@@ -526,11 +526,11 @@ fn lease_backing_pool_hygiene() {
     assert_eq!(
         ctx.transient_outstanding_bytes().texture,
         outstanding_before,
-        "outstanding drops when scheme releases lease backings"
+        "outstanding drops when the last lease clone is dropped"
     );
 
-    let mut scheme2 = Scheme::new(&ctx);
-    let _lease2 = scheme2
+    let _scheme2 = Scheme::new(&ctx);
+    let _lease2 = ctx
         .lease_texture(
             4,
             4,
