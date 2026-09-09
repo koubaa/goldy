@@ -152,7 +152,7 @@ impl App {
         ) {
             let mut scheme = Scheme::new(ctx);
             let (width, height) = sink.size();
-            if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
+            if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
                 if Self::record_scheme(&mut scheme, sink, pipeline, vertex_parcel, vertex_count, bg_color, &rt).is_ok()
                 {
                     self.scheme = Some(scheme);
@@ -186,7 +186,7 @@ impl App {
         let bg_color = self.clock_state.background_color();
         let mut scheme = Scheme::new(&ctx);
         let (width, height) = sink.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
         Self::record_scheme(
             &mut scheme,
             &mut sink,
@@ -296,7 +296,7 @@ impl App {
                         let vertex_count = self.recorded_vertex_count.max(1);
                         let mut scheme = Scheme::new(ctx);
                         let (width, height) = sink.size();
-                        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
+                        if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), sink.format(), None) {
                             if Self::record_scheme(
                                 &mut scheme,
                                 sink,

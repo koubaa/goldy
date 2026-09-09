@@ -122,6 +122,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_context_destroy")]
     internal static partial void ContextDestroy(nint ctx);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_context_lease_render_target")]
+    internal static partial nint ContextLeaseRenderTarget(
+        nint ctx, uint width, uint height, TextureFormat format, [MarshalAs(UnmanagedType.U1)] bool hasDepth, DepthFormat depthFormat);
+
     // ========================================================================
     // Scheme
     // ========================================================================

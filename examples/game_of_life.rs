@@ -208,7 +208,7 @@ impl RenderState {
 
         let mut display_scheme = Scheme::new(&ctx);
         let (width, height) = sink.size();
-        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
         record_display_scheme(&mut display_scheme, &mut sink, &cells, "a", &render_pipeline, &scene_rt)?;
 
         println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
@@ -236,7 +236,9 @@ impl RenderState {
         let current_field = if self.use_buffer_a { "a" } else { "b" };
         let mut display_scheme = Scheme::new(&self.ctx);
         let (width, height) = self.sink.size();
-        self.scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), self.sink.format(), None)?;
+        self.scene_rt = self
+            .ctx
+            .lease_render_target(width.max(1), height.max(1), self.sink.format(), None)?;
         record_display_scheme(
             &mut display_scheme,
             &mut self.sink,

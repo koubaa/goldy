@@ -40,12 +40,16 @@ impl Drop for SchemeSubmission {
     }
 }
 
-/// Stable render-target lease declared on a [`Scheme`].
+/// Stable render-target lease minted by a [`Context`].
 pub struct SchemeRenderTargetLease {
     ptr: *mut GoldySchemeRenderTargetLease,
 }
 
 impl SchemeRenderTargetLease {
+    pub(crate) fn from_ptr(ptr: *mut GoldySchemeRenderTargetLease) -> Self {
+        Self { ptr }
+    }
+
     pub(crate) fn as_ptr(&self) -> *const GoldySchemeRenderTargetLease {
         self.ptr
     }
@@ -134,7 +138,7 @@ impl Scheme {
         let ptr = non_null_expect(unsafe {
             sys::goldy_scheme_lease_render_target(self.ptr, width, height, format.into(), has_depth, depth.into())
         });
-        Ok(SchemeRenderTargetLease { ptr })
+        Ok(SchemeRenderTargetLease::from_ptr(ptr))
     }
 
     pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Texture) -> Result<()> {

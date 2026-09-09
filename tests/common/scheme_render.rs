@@ -49,7 +49,7 @@ pub fn scheme_record_readback(
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> (Scheme, WithdrawTransaction) {
     let mut scheme = Scheme::new(ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(width, height, format, depth_format)
         .expect("render target lease");
     {

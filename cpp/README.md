@@ -63,7 +63,7 @@ int main() {
             GOLDY_TEXTURE_KIND_DIRECT, readback_flags);
 
         goldy::Scheme scheme(ctx);
-        goldy::SchemeRenderTargetLease rt = scheme.lease_render_target(
+        goldy::SchemeRenderTargetLease rt = ctx.lease_render_target(
             800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM, nullptr);
         {
             auto pass = scheme.render_pass("triangle", rt, goldy::TargetLoad::clear(goldy::Color::cornflower_blue()));

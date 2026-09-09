@@ -124,7 +124,7 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx);
         let (width, height) = sink.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
@@ -189,7 +189,7 @@ impl App {
                 self.pipeline = Some(pipeline);
                 if let Some(pipeline) = self.pipeline.as_ref() {
                     let mut scheme = Scheme::new(ctx);
-                    if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+                    if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                         let bg_color = Color {
                             r: 0.1,
                             g: 0.1,

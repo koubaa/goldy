@@ -1,7 +1,7 @@
 //! Depth quads example - two fullscreen quads whose depths cross periodically.
 //!
-//! Depth-tested rendering via an offscreen scheme-leased render target with a depth attachment,
-//! (`Scheme::lease_render_target` with depth), then copy-to-present through a retained scheme.
+//! Depth-tested rendering via an offscreen context-leased render target with a depth attachment
+//! (`Context::lease_render_target` with depth), then copy-to-present through a retained scheme.
 //!
 //! Run with: cargo run --example depth_quads
 
@@ -172,7 +172,7 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx);
         let (width, height) = sink.size();
-        let scene_rt = scheme.lease_render_target(
+        let scene_rt = ctx.lease_render_target(
             width.max(1),
             height.max(1),
             sink.format(),
@@ -261,7 +261,7 @@ impl App {
                     if let Some(pipeline) = self.pipeline.as_ref() {
                         let mut scheme = Scheme::new(ctx);
                         let (width, height) = sink.size();
-                        if let Ok(rt) = scheme.lease_render_target(
+                        if let Ok(rt) = ctx.lease_render_target(
                             width.max(1),
                             height.max(1),
                             sink.format(),

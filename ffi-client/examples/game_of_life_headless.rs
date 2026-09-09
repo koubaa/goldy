@@ -78,7 +78,7 @@ fn main() -> goldy_ffi_client::Result<()> {
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
-    let rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
+    let rt = ctx.lease_render_target(GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
     {
         let current = cells.field(1)?;
         let mut pass = scheme.render_pass("game_of_life_render", &rt, TargetLoad::Discard);

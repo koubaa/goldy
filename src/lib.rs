@@ -81,7 +81,9 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use retained_pool::RetainedPool;
-pub use scheme::{Lease, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission};
+pub use scheme::{
+    Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission,
+};
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};

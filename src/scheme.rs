@@ -615,10 +615,6 @@ struct WithdrawInfo {
     staging_pool: Arc<WithdrawStagingPool>,
 }
 
-/// Stable index of a scheme-held lease declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LeaseId(pub(crate) u32);
-
 /// Stable identity of one recorded scheme node, returned when the node is finalized.
 ///
 /// Nodes are only ever appended to a scheme, so an id stays valid — and keeps pointing at
@@ -642,15 +638,80 @@ impl NodeId {
     }
 }
 
-/// Marker type for texture leases acquired via [`Scheme::lease_texture`].
+/// Marker type for texture leases acquired via [`Context::lease_texture`].
 pub struct LeaseTexture;
 
-/// Marker type for buffer leases acquired via [`Scheme::lease_buffer`].
+/// Marker type for buffer leases acquired via [`Context::lease_buffer`].
 pub struct LeaseBuffer;
 
-/// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
+/// Marker type for render-target leases acquired via [`Context::lease_render_target`].
 #[cfg(feature = "graphics")]
 pub struct LeaseRenderTarget;
+
+/// Pool-owned backing for a [`Lease`]: a transient parcel or an offscreen render target.
+enum LeaseBacking {
+    Parcel(Parcel),
+    #[cfg(feature = "graphics")]
+    RenderTarget(RenderTarget),
+}
+
+/// Self-describing lease inner: owns the backing and a handle back to its context/pool.
+///
+/// Return-to-pool happens here when both the user's [`Lease`] and every interned scheme
+/// clone are gone.
+pub(crate) struct LeaseInner {
+    ctx: Context,
+    backing: Option<LeaseBacking>,
+}
+
+impl LeaseInner {
+    fn parcel(&self) -> &Parcel {
+        match self.backing.as_ref().expect("lease backing taken") {
+            LeaseBacking::Parcel(parcel) => parcel,
+            #[cfg(feature = "graphics")]
+            LeaseBacking::RenderTarget(_) => panic!("render-target lease has no parcel"),
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    fn rt(&self) -> &RenderTarget {
+        match self.backing.as_ref().expect("lease backing taken") {
+            LeaseBacking::RenderTarget(rt) => rt,
+            LeaseBacking::Parcel(_) => panic!("parcel lease is not a render target"),
+        }
+    }
+}
+
+impl Drop for LeaseInner {
+    fn drop(&mut self) {
+        let Some(backing) = self.backing.take() else {
+            return;
+        };
+        match backing {
+            LeaseBacking::Parcel(mut parcel) => {
+                let ready_after = parcel.last_referenced();
+                parcel.release_bookkeeping();
+                if parcel.texture_descriptor().is_some() {
+                    let home_device = parcel.home_device().clone();
+                    let texture = crate::Texture::from_returned_parcel(parcel, home_device);
+                    self.ctx.with_transient_pool(|pool| {
+                        pool.adopt(StampedParcel {
+                            hold: crate::retained_pool::RetainedHold::Texture(texture),
+                            ready_after,
+                        });
+                    });
+                } else {
+                    self.ctx
+                        .with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+                }
+            }
+            #[cfg(feature = "graphics")]
+            LeaseBacking::RenderTarget(_) => {
+                // Render targets are not pooled yet; dropping the backing frees the GPU object.
+            }
+        }
+    }
+}
 
 /// Epoch-gated pool of physical staging parcels for one logical deposit.
 struct DepositPool {
@@ -736,13 +797,110 @@ impl DepositPool {
     }
 }
 
-/// One-submission tenancy of pool property held by a [`Scheme`].
+/// One-submission tenancy of pool property, minted by the lessor ([`Context`]).
 ///
-/// Leases have no cross-scheme identity; the scheme owns the N=1 backing parcel
-/// for the declaration's lifetime.
+/// The lease is self-describing: it carries its backing (as [`PresentLease`] carries
+/// its pool) and may be bound by any scheme on the same context. Schemes intern a
+/// clone of the inner [`Arc`] on first use so the backing outlives every IR node
+/// that references its handle. Pool return happens when the last clone is dropped,
+/// gated by the parcel's last-referenced epoch.
 pub struct Lease<T> {
-    pub(crate) id: LeaseId,
-    _marker: PhantomData<T>,
+    pub(crate) inner: Arc<LeaseInner>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Lease<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl Lease<LeaseTexture> {
+    pub(crate) fn mint_texture(
+        ctx: &Context,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<Self, GoldyError> {
+        let texture = ctx
+            .with_transient_pool(|pool| pool.acquire_texture(ctx, width, height, format, access, flags))
+            .map_err(|e| ctx.classify(e))?;
+        Ok(Self {
+            inner: Arc::new(LeaseInner {
+                ctx: ctx.clone(),
+                backing: Some(LeaseBacking::Parcel(texture.into_lease_parcel())),
+            }),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Typed resource descriptor handle for this texture lease (advanced binding).
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.inner.parcel().handle(access)
+    }
+
+    pub(crate) fn parcel(&self) -> &Parcel {
+        self.inner.parcel()
+    }
+}
+
+impl Lease<LeaseBuffer> {
+    pub(crate) fn mint_buffer(
+        ctx: &Context,
+        size: u64,
+        kind: crate::types::BufferKind,
+        flags: crate::types::BufferFlags,
+    ) -> Result<Self, GoldyError> {
+        let backing = ctx
+            .with_transient_pool(|pool| pool.acquire_buffer(ctx, size, kind, flags, None))
+            .map_err(|e| ctx.classify(e))?;
+        Ok(Self {
+            inner: Arc::new(LeaseInner {
+                ctx: ctx.clone(),
+                backing: Some(LeaseBacking::Parcel(backing)),
+            }),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Typed resource descriptor handle for this buffer lease (advanced binding).
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.inner.parcel().handle(access)
+    }
+
+    pub(crate) fn parcel(&self) -> &Parcel {
+        self.inner.parcel()
+    }
+}
+
+#[cfg(feature = "graphics")]
+impl Lease<LeaseRenderTarget> {
+    pub(crate) fn mint_render_target(
+        ctx: &Context,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<Self, GoldyError> {
+        let rt = RenderTarget::new_with_depth(ctx.device(), width, height, format, depth_format)
+            .map_err(|e| ctx.classify(e))?;
+        Ok(Self {
+            inner: Arc::new(LeaseInner {
+                ctx: ctx.clone(),
+                backing: Some(LeaseBacking::RenderTarget(rt)),
+            }),
+            _marker: PhantomData,
+        })
+    }
+
+    pub(crate) fn rt(&self) -> &RenderTarget {
+        self.inner.rt()
+    }
 }
 
 /// Outcome counters for [`Scheme::submit`] (retention-recovery assertions and telemetry).
@@ -808,11 +966,8 @@ pub struct Scheme {
     /// Context this scheme submits on. Fixed at construction; many schemes per context,
     /// exactly one context per scheme.
     ctx: Context,
-    /// N=1 backing parcels for [`Lease`] declarations, indexed by [`LeaseId`].
-    leases: Vec<Parcel>,
-    /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
-    #[cfg(feature = "graphics")]
-    rt_leases: Vec<RenderTarget>,
+    /// Interned lease clones: held for lifetime so backing outlives IR handles, not for lookup.
+    interned_leases: Vec<Arc<LeaseInner>>,
     /// Epoch-gated CPU-writable staging pools for deposit declarations.
     deposits: Vec<DepositPool>,
     /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
@@ -869,9 +1024,7 @@ impl Scheme {
             ir: GraphIR::default(),
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
-            leases: Vec::new(),
-            #[cfg(feature = "graphics")]
-            rt_leases: Vec::new(),
+            interned_leases: Vec::new(),
             deposits: Vec::new(),
             cpu_dispatches: Vec::new(),
             dirty: SchemeDirty::Structure,
@@ -1511,9 +1664,27 @@ impl Scheme {
         });
     }
 
-    /// Declare a transient texture lease backed by the context's transient pool (N=1).
+    /// Intern `lease` on first use so its backing outlives IR nodes that reference it.
     ///
-    /// The backing parcel is held until the scheme is dropped. Structural mutation.
+    /// Render-target stamps are registered here (moved from mint time) so submit still
+    /// knows the stamp before the first present WAR.
+    pub(crate) fn intern_lease(&mut self, inner: &Arc<LeaseInner>) {
+        if self.interned_leases.iter().any(|held| Arc::ptr_eq(held, inner)) {
+            return;
+        }
+        #[cfg(feature = "graphics")]
+        if let Some(LeaseBacking::RenderTarget(rt)) = inner.backing.as_ref() {
+            self.submit_state
+                .register_stamp_parts(ResourceId::RenderTarget(rt.backend_handle()), rt.stamp_handle());
+        }
+        self.interned_leases.push(Arc::clone(inner));
+    }
+
+    /// Declare a transient texture lease backed by the context's transient pool.
+    ///
+    /// Prefer [`Context::lease_texture`]: the context is the lessor. This forwarder
+    /// remains for callers that still mint through the scheme.
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_texture")]
     pub fn lease_texture(
         &mut self,
         width: u32,
@@ -1522,71 +1693,37 @@ impl Scheme {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Lease<LeaseTexture>, GoldyError> {
-        self.mark_structure_dirty();
-        let texture = self
-            .ctx
-            .with_transient_pool(|pool| pool.acquire_texture(&self.ctx, width, height, format, access, flags))
-            .map_err(|e| self.ctx.classify(e))?;
-        let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
-        self.leases.push(texture.into_lease_parcel());
-        Ok(Lease {
-            id,
-            _marker: PhantomData,
-        })
+        self.ctx.lease_texture(width, height, format, access, flags)
     }
 
-    /// Declare a transient buffer lease backed by the context's transient pool (N=1).
+    /// Declare a transient buffer lease backed by the context's transient pool.
     ///
-    /// The backing parcel is held until the scheme is dropped. Structural mutation.
-    ///
-    /// # Write-first invariant
-    ///
-    /// The pool may reissue a previously-used buffer parcel whose epoch has retired.
-    /// The recycled bytes are **not** cleared. The first node that accesses this lease
-    /// must declare [`NodeAccess::Write`], [`NodeAccess::Overwrite`], or `ReadWrite`, never pure `Read` — otherwise
-    /// the shader observes the previous tenant's data.
-    ///
-    /// A full inaugural-write shape check (unique-minimal-write scheme validation per
-    /// design §8) is not yet implemented; callers are responsible for this invariant today.
+    /// Prefer [`Context::lease_buffer`]. See that method for the write-first invariant.
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_buffer")]
     pub fn lease_buffer(&mut self, size: u64) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.lease_buffer_with(
-            size,
-            crate::types::BufferKind::Scattered,
-            crate::types::BufferFlags::empty(),
-        )
+        self.ctx.lease_buffer(size)
     }
 
     /// Like [`Self::lease_buffer`] but with explicit kind and flags.
     ///
-    /// Use this when the shader requires a buffer kind other than `Scattered` (e.g.
-    /// `Broadcast` for uniform buffers). The pool bins buffers by `(size, kind, flags)`,
-    /// so only identically-described buffers are ever reused across submissions.
-    ///
-    /// See [`Self::lease_buffer`] for the write-first invariant that applies to all buffer
-    /// leases regardless of kind.
+    /// Prefer [`Context::lease_buffer_with`].
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_buffer_with")]
     pub fn lease_buffer_with(
         &mut self,
         size: u64,
         kind: crate::types::BufferKind,
         flags: crate::types::BufferFlags,
     ) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.mark_structure_dirty();
-        let backing = self
-            .ctx
-            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags, None))
-            .map_err(|e| self.ctx.classify(e))?;
-        let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
-        self.leases.push(backing);
-        Ok(Lease {
-            id,
-            _marker: PhantomData,
-        })
+        self.ctx.lease_buffer_with(size, kind, flags)
     }
 
-    /// Declare a render-target lease owned by this scheme (N=1).
+    /// Declare a render-target lease allocated on this scheme's context.
     ///
-    /// The backing render target is held until the scheme is dropped. Structural mutation.
+    /// Prefer [`Context::lease_render_target`]: the context is the lessor. Stamp
+    /// registration happens when the lease is first bound (`render_pass`,
+    /// `copy_to_present`, `copy_to_texture`).
     #[cfg(feature = "graphics")]
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_render_target")]
     pub fn lease_render_target(
         &mut self,
         width: u32,
@@ -1594,35 +1731,26 @@ impl Scheme {
         format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<Lease<LeaseRenderTarget>, GoldyError> {
-        self.mark_structure_dirty();
-        let rt = RenderTarget::new_with_depth(self.ctx.device(), width, height, format, depth_format)
-            .map_err(|e| self.ctx.classify(e))?;
-        let handle = rt.backend_handle();
-        let stamp = rt.stamp_handle();
-        self.submit_state
-            .register_stamp_parts(ResourceId::RenderTarget(handle), stamp);
-        let id = LeaseId(u32::try_from(self.rt_leases.len()).expect("render target lease id overflow"));
-        self.rt_leases.push(rt);
-        Ok(Lease {
-            id,
-            _marker: PhantomData,
-        })
+        self.ctx.lease_render_target(width, height, format, depth_format)
     }
 
-    /// Borrow the backing render target for a scheme-held lease.
+    /// Intern `lease` and borrow its backing render target.
     #[cfg(feature = "graphics")]
-    pub(crate) fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
-        &self.rt_leases[lease.id.0 as usize]
+    pub(crate) fn intern_rt<'a>(&mut self, lease: &'a Lease<LeaseRenderTarget>) -> &'a RenderTarget {
+        self.intern_lease(&lease.inner);
+        lease.rt()
     }
 
-    /// Typed resource descriptor handle for a scheme-held texture lease (advanced binding).
+    /// Typed resource descriptor handle for a texture lease (advanced binding).
+    #[deprecated(since = "0.2.0", note = "use Lease::handle")]
     pub fn lease_handle(&self, lease: &Lease<LeaseTexture>, access: ResourceAccess) -> Option<ResourceHandle> {
-        self.leases[lease.id.0 as usize].handle(access)
+        lease.handle(access)
     }
 
-    /// Typed resource descriptor handle for a scheme-held buffer lease (advanced binding).
+    /// Typed resource descriptor handle for a buffer lease (advanced binding).
+    #[deprecated(since = "0.2.0", note = "use Lease::handle")]
     pub fn lease_buffer_handle(&self, lease: &Lease<LeaseBuffer>, access: ResourceAccess) -> Option<ResourceHandle> {
-        self.leases[lease.id.0 as usize].handle(access)
+        lease.handle(access)
     }
 
     /// Declare a compute dispatch node, returning a builder for access declarations.
@@ -2556,7 +2684,7 @@ impl Scheme {
     pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
         self.mark_structure_dirty();
         let binding_id = self.intern_present_binding(dst);
-        let handle = self.rt_leases[src.id.0 as usize].backend_handle();
+        let handle = self.intern_rt(src).backend_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_present",
             bindings: vec![
@@ -2787,7 +2915,8 @@ impl Scheme {
     /// this scheme's context, and matching the render target's width, height, and format.
     #[cfg(feature = "graphics")]
     pub fn copy_to_texture(&mut self, src: &Lease<LeaseRenderTarget>, dst: &Parcel) -> Result<(), GoldyError> {
-        let src_rt = &self.rt_leases[src.id.0 as usize];
+        self.intern_lease(&src.inner);
+        let src_rt = src.rt();
         if !dst.is_homed_on(&self.ctx) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "parcel home device does not match scheme context"
@@ -2855,7 +2984,7 @@ impl Scheme {
         color_load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
         self.mark_structure_dirty();
-        let handle = self.rt_leases[rt.id.0 as usize].backend_handle();
+        let handle = self.intern_rt(rt).backend_handle();
         let access = if color_load.overwrites() {
             NodeAccess::Overwrite
         } else {
@@ -3002,24 +3131,9 @@ impl Drop for Scheme {
         for exec in std::mem::take(&mut self.cpu_dispatches) {
             exec.release(&ctx);
         }
-        for mut parcel in self.leases.drain(..) {
-            let ready_after = parcel.last_referenced();
-            parcel.release_bookkeeping();
-            if parcel.texture_descriptor().is_some() {
-                let home_device = parcel.home_device().clone();
-                let texture = crate::Texture::from_returned_parcel(parcel, home_device);
-                ctx.with_transient_pool(|pool| {
-                    pool.adopt(StampedParcel {
-                        hold: crate::retained_pool::RetainedHold::Texture(texture),
-                        ready_after,
-                    });
-                });
-            } else {
-                ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
-            }
-        }
-        #[cfg(feature = "graphics")]
-        self.rt_leases.clear();
+        // Interned lease Arcs drop here (after wait_until). Pool return is in
+        // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
+        let _interned = std::mem::take(&mut self.interned_leases);
     }
 }
 
@@ -3193,7 +3307,7 @@ type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelSt
 type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
 
 pub(crate) trait SchemeBindable {
-    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult;
+    fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult;
     fn accel_kind(&self) -> Option<crate::accel::AccelKind> {
         None
     }
@@ -3209,7 +3323,7 @@ pub(crate) trait SchemeBindable {
 }
 
 impl SchemeBindable for Parcel {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         (
             Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
@@ -3222,7 +3336,7 @@ impl SchemeBindable for Parcel {
 }
 
 impl SchemeBindable for crate::Buffer {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = self.whole();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
@@ -3236,7 +3350,7 @@ impl SchemeBindable for crate::Buffer {
 }
 
 impl SchemeBindable for crate::buffer::Allocation {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         (
             Some((ResourceId::Buffer(self.handle), None)),
             self.resource_index(access),
@@ -3244,14 +3358,10 @@ impl SchemeBindable for crate::buffer::Allocation {
     }
 }
 
-impl<T> SchemeBindable for Lease<T> {
-    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
-        let parcel = &scheme.leases[self.id.0 as usize];
-        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write,
-        // Overwrite, or ReadWrite — never pure Read. The pool may recycle a buffer whose bytes
-        // come from a previous submission; a Read-only first access would observe stale data.
-        // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
-        // the unique-minimal-write shape-check lands (design §8).
+impl SchemeBindable for Lease<LeaseTexture> {
+    fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
+        scheme.intern_lease(&self.inner);
+        let parcel = self.parcel();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
@@ -3259,8 +3369,28 @@ impl<T> SchemeBindable for Lease<T> {
     }
 }
 
+impl SchemeBindable for Lease<LeaseBuffer> {
+    fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
+        scheme.intern_lease(&self.inner);
+        let parcel = self.inner.parcel();
+        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write,
+        // Overwrite, or ReadWrite — never pure Read. The pool may recycle a buffer whose bytes
+        // come from a previous submission; a Read-only first access would observe stale data.
+        // This requires a per-scheme "has-been-written" bit per lease; deferred until
+        // the unique-minimal-write shape-check lands (design §8).
+        (
+            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
+            parcel.resource_index(access),
+        )
+    }
+
+    fn buffer_parcel(&self) -> Option<Parcel> {
+        Some(self.inner.parcel().clone())
+    }
+}
+
 impl SchemeBindable for crate::Sampler {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
@@ -3268,7 +3398,7 @@ impl SchemeBindable for crate::Sampler {
 }
 
 impl SchemeBindable for crate::AccelerationStructure {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         let _ = access;
         (
             Some((self.resource_id(), None)),
@@ -3286,7 +3416,7 @@ impl SchemeBindable for crate::AccelerationStructure {
 }
 
 impl SchemeBindable for crate::Texture {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
         // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
         // fall back to the UAV bindless index — matching historical submit behaviour in
@@ -3755,7 +3885,8 @@ impl SchemeCpuNodeBuilder<'_> {
 
     /// Bind a scheme-held buffer lease as the next slice parameter of the virtual main.
     pub fn with_lease(mut self, lease: &Lease<LeaseBuffer>, access: NodeAccess) -> Self {
-        let parcel = &self.scheme.leases[lease.id.0 as usize];
+        self.scheme.intern_lease(&lease.inner);
+        let parcel = lease.parcel();
         self.bindings
             .push(PendingCpuBinding::from_parcel(self.label, parcel, access));
         self
@@ -4355,7 +4486,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let pipeline = mock_pipeline(device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
-        let lease = scheme
+        let lease = ctx
             .lease_texture(
                 4,
                 4,
@@ -4364,7 +4495,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 TextureFlags::empty(),
             )
             .expect("lease texture");
-        let _handle = scheme.leases[0].handle(ResourceAccess::Write).expect("lease handle");
+        let _handle = lease.handle(ResourceAccess::Write).expect("lease handle");
         scheme
             .node("write_tex", &pipeline)
             .with_parcel(&lease, NodeAccess::Write)
@@ -4750,19 +4881,19 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn lease_backing_stamped_per_submit() {
         let device = mock_device();
-        let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
+        let (mut scheme, lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
         let frame1 = scheme.submit().unwrap();
         assert_eq!(
-            scheme.leases[0].last_referenced_on(ctx.backend_handle()),
+            lease.parcel().last_referenced_on(ctx.backend_handle()),
             Some(frame1.timeline_value())
         );
 
         let frame2 = scheme.submit().unwrap();
         assert!(frame2.timeline_value() >= frame1.timeline_value());
         assert_eq!(
-            scheme.leases[0].last_referenced_on(ctx.backend_handle()),
+            lease.parcel().last_referenced_on(ctx.backend_handle()),
             Some(frame2.timeline_value()),
             "lease backing must be stamped on resubmit"
         );
@@ -4775,8 +4906,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let outstanding_before = ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture);
 
         {
-            let mut scheme = Scheme::new(&ctx);
-            let lease = scheme
+            let _scheme = Scheme::new(&ctx);
+            let lease = ctx
                 .lease_texture(
                     4,
                     4,
@@ -4790,13 +4921,113 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 "leased backing counts as pool outstanding"
             );
             drop(lease);
-            drop(scheme);
+            drop(_scheme);
         }
 
         assert_eq!(
             ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture),
             outstanding_before,
-            "outstanding drops when scheme releases lease backings"
+            "outstanding drops when the last lease clone is dropped"
+        );
+        assert_eq!(
+            ctx.with_transient_pool(|pool| pool.pending_count()),
+            1,
+            "dropped lease backing is parked in the pool"
+        );
+    }
+
+    #[test]
+    fn lease_reusable_across_schemes() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let lease = ctx.lease_buffer(64).expect("lease");
+
+        let mut scheme_a = Scheme::new(&ctx);
+        scheme_a
+            .node("a", &pipeline)
+            .with_parcel(&lease, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme_a.submit().expect("scheme a");
+
+        let mut scheme_b = Scheme::new(&ctx);
+        scheme_b
+            .node("b", &pipeline)
+            .with_parcel(&lease, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        scheme_b.submit().expect("scheme b");
+    }
+
+    #[test]
+    fn interned_lease_survives_handle_drop() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let outstanding_before = ctx.transient_outstanding_bytes().texture;
+
+        let mut scheme = Scheme::new(&ctx);
+        let lease = ctx
+            .lease_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("lease");
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&lease, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let outstanding_held = ctx.transient_outstanding_bytes().texture;
+        assert!(outstanding_held > outstanding_before);
+
+        drop(lease);
+        assert_eq!(
+            ctx.transient_outstanding_bytes().texture,
+            outstanding_held,
+            "scheme intern keeps the backing alive after the user handle is dropped"
+        );
+        scheme.submit().expect("submit after lease handle drop");
+
+        drop(scheme);
+        assert_eq!(
+            ctx.transient_outstanding_bytes().texture,
+            outstanding_before,
+            "pool return happens when the interned clone is dropped"
+        );
+    }
+
+    #[test]
+    fn pool_return_waits_for_last_lease_clone() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let outstanding_before = ctx.transient_outstanding_bytes().buffer;
+
+        let lease = ctx.lease_buffer(64).expect("lease");
+        {
+            let mut scheme = Scheme::new(&ctx);
+            scheme
+                .node("write", &pipeline)
+                .with_parcel(&lease, NodeAccess::Write)
+                .dispatch(1, 1, 1);
+            scheme.submit().expect("submit");
+            drop(scheme);
+            assert!(
+                ctx.transient_outstanding_bytes().buffer > outstanding_before,
+                "user lease keeps the backing after the scheme is dropped"
+            );
+        }
+
+        drop(lease);
+        assert_eq!(
+            ctx.transient_outstanding_bytes().buffer,
+            outstanding_before,
+            "pool return happens on the last lease clone"
         );
         assert_eq!(
             ctx.with_transient_pool(|pool| pool.pending_count()),
@@ -5800,6 +6031,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     fn register_exchange_with_copy(scheme: &mut Scheme, lease: &crate::swapchain_pool::PresentLease) -> Transaction {
         let rt = scheme
+            .context()
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         scheme.copy_to_present(&rt, lease);
@@ -5812,7 +6044,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         {
@@ -6056,7 +6288,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         assert_eq!(scheme.ir_node_count(), 0);
@@ -6095,7 +6327,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let tex_handle = tex.texture_handle().expect("texture handle");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         assert_eq!(scheme.ir_node_count(), 0);
@@ -6126,7 +6358,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("buffer");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6156,7 +6388,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6186,7 +6418,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6219,7 +6451,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6600,10 +6832,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(right.id, 0);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt_a = scheme
+        let rt_a = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_b = scheme
+        let rt_b = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt_a, &left);
@@ -6672,10 +6904,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let left_lease = left_pool.lease();
         let right_lease = right_pool.lease();
-        let rt_a = scheme
+        let rt_a = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_b = scheme
+        let rt_b = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt_a, &left_lease);
@@ -6706,7 +6938,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(left.id, right.id);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt, &left);
@@ -6733,10 +6965,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let left = left_pool.lease();
         let right = right_pool.lease();
-        let rt_a = scheme
+        let rt_a = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_b = scheme
+        let rt_b = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt_a, &left);
@@ -7176,7 +7408,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let pipeline = mock_render_pipeline(&device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
@@ -7309,10 +7541,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let pipeline = mock_render_pipeline(&device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_handle = scheme.rt(&rt).backend_handle();
+        let rt_handle = rt.rt().backend_handle();
         let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();

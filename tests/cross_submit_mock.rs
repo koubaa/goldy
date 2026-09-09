@@ -331,7 +331,7 @@ fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
 #[cfg(feature = "graphics")]
 fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline) -> Scheme {
     let mut s = Scheme::new(ctx);
-    let rt = s
+    let rt = ctx
         .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
         .expect("render target lease");
     let mut pass = s.render_pass("render_read", &rt, goldy::TargetLoad::Discard);

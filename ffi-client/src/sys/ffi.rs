@@ -12,6 +12,14 @@ pub type FnGoldyComputePipelineDestroy = unsafe extern "C" fn(*mut GoldyComputeP
 
 pub type FnGoldyContextCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyContext;
 pub type FnGoldyContextDestroy = unsafe extern "C" fn(*mut GoldyContext);
+pub type FnGoldyContextLeaseRenderTarget = unsafe extern "C" fn(
+    *const GoldyContext,
+    u32,
+    u32,
+    GoldyTextureFormat,
+    bool,
+    GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease;
 
 pub type FnGoldySchemeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyScheme;
 pub type FnGoldySchemeDestroy = unsafe extern "C" fn(*mut GoldyScheme);

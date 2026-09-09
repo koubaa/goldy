@@ -41,6 +41,27 @@ typedef enum GoldyResult {
     GOLDY_RESULT_INTERNAL_ERROR = 6,
 } GoldyResult;
 
+// Texture format.
+typedef enum GoldyTextureFormat {
+    GOLDY_TEXTURE_FORMAT_RGBA8_UNORM_SRGB = 0,
+    GOLDY_TEXTURE_FORMAT_RGBA8_UNORM = 1,
+    GOLDY_TEXTURE_FORMAT_BGRA8_UNORM_SRGB = 2,
+    GOLDY_TEXTURE_FORMAT_BGRA8_UNORM = 3,
+    GOLDY_TEXTURE_FORMAT_RGBA16_FLOAT = 4,
+    GOLDY_TEXTURE_FORMAT_RGBA32_FLOAT = 5,
+    GOLDY_TEXTURE_FORMAT_R8_UNORM = 6,
+    GOLDY_TEXTURE_FORMAT_RG8_UNORM = 7,
+} GoldyTextureFormat;
+
+// Depth format.
+typedef enum GoldyDepthFormat {
+    GOLDY_DEPTH_FORMAT_DEPTH16_UNORM = 0,
+    GOLDY_DEPTH_FORMAT_DEPTH24_PLUS = 1,
+    GOLDY_DEPTH_FORMAT_DEPTH24_PLUS_STENCIL8 = 2,
+    GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT = 3,
+    GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT_STENCIL8 = 4,
+} GoldyDepthFormat;
+
 // Graphics backend type.
 typedef enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_VULKAN = 0,
@@ -79,27 +100,6 @@ typedef enum GoldyPrimitiveTopology {
     GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST = 3,
     GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP = 4,
 } GoldyPrimitiveTopology;
-
-// Texture format.
-typedef enum GoldyTextureFormat {
-    GOLDY_TEXTURE_FORMAT_RGBA8_UNORM_SRGB = 0,
-    GOLDY_TEXTURE_FORMAT_RGBA8_UNORM = 1,
-    GOLDY_TEXTURE_FORMAT_BGRA8_UNORM_SRGB = 2,
-    GOLDY_TEXTURE_FORMAT_BGRA8_UNORM = 3,
-    GOLDY_TEXTURE_FORMAT_RGBA16_FLOAT = 4,
-    GOLDY_TEXTURE_FORMAT_RGBA32_FLOAT = 5,
-    GOLDY_TEXTURE_FORMAT_R8_UNORM = 6,
-    GOLDY_TEXTURE_FORMAT_RG8_UNORM = 7,
-} GoldyTextureFormat;
-
-// Depth format.
-typedef enum GoldyDepthFormat {
-    GOLDY_DEPTH_FORMAT_DEPTH16_UNORM = 0,
-    GOLDY_DEPTH_FORMAT_DEPTH24_PLUS = 1,
-    GOLDY_DEPTH_FORMAT_DEPTH24_PLUS_STENCIL8 = 2,
-    GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT = 3,
-    GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT_STENCIL8 = 4,
-} GoldyDepthFormat;
 
 // Comparison function for depth testing.
 typedef enum GoldyCompareFunction {
@@ -400,6 +400,20 @@ void goldy_context_destroy(struct GoldyContext *ctx);
 // # Safety
 // `ctx` must be valid when non-null.
 enum GoldyResult goldy_context_is_valid(const struct GoldyContext *ctx);
+
+// Declare a render-target lease on `ctx` (the lessor).
+//
+// Returns a heap-allocated lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
+// The lease is self-describing and may be bound by any scheme on this context.
+//
+// # Safety
+// `ctx` must be valid.
+struct GoldySchemeRenderTargetLease *goldy_context_lease_render_target(const struct GoldyContext *ctx,
+                                                                       uint32_t width,
+                                                                       uint32_t height,
+                                                                       enum GoldyTextureFormat format,
+                                                                       bool has_depth,
+                                                                       enum GoldyDepthFormat depth_format);
 
 // Staging capacity declared for this deposit.
 //
@@ -728,10 +742,10 @@ void goldy_scheme_destroy(struct GoldyScheme *scheme);
 // `scheme` must be valid.
 bool goldy_scheme_is_dirty(const struct GoldyScheme *scheme);
 
-// Declare a render-target lease on `scheme` (N=1 backing).
+// Declare a render-target lease on `scheme`'s context.
 //
-// Returns a heap-allocated lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
-// The lease is valid until the scheme is destroyed.
+// Forwarder for [`goldy_context_lease_render_target`]. Returns a heap-allocated
+// lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
 //
 // # Safety
 // `scheme` must be valid.
@@ -844,7 +858,8 @@ enum GoldyResult goldy_scheme_render_pass_with_parcel(struct GoldyScheme *scheme
 
 // Destroy a render-target lease handle.
 //
-// Does not remove the lease from the scheme; the backing remains until the scheme is dropped.
+// Drops this handle. The backing stays alive while any scheme still holds an interned
+// clone; pool return (or RT free) happens when the last clone is gone.
 //
 // # Safety
 // `lease` must be valid and not used after this call.

@@ -117,7 +117,7 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx);
         let (width, height) = sink.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
         Self::record_scheme(&mut scheme, &mut sink, &pipeline, &uniform, &scene_rt)?;
 
         let mut upload_scheme = Scheme::new(&ctx);
@@ -183,7 +183,7 @@ impl App {
                     (self.ctx.as_ref(), self.pipeline.as_ref(), self.uniform.as_ref())
                 {
                     let mut scheme = Scheme::new(ctx);
-                    if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), format, None) {
+                    if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                         if Self::record_scheme(&mut scheme, self.sink.as_mut().unwrap(), pipeline, uniform, &rt).is_ok()
                         {
                             self.scheme = Some(scheme);

@@ -211,8 +211,7 @@ impl RenderState {
 
         let mut display_scheme = Scheme::new(&ctx)?;
         let (width, height) = surface.size();
-        let scene_rt =
-            display_scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
         let present = record_display_scheme(&mut display_scheme, &surface, &cells, "a", &render_pipeline, &scene_rt)?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
@@ -241,12 +240,9 @@ impl RenderState {
         let current_field = if self.use_buffer_a { "a" } else { "b" };
         let mut display_scheme = Scheme::new(&self.ctx)?;
         let (width, height) = self.surface.size();
-        self.scene_rt = display_scheme.lease_render_target(
-            width.max(1),
-            height.max(1),
-            self.surface.format(),
-            None::<DepthFormat>,
-        )?;
+        self.scene_rt =
+            self.ctx
+                .lease_render_target(width.max(1), height.max(1), self.surface.format(), None::<DepthFormat>)?;
         self.present = record_display_scheme(
             &mut display_scheme,
             &self.surface,

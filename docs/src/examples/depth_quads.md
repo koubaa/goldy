@@ -13,7 +13,7 @@ cargo run --features examples --example depth_quads
 
 ## What it demonstrates
 
-- `Scheme::lease_render_target` with a depth attachment
+- `Context::lease_render_target` with a depth attachment
 - Depth-stencil state on a render pipeline
 - Draw-order independence
 

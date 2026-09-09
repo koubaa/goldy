@@ -95,7 +95,7 @@ let pipeline = RenderPipeline::new(
 
 ```rust
 let mut scheme = Scheme::new(&ctx);
-let scene_rt = scheme.lease_render_target(width, height, surface.format(), None)?;
+let scene_rt = ctx.lease_render_target(width, height, surface.format(), None)?;
 let present = record_scheme(&mut scheme, &surface, &pipeline, &vertex_buffer, &scene_rt, bg_color)?;
 
 // Each frame:

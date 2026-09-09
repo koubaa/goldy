@@ -25,6 +25,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
     pub goldy_context_create: FnGoldyContextCreate,
     pub goldy_context_destroy: FnGoldyContextDestroy,
+    pub goldy_context_lease_render_target: FnGoldyContextLeaseRenderTarget,
     pub goldy_device_adapter_id: FnGoldyDeviceAdapterId,
     pub goldy_device_destroy: FnGoldyDeviceDestroy,
     pub goldy_device_has_library: FnGoldyDeviceHasLibrary,
@@ -161,6 +162,10 @@ impl GoldyFfi {
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
             goldy_context_create: sym!("goldy_context_create", FnGoldyContextCreate),
             goldy_context_destroy: sym!("goldy_context_destroy", FnGoldyContextDestroy),
+            goldy_context_lease_render_target: sym!(
+                "goldy_context_lease_render_target",
+                FnGoldyContextLeaseRenderTarget
+            ),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),
             goldy_device_destroy: sym!("goldy_device_destroy", FnGoldyDeviceDestroy),
             goldy_device_has_library: sym!("goldy_device_has_library", FnGoldyDeviceHasLibrary),

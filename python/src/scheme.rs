@@ -27,6 +27,21 @@ impl PyContext {
     fn __repr__(&self) -> String {
         "Context()".to_string()
     }
+
+    #[pyo3(signature = (width, height, format, depth_format=None))]
+    fn lease_render_target(
+        &self,
+        width: u32,
+        height: u32,
+        format: PyTextureFormat,
+        depth_format: Option<PyDepthFormat>,
+    ) -> PyResult<PySchemeRenderTargetLease> {
+        let lease = self
+            .inner
+            .lease_render_target(width, height, format.into(), depth_format.map(Into::into))
+            .into_py_result()?;
+        Ok(PySchemeRenderTargetLease { inner: lease })
+    }
 }
 
 /// Per-submission identity returned by [`PyScheme::submit`].
@@ -63,7 +78,7 @@ impl PyPresentLease {
     }
 }
 
-/// Stable render-target lease declared on a [`PyScheme`].
+/// Stable render-target lease minted by a [`PyContext`].
 #[pyclass(name = "SchemeRenderTargetLease", module = "goldy", unsendable)]
 pub struct PySchemeRenderTargetLease {
     pub(crate) inner: Lease<LeaseRenderTarget>,
@@ -122,9 +137,8 @@ impl PyScheme {
         depth_format: Option<PyDepthFormat>,
     ) -> PyResult<PySchemeRenderTargetLease> {
         self.ensure_no_active_recorder()?;
-        let lease = self
-            .inner
-            .borrow_mut()
+        let ctx = self.inner.borrow().context().clone();
+        let lease = ctx
             .lease_render_target(width, height, format.into(), depth_format.map(Into::into))
             .into_py_result()?;
         Ok(PySchemeRenderTargetLease { inner: lease })
@@ -145,8 +159,12 @@ impl PyScheme {
                 ));
             }
             let static_label = scheme.intern_label(&label)?;
-            let pass =
-                RenderPassRecord::new_for_scheme_lease(static_label, &scheme.inner.borrow(), &lease.inner, load.inner);
+            let pass = RenderPassRecord::new_for_scheme_lease(
+                static_label,
+                &mut scheme.inner.borrow_mut(),
+                &lease.inner,
+                load.inner,
+            );
             *scheme.active_render_pass.borrow_mut() = Some(pass);
         }
         Ok(PySchemeRenderPass { scheme: slf })

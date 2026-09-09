@@ -258,9 +258,9 @@ impl TransientPool {
         crate::parcel::Buffer::from_transient_parcel(parcel, home_device)
     }
 
-    /// Return a scheme-held buffer lease parcel to the pool after its epoch retires.
+    /// Return a buffer lease parcel to the pool after its epoch retires.
     ///
-    /// Called from [`crate::Scheme::drop`] for each buffer-backed lease. The parcel's
+    /// Called from lease drop for each buffer-backed lease. The parcel's
     /// bookkeeping must already be released by the caller.
     ///
     /// Retires the parcel stamp before parking: schemes that still bind the returned

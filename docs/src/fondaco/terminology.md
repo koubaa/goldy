@@ -50,7 +50,7 @@ Do not describe **Designed**, **Experimental**, or **Speculative** capabilities 
 | Gate | Submission gate, `Context::boundary_crossed` | Epoch-driven reclamation |
 | Exchange | `SurfaceExchange`, `MemoryExchange` | `Transaction` → `Claim` → `consume` / `discard` |
 | Warehouse | `BudgetPolicy`, `VramAllocator` | Bound on committed parcel extent |
-| Lease | `Lease<T>`, `LeaseRenderTarget` | Temporary view of a parcel for scheme recording |
+| Lease | `Lease<LeaseTexture>`, `Lease<LeaseBuffer>`, `Lease<LeaseRenderTarget>`, `PresentLease` | Temporary tenancy minted by the lessor (`Context` / surface pool); schemes intern on first use |
 
 ### Internal terms
 

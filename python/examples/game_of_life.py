@@ -137,7 +137,7 @@ def rebuild_display_scheme(
     render_pipeline: goldy.RenderPipeline,
 ) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.Transaction]:
     display_scheme = goldy.Scheme(ctx)
-    scene_rt = display_scheme.lease_render_target(
+    scene_rt = ctx.lease_render_target(
         max(surface.width, 1),
         max(surface.height, 1),
         surface.format,
@@ -194,7 +194,7 @@ def main() -> int:
     )
 
     display_scheme = goldy.Scheme(ctx)
-    scene_rt = display_scheme.lease_render_target(
+    scene_rt = ctx.lease_render_target(
         max(surface.width, 1),
         max(surface.height, 1),
         surface.format,

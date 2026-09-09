@@ -86,7 +86,7 @@ Headless rendering — no window, no `SurfaceExchange` — records the same rend
 ```rust
 let memory = MemoryExchange::new(&ctx);
 let mut scheme = Scheme::new(&ctx);
-let rt = scheme.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
+let rt = ctx.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
 
 let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::RED));
 pass.finish();
