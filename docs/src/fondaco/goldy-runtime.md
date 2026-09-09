@@ -42,6 +42,7 @@ That split is a substrate artifact, not a machine requirement.
 | Pipelined frames | `FrameOrchestrator`, surface depth | **Shipped** |
 | Yielding scripts / `$yield` | Slang intrinsic + petition servicing | **Designed** |
 | Scheme fusion (mega-kernel) | Merge adjacent dispatches | **Designed** |
+| Raster pass as fused draws | One `RenderPass` node per framebuffer epoch | **Shipped** (finer per-draw nodes: **Designed**) |
 | Scheme splitting (wavefront) | Split at yield points | **Designed** |
 | Defragmentation | `VramAllocator::defragment` | **Designed** |
 | Memory-pressure events | `MemoryPressureEvent` | **Designed** |
@@ -58,6 +59,12 @@ That split is a substrate artifact, not a machine requirement.
 - **Claims**: `NodeAccess` on scheme nodes — read, write, read-write — mapped to public / private / private-inaugural ownership.
 
 Non-computing dispatches also **Shipped**: buffer copy, buffer write, texture upload, buffer clear, present / copy-to-swapchain.
+
+### Raster: fused dispatches, not machine-opaque scripts
+
+**Shipped.** A Goldy render-pass node is **one dispatch** covering a framebuffer epoch (`vkCmdBeginRendering` … `EndRendering`, Metal render encoder, DX12 render pass / RTV span) plus every `draw` / `dispatch_mesh` recorded in that epoch.
+
+In the machine, each of those draws *may* be a dispatch. Goldy fuses them at record time because the 2026 portable ABIs do not expose a gate between draws without checking the attachment back in.
 
 **CPU dispatches** (**Shipped**, 0.2.x): `Scheme::cpu_node` admits a serial host function whose parameter list is the virtual main (`&[T]` / `&mut [T]` per bound parcel, then scalars). The machine does not distinguish where a dispatch executes; Goldy realizes host execution by staging bound parcels through readback/upload copies around a fence wait, so the node is a full drain of the device pipeline. See [CPU Dispatches](../programming-model/cpu-dispatch.md).
 
@@ -181,6 +188,7 @@ Deliberate restrictions for modern desktop / laptop workloads:
 - Workgroup-grid execution model
 - Single accelerator queue per device (heterogeneous multi-queue: **Designed**)
 - 2020+ hardware floor (Vulkan 1.4+, DX12 Enhanced Barriers, Metal Tier 2+)
+- Raster grain: one scheme node per framebuffer epoch (per-draw dispatches: **Designed**)
 
 For older hardware or maximum portability, use **wgpu**. See [Goldy vs wgpu](../design/comparison.md) and [Target Hardware](../design/hardware.md).
 
@@ -200,8 +208,8 @@ Capability queries report backend, residency model, resize cost, zero-copy readb
 | Fondaco term | Goldy / GPU analogue |
 |--------------|----------------------|
 | Scheme | `Scheme`, `GraphIR` |
-| Dispatch | Kernel launch, draw / dispatch command |
-| Script | Slang shader |
+| Dispatch | Compute node; render-pass node (fused draws); copy / present |
+| Script | Slang shader (per pipeline); pass body is fused command list, not a Fondaco script |
 | Parcel | `Buffer` / `Texture` handle |
 | Merchant | Program |
 | Exchange | `SurfaceExchange`, `MemoryExchange` |

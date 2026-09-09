@@ -4,6 +4,12 @@ Goldy has no command buffers and no command lists. A graphics draw is a **render
 
 This matters for how you think about the API: there is no "encoder" you open and close per frame. You build the graph once — typically at init and on resize — and resubmit it every frame. See [Settlement](../compute/settlement.md) for what happens after `submit()`, and [Pipelines](pipelines.md) for how `RenderPipeline` fits into a pass.
 
+`finish()` is the node's terminator — the same role `dispatch(x, y, z)` plays for compute — because a raster node is a **list** of draws against one target, not one launch. It is not `vkCmdEndRendering`; recording is pure IR. Drop does not commit the node.
+
+### Why one node for many draws
+
+The Fondaco machine allows each `draw` to be its own dispatch. Goldy clusters them because 2026 graphics APIs only let you fence at the **framebuffer epoch** (begin/end rendering, Metal render encoder), not at each draw. Draws that share a color/depth target need that epoch so the tile stays on-chip; vertex buffers used by only the first draw still cannot be recycled until the whole pass ends. That is a substrate limit, not a scheme-theory limit. Full argument: [Render Passes and Schemes](../fondaco/render-passes.md).
+
 ## Recording a Render Pass Node
 
 `scheme.render_pass(label, target, color_load)` opens a builder bound to one leased render target:
@@ -152,3 +158,4 @@ Goldy derives the ordering between the compute node and the render pass node fro
 - A render pass builder is single-use: call `finish()` (Rust) once recording is complete, before `scheme.submit()`. In the FFI bindings (C++, .NET, `goldy-ffi-client`), the equivalent is a RAII scope that finishes on drop or block exit.
 - A pass node is scoped to one leased render target for its lifetime — draw into a different target by opening a new `render_pass(...)` node.
 - Nothing in this page executes anything: recording is pure graph-building. Execution, barrier insertion, and transient aliasing all happen inside `scheme.submit()`.
+- A `draw` inside the builder is not a waitable epoch. Compute that overwrites a vertex parcel, or samples the color target, is a **later scheme node**. Splitting the pass (`TargetLoad::Load` on a second node) is how you manufacture a gate; it stores and reloads the attachment.

@@ -102,6 +102,7 @@
 - [Terminology](./fondaco/terminology.md)
 - [Machine Specification](./fondaco/specification.md)
 - [Goldy Runtime Mapping](./fondaco/goldy-runtime.md)
+- [Render Passes and Schemes](./fondaco/render-passes.md)
 - [Design Thesis](./fondaco/design-thesis.md)
 
 # Appendix
