@@ -10,8 +10,7 @@ use goldy::{
     task_graph::NodeAccess,
     types::{BackendType, BufferFlags},
     AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor,
-    Instance, MemoryExchange, PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Transaction,
+    Instance, MemoryExchange, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
 };
 use std::sync::Arc;
 use winit::{
@@ -22,6 +21,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
+use common::FrameSink;
 
 const RAY_SHADER: &str = r#"
 import goldy_exp;
@@ -84,6 +84,20 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+
+    if common::capture_requested() {
+        let warmup = warm_gpu()?;
+        let mut app = App {
+            warmup: Some(warmup),
+            state: None,
+        };
+        app.init(None)?;
+        let state = app.state.as_mut().expect("capture state");
+        while !state.sink.finished() {
+            render_frame(state)?;
+        }
+        return Ok(());
+    }
 
     println!("Goldy — Compute Ray Query");
     println!("=========================");
@@ -153,13 +167,12 @@ struct App {
 }
 
 struct RenderState {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     ctx: goldy::Context,
-    surface: SurfaceExchange,
-    present: Transaction,
+    sink: FrameSink,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
-    _retained_pool: RetainedPool,
+    retained_pool: RetainedPool,
     verts: Buffer,
     blas: AccelerationStructure,
     tlas: AccelerationStructure,
@@ -170,9 +183,11 @@ struct RenderState {
     frame_count: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_scheme(
     scheme: &mut Scheme,
-    surface: &SurfaceExchange,
+    sink: &mut FrameSink,
+    pool: &mut RetainedPool,
     pipeline: &ComputePipeline,
     uniform: &Buffer,
     verts: &Buffer,
@@ -180,7 +195,7 @@ fn record_scheme(
     tlas: &AccelerationStructure,
     width: u32,
     height: u32,
-) -> Result<Transaction> {
+) -> Result<()> {
     scheme.build_blas(blas, verts.whole(), 3, 12, None)?;
     let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
     scheme.build_tlas(
@@ -192,23 +207,28 @@ fn record_scheme(
             custom_index: 0,
         }],
     )?;
-    let (lease, present_tx) = surface.bind_destination(scheme)?;
+    let target = sink.compute_color_target(scheme, pool)?;
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
-    scheme
-        .node("rays", pipeline)
-        .with_parcel(uniform, NodeAccess::Read)
-        .with_parcel(tlas, NodeAccess::Read)
-        .with_present(&lease)
-        .dispatch(wg_x, wg_y, 1);
-    Ok(present_tx)
+    common::bind_compute_node(
+        scheme
+            .node("rays", pipeline)
+            .with_parcel(uniform, NodeAccess::Read)
+            .with_parcel(tlas, NodeAccess::Read),
+        &target,
+        sink,
+    )
+    .dispatch(wg_x, wg_y, 1);
+    sink.complete_compute(scheme)?;
+    Ok(())
 }
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     let mut scheme = Scheme::new(&state.ctx);
-    state.present = record_scheme(
+    record_scheme(
         &mut scheme,
-        &state.surface,
+        &mut state.sink,
+        &mut state.retained_pool,
         &state.compute_pipeline,
         &state.uniform_buffer,
         &state.verts,
@@ -222,7 +242,7 @@ fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
 }
 
 impl App {
-    fn init(&mut self, window: Arc<Window>) -> Result<()> {
+    fn init(&mut self, window: Option<Arc<Window>>) -> Result<()> {
         let warmup = self
             .warmup
             .take()
@@ -236,20 +256,13 @@ impl App {
             tlas,
         } = warmup;
 
-        let surface = SurfaceExchange::new_with_depth(
-            &ctx,
-            window.as_ref(),
-            3,
-            SurfaceConfig {
-                present_mode: PresentMode::Fifo,
-                depth_format: None,
-            },
-        )?;
+        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window.as_deref())?;
+        let (width, height) = sink.size();
 
         let uniform_buffer = retained_pool.acquire_buffer_with_data(
             &[Uniforms {
-                width: surface.width(),
-                height: surface.height(),
+                width,
+                height,
                 time: 0.0,
                 _padding: 0.0,
             }],
@@ -257,16 +270,17 @@ impl App {
         )?;
 
         let mut scheme = Scheme::new(&ctx);
-        let present = record_scheme(
+        record_scheme(
             &mut scheme,
-            &surface,
+            &mut sink,
+            &mut retained_pool,
             &compute_pipeline,
             &uniform_buffer,
             &verts,
             &blas,
             &tlas,
-            surface.width(),
-            surface.height(),
+            width,
+            height,
         )?;
 
         let mut upload_scheme = Scheme::new(&ctx);
@@ -279,11 +293,10 @@ impl App {
         self.state = Some(RenderState {
             window,
             ctx,
-            surface,
-            present,
+            sink,
             scheme,
             compute_pipeline,
-            _retained_pool: retained_pool,
+            retained_pool,
             verts,
             blas,
             tlas,
@@ -319,7 +332,7 @@ impl ApplicationHandler for App {
         }
         let attrs = common::hidden_window("Goldy — Compute Ray Query", INITIAL_WIDTH, INITIAL_HEIGHT);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
-        if let Err(e) = self.init(window.clone()) {
+        if let Err(e) = self.init(Some(window.clone())) {
             tracing::error!("Failed to initialize: {}", e);
             event_loop.exit();
             return;
@@ -351,15 +364,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
-                let _ = state.surface.resize(new_size.width, new_size.height);
+                let _ = state.sink.resize(new_size.width, new_size.height);
                 rebuild_scheme(state, new_size.width, new_size.height);
-                state.window.request_redraw();
+                if let Some(window) = &state.window {
+                    window.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = render_frame(state) {
                     tracing::error!("Render error: {}", e);
                 }
-                state.window.request_redraw();
+                if let Some(window) = &state.window {
+                    window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -368,14 +385,14 @@ impl ApplicationHandler for App {
 
 fn render_frame(state: &mut RenderState) -> Result<()> {
     state.frame_count += 1;
-    let (width, height) = state.surface.size();
+    let (width, height) = state.sink.size();
     if width == 0 || height == 0 {
         return Ok(());
     }
     let uniforms = Uniforms {
         width,
         height,
-        time: state.start_time.elapsed().as_secs_f32(),
+        time: state.sink.time(state.start_time),
         _padding: 0.0,
     };
     state
@@ -383,6 +400,6 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         .write(&mut state.upload_scheme, 0, bytemuck::bytes_of(&uniforms))?;
     state.upload_scheme.submit()?;
     let mut submission = state.scheme.submit()?;
-    state.present.claim(&mut submission)?.consume()?;
+    state.sink.settle(&mut submission)?;
     Ok(())
 }

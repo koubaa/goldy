@@ -4,9 +4,9 @@ Goldy ships **23 Rust examples**, each a complete runnable program. Every exampl
 here with a recording of it running, plus its Rust and Slang source inlined straight from the
 repository — so what you watch is what the code does, and what you read is what compiles.
 
-The clips are not screen-captured by hand. `scripts/record_example_captures.sh` builds the
-examples, runs each one against a real backend on a virtual display, and grabs the window with
-ffmpeg. Rerun it after changing an example's visuals.
+The clips are not screen-captured from a desktop window. `scripts/record_example_captures.sh`
+runs each example headlessly: the example writes packed RGBA pixels, and ffmpeg stitches them
+into a WebM. Rerun it after changing an example's visuals.
 
 ## Running Examples
 
@@ -35,12 +35,12 @@ GOLDY_BACKEND=webgpu cargo run --no-default-features --features webgpu,examples 
 
 Two examples probe capabilities and exit cleanly when they are missing:
 [`mesh_triangle`](./mesh_triangle.md) needs mesh shaders and [`ray_query`](./ray_query.md) needs
-ray query, neither of which the WebGPU backend implements. Those two pages carry source but no
-recording.
+ray query. Capture skips writing a clip when the adapter used for recording lacks the
+capability.
 
-WebGPU is what the recordings run on, because it is the one backend that can present to X11 on
-Linux — Goldy's Vulkan surface path is Wayland-only. Software rendering (lavapipe) is enough:
-the clips are wall-clock captures, not benchmarks.
+Headless capture does not present to a window, so it works on Vulkan (including lavapipe)
+without a Wayland or X11 display. `GOLDY_BACKEND` still selects the backend when you want
+WebGPU or CUDA instead.
 
 ## Bindless Basics
 
@@ -103,4 +103,5 @@ Input handling, runtime state changes, and more than one surface per device.
 ## Shared Code
 
 Examples share a small amount of scaffolding — FPS reporting, run limits, hidden-window
-creation, and surface-matched pipeline rebuilds. See [Shared Helpers](./shared-helpers.md).
+creation, headless RGBA capture (`GOLDY_EXAMPLE_CAPTURE`), and surface-matched pipeline
+rebuilds. See [Shared Helpers](./shared-helpers.md).

@@ -5,7 +5,8 @@ The same present path as [`triangle`](./triangle.md), but the geometry is produc
 `MeshOutput` and `FsIn` deliberately use different struct names so the example also shows
 Goldy linking stages by semantic (`SV_Position`, `COLOR`) rather than by type identity.
 
-*No recording: the capture runs on the WebGPU backend, which has no mesh shaders, so the example skips.*
+<video src="../assets/examples/mesh_triangle.webm" autoplay loop muted playsinline
+       width="640" style="max-width: 100%; border-radius: 4px;"></video>
 
 ```bash
 cargo run --features examples --example mesh_triangle

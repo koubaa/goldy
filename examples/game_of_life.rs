@@ -10,7 +10,7 @@ use anyhow::Result;
 use goldy::{
     field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Transaction, VertexBufferLayout,
+    TargetLoad, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -21,6 +21,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
+use common::FrameSink;
 
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
@@ -45,19 +46,19 @@ fn run_compute_step(
 
 fn record_display_scheme(
     scheme: &mut Scheme,
-    surface: &SurfaceExchange,
+    sink: &mut FrameSink,
     cells: &Buffer,
     current_field: &str,
     render_pipeline: &RenderPipeline,
     scene_rt: &Lease<LeaseRenderTarget>,
-) -> anyhow::Result<Transaction> {
+) -> anyhow::Result<()> {
     let current = &cells[current_field];
     let mut pass = scheme.render_pass("game_of_life_render", scene_rt, TargetLoad::Discard);
     pass.with_parcel(current, NodeAccess::Read);
     pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();
-    surface.bind_render_target(scheme, scene_rt).map_err(Into::into)
+    sink.bind_render_target(scheme, scene_rt)
 }
 
 fn create_initial_state() -> Vec<u32> {
@@ -133,6 +134,14 @@ fn main() -> Result<()> {
         )
         .init();
 
+    if common::capture_requested() {
+        let mut state = RenderState::new(None)?;
+        while !state.sink.finished() {
+            state.render()?;
+        }
+        return Ok(());
+    }
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -148,12 +157,11 @@ struct App {
 }
 
 struct RenderState {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     ctx: Context,
-    surface: SurfaceExchange,
+    sink: FrameSink,
     scene_rt: Lease<LeaseRenderTarget>,
     display_scheme: Scheme,
-    present: Transaction,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
@@ -165,7 +173,7 @@ struct RenderState {
 }
 
 impl RenderState {
-    fn new(window: Arc<Window>) -> Result<Self> {
+    fn new(window: Option<Arc<Window>>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
             instance
@@ -173,13 +181,13 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = SurfaceExchange::new(&ctx, window.as_ref(), SurfaceConfig::default())?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window.as_deref())?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
 
         let initial_state = create_initial_state();
-        let mut retained_pool = RetainedPool::new(device.clone());
         let cells = retained_pool.acquire_record([
             field("a", Init::data(&initial_state)),
             field("b", Init::data(&initial_state)),
@@ -193,15 +201,15 @@ impl RenderState {
             &RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::default(),
                 topology: PrimitiveTopology::TriangleList,
-                target_format: surface.format(),
+                target_format: sink.format(),
                 ..Default::default()
             },
         )?;
 
         let mut display_scheme = Scheme::new(&ctx);
-        let (width, height) = surface.size();
-        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None)?;
-        let present = record_display_scheme(&mut display_scheme, &surface, &cells, "a", &render_pipeline, &scene_rt)?;
+        let (width, height) = sink.size();
+        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        record_display_scheme(&mut display_scheme, &mut sink, &cells, "a", &render_pipeline, &scene_rt)?;
 
         println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
         println!("Features Gosper Glider Gun + random cells");
@@ -210,10 +218,9 @@ impl RenderState {
         Ok(Self {
             window,
             ctx,
-            surface,
+            sink,
             scene_rt,
             display_scheme,
-            present,
             compute_pipeline,
             render_pipeline,
             _retained_pool: retained_pool,
@@ -228,11 +235,11 @@ impl RenderState {
     fn rebuild_display_scheme(&mut self) -> Result<()> {
         let current_field = if self.use_buffer_a { "a" } else { "b" };
         let mut display_scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.surface.size();
-        self.scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), self.surface.format(), None)?;
-        self.present = record_display_scheme(
+        let (width, height) = self.sink.size();
+        self.scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), self.sink.format(), None)?;
+        record_display_scheme(
             &mut display_scheme,
-            &self.surface,
+            &mut self.sink,
             &self.cells,
             current_field,
             &self.render_pipeline,
@@ -246,7 +253,7 @@ impl RenderState {
         self.frame_count += 1;
 
         let now = std::time::Instant::now();
-        let should_update = now.duration_since(self.last_update).as_millis() > 33;
+        let should_update = self.sink.is_capture() || now.duration_since(self.last_update).as_millis() > 33;
 
         if should_update {
             self.last_update = now;
@@ -258,9 +265,11 @@ impl RenderState {
         }
 
         let mut submission = self.display_scheme.submit()?;
-        self.present.claim(&mut submission)?.consume()?;
+        self.sink.settle(&mut submission)?;
 
-        self.window.request_redraw();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
         Ok(())
     }
 }
@@ -289,7 +298,7 @@ impl ApplicationHandler for App {
                     .expect("Failed to create window"),
             );
 
-            match RenderState::new(window.clone()) {
+            match RenderState::new(Some(window.clone())) {
                 Ok(mut state) => {
                     if let Err(e) = state.render() {
                         tracing::error!("First frame error: {e}");
@@ -325,7 +334,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        if let Err(e) = state.surface.resize(size.width, size.height) {
+                        if let Err(e) = state.sink.resize(size.width, size.height) {
                             tracing::error!("Failed to resize surface: {e}");
                             return;
                         }
