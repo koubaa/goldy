@@ -7,8 +7,8 @@
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, IndexFormat, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture,
-    TextureFormat, Transaction, Vertex2D, WithdrawTransaction,
+    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -242,7 +242,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        
+
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -270,11 +270,8 @@ impl App {
             BufferKind::Scattered,
             BufferFlags::empty(),
         )?;
-        let index_parcel = device.acquire_buffer_sized::<u16>(
-            MAX_CUBE_INDICES as u64,
-            BufferKind::Scattered,
-            BufferFlags::empty(),
-        )?;
+        let index_parcel =
+            device.acquire_buffer_sized::<u16>(MAX_CUBE_INDICES as u64, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;

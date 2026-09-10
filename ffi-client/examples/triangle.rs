@@ -6,8 +6,8 @@
 
 use goldy_ffi_client::{
     shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule,
-    SurfaceExchange, TargetLoad, Transaction, Vertex2D,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule, SurfaceExchange,
+    TargetLoad, Transaction, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;

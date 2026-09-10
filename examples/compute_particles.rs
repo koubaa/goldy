@@ -8,8 +8,8 @@ use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture,
-    TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
+    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -204,7 +204,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        
+
         let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -246,8 +246,7 @@ impl RenderState {
         }
 
         let particle_buffer = device.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
-        let params_buffer =
-            device.acquire_buffer_sized::<SimParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+        let params_buffer = device.acquire_buffer_sized::<SimParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
         let render_pipeline = Self::create_render_pipeline(&device, &render_shader, format)?;

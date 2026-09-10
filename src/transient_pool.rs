@@ -310,7 +310,7 @@ impl TransientPool {
                 self.park_texture(texture, ready_after);
             }
             RetainedHold::Buffer(buffer) => {
-                // Partitioned buffers (from `RetainedPool::acquire_record`) cannot be
+                // Partitioned buffers (from `Device::acquire_record`) cannot be
                 // reissued from the bin since the pool keys on single-parcel descriptors.
                 // Drop them directly; the backend's deferred deletion queue provides the
                 // same epoch-gated reclamation the bin would otherwise give.

@@ -9,8 +9,8 @@
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, LayoutCheckable,
     Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexBufferLayout, WithdrawTransaction,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
+    VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -130,7 +130,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        
+
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -161,8 +161,7 @@ impl App {
 
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
-        let uniform =
-            device.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+        let uniform = device.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;

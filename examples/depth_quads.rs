@@ -9,9 +9,8 @@ use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTransaction, DepthFormat, DepthStencilState,
     DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
-    TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
-    WithdrawTransaction,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -181,7 +180,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        
+
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -204,14 +203,11 @@ impl App {
         let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
-        let warm_parcel =
-            device.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
-        let cool_parcel =
-            device.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+        let warm_parcel = device.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+        let cool_parcel = device.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
-        let scene_rt =
-            ctx.lease_render_target(width.max(1), height.max(1), format, Some(DepthFormat::Depth32Float))?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, Some(DepthFormat::Depth32Float))?;
         Self::record_pass(&mut scheme, &pipeline, &warm_parcel, &cool_parcel, &scene_rt);
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 

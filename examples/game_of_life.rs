@@ -10,9 +10,9 @@
 use anyhow::Result;
 use goldy::{
     field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
-    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    Scheme, ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexBufferLayout, WithdrawTransaction,
+    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
+    VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -287,7 +287,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        
+
         let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();

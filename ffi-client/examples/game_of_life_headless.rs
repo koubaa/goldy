@@ -6,9 +6,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
 use goldy_ffi_client::{
-    ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad, TextureFlags,
-    TextureFormat, TextureKind,
+    ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, Scheme, ShaderModule, TargetLoad, TextureFlags, TextureFormat, TextureKind,
 };
 
 const GRID_WIDTH: u32 = 128;

@@ -268,7 +268,7 @@ enum ParcelBacking {
 
     /// BufferRange is a sub-region of a partitioned buffer.
     ///
-    /// This is an internal Goldy type. The public API is [`RetainedPool::acquire_record`]
+    /// This is an internal Goldy type. The public API is [`crate::Device::acquire_record`]
     /// with [`ordinal`] / [`field`] descriptors; the resulting [`Buffer`] yields
     /// `BufferRange`-backed parcels via [`Buffer::unit`] / [`Buffer::field`].
     /// [`Parcel::from_buffer_range`] is intentionally `pub(crate)`.
@@ -1196,7 +1196,7 @@ impl Init {
     }
 }
 
-/// One field specification for [`crate::RetainedPool::acquire_record`].
+/// One field specification for [`crate::Device::acquire_record`].
 pub struct RecordField {
     pub name: Option<Cow<'static, str>>,
     pub init: Init,

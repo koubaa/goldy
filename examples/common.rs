@@ -9,8 +9,8 @@
 //! [`SurfaceExchange`] / [`MemoryExchange`] in each example.
 
 use goldy::{
-    Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SurfaceExchange, Texture, TextureFlags,
-    TextureFormat, TextureKind,
+    Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SurfaceExchange, Texture, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use std::fs::File;
 use std::io::{BufWriter, Write};

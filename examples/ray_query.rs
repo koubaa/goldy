@@ -9,8 +9,8 @@ use anyhow::Result;
 use goldy::{
     types::{BackendType, BufferFlags},
     AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor,
-    Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Texture, Transaction, WithdrawTransaction,
+    Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    Texture, Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -142,12 +142,9 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let ctx = device.create_context()?;
     let shader = ShaderModule::from_slang(&device, RAY_SHADER)?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-        let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.7, -0.5, 0.0], [0.7, -0.5, 0.0]];
-    let verts = device.acquire_buffer_with_data_and_flags(
-        &positions,
-        BufferKind::Scattered,
-        BufferFlags::ACCEL_INPUT,
-    )?;
+    let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.7, -0.5, 0.0], [0.7, -0.5, 0.0]];
+    let verts =
+        device.acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)?;
     let blas = AccelerationStructure::blas_triangles(&device, 1, 3, 12)?;
     let tlas = AccelerationStructure::tlas(&device, 1)?;
     Ok(GpuWarmup {

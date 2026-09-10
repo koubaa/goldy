@@ -6,9 +6,9 @@
 
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute,
+    VertexBufferLayout, VertexFormat, WithdrawTransaction,
 };
 mod common;
 use common::CaptureDump;
@@ -339,7 +339,7 @@ impl WindowState {
         device: &Arc<goldy::Device>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
-                let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
+        let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
         let format = surface.format();
         let (width, height) = surface.size();
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
@@ -390,7 +390,7 @@ impl WindowState {
         width: u32,
         height: u32,
     ) -> anyhow::Result<Self> {
-                let capture = CaptureDump::memory(width, height);
+        let capture = CaptureDump::memory(width, height);
         let format = CaptureDump::format();
         let readback = common::capture_readback(&device, width, height)?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;

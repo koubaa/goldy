@@ -9,8 +9,8 @@
 
 use goldy_ffi_client::{
     Buffer, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease,
-    ShaderModule, SurfaceExchange, TargetLoad, Transaction,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule,
+    SurfaceExchange, TargetLoad, Transaction,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;

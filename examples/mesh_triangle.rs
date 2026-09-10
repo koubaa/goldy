@@ -8,8 +8,8 @@
 
 use goldy::{
     Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, MeshPipeline, RequestAdapterOptions,
-    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, WithdrawTransaction,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
+    WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -149,7 +149,7 @@ impl App {
             std::process::exit(0);
         }
         let ctx = device.create_context()?;
-        
+
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();

@@ -9,8 +9,8 @@
 use anyhow::Result;
 use goldy::{
     Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-    PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture,
-    Transaction, WithdrawTransaction,
+    PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture, Transaction,
+    WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -134,7 +134,7 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let ctx = device.create_context()?;
     let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-        Ok(GpuWarmup {
+    Ok(GpuWarmup {
         ctx,
         compute_pipeline,
         device,
