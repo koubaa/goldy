@@ -7,7 +7,7 @@
 use anyhow::Result;
 use goldy::{
     Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
     WithdrawTransaction,
 };
@@ -84,7 +84,6 @@ struct RenderState {
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
-    _retained_pool: RetainedPool,
     line_buffer: Buffer,
     render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
@@ -201,8 +200,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -211,7 +209,7 @@ impl RenderState {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -240,7 +238,7 @@ impl RenderState {
             });
         }
 
-        let line_buffer = retained_pool.acquire_buffer_with_data(&lines, BufferKind::Scattered)?;
+        let line_buffer = device.acquire_buffer_with_data(&lines, BufferKind::Scattered)?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
         let render_pipeline = Self::create_render_pipeline(&device, &render_shader, format)?;
@@ -270,7 +268,6 @@ impl RenderState {
             scheme,
             scene_rt,
             compute_pipeline,
-            _retained_pool: retained_pool,
             line_buffer,
             render_shader,
             render_pipeline,

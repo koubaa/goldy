@@ -8,7 +8,7 @@
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
     Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
-    Parcel, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderBinding,
+    Parcel, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Sampler, Scheme, ShaderBinding,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -99,7 +99,6 @@ struct App {
     withdraw: Option<WithdrawTransaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
-    _retained_pool: Option<RetainedPool>,
     vertex_buffer: Option<Buffer>,
     texture: Option<Texture>,
     sampler: Option<Sampler>,
@@ -123,7 +122,6 @@ impl App {
             withdraw: None,
             scene_rt: None,
             scheme: None,
-            _retained_pool: None,
             vertex_buffer: None,
             texture: None,
             sampler: None,
@@ -204,8 +202,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -214,7 +211,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -231,7 +228,7 @@ impl App {
         let tex_height = 256u32;
         let checker_data = generate_checkerboard(tex_width, tex_height, 32);
 
-        let texture = retained_pool.acquire_texture(
+        let texture = device.acquire_texture(
             tex_width,
             tex_height,
             TextureFormat::Rgba8Unorm,
@@ -258,7 +255,7 @@ impl App {
 
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
-        let vertex_buffer = retained_pool.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
+        let vertex_buffer = device.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_buffer, &texture, &sampler, &scene_rt);
@@ -275,7 +272,6 @@ impl App {
         self.withdraw = withdraw;
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
-        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.texture = Some(texture);
         self.sampler = Some(sampler);

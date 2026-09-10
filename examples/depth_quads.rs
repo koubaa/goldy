@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTransaction, DepthFormat, DepthStencilState,
     DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
     TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
     WithdrawTransaction,
 };
@@ -74,7 +74,6 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    _retained_pool: Option<RetainedPool>,
     warm_parcel: Option<Buffer>,
     cool_parcel: Option<Buffer>,
     upload_scheme: Option<Scheme>,
@@ -100,7 +99,6 @@ impl App {
             device: None,
             pipeline: None,
             shader: None,
-            _retained_pool: None,
             warm_parcel: None,
             cool_parcel: None,
             upload_scheme: None,
@@ -183,8 +181,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -193,7 +190,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -208,9 +205,9 @@ impl App {
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
         let warm_parcel =
-            retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
         let cool_parcel =
-            retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt =
@@ -223,7 +220,6 @@ impl App {
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self._retained_pool = Some(retained_pool);
         self.warm_parcel = Some(warm_parcel);
         self.cool_parcel = Some(cool_parcel);
         let warm_parcel = self.warm_parcel.as_ref().unwrap();

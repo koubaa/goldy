@@ -491,7 +491,7 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
-            // `RetainedPool::release` parks parcels here for epoch-gated reuse (leases,
+            // `Context::release_*` parks parcels here for epoch-gated reuse (leases,
             // future scheme-held transients). When callers park buffers here but do not
             // acquire through the transient pool, those parked buffers are not re-issued
             // — only dropped once `ready_after` retires. Without this drain at every frame

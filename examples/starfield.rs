@@ -8,7 +8,7 @@ use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture,
+    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture,
     TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -105,7 +105,6 @@ struct RenderState {
     compute_pipeline: ComputePipeline,
     render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
-    _retained_pool: RetainedPool,
     star_buffer: Buffer,
     params_buffer: Buffer,
     upload_scheme: Scheme,
@@ -220,8 +219,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -230,7 +228,7 @@ impl RenderState {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -265,9 +263,9 @@ impl RenderState {
             });
         }
 
-        let star_buffer = retained_pool.acquire_buffer_with_data(&stars, BufferKind::Scattered)?;
+        let star_buffer = device.acquire_buffer_with_data(&stars, BufferKind::Scattered)?;
         let params_buffer =
-            retained_pool.acquire_buffer_sized::<StarfieldParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<StarfieldParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
         let render_pipeline = Self::create_render_pipeline(&device, &render_shader, format)?;
@@ -307,7 +305,6 @@ impl RenderState {
             compute_pipeline,
             render_shader,
             render_pipeline,
-            _retained_pool: retained_pool,
             star_buffer,
             params_buffer,
             upload_scheme,

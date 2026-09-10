@@ -6,7 +6,7 @@
 
 use goldy_ffi_client::{
     shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, TextureFlags,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad, TextureFlags,
     TextureFormat, TextureKind, Vertex2D,
 };
 
@@ -33,12 +33,11 @@ fn main() -> goldy_ffi_client::Result<()> {
             color: [0.0, 0.0, 1.0, 1.0],
         },
     ];
-    let mut retained_pool = RetainedPool::new(&device)?;
-    let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+    let vertex_buffer = device.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 64;
-    let readback = retained_pool.acquire_texture(
+    let readback = device.acquire_texture(
         WIDTH,
         HEIGHT,
         TextureFormat::Rgba8Unorm,

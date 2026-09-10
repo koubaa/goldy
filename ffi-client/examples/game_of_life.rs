@@ -8,8 +8,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease,
+    Buffer, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease,
     ShaderModule, SurfaceExchange, TargetLoad, Transaction,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -202,7 +202,6 @@ struct RenderState {
     present_ba: Transaction,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
-    _retained_pool: RetainedPool,
     cells: Buffer,
     use_buffer_a: bool,
     frame_count: u32,
@@ -220,8 +219,7 @@ impl RenderState {
         let surface = surface_from_window(&ctx, window.as_ref())?;
 
         let initial = create_initial_state();
-        let mut retained_pool = RetainedPool::new(&device)?;
-        let cells = retained_pool.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
+        let cells = device.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
 
         let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -254,7 +252,6 @@ impl RenderState {
             present_ba,
             compute_pipeline,
             render_pipeline,
-            _retained_pool: retained_pool,
             cells,
             use_buffer_a: true,
             frame_count: 0,

@@ -9,7 +9,7 @@ use anyhow::Result;
 use goldy::{
     types::{BackendType, BufferFlags},
     AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor,
-    Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig,
     SurfaceExchange, Texture, Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -118,7 +118,7 @@ fn main() -> Result<()> {
 struct GpuWarmup {
     ctx: goldy::Context,
     compute_pipeline: ComputePipeline,
-    retained_pool: RetainedPool,
+    device: Arc<goldy::Device>,
     verts: Buffer,
     blas: AccelerationStructure,
     tlas: AccelerationStructure,
@@ -142,9 +142,8 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let ctx = device.create_context()?;
     let shader = ShaderModule::from_slang(&device, RAY_SHADER)?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-    let mut retained_pool = RetainedPool::new(device.clone());
-    let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.7, -0.5, 0.0], [0.7, -0.5, 0.0]];
-    let verts = retained_pool.acquire_buffer_with_data_and_flags(
+        let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.7, -0.5, 0.0], [0.7, -0.5, 0.0]];
+    let verts = device.acquire_buffer_with_data_and_flags(
         &positions,
         BufferKind::Scattered,
         BufferFlags::ACCEL_INPUT,
@@ -154,7 +153,7 @@ fn warm_gpu() -> Result<GpuWarmup> {
     Ok(GpuWarmup {
         ctx,
         compute_pipeline,
-        retained_pool,
+        device,
         verts,
         blas,
         tlas,
@@ -177,7 +176,6 @@ struct RenderState {
     withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
-    _retained_pool: RetainedPool,
     verts: Buffer,
     blas: AccelerationStructure,
     tlas: AccelerationStructure,
@@ -273,7 +271,7 @@ impl App {
         let GpuWarmup {
             ctx,
             compute_pipeline,
-            mut retained_pool,
+            device,
             verts,
             blas,
             tlas,
@@ -286,11 +284,11 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (None, Some(capture), Some(readback), width, height)
         };
 
-        let uniform_buffer = retained_pool.acquire_buffer_with_data(
+        let uniform_buffer = device.acquire_buffer_with_data(
             &[Uniforms {
                 width,
                 height,
@@ -331,7 +329,6 @@ impl App {
             withdraw,
             scheme,
             compute_pipeline,
-            _retained_pool: retained_pool,
             verts,
             blas,
             tlas,

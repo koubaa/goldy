@@ -8,7 +8,7 @@
 
 use goldy::{
     Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, MeshPipeline, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -57,7 +57,6 @@ struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
-    _retained_pool: Option<RetainedPool>,
     pipeline: Option<MeshPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -79,7 +78,6 @@ impl App {
             instance: Instance::new()?,
             ctx: None,
             device: None,
-            _retained_pool: None,
             pipeline: None,
             shader: None,
             window: None,
@@ -151,8 +149,7 @@ impl App {
             std::process::exit(0);
         }
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -161,7 +158,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -188,7 +185,6 @@ impl App {
 
         self.ctx = Some(ctx);
         self.device = Some(device);
-        self._retained_pool = Some(retained_pool);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = surface;

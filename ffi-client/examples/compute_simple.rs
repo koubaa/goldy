@@ -4,7 +4,7 @@
 
 use goldy_ffi_client::{
     BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    RequestAdapterOptions, Scheme, ShaderModule,
 };
 
 const COMPUTE_SRC: &str = r#"
@@ -29,9 +29,7 @@ fn main() -> goldy_ffi_client::Result<()> {
         .request_device(&DeviceDescriptor::default())?;
 
     let data = [0f32; 64];
-    let mut retained_pool = RetainedPool::new(&device)?;
-    let buffer = retained_pool.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
-    let _retained_pool = retained_pool;
+    let buffer = device.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
 
     let shader = ShaderModule::from_slang(&device, COMPUTE_SRC)?;
     let pipeline = ComputePipeline::new(&device, &shader)?;

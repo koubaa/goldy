@@ -11,7 +11,7 @@ use anyhow::Result;
 use goldy::{
     field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
     MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Scheme, ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -231,7 +231,6 @@ struct RenderState {
     withdraw_ba: Option<WithdrawTransaction>,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
-    _retained_pool: RetainedPool,
     cells: Buffer,
     use_buffer_a: bool,
     frame_count: u32,
@@ -288,8 +287,7 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -298,7 +296,7 @@ impl RenderState {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -313,7 +311,7 @@ impl RenderState {
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
 
         let initial_state = create_initial_state();
-        let cells = retained_pool.acquire_record([
+        let cells = device.acquire_record([
             field("a", Init::data(&initial_state)),
             field("b", Init::data(&initial_state)),
         ])?;
@@ -358,7 +356,6 @@ impl RenderState {
             withdraw_ba: ba.withdraw,
             compute_pipeline,
             render_pipeline,
-            _retained_pool: retained_pool,
             cells,
             use_buffer_a: true,
             frame_count: 0,

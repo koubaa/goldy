@@ -296,7 +296,7 @@ pub mod test_support {
     pub fn scheme_advance_timeline(ctx: &crate::Context) -> u64 {
         use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
         let device = Arc::new(ctx.device().clone());
-        let mut pool = RetainedPool::new(device);
+        let pool = RetainedPool::new(device);
         let buf = pool
             .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");

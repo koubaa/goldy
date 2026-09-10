@@ -9,7 +9,7 @@ mod digital_clock_shared;
 use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, TimeData};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
     VertexFormat, WithdrawTransaction,
 };
@@ -63,7 +63,6 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    _retained_pool: Option<RetainedPool>,
     vertex_parcel: Option<Buffer>,
     upload_scheme: Option<Scheme>,
     vertex_deposit: Option<DepositTransaction>,
@@ -106,7 +105,6 @@ impl App {
             perf_start: Instant::now(),
             frame_count: 0,
             clock_state: ClockState::default(),
-            _retained_pool: None,
             vertex_parcel: None,
             upload_scheme: None,
             vertex_deposit: None,
@@ -208,8 +206,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -218,7 +215,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -232,7 +229,7 @@ impl App {
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
-        let vertex_parcel = retained_pool.acquire_buffer_sized::<ClockVertex>(
+        let vertex_parcel = device.acquire_buffer_sized::<ClockVertex>(
             MAX_CLOCK_VERTICES as u64,
             BufferKind::Scattered,
             BufferFlags::empty(),
@@ -249,7 +246,6 @@ impl App {
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);

@@ -7,7 +7,7 @@
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
 };
 mod common;
@@ -239,7 +239,6 @@ struct WindowState {
     paused: bool,
     paused_at: f32,
     time_multiplier: f32,
-    _retained_pool: RetainedPool,
     vertex_parcel: Buffer,
     upload_scheme: Scheme,
     vertex_deposit: DepositTransaction,
@@ -340,15 +339,14 @@ impl WindowState {
         device: &Arc<goldy::Device>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
-        let mut retained_pool = RetainedPool::new(device.clone());
-        let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
+                let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
         let format = surface.format();
         let (width, height) = surface.size();
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
         let pipeline = Self::create_pipeline(device, &shader, format)?;
 
         let vertex_parcel =
-            retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
@@ -378,7 +376,6 @@ impl WindowState {
             paused: false,
             paused_at: 0.0,
             time_multiplier: 1.0,
-            _retained_pool: retained_pool,
             vertex_parcel,
             upload_scheme,
             vertex_deposit,
@@ -393,15 +390,14 @@ impl WindowState {
         width: u32,
         height: u32,
     ) -> anyhow::Result<Self> {
-        let mut retained_pool = RetainedPool::new(device.clone());
-        let capture = CaptureDump::memory(width, height);
+                let capture = CaptureDump::memory(width, height);
         let format = CaptureDump::format();
-        let readback = common::capture_readback(&mut retained_pool, width, height)?;
+        let readback = common::capture_readback(&device, width, height)?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
         let pipeline = Self::create_pipeline(device, &shader, format)?;
 
         let vertex_parcel =
-            retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
@@ -431,7 +427,6 @@ impl WindowState {
             paused: false,
             paused_at: 0.0,
             time_multiplier: 1.0,
-            _retained_pool: retained_pool,
             vertex_parcel,
             upload_scheme,
             vertex_deposit,

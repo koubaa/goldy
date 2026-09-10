@@ -9,7 +9,7 @@
 use anyhow::Result;
 use goldy::{
     Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-    PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture,
+    PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture,
     Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -121,7 +121,7 @@ fn main() -> Result<()> {
 struct GpuWarmup {
     ctx: goldy::Context,
     compute_pipeline: ComputePipeline,
-    retained_pool: RetainedPool,
+    device: Arc<goldy::Device>,
 }
 
 fn warm_gpu() -> Result<GpuWarmup> {
@@ -134,11 +134,10 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let ctx = device.create_context()?;
     let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-    let retained_pool = RetainedPool::new(device);
-    Ok(GpuWarmup {
+        Ok(GpuWarmup {
         ctx,
         compute_pipeline,
-        retained_pool,
+        device,
     })
 }
 
@@ -158,7 +157,6 @@ struct RenderState {
     withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
-    _retained_pool: RetainedPool,
     uniform_buffer: Buffer,
     upload_scheme: Scheme,
     uniform_deposit: DepositTransaction,
@@ -232,7 +230,7 @@ impl App {
         let GpuWarmup {
             ctx,
             compute_pipeline,
-            mut retained_pool,
+            device,
             ..
         } = warmup;
 
@@ -243,11 +241,11 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (None, Some(capture), Some(readback), width, height)
         };
 
-        let uniform_buffer = retained_pool.acquire_buffer_with_data(
+        let uniform_buffer = device.acquire_buffer_with_data(
             &[Uniforms {
                 width,
                 height,
@@ -285,7 +283,6 @@ impl App {
             withdraw,
             scheme,
             compute_pipeline,
-            _retained_pool: retained_pool,
             uniform_buffer,
             upload_scheme,
             uniform_deposit,

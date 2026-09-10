@@ -35,7 +35,7 @@ pub use instance::{AdapterInfo, Instance};
 pub use memory_exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
-pub use retained_pool::{RecordBuilder, RecordField, RetainedPool};
+pub use retained_pool::{RecordBuilder, RecordField};
 pub use scheme::{
     ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentLease, ReplayStats, Scheme, SchemeRenderPassBuilder,
     SchemeRenderTargetLease, SchemeSubmission,

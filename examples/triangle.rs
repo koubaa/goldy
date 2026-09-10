@@ -6,7 +6,7 @@
 
 use goldy::{
     shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange,
-    NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
     SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -25,7 +25,6 @@ struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
-    _retained_pool: Option<RetainedPool>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -49,7 +48,6 @@ impl App {
             instance: Instance::new()?,
             ctx: None,
             device: None,
-            _retained_pool: None,
             vertex_buffer: None,
             pipeline: None,
             shader: None,
@@ -132,8 +130,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -142,7 +139,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -158,7 +155,7 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+        let vertex_buffer = device.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
@@ -176,7 +173,6 @@ impl App {
 
         self.ctx = Some(ctx);
         self.device = Some(device);
-        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);

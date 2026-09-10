@@ -7,7 +7,7 @@
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
     MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -82,7 +82,6 @@ struct App {
     upload_scheme: Option<Scheme>,
     vertex_deposit: Option<DepositTransaction>,
     vertex_parcel: Option<Buffer>,
-    _retained_pool: Option<RetainedPool>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     ctx: Option<goldy::Context>,
@@ -106,7 +105,6 @@ impl App {
             upload_scheme: None,
             vertex_deposit: None,
             vertex_parcel: None,
-            _retained_pool: None,
             pipeline: None,
             shader: None,
             ctx: None,
@@ -181,8 +179,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -191,7 +188,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -205,7 +202,7 @@ impl App {
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
-        let vertex_parcel = retained_pool.acquire_buffer_sized::<Vertex2D>(
+        let vertex_parcel = device.acquire_buffer_sized::<Vertex2D>(
             MAX_LINE_VERTICES as u64,
             BufferKind::Scattered,
             BufferFlags::empty(),
@@ -221,7 +218,6 @@ impl App {
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);

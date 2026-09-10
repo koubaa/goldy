@@ -6,8 +6,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
 use goldy_ffi_client::{
-    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, TextureFlags,
+    ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad, TextureFlags,
     TextureFormat, TextureKind,
 };
 
@@ -42,8 +42,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let ctx = Context::new(&device)?;
 
     let initial = initial_cells();
-    let mut retained_pool = RetainedPool::new(&device)?;
-    let cells = retained_pool.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
+    let cells = device.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
 
     let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
     let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -58,7 +57,7 @@ fn main() -> goldy_ffi_client::Result<()> {
         },
     )?;
 
-    let readback = retained_pool.acquire_texture(
+    let readback = device.acquire_texture(
         GRID_WIDTH,
         GRID_HEIGHT,
         TextureFormat::Rgba8Unorm,

@@ -10,7 +10,7 @@
 use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, LayoutCheckable,
     Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -39,7 +39,6 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    _retained_pool: Option<RetainedPool>,
     uniform: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<SurfaceExchange>,
@@ -63,7 +62,6 @@ impl App {
             device: None,
             pipeline: None,
             shader: None,
-            _retained_pool: None,
             uniform: None,
             window: None,
             surface: None,
@@ -133,8 +131,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -143,7 +140,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -166,7 +163,7 @@ impl App {
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
         let uniform =
-            retained_pool.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
@@ -184,7 +181,6 @@ impl App {
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self._retained_pool = Some(retained_pool);
         self.uniform = Some(uniform);
         self.surface = surface;
         self.present = present;

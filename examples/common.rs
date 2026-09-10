@@ -9,7 +9,7 @@
 //! [`SurfaceExchange`] / [`MemoryExchange`] in each example.
 
 use goldy::{
-    Device, RenderPipeline, RenderPipelineDesc, RetainedPool, ShaderModule, SurfaceExchange, Texture, TextureFlags,
+    Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SurfaceExchange, Texture, TextureFlags,
     TextureFormat, TextureKind,
 };
 use std::fs::File;
@@ -259,8 +259,8 @@ impl CaptureDump {
 
 /// Retained RGBA8 texture for `copy_to_texture` + [`goldy::MemoryExchange::bind_withdraw`].
 #[allow(dead_code)]
-pub fn capture_readback(pool: &mut RetainedPool, width: u32, height: u32) -> anyhow::Result<Texture> {
-    pool.acquire_texture(
+pub fn capture_readback(device: &Device, width: u32, height: u32) -> anyhow::Result<Texture> {
+    device.acquire_texture(
         width,
         height,
         TextureFormat::Rgba8Unorm,

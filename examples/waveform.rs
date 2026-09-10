@@ -7,7 +7,7 @@
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
     MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -68,7 +68,6 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    _retained_pool: Option<RetainedPool>,
     channel_parcels: Option<[Buffer; NUM_CHANNELS]>,
     upload_scheme: Option<Scheme>,
     channel_deposits: Option<[DepositTransaction; NUM_CHANNELS]>,
@@ -102,7 +101,6 @@ impl App {
             scheme: None,
             start_time: Instant::now(),
             frame_count: 0,
-            _retained_pool: None,
             channel_parcels: None,
             upload_scheme: None,
             channel_deposits: None,
@@ -178,8 +176,7 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-
+        
         let (surface, capture, readback, format, width, height) = if let Some(window) = window {
             let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
             let format = surface.format();
@@ -188,7 +185,7 @@ impl App {
         } else {
             let capture = CaptureDump::from_env()?;
             let (width, height) = capture.size();
-            let readback = common::capture_readback(&mut retained_pool, width, height)?;
+            let readback = common::capture_readback(&device, width, height)?;
             (
                 None,
                 Some(capture),
@@ -203,7 +200,7 @@ impl App {
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
         let channel_parcels = std::array::from_fn(|_| {
-            retained_pool
+            device
                 .acquire_buffer_sized::<Vertex2D>(NUM_SAMPLES as u64, BufferKind::Scattered, BufferFlags::empty())
                 .expect("waveform channel parcel")
         });
@@ -218,7 +215,6 @@ impl App {
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self._retained_pool = Some(retained_pool);
         self.channel_parcels = Some(channel_parcels);
         let channel_parcels = self.channel_parcels.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);
