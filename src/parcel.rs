@@ -135,6 +135,7 @@ impl ParcelStamp {
         }
     }
 
+    #[cfg(test)]
     fn lazy_gc_pending(&self, ctx: ContextHandle) -> bool {
         let mut pending = self.pending.lock().unwrap();
         if pending.is_empty() {
@@ -157,6 +158,7 @@ impl ParcelStamp {
     }
 
     /// Reuse-gate state for this stamp on `ctx`, including outstanding timeline promises.
+    #[cfg(test)]
     pub(crate) fn settle_on_context(&self, ctx: &Context) -> Settle {
         let ctx_handle = ctx.backend_handle();
         if self.lazy_gc_pending(ctx_handle) {
@@ -420,6 +422,7 @@ impl Parcel {
     }
 
     /// Reuse-gate state for this parcel on `ctx`, including outstanding timeline promises.
+    #[cfg(test)]
     pub(crate) fn settle_on(&self, ctx: &Context) -> Settle {
         self.stamp.settle_on_context(ctx)
     }
@@ -436,6 +439,7 @@ impl Parcel {
     }
 
     /// True when this parcel is settled for reuse on `ctx`.
+    #[cfg(test)]
     pub(crate) fn is_settled_on(&self, ctx: &Context) -> bool {
         matches!(self.settle_on(ctx), Settle::Ready)
     }
