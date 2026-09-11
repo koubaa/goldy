@@ -1205,7 +1205,7 @@ class DepositTarget {
 public:
     static DepositTarget buffer(const Parcel& destination, uint64_t capacity) {
         DepositTarget t;
-        t.raw_.kind = GOLDY_DEPOSIT_TARGET_BUFFER;
+        t.raw_.kind = GOLDY_DEPOSIT_TARGET_KIND_BUFFER;
         t.raw_.buffer = destination.get();
         t.raw_.dst_offset = 0;
         t.raw_.capacity = capacity;
@@ -1229,7 +1229,7 @@ public:
         uint32_t x, uint32_t y, uint32_t width, uint32_t height,
         uint64_t capacity, uint32_t src_row_pitch = 0) {
         DepositTarget t;
-        t.raw_.kind = GOLDY_DEPOSIT_TARGET_TEXTURE;
+        t.raw_.kind = GOLDY_DEPOSIT_TARGET_KIND_TEXTURE;
         t.raw_.buffer = nullptr;
         t.raw_.dst_offset = 0;
         t.raw_.capacity = capacity;
