@@ -659,7 +659,9 @@ enum LeaseBacking {
 /// Self-describing lease inner: owns the backing and a handle back to its context/pool.
 ///
 /// Return-to-pool happens here when both the user's [`Lease`] and every interned scheme
-/// clone are gone.
+/// clone are gone. Before the parcel is parked, drop waits until every last-referenced
+/// epoch has retired so backing is not recycled (or destroyed at process exit) while
+/// GPU/CPU work still holds it.
 pub(crate) struct LeaseInner {
     ctx: Context,
     backing: Option<LeaseBacking>,
@@ -690,6 +692,13 @@ impl Drop for LeaseInner {
         };
         match backing {
             LeaseBacking::Parcel(mut parcel) => {
+                // `Scheme::drop` already waits the scheme high-water, but the last Arc is
+                // often the caller's `Lease` after the scheme is gone. Skipping this wait
+                // (the a90cff78 hole) returned backing to the transient pool while work
+                // was still in flight. Use `Parcel::wait_until_settled` (Ready is a
+                // no-op) rather than `Context::wait_until`, whose `finish_timeline_wait`
+                // deadlocks multi-window teardown when the epoch is already retired.
+                let _ = parcel.wait_until_settled();
                 let ready_after = parcel.last_referenced();
                 parcel.release_bookkeeping();
                 if parcel.texture_descriptor().is_some() {
@@ -719,8 +728,8 @@ impl Drop for LeaseInner {
 /// The lease is self-describing: it carries its backing (as [`PresentLease`] carries
 /// its pool) and may be bound by any scheme on the same context. Schemes intern a
 /// clone of the inner [`Arc`] on first use so the backing outlives every IR node
-/// that references its handle. Pool return happens when the last clone is dropped,
-/// gated by the parcel's last-referenced epoch.
+/// that references its handle. Pool return happens when the last clone is dropped:
+/// drop waits for the parcel to settle, then parks the backing for epoch-gated reuse.
 pub struct Lease<T> {
     pub(crate) inner: Arc<LeaseInner>,
     _marker: PhantomData<fn() -> T>,
@@ -4933,7 +4942,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(
             ctx.transient_outstanding_bytes().buffer,
             outstanding_before,
-            "pool return happens on the last lease clone"
+            "pool return happens on the last lease clone after settle"
         );
         assert_eq!(
             ctx.with_transient_pool(|pool| pool.pending_count()),

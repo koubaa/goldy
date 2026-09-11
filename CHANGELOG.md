@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lease pool return waits for in-flight work.** `LeaseInner::drop` now
+  `wait_until_settled`s the parcel before parking it in the transient pool.
+  Minting leases on `Context` (`a90cff78`) moved return from `Scheme::drop`
+  (which already waited the scheme high-water) onto the last `Arc`, so a
+  caller-held `Lease` could recycle backing while GPU/CPU work still referenced
+  it.
+
 ### Changed
 
 - **Examples present through Goldy types** — windowed examples bind
