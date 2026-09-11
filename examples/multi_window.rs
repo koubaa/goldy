@@ -5,10 +5,10 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute,
-    VertexBufferLayout, VertexFormat, WithdrawTransaction,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance,
+    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
+    VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
 };
 mod common;
 use common::CaptureDump;
@@ -354,10 +354,9 @@ impl WindowState {
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, Some(&surface), None)?;
 
         let mut upload_scheme = Scheme::new(ctx);
-        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit(
             &mut upload_scheme,
-            &vertex_parcel,
-            vertex_parcel.byte_size(),
+            DepositTarget::buffer(&vertex_parcel, vertex_parcel.byte_size()),
         )?;
 
         Ok(Self {
@@ -405,10 +404,9 @@ impl WindowState {
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, None, Some(&readback))?;
 
         let mut upload_scheme = Scheme::new(ctx);
-        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit(
             &mut upload_scheme,
-            &vertex_parcel,
-            vertex_parcel.byte_size(),
+            DepositTarget::buffer(&vertex_parcel, vertex_parcel.byte_size()),
         )?;
 
         Ok(Self {
@@ -487,8 +485,7 @@ impl WindowState {
         }
 
         let vertices = create_quad(self.current_time());
-        self.vertex_deposit
-            .write(&mut self.upload_scheme, 0, bytemuck::cast_slice(&vertices))?;
+        self.vertex_deposit.write(0, bytemuck::cast_slice(&vertices))?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;

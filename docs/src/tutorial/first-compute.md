@@ -119,7 +119,6 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     };
 
     state.uniform_deposit.write(
-        &mut state.upload_scheme,
         0,
         bytemuck::bytes_of(&uniforms),
     )?;
@@ -135,16 +134,15 @@ At init, bind the deposit once on a retained upload scheme:
 
 ```rust
 let mut upload_scheme = Scheme::new(&ctx);
-let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload_scheme,
-    &uniform_buffer,
-    std::mem::size_of::<Uniforms>() as u64,
+    goldy::DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
 )?;
 ```
 
 ### Step by Step
 
-**Update uniforms** — `MemoryExchange::bind_deposit_buffer` records the upload topology once; each frame call `deposit.write` on the upload scheme before the main submit.
+**Update uniforms** — `MemoryExchange::bind_deposit` records the upload topology once; each frame call `deposit.write` before the main submit.
 
 **Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 

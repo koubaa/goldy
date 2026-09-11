@@ -34,7 +34,7 @@ That split is a substrate artifact, not a machine requirement.
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | **Shipped** (internal) |
 | Gate | Submission gate, `Context::boundary_crossed` | **Shipped** |
 | Exchange | `SurfaceExchange`, `MemoryExchange` | **Shipped** |
-| Exchange claim | `Transaction` → `Claim` → `consume` / `discard` | **Shipped** |
+| Exchange claim | `Transaction` → `Claim` → `consume` / `discard` (deposit claims are Runtime-internal) | **Shipped** |
 | Warehouse / budget | `BudgetPolicy`, `VramAllocator` | **Shipped** (partial) |
 | Growable buffers | `Buffer::resize_to`, stable handles | **Shipped** |
 | Retained resubmit | Clean schemes replay with zero re-record | **Shipped** |
@@ -128,6 +128,8 @@ claim.consume()?; // present
 
 **Shipped** CPU readback: `MemoryExchange` with `WithdrawTransaction` / `WithdrawClaim`. See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
+**Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `DepositTransaction::write` prepares an occurrence; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
+
 **Designed**: video-encoder exchange (foreign read continues after enqueue).
 
 ## 7. Schemes and GraphIR
@@ -213,7 +215,7 @@ Capability queries report backend, residency model, resize cost, zero-copy readb
 | Parcel | `Buffer` / `Texture` handle |
 | Merchant | Program |
 | Exchange | `SurfaceExchange`, `MemoryExchange` |
-| Claim (exchange) | `Claim`, `WithdrawClaim` |
+| Claim (exchange) | `Claim`, `WithdrawClaim`; deposit claims are Runtime-internal |
 | Gate | Fence epoch, `boundary_crossed` |
 | Warehouse | `BudgetPolicy`, `VramAllocator` |
 | Ledger | Cross-submit sync analysis |

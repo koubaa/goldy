@@ -6,10 +6,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexBufferLayout, WithdrawTransaction,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, DeviceDescriptor,
+    Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -283,10 +283,9 @@ impl RenderState {
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &params_buffer,
-            std::mem::size_of::<StarfieldParams>() as u64,
+            DepositTarget::buffer(&params_buffer, std::mem::size_of::<StarfieldParams>() as u64),
         )?;
 
         println!("Created starfield with {NUM_STARS} stars (Scheme + Present)");
@@ -325,8 +324,7 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        self.params_deposit
-            .write(&mut self.upload_scheme, 0, bytemuck::bytes_of(&params))?;
+        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;

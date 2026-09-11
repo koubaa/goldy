@@ -4,6 +4,7 @@
 //! outlives every context. Submit, wait, signal, and reclamation APIs live here.
 
 use crate::backend::ContextHandle;
+use crate::deposit_pool::DepositExchangePool;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::parcel::BytesByKind;
@@ -35,6 +36,8 @@ pub(crate) struct ContextInner {
     high_water_timeline: AtomicU64,
     /// Epoch-gated transient parcel pool backing context-minted leases.
     transient_pool: Mutex<TransientPool>,
+    /// Exchange-owned CPU-writable staging for memory deposits.
+    deposit_pool: Arc<DepositExchangePool>,
 }
 
 impl Clone for Context {
@@ -53,6 +56,7 @@ impl std::fmt::Debug for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
+        self.deposit_pool.drain_backend(&self.device, self.handle);
         // Drop the transient pool (and its parked parcels) while the device is alive.
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
@@ -102,6 +106,7 @@ impl Context {
                 submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
                 transient_pool: Mutex::new(TransientPool::new()),
+                deposit_pool: Arc::new(DepositExchangePool::new()),
             }),
         })
     }
@@ -132,6 +137,22 @@ impl Context {
     {
         let mut pool = self.inner.transient_pool.lock().unwrap();
         f(&mut pool)
+    }
+
+    pub(crate) fn deposit_pool(&self) -> &Arc<DepositExchangePool> {
+        &self.inner.deposit_pool
+    }
+
+    /// Fresh deposit-staging allocations made by this context's memory exchange.
+    #[doc(hidden)]
+    pub fn deposit_staging_alloc_count(&self) -> usize {
+        self.inner.deposit_pool.alloc_count()
+    }
+
+    /// Live deposit-staging backings currently owned by the exchange pool.
+    #[doc(hidden)]
+    pub fn deposit_staging_live_count(&self) -> usize {
+        self.inner.deposit_pool.live_count()
     }
 
     /// Acquire a one-submission texture from this context's transient pool.

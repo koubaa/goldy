@@ -5,9 +5,9 @@
 //! Run with: `cargo run --example mandelbrot`
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, WithdrawTransaction,
+    shaders, Buffer, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -171,10 +171,9 @@ impl App {
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &uniform,
-            std::mem::size_of::<Uniforms>() as u64,
+            DepositTarget::buffer(&uniform, std::mem::size_of::<Uniforms>() as u64),
         )?;
 
         self.ctx = Some(ctx);
@@ -213,8 +212,9 @@ impl App {
         };
         let upload = self.upload_scheme.as_mut().unwrap();
         self.uniform_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::bytes_of(&uniforms))?;
+            .write(0, bytemuck::bytes_of(&uniforms))?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;

@@ -6,10 +6,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexBufferLayout, WithdrawTransaction,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, DeviceDescriptor,
+    Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -282,10 +282,9 @@ impl RenderState {
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &params_buffer,
-            std::mem::size_of::<ParticleParams>() as u64,
+            DepositTarget::buffer(&params_buffer, std::mem::size_of::<ParticleParams>() as u64),
         )?;
 
         println!("Created rain/snow simulation with {NUM_PARTICLES} particles (Scheme + Present)");
@@ -352,12 +351,11 @@ impl RenderState {
         let particles = Self::create_particles(self.is_snow);
         let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
         let mut particle_upload = Scheme::new(&self.ctx);
-        let particle_deposit = MemoryExchange::new(&self.ctx).bind_deposit_buffer(
+        let particle_deposit = MemoryExchange::new(&self.ctx).bind_deposit(
             &mut particle_upload,
-            &self.particle_buffer,
-            particle_capacity,
+            DepositTarget::buffer(&self.particle_buffer, particle_capacity),
         )?;
-        particle_deposit.write(&mut particle_upload, 0, bytemuck::cast_slice(&particles))?;
+        particle_deposit.write(0, bytemuck::cast_slice(&particles))?;
         particle_upload.submit()?;
 
         if let Some(window) = &self.window {
@@ -381,8 +379,7 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        self.params_deposit
-            .write(&mut self.upload_scheme, 0, bytemuck::bytes_of(&params))?;
+        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;

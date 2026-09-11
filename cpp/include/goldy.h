@@ -80,6 +80,23 @@ typedef enum GoldyDeviceType {
     GOLDY_DEVICE_TYPE_OTHER = 3,
 } GoldyDeviceType;
 
+// Destination of a memory-exchange deposit (buffer range or texture region).
+enum GoldyDepositTargetKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    GOLDY_DEPOSIT_TARGET_KIND_BUFFER = 0,
+    GOLDY_DEPOSIT_TARGET_KIND_TEXTURE = 1,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum GoldyDepositTargetKind GoldyDepositTargetKind;
+#else
+typedef uint32_t GoldyDepositTargetKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
 // Vertex format.
 typedef enum GoldyVertexFormat {
     GOLDY_VERTEX_FORMAT_FLOAT32 = 0,
@@ -253,6 +270,20 @@ typedef struct GoldyAdapterInfo {
     char name[256];
     char vendor[64];
 } GoldyAdapterInfo;
+
+// Tagged deposit destination matching [`GoldyDepositTarget`] in `goldy.h`.
+typedef struct GoldyDepositTarget {
+    GoldyDepositTargetKind kind;
+    const struct GoldyParcel *buffer;
+    uint64_t dst_offset;
+    uint64_t capacity;
+    const struct GoldyTexture *texture;
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t src_row_pitch;
+} GoldyDepositTarget;
 
 // Vertex attribute description.
 typedef struct GoldyVertexAttribute {
@@ -433,12 +464,11 @@ void goldy_deposit_transaction_destroy(struct GoldyDepositTransaction *transacti
 // `transaction` must be valid.
 uint32_t goldy_deposit_transaction_id(const struct GoldyDepositTransaction *transaction);
 
-// Write `data` into deposit staging before submit. No claim afterward.
+// Write `data` into deposit staging before submit. Submit claims the occurrence internally.
 //
 // # Safety
 // All pointers must be valid. `data` must point to at least `data_size` bytes.
 enum GoldyResult goldy_deposit_transaction_write(const struct GoldyDepositTransaction *transaction,
-                                                 struct GoldyScheme *scheme,
                                                  uint64_t offset,
                                                  const uint8_t *data,
                                                  size_t data_size);
@@ -517,28 +547,13 @@ enum GoldyResult goldy_instance_get_adapter(const struct GoldyInstance *instance
                                             uint32_t index,
                                             struct GoldyAdapterInfo *info);
 
-// Bind a deposit that copies staging bytes into a destination buffer parcel.
+// Bind a deposit into `target` (buffer range or texture region).
 //
 // # Safety
 // All pointers must be valid.
-struct GoldyDepositTransaction *goldy_memory_exchange_bind_deposit_buffer(const struct GoldyMemoryExchange *exchange,
-                                                                          struct GoldyScheme *scheme,
-                                                                          const struct GoldyParcel *destination,
-                                                                          uint64_t capacity);
-
-// Bind a deposit that copies staging bytes into a texture region.
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyDepositTransaction *goldy_memory_exchange_bind_deposit_texture(const struct GoldyMemoryExchange *exchange,
-                                                                           struct GoldyScheme *scheme,
-                                                                           const struct GoldyTexture *destination,
-                                                                           uint32_t x,
-                                                                           uint32_t y,
-                                                                           uint32_t width,
-                                                                           uint32_t height,
-                                                                           uint64_t capacity,
-                                                                           uint32_t src_row_pitch);
+struct GoldyDepositTransaction *goldy_memory_exchange_bind_deposit(const struct GoldyMemoryExchange *exchange,
+                                                                   struct GoldyScheme *scheme,
+                                                                   const struct GoldyDepositTarget *target);
 
 // Bind a withdrawal over a buffer or texture deed parcel.
 //

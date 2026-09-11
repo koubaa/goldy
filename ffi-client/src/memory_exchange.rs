@@ -4,8 +4,8 @@ use crate::error::{check, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::scheme::{Scheme, SchemeSubmission};
 use crate::sys::{
-    self, GoldyDepositTransaction, GoldyMemoryExchange, GoldyWithdrawBytes, GoldyWithdrawClaim,
-    GoldyWithdrawTransaction,
+    self, GoldyDepositTarget, GoldyDepositTargetKind, GoldyDepositTransaction, GoldyMemoryExchange, GoldyWithdrawBytes,
+    GoldyWithdrawClaim, GoldyWithdrawTransaction,
 };
 use crate::texture::Texture;
 use std::ops::Deref;
@@ -115,7 +115,7 @@ impl Drop for WithdrawTransaction {
 
 /// Stable deposit relationship recorded in one [`Scheme`].
 ///
-/// Write staging bytes before [`Scheme::submit`]; no claim afterward.
+/// Write staging bytes before [`Scheme::submit`]; submit claims the occurrence internally.
 pub struct DepositTransaction {
     ptr: *mut GoldyDepositTransaction,
 }
@@ -129,10 +129,8 @@ impl DepositTransaction {
         unsafe { sys::goldy_deposit_transaction_id(self.ptr) }
     }
 
-    pub fn write(&self, scheme: &mut Scheme, data: &[u8], offset: u64) -> Result<()> {
-        check(unsafe {
-            sys::goldy_deposit_transaction_write(self.ptr, scheme.as_ptr(), offset, data.as_ptr(), data.len())
-        })
+    pub fn write(&self, data: &[u8], offset: u64) -> Result<()> {
+        check(unsafe { sys::goldy_deposit_transaction_write(self.ptr, offset, data.as_ptr(), data.len()) })
     }
 }
 
@@ -175,43 +173,109 @@ impl MemoryExchange {
         Ok(WithdrawTransaction { ptr })
     }
 
-    pub fn bind_deposit_buffer(
-        &self,
-        scheme: &mut Scheme,
-        destination: &Parcel,
-        capacity: u64,
-    ) -> Result<DepositTransaction> {
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_memory_exchange_bind_deposit_buffer(self.ptr, scheme.as_ptr(), destination.as_ptr(), capacity)
-        });
+    pub fn bind_deposit(&self, scheme: &mut Scheme, target: DepositTarget<'_>) -> Result<DepositTransaction> {
+        let ffi_target = target.as_ffi();
+        let ptr =
+            non_null_expect(unsafe { sys::goldy_memory_exchange_bind_deposit(self.ptr, scheme.as_ptr(), &ffi_target) });
         Ok(DepositTransaction { ptr })
     }
+}
 
-    pub fn bind_deposit_texture(
-        &self,
-        scheme: &mut Scheme,
-        destination: &Texture,
+/// Destination of a memory-exchange deposit (buffer range or texture region).
+pub enum DepositTarget<'a> {
+    Buffer {
+        destination: &'a Parcel,
+        dst_offset: u64,
+        capacity: u64,
+    },
+    Texture {
+        destination: &'a Texture,
         x: u32,
         y: u32,
         width: u32,
         height: u32,
         capacity: u64,
         src_row_pitch: u32,
-    ) -> Result<DepositTransaction> {
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_memory_exchange_bind_deposit_texture(
-                self.ptr,
-                scheme.as_ptr(),
-                destination.as_ptr(),
+    },
+}
+
+impl<'a> DepositTarget<'a> {
+    pub fn buffer(destination: &'a Parcel, capacity: u64) -> Self {
+        Self::Buffer {
+            destination,
+            dst_offset: 0,
+            capacity,
+        }
+    }
+
+    pub fn buffer_at(destination: &'a Parcel, dst_offset: u64, capacity: u64) -> Self {
+        Self::Buffer {
+            destination,
+            dst_offset,
+            capacity,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn texture(
+        destination: &'a Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        capacity: u64,
+        src_row_pitch: u32,
+    ) -> Self {
+        Self::Texture {
+            destination,
+            x,
+            y,
+            width,
+            height,
+            capacity,
+            src_row_pitch,
+        }
+    }
+
+    fn as_ffi(&self) -> GoldyDepositTarget {
+        match self {
+            Self::Buffer {
+                destination,
+                dst_offset,
+                capacity,
+            } => GoldyDepositTarget {
+                kind: GoldyDepositTargetKind::GOLDY_DEPOSIT_TARGET_BUFFER,
+                buffer: destination.as_ptr(),
+                dst_offset: *dst_offset,
+                capacity: *capacity,
+                texture: std::ptr::null(),
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                src_row_pitch: 0,
+            },
+            Self::Texture {
+                destination,
                 x,
                 y,
                 width,
                 height,
                 capacity,
                 src_row_pitch,
-            )
-        });
-        Ok(DepositTransaction { ptr })
+            } => GoldyDepositTarget {
+                kind: GoldyDepositTargetKind::GOLDY_DEPOSIT_TARGET_TEXTURE,
+                buffer: std::ptr::null(),
+                dst_offset: 0,
+                capacity: *capacity,
+                texture: destination.as_ptr(),
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+                src_row_pitch: *src_row_pitch,
+            },
+        }
     }
 }
 

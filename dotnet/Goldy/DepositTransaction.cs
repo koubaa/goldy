@@ -4,7 +4,7 @@ namespace Goldy;
 
 /// <summary>
 /// Stable deposit relationship recorded in one <see cref="Scheme"/>.
-/// Write staging bytes before <see cref="Scheme.Submit"/>; no claim afterward.
+/// Write staging bytes before <see cref="Scheme.Submit"/>; submit claims the occurrence internally.
 /// </summary>
 public sealed class DepositTransaction : IDisposable
 {
@@ -31,16 +31,15 @@ public sealed class DepositTransaction : IDisposable
         }
     }
 
-    public void Write(Scheme scheme, ReadOnlySpan<byte> data, ulong offset = 0)
+    public void Write(ReadOnlySpan<byte> data, ulong offset = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(scheme);
         unsafe
         {
             fixed (byte* p = data)
             {
                 var result = NativeMethods.DepositTransactionWrite(
-                    Handle, scheme.Handle, offset, (nint)p, (nuint)data.Length);
+                    Handle, offset, (nint)p, (nuint)data.Length);
                 if (result != GoldyResult.Ok)
                     throw GoldyException.FromLastError("DepositTransaction write");
             }

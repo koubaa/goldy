@@ -1064,7 +1064,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]
@@ -1076,7 +1076,7 @@ impl Texture {
 
     #[deprecated(
         since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     #[allow(deprecated)]

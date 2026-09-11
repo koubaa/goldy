@@ -41,34 +41,14 @@ public sealed class MemoryExchange : IDisposable
         return new WithdrawTransaction(tx);
     }
 
-    public DepositTransaction BindDepositBuffer(Scheme scheme, Parcel destination, ulong capacity)
+    public DepositTransaction BindDeposit(Scheme scheme, DepositTarget target)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(scheme);
-        ArgumentNullException.ThrowIfNull(destination);
-        var tx = NativeMethods.MemoryExchangeBindDepositBuffer(Handle, scheme.Handle, destination.Handle, capacity);
+        var native = target.Raw;
+        var tx = NativeMethods.MemoryExchangeBindDeposit(Handle, scheme.Handle, native);
         if (tx == nint.Zero)
-            throw GoldyException.FromLastError("MemoryExchange bind_deposit_buffer");
-        return new DepositTransaction(tx);
-    }
-
-    public DepositTransaction BindDepositTexture(
-        Scheme scheme,
-        Texture destination,
-        uint x,
-        uint y,
-        uint width,
-        uint height,
-        ulong capacity,
-        uint srcRowPitch = 0)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(scheme);
-        ArgumentNullException.ThrowIfNull(destination);
-        var tx = NativeMethods.MemoryExchangeBindDepositTexture(
-            Handle, scheme.Handle, destination.Handle, x, y, width, height, capacity, srcRowPitch);
-        if (tx == nint.Zero)
-            throw GoldyException.FromLastError("MemoryExchange bind_deposit_texture");
+            throw GoldyException.FromLastError("MemoryExchange bind_deposit");
         return new DepositTransaction(tx);
     }
 

@@ -41,6 +41,7 @@ pub mod types;
 
 pub mod cpu_dispatch;
 pub mod cpu_shaders;
+pub(crate) mod deposit_pool;
 pub(crate) mod host_access;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
@@ -76,7 +77,9 @@ pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
 pub use exchange::{Claim, SurfaceExchange};
-pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
+pub use exchange::{
+    DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
+};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};

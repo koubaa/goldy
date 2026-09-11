@@ -5,10 +5,10 @@
 //! Run with: `cargo run --example plasma`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
-    WithdrawTransaction,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance,
+    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
+    VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -160,10 +160,9 @@ impl App {
         let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &uniform,
-            std::mem::size_of::<Uniforms>() as u64,
+            DepositTarget::buffer(&uniform, std::mem::size_of::<Uniforms>() as u64),
         )?;
 
         self.ctx = Some(ctx);
@@ -203,8 +202,9 @@ impl App {
         let uniforms = Uniforms { time };
         let upload = self.upload_scheme.as_mut().unwrap();
         self.uniform_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::bytes_of(&uniforms))?;
+            .write(0, bytemuck::bytes_of(&uniforms))?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;

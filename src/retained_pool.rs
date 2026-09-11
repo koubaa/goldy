@@ -54,7 +54,7 @@ impl Device {
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// For in-place per-frame CPU rewrites, use [`crate::MemoryExchange::bind_deposit_buffer`]
+    /// For in-place per-frame CPU rewrites, use [`crate::MemoryExchange::bind_deposit`]
     /// on the buffer's whole parcel (`&*buffer` or `buffer.whole()`).
     pub fn acquire_buffer(
         &self,
@@ -285,7 +285,7 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::parcel::{field, Init};
     use crate::types::{ResourceAccess, TextureFormat};
-    use crate::MemoryExchange;
+    use crate::{DepositTarget, MemoryExchange};
 
     fn test_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
@@ -417,10 +417,10 @@ mod tests {
             .unwrap();
         let mut scheme = crate::Scheme::new(&ctx);
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut scheme, &*buffer, 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(&*buffer, 16))
             .expect("bind deposit");
         deposit
-            .write(&mut scheme, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))
+            .write(0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))
             .expect("deposit write");
         scheme.submit().unwrap();
     }

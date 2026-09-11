@@ -17,6 +17,7 @@ use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::cpu_dispatch::{CpuBindingExec, CpuDispatchExec, CpuMain};
 use crate::error::GoldyError;
+use crate::exchange::{DepositBinding, DepositClaim, DepositTarget};
 use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
 #[cfg(feature = "graphics")]
@@ -713,90 +714,6 @@ impl Drop for LeaseInner {
     }
 }
 
-/// Epoch-gated pool of physical staging parcels for one logical deposit.
-struct DepositPool {
-    size: u64,
-    /// All physical parcels kept alive for retained CB variants.
-    parcels: Vec<Parcel>,
-    /// Parcel selected for the next submit (`None` until [`DepositTransaction::write`](crate::exchange::DepositTransaction::write)).
-    pending: Option<usize>,
-}
-
-impl DepositPool {
-    fn new(size: u64) -> Self {
-        Self {
-            size,
-            parcels: Vec::new(),
-            pending: None,
-        }
-    }
-
-    fn select_or_alloc(&mut self, ctx: &Context) -> Result<usize, GoldyError> {
-        if let Some(idx) = self.pending {
-            return Ok(idx);
-        }
-        if let Some(idx) = self.parcels.iter().position(|p| p.is_settled_on(ctx)) {
-            self.pending = Some(idx);
-            return Ok(idx);
-        }
-        let parcel = ctx
-            .with_transient_pool(|pool| {
-                pool.acquire_buffer(
-                    ctx,
-                    self.size,
-                    crate::types::BufferKind::Scattered,
-                    BufferFlags::CPU_WRITABLE,
-                    None,
-                )
-            })
-            .map_err(|e| ctx.classify(e))?;
-        self.parcels.push(parcel);
-        let idx = self.parcels.len() - 1;
-        self.pending = Some(idx);
-        Ok(idx)
-    }
-
-    fn stage(&mut self, ctx: &Context, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
-        if offset.saturating_add(data.len() as u64) > self.size {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "deposit write: [{offset}..{}] exceeds declaration size {}",
-                offset + data.len() as u64,
-                self.size
-            )));
-        }
-        let idx = self.select_or_alloc(ctx)?;
-        self.parcels[idx]
-            .write_bytes(offset, data)
-            .map_err(|e| ctx.classify(e))?;
-        Ok(())
-    }
-
-    fn resolve_pending(&self) -> Option<crate::task_graph::ResolvedDeposit> {
-        let idx = self.pending?;
-        let parcel = &self.parcels[idx];
-        let parent = parcel.buffer_handle().expect("deposit parcels are whole buffers");
-        Some(crate::task_graph::ResolvedDeposit {
-            parent,
-            offset: 0,
-            len: parcel.byte_size(),
-        })
-    }
-
-    fn stamp_pending(&mut self, ctx: crate::backend::ContextHandle, tv: TimelineValue) {
-        if let Some(idx) = self.pending.take() {
-            self.parcels[idx].mark_referenced(ctx, tv);
-        }
-    }
-
-    fn return_all(self, ctx: &Context) {
-        for mut parcel in self.parcels {
-            let ready_after = parcel.last_referenced();
-            parcel.release_bookkeeping();
-            ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
-        }
-    }
-}
-
 /// One-submission tenancy of pool property, minted by the lessor ([`Context`]).
 ///
 /// The lease is self-describing: it carries its backing (as [`PresentLease`] carries
@@ -954,6 +871,7 @@ struct IrSubmitPrep {
     ir_clean: bool,
     had_replay: bool,
     deposit_resolutions: std::collections::HashMap<u32, crate::task_graph::ResolvedDeposit>,
+    deposit_claims: std::collections::HashMap<u32, Option<DepositClaim>>,
 }
 
 /// A retained scheme: a set of dispatches held across submissions with COW dirty tracking.
@@ -968,8 +886,8 @@ pub struct Scheme {
     ctx: Context,
     /// Interned lease clones: held for lifetime so backing outlives IR handles, not for lookup.
     interned_leases: Vec<Arc<LeaseInner>>,
-    /// Epoch-gated CPU-writable staging pools for deposit declarations.
-    deposits: Vec<DepositPool>,
+    /// Recorded deposit relationships (topology only; staging lives on the exchange).
+    deposits: Vec<Arc<DepositBinding>>,
     /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
     cpu_dispatches: Vec<CpuDispatchExec>,
     /// COW dirty level: structural vs params-only vs clean. Cleared by a successful submit.
@@ -1330,175 +1248,155 @@ impl Scheme {
         dest.mark_gpu_built();
         Ok(())
     }
-    ///
-    /// `dst_offset` is relative to the start of `destination` (added to any buffer-range base).
-    /// The recorded copy size is `capacity.min(destination.byte_size().saturating_sub(dst_offset))`.
-    pub(crate) fn register_deposit_buffer(
-        &mut self,
-        destination: &Parcel,
-        dst_offset: u64,
-        capacity: u64,
-    ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
-        if capacity == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_buffer requires non-zero capacity"
-            )));
-        }
-        self.mark_structure_dirty();
-        let dst_resource = destination.resource_id();
-        if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_buffer requires a buffer parcel destination"
-            )));
-        }
-        let remaining = destination.byte_size().saturating_sub(dst_offset);
-        if remaining == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_buffer: dst_offset {dst_offset} exceeds destination size {}",
-                destination.byte_size()
-            )));
-        }
-        let copy_size = capacity.min(remaining);
-        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
-        self.deposits.push(DepositPool::new(capacity));
-        self.submit_state.register_parcel_stamp(destination);
-        let src_resource = ResourceId::Deposit(deposit_id);
-        let abs_dst_offset = destination.source_offset() + dst_offset;
-        let dst_access = if dst_offset == 0 && copy_size == destination.byte_size() {
-            NodeAccess::Overwrite
-        } else {
-            NodeAccess::Write
-        };
-        self.ir.nodes.push(TaskNode {
-            label: "deposit_buffer",
-            bindings: vec![
-                ResourceBinding {
-                    resource: src_resource,
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: dst_resource,
-                    access: dst_access,
-                },
-            ],
-            kind: NodeKind::CopyBuffer {
-                src: src_resource,
-                src_offset: 0,
-                dst: dst_resource,
-                dst_offset: abs_dst_offset,
-                size: copy_size,
-            },
-        });
-        Ok(crate::exchange::DepositTransaction {
-            scheme_id: self.scheme_id,
-            deposit_id,
-            capacity,
-        })
-    }
 
-    /// Register a destination-bound texture-region deposit (called by [`crate::MemoryExchange`]).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn register_deposit_texture(
+    /// Record a deposit copy into `target` (called by [`crate::MemoryExchange::bind_deposit`]).
+    pub(crate) fn register_deposit(
         &mut self,
-        destination: &crate::Texture,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        capacity: u64,
-        src_row_pitch: u32,
+        target: DepositTarget<'_>,
     ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
-        if capacity == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_texture requires non-zero capacity"
-            )));
-        }
         self.mark_structure_dirty();
-        let x_end = x
-            .checked_add(width)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: x+width overflow")))?;
-        let y_end = y
-            .checked_add(height)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: y+height overflow")))?;
-        if x_end > destination.width() || y_end > destination.height() {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_texture: {}x{} at ({},{}) exceeds {}x{} texture",
-                width,
-                height,
+        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
+        let src_resource = ResourceId::Deposit(deposit_id);
+        let capacity = match target {
+            DepositTarget::Buffer {
+                destination,
+                dst_offset,
+                capacity,
+            } => {
+                if capacity == 0 {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit requires non-zero capacity"
+                    )));
+                }
+                let dst_resource = destination.resource_id();
+                if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit buffer target requires a buffer parcel destination"
+                    )));
+                }
+                let remaining = destination.byte_size().saturating_sub(dst_offset);
+                if remaining == 0 {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit: dst_offset {dst_offset} exceeds destination size {}",
+                        destination.byte_size()
+                    )));
+                }
+                let copy_size = capacity.min(remaining);
+                self.submit_state.register_parcel_stamp(destination);
+                let abs_dst_offset = destination.source_offset() + dst_offset;
+                let dst_access = if dst_offset == 0 && copy_size == destination.byte_size() {
+                    NodeAccess::Overwrite
+                } else {
+                    NodeAccess::Write
+                };
+                self.ir.nodes.push(TaskNode {
+                    label: "deposit_buffer",
+                    bindings: vec![
+                        ResourceBinding {
+                            resource: src_resource,
+                            access: NodeAccess::Read,
+                        },
+                        ResourceBinding {
+                            resource: dst_resource,
+                            access: dst_access,
+                        },
+                    ],
+                    kind: NodeKind::CopyBuffer {
+                        src: src_resource,
+                        src_offset: 0,
+                        dst: dst_resource,
+                        dst_offset: abs_dst_offset,
+                        size: copy_size,
+                    },
+                });
+                capacity
+            }
+            DepositTarget::Texture {
+                destination,
                 x,
                 y,
-                destination.width(),
-                destination.height()
-            )));
-        }
-        let bpp = u64::from(destination.format().bytes_per_pixel());
-        let min_bytes = if src_row_pitch == 0 {
-            (width as u64) * (height as u64) * bpp
-        } else {
-            (src_row_pitch as u64) * (height as u64)
-        };
-        if min_bytes > capacity {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_texture: copy range exceeds deposit capacity"
-            )));
-        }
-        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
-        self.deposits.push(DepositPool::new(capacity));
-        let th = destination.gpu_handle();
-        let src_resource = ResourceId::Deposit(deposit_id);
-        let dst_access = if x == 0 && y == 0 && width == destination.width() && height == destination.height() {
-            NodeAccess::Overwrite
-        } else {
-            NodeAccess::Write
-        };
-        self.ir.nodes.push(TaskNode {
-            label: "deposit_texture",
-            bindings: vec![
-                ResourceBinding {
-                    resource: src_resource,
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: ResourceId::Texture(th),
-                    access: dst_access,
-                },
-            ],
-            kind: NodeKind::CopyBufferToTexture {
-                src: src_resource,
-                src_offset: 0,
+                width,
+                height,
+                capacity,
                 src_row_pitch,
-                dst: th,
-                x,
-                y,
-                width,
-                height,
-            },
-        });
-        Ok(crate::exchange::DepositTransaction {
+            } => {
+                if capacity == 0 {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit requires non-zero capacity"
+                    )));
+                }
+                let x_end = x
+                    .checked_add(width)
+                    .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit: x+width overflow")))?;
+                let y_end = y
+                    .checked_add(height)
+                    .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit: y+height overflow")))?;
+                if x_end > destination.width() || y_end > destination.height() {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit: {}x{} at ({},{}) exceeds {}x{} texture",
+                        width,
+                        height,
+                        x,
+                        y,
+                        destination.width(),
+                        destination.height()
+                    )));
+                }
+                let bpp = u64::from(destination.format().bytes_per_pixel());
+                let min_bytes = if src_row_pitch == 0 {
+                    (width as u64) * (height as u64) * bpp
+                } else {
+                    (src_row_pitch as u64) * (height as u64)
+                };
+                if min_bytes > capacity {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit: copy range exceeds deposit capacity"
+                    )));
+                }
+                let th = destination.gpu_handle();
+                let dst_access = if x == 0 && y == 0 && width == destination.width() && height == destination.height() {
+                    NodeAccess::Overwrite
+                } else {
+                    NodeAccess::Write
+                };
+                self.ir.nodes.push(TaskNode {
+                    label: "deposit_texture",
+                    bindings: vec![
+                        ResourceBinding {
+                            resource: src_resource,
+                            access: NodeAccess::Read,
+                        },
+                        ResourceBinding {
+                            resource: ResourceId::Texture(th),
+                            access: dst_access,
+                        },
+                    ],
+                    kind: NodeKind::CopyBufferToTexture {
+                        src: src_resource,
+                        src_offset: 0,
+                        src_row_pitch,
+                        dst: th,
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                });
+                capacity
+            }
+        };
+        let binding = Arc::new(DepositBinding {
             scheme_id: self.scheme_id,
             deposit_id,
             capacity,
-        })
-    }
-
-    /// Stage bytes for a deposit transaction (called by [`crate::exchange::DepositTransaction::write`]).
-    pub(crate) fn stage_deposit(
-        &mut self,
-        scheme_id: u64,
-        deposit_id: u32,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<(), GoldyError> {
-        if scheme_id != self.scheme_id {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "DepositTransaction belongs to a different scheme"
-            )));
-        }
-        let pool = self
-            .deposits
-            .get_mut(deposit_id as usize)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("deposit write: unknown deposit {deposit_id}")))?;
-        pool.stage(&self.ctx, offset, data)
+            affinity: crate::deposit_pool::next_deposit_affinity(),
+            pending: Mutex::new(None),
+            ctx: self.ctx.clone(),
+            pool: Arc::clone(self.ctx.deposit_pool()),
+            scheme_alive: Arc::new(AtomicBool::new(true)),
+        });
+        self.deposits.push(Arc::clone(&binding));
+        Ok(crate::exchange::DepositTransaction { inner: binding })
     }
 
     /// Append a CPU-writable buffer → texture copy node (identity only; no bytes in IR).
@@ -2079,7 +1977,8 @@ impl Scheme {
             params_dirty,
             ir_clean: self.dirty == SchemeDirty::Clean && !topo_dirty,
             had_replay: self.submit_state.has_cb_replay(),
-            deposit_resolutions: self.resolve_deposits_for_submit()?,
+            deposit_resolutions: HashMap::new(),
+            deposit_claims: HashMap::new(),
         })
     }
 
@@ -2093,11 +1992,36 @@ impl Scheme {
     }
 
     fn stamp_deposits_and_cpu(&mut self, tv: TimelineValue) {
-        let ctx_h = self.ctx.backend_handle();
-        for pool in &mut self.deposits {
-            pool.stamp_pending(ctx_h, tv);
-        }
         self.stamp_cpu_dispatches(tv);
+    }
+
+    fn claim_deposits_into(&mut self, prep: &mut IrSubmitPrep) -> Result<(), GoldyError> {
+        let mut referenced = HashSet::new();
+        for node in &self.ir.nodes {
+            for b in &node.bindings {
+                if let ResourceId::Deposit(id) = b.resource {
+                    referenced.insert(id);
+                }
+            }
+        }
+        for id in referenced {
+            let binding = self
+                .deposits
+                .get(id as usize)
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
+            let handle = binding
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .ok_or_else(|| {
+                    GoldyError::Backend(anyhow::anyhow!("submit: Deposit({id}) was not written before submit"))
+                })?;
+            let claim = DepositClaim::new(handle, binding.capacity, Arc::clone(&binding.pool));
+            prep.deposit_resolutions.insert(id, claim.resolved());
+            prep.deposit_claims.insert(id, Some(claim));
+        }
+        Ok(())
     }
 
     fn finish_ir_submit_bookkeeping(
@@ -2228,7 +2152,9 @@ impl Scheme {
         &mut self,
         mut acquired: Vec<AcquiredPresent>,
     ) -> Result<Submission, GoldyError> {
-        let prep = self.prepare_ir_submit()?;
+        let mut prep = self.prepare_ir_submit()?;
+        self.claim_deposits_into(&mut prep)?;
+        let mut deposit_claims = std::mem::take(&mut prep.deposit_claims);
 
         validate_present_exchange_bindings(&self.ir, &self.present_transactions)?;
         if let Some(msg) = self.record_errors.first() {
@@ -2336,6 +2262,7 @@ impl Scheme {
                     &mut present_slots,
                     deferred,
                     &prep.deposit_resolutions,
+                    &mut deposit_claims,
                     prep.ir_clean,
                     &mut partial,
                     &mut partial_tv,
@@ -2345,7 +2272,10 @@ impl Scheme {
             self.teardown_replay_if_disabled(prep.had_replay);
             match result {
                 Ok(ok) => Ok((ok, surface_frames, surface_generations, partial)),
-                Err(e) => Err((e, surface_frames, partial, partial_tv)),
+                Err(e) => {
+                    crate::exchange::park_unconsumed_deposit_claims(&mut deposit_claims, partial_tv);
+                    Err((e, surface_frames, partial, partial_tv))
+                }
             }
         };
 
@@ -2391,7 +2321,9 @@ impl Scheme {
 
     #[cfg(not(feature = "graphics"))]
     fn submit_without_presents(&mut self) -> Result<Submission, GoldyError> {
-        let prep = self.prepare_ir_submit()?;
+        let mut prep = self.prepare_ir_submit()?;
+        self.claim_deposits_into(&mut prep)?;
+        let mut deposit_claims = std::mem::take(&mut prep.deposit_claims);
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
@@ -2407,12 +2339,14 @@ impl Scheme {
                 &mut present_slots,
                 None,
                 &prep.deposit_resolutions,
+                &mut deposit_claims,
                 prep.ir_clean,
                 &mut partial,
                 &mut partial_tv,
                 &self.cpu_dispatches,
             )
             .map_err(|e| {
+                crate::exchange::park_unconsumed_deposit_claims(&mut deposit_claims, partial_tv);
                 self.stamp_cpu_dispatches(partial_tv);
                 self.ctx.advance_high_water_timeline(partial_tv);
                 self.ctx.classify(e)
@@ -3047,50 +2981,24 @@ impl Scheme {
         })
     }
 
-    /// Resolve pending deposit stages into concrete handles for this submit.
-    fn resolve_deposits_for_submit(
-        &self,
-    ) -> Result<std::collections::HashMap<u32, crate::task_graph::ResolvedDeposit>, GoldyError> {
-        let mut out = std::collections::HashMap::new();
-        let mut referenced = std::collections::HashSet::new();
-        for node in &self.ir.nodes {
-            for b in &node.bindings {
-                if let ResourceId::Deposit(id) = b.resource {
-                    referenced.insert(id);
-                }
-            }
-        }
-        for id in referenced {
-            let pool = self
-                .deposits
-                .get(id as usize)
-                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
-            let resolved = pool.resolve_pending().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("submit: Deposit({id}) was not written before submit"))
-            })?;
-            out.insert(id, resolved);
-        }
-        Ok(out)
-    }
-
-    /// Test/telemetry: number of physical parcels owned by deposit `id`.
+    /// Test/telemetry: number of physical staging backings last used by this deposit.
     #[doc(hidden)]
     pub fn deposit_parcel_count(&self, deposit: &crate::exchange::DepositTransaction) -> usize {
-        self.deposits
-            .get(deposit.deposit_id as usize)
-            .map(|p| p.parcels.len())
-            .unwrap_or(0)
+        self.ctx.deposit_pool().count_for_affinity(deposit.inner.affinity)
     }
 
-    /// Test helper: mark the first physical deposit parcel as still in flight at `tv`.
+    /// Test helper: mark this deposit's last parked backing as still in flight at `tv`.
     #[doc(hidden)]
     pub fn test_mark_deposit_inflight(&mut self, deposit: &crate::exchange::DepositTransaction, tv: TimelineValue) {
-        let ctx = self.ctx.backend_handle();
-        let pool = &mut self.deposits[deposit.deposit_id as usize];
-        pool.pending = None;
-        if let Some(parcel) = pool.parcels.first() {
-            parcel.mark_referenced(ctx, tv);
-        }
+        self.ctx
+            .deposit_pool()
+            .mark_affinity_inflight(deposit.inner.affinity, tv);
+    }
+
+    /// Test helper: physical handles last used by this deposit.
+    #[doc(hidden)]
+    pub fn test_deposit_handles(&self, deposit: &crate::exchange::DepositTransaction) -> Vec<BufferHandle> {
+        self.ctx.deposit_pool().handles_for_affinity(deposit.inner.affinity)
     }
 
     /// Test helper: number of retained CB slot variants across all partitions.
@@ -3125,8 +3033,8 @@ impl Drop for Scheme {
         self.submit_state.release_backend_retained_graphs(&self.ctx);
 
         let ctx = self.ctx.clone();
-        for pool in std::mem::take(&mut self.deposits) {
-            pool.return_all(&ctx);
+        for binding in std::mem::take(&mut self.deposits) {
+            binding.discard_pending();
         }
         for exec in std::mem::take(&mut self.cpu_dispatches) {
             exec.release(&ctx);
@@ -4353,7 +4261,7 @@ mod tests {
     use crate::types::BufferFlags;
     use crate::types::ResourceAccess;
     use crate::BufferKind;
-    use crate::MemoryExchange;
+    use crate::{DepositTarget, MemoryExchange};
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -4519,20 +4427,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let mut write_scheme = Scheme::new(&ctx);
         let deposit = memory
-            .bind_deposit_buffer(&mut write_scheme, parcel, parcel.byte_size())
+            .bind_deposit(&mut write_scheme, DepositTarget::buffer(parcel, parcel.byte_size()))
             .expect("bind full deposit");
         deposit
-            .write(&mut write_scheme, 0, &vec![0u8; parcel.byte_size() as usize])
+            .write(0, &vec![0u8; parcel.byte_size() as usize])
             .expect("full deposit write");
         assert_eq!(write_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Overwrite);
 
         let mut partial_scheme = Scheme::new(&ctx);
         let partial_deposit = memory
-            .bind_deposit_buffer_at(&mut partial_scheme, parcel, 4, 4)
+            .bind_deposit(&mut partial_scheme, DepositTarget::buffer_at(parcel, 4, 4))
             .expect("bind partial deposit");
-        partial_deposit
-            .write(&mut partial_scheme, 0, &[1, 2, 3, 4])
-            .expect("partial deposit write");
+        partial_deposit.write(0, &[1, 2, 3, 4]).expect("partial deposit write");
         assert_eq!(partial_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Write);
     }
 
@@ -7908,11 +7814,11 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 64)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 64))
             .unwrap();
 
         let payload_a = vec![1u8; 64];
-        upload.write(&mut scheme, 0, &payload_a).unwrap();
+        upload.write(0, &payload_a).unwrap();
         assert_eq!(scheme.deposit_parcel_count(&upload), 1);
         let _sub1 = scheme.submit().unwrap();
 
@@ -7920,7 +7826,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         scheme.test_mark_deposit_inflight(&upload, 1_000_000);
 
         let payload_b = vec![2u8; 64];
-        upload.write(&mut scheme, 0, &payload_b).unwrap();
+        upload.write(0, &payload_b).unwrap();
         assert_eq!(
             scheme.deposit_parcel_count(&upload),
             2,
@@ -7939,12 +7845,12 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 32)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 32))
             .unwrap();
 
-        upload.write(&mut scheme, 0, &[7u8; 32]).unwrap();
+        upload.write(0, &[7u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
-        upload.write(&mut scheme, 0, &[8u8; 32]).unwrap();
+        upload.write(0, &[8u8; 32]).unwrap();
         assert_eq!(
             scheme.deposit_parcel_count(&upload),
             1,
@@ -7963,7 +7869,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 16))
             .unwrap();
         let err = scheme.submit().expect_err("must require stage before submit");
         let msg = format!("{err}");
@@ -7982,15 +7888,15 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 32)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 32))
             .unwrap();
 
-        upload.write(&mut scheme, 0, &[1u8; 32]).unwrap();
+        upload.write(0, &[1u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1);
         assert_eq!(scheme.test_retained_slot_variant_count(), 1);
 
-        upload.write(&mut scheme, 0, &[2u8; 32]).unwrap();
+        upload.write(0, &[2u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.test_retained_slot_variant_count(), 1);
         #[cfg(not(feature = "metal"))]
@@ -8001,7 +7907,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
 
         scheme.test_mark_deposit_inflight(&upload, 1_000_000);
-        upload.write(&mut scheme, 0, &[3u8; 32]).unwrap();
+        upload.write(0, &[3u8; 32]).unwrap();
         assert_eq!(scheme.deposit_parcel_count(&upload), 2);
         let _ = scheme.submit().unwrap();
         assert_eq!(
@@ -8030,9 +7936,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_texture(&mut scheme, &tex, 0, 0, 1, 1, 4, 0)
+            .bind_deposit(&mut scheme, DepositTarget::texture(&tex, 0, 0, 1, 1, 4, 0))
             .unwrap();
-        upload.write(&mut scheme, 0, &[9, 8, 7, 6]).unwrap();
+        upload.write(0, &[9, 8, 7, 6]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1);
         assert!(scheme.deposit_parcel_count(&upload) >= 1);
@@ -8048,9 +7954,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 16))
             .unwrap();
-        upload.write(&mut scheme, 0, &[4u8; 16]).unwrap();
+        upload.write(0, &[4u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.deposit_parcel_count(&upload), 1);
         drop(scheme);
@@ -8070,11 +7976,11 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 16))
             .unwrap();
-        upload.write(&mut scheme, 0, &[1u8; 16]).unwrap();
+        upload.write(0, &[1u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
-        upload.write(&mut scheme, 0, &[2u8; 16]).unwrap();
+        upload.write(0, &[2u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
 
         assert!(

@@ -5,8 +5,8 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, IndexFormat, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, IndexFormat, Instance,
+    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, Vertex2D, WithdrawTransaction,
 };
@@ -289,9 +289,14 @@ impl App {
         let index_parcel = self.index_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);
         let memory = MemoryExchange::new(ctx);
-        let vertex_deposit =
-            memory.bind_deposit_buffer(&mut upload_scheme, vertex_parcel, vertex_parcel.byte_size())?;
-        let index_deposit = memory.bind_deposit_buffer(&mut upload_scheme, index_parcel, index_parcel.byte_size())?;
+        let vertex_deposit = memory.bind_deposit(
+            &mut upload_scheme,
+            DepositTarget::buffer(vertex_parcel, vertex_parcel.byte_size()),
+        )?;
+        let index_deposit = memory.bind_deposit(
+            &mut upload_scheme,
+            DepositTarget::buffer(index_parcel, index_parcel.byte_size()),
+        )?;
         self.upload_scheme = Some(upload_scheme);
         self.vertex_deposit = Some(vertex_deposit);
         self.index_deposit = Some(index_deposit);
@@ -364,11 +369,13 @@ impl App {
 
         let upload = self.upload_scheme.as_mut().unwrap();
         self.vertex_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::cast_slice(&vertices))?;
+            .write(0, bytemuck::cast_slice(&vertices))?;
         self.index_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::cast_slice(&sorted_indices))?;
+            .write(0, bytemuck::cast_slice(&sorted_indices))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

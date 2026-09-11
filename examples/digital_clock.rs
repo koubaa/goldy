@@ -8,10 +8,10 @@ mod digital_clock_shared;
 
 use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, TimeData};
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout, VertexFormat,
-    WithdrawTransaction,
+    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
+    VertexFormat, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -249,10 +249,12 @@ impl App {
         self.vertex_parcel = Some(vertex_parcel);
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);
-        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit_buffer(
+        let vertex_deposit = MemoryExchange::new(ctx).bind_deposit(
             &mut upload_scheme,
-            vertex_parcel,
-            (MAX_CLOCK_VERTICES * std::mem::size_of::<ClockVertex>()) as u64,
+            DepositTarget::buffer(
+                vertex_parcel,
+                (MAX_CLOCK_VERTICES * std::mem::size_of::<ClockVertex>()) as u64,
+            ),
         )?;
         self.upload_scheme = Some(upload_scheme);
         self.vertex_deposit = Some(vertex_deposit);
@@ -312,8 +314,9 @@ impl App {
 
         let upload = self.upload_scheme.as_mut().unwrap();
         self.vertex_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::cast_slice(&vertices))?;
+            .write(0, bytemuck::cast_slice(&vertices))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

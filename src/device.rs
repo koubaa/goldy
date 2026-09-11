@@ -1154,7 +1154,7 @@ impl Device {
     /// No-op: texture uploads are scheduled via [`crate::Scheme`].
     #[deprecated(
         since = "0.1.0",
-        note = "Texture uploads are batched via MemoryExchange::bind_deposit_texture; there is nothing to flush."
+        note = "Texture uploads are batched via MemoryExchange::bind_deposit; there is nothing to flush."
     )]
     pub fn flush_texture_uploads(&self) -> Result<()> {
         Ok(())

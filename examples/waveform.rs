@@ -5,10 +5,10 @@
 //! Run with: `cargo run --example waveform`
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DepositTransaction, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
-    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, Vertex2D,
-    WithdrawTransaction,
+    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -222,7 +222,10 @@ impl App {
         let channel_capacity = channel_parcels[0].byte_size();
         let channel_deposits = std::array::from_fn(|ch| {
             memory
-                .bind_deposit_buffer(&mut upload_scheme, &channel_parcels[ch], channel_capacity)
+                .bind_deposit(
+                    &mut upload_scheme,
+                    DepositTarget::buffer(&channel_parcels[ch], channel_capacity),
+                )
                 .expect("bind channel deposit")
         });
         self.upload_scheme = Some(upload_scheme);
@@ -287,7 +290,7 @@ impl App {
         for ch in 0..NUM_CHANNELS {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
-            channel_deposits[ch].write(upload, 0, bytemuck::cast_slice(&vertices))?;
+            channel_deposits[ch].write(0, bytemuck::cast_slice(&vertices))?;
         }
         upload.submit()?;
 

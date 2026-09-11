@@ -63,6 +63,12 @@ let bytes = withdraw.claim(&mut submission)?.consume()?;
 A live linear claim is unsettled until `consume` or `discard`. Dropping an unsettled claim
 discards it.
 
+Memory deposits follow the same grammar internally (`Transaction` → claim at submit →
+consume at the copy dispatch) but the program never authors the claim. `bind_deposit`
+records copy topology; `DepositTransaction::write` prepares the occurrence; submit claims
+it; graph execution consumes it. Exchange staging is retired locally and is not a
+parcel-ledger entry. Destination RAW/WAR ordering remains enforced.
+
 ## Multi-frame pipelining
 
 For production renderers, use [`FrameOrchestrator`](./pipelined-frames.md). It bounds

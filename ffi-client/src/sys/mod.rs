@@ -316,37 +316,12 @@ pub unsafe fn goldy_memory_exchange_bind_withdraw_texture(
     (lib().goldy_memory_exchange_bind_withdraw_texture)(exchange, scheme, texture)
 }
 
-pub unsafe fn goldy_memory_exchange_bind_deposit_buffer(
+pub unsafe fn goldy_memory_exchange_bind_deposit(
     exchange: *const GoldyMemoryExchange,
     scheme: *mut GoldyScheme,
-    destination: *const GoldyParcel,
-    capacity: u64,
+    target: *const GoldyDepositTarget,
 ) -> *mut GoldyDepositTransaction {
-    (lib().goldy_memory_exchange_bind_deposit_buffer)(exchange, scheme, destination, capacity)
-}
-
-pub unsafe fn goldy_memory_exchange_bind_deposit_texture(
-    exchange: *const GoldyMemoryExchange,
-    scheme: *mut GoldyScheme,
-    destination: *const GoldyTexture,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    capacity: u64,
-    src_row_pitch: u32,
-) -> *mut GoldyDepositTransaction {
-    (lib().goldy_memory_exchange_bind_deposit_texture)(
-        exchange,
-        scheme,
-        destination,
-        x,
-        y,
-        width,
-        height,
-        capacity,
-        src_row_pitch,
-    )
+    (lib().goldy_memory_exchange_bind_deposit)(exchange, scheme, target)
 }
 
 pub unsafe fn goldy_withdraw_transaction_destroy(transaction: *mut GoldyWithdrawTransaction) {
@@ -410,12 +385,11 @@ pub unsafe fn goldy_deposit_transaction_id(transaction: *const GoldyDepositTrans
 
 pub unsafe fn goldy_deposit_transaction_write(
     transaction: *const GoldyDepositTransaction,
-    scheme: *mut GoldyScheme,
     offset: u64,
     data: *const u8,
     data_size: usize,
 ) -> GoldyResult {
-    (lib().goldy_deposit_transaction_write)(transaction, scheme, offset, data, data_size)
+    (lib().goldy_deposit_transaction_write)(transaction, offset, data, data_size)
 }
 
 pub unsafe fn goldy_scheme_lease_render_target(

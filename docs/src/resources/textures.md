@@ -74,7 +74,7 @@ bitflags! {
 
 ## Writing Data
 
-Prefer `MemoryExchange::bind_deposit_texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
+Prefer `MemoryExchange::bind_deposit` with `DepositTarget::texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
 
 ```rust
 #[allow(deprecated)]

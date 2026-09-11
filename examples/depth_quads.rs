@@ -7,10 +7,11 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTransaction, DepthFormat, DepthStencilState,
-    DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
-    Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
+    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTarget, DepositTransaction, DepthFormat,
+    DepthStencilState, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
+    WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -222,8 +223,14 @@ impl App {
         let cool_parcel = self.cool_parcel.as_ref().unwrap();
         let mut upload_scheme = Scheme::new(ctx);
         let memory = MemoryExchange::new(ctx);
-        let warm_deposit = memory.bind_deposit_buffer(&mut upload_scheme, warm_parcel, warm_parcel.byte_size())?;
-        let cool_deposit = memory.bind_deposit_buffer(&mut upload_scheme, cool_parcel, cool_parcel.byte_size())?;
+        let warm_deposit = memory.bind_deposit(
+            &mut upload_scheme,
+            DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()),
+        )?;
+        let cool_deposit = memory.bind_deposit(
+            &mut upload_scheme,
+            DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()),
+        )?;
         self.upload_scheme = Some(upload_scheme);
         self.warm_deposit = Some(warm_deposit);
         self.cool_deposit = Some(cool_deposit);
@@ -262,11 +269,13 @@ impl App {
 
         let upload = self.upload_scheme.as_mut().unwrap();
         self.warm_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::cast_slice(&warm_verts))?;
+            .write(0, bytemuck::cast_slice(&warm_verts))?;
         self.cool_deposit
+            .as_ref()
             .unwrap()
-            .write(upload, 0, bytemuck::cast_slice(&cool_verts))?;
+            .write(0, bytemuck::cast_slice(&cool_verts))?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

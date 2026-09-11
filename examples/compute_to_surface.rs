@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-    PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture, Transaction,
-    WithdrawTransaction,
+    Buffer, BufferKind, ComputePipeline, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange,
+    NodeAccess, PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture,
+    Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -267,10 +267,9 @@ impl App {
         )?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &uniform_buffer,
-            std::mem::size_of::<Uniforms>() as u64,
+            DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
         )?;
 
         self.state = Some(RenderState {
@@ -412,9 +411,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    state
-        .uniform_deposit
-        .write(&mut state.upload_scheme, 0, bytemuck::bytes_of(&uniforms))?;
+    state.uniform_deposit.write(0, bytemuck::bytes_of(&uniforms))?;
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;

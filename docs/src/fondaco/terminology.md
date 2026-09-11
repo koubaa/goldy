@@ -48,7 +48,7 @@ Do not describe **Designed**, **Experimental**, or **Speculative** capabilities 
 | Ownership | `NodeAccess` on scheme nodes | Precedences derived from access modes |
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | Crate-private; clients use settlement APIs |
 | Gate | Submission gate, `Context::boundary_crossed` | Epoch-driven reclamation |
-| Exchange | `SurfaceExchange`, `MemoryExchange` | `Transaction` → `Claim` → `consume` / `discard` |
+| Exchange | `SurfaceExchange`, `MemoryExchange` | Present/withdraw: `Transaction` → `Claim` → `consume` / `discard`. Deposit: `Transaction` → internal `Claim` → consume at copy dispatch |
 | Warehouse | `BudgetPolicy`, `VramAllocator` | Bound on committed parcel extent |
 | Lease | `Lease<LeaseTexture>`, `Lease<LeaseBuffer>`, `Lease<LeaseRenderTarget>`, `PresentLease` | Temporary tenancy minted by the lessor (`Context` / surface pool); schemes intern on first use |
 

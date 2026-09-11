@@ -79,8 +79,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_memory_exchange_destroy: FnGoldyMemoryExchangeDestroy,
     pub goldy_memory_exchange_bind_withdraw: FnGoldyMemoryExchangeBindWithdraw,
     pub goldy_memory_exchange_bind_withdraw_texture: FnGoldyMemoryExchangeBindWithdrawTexture,
-    pub goldy_memory_exchange_bind_deposit_buffer: FnGoldyMemoryExchangeBindDepositBuffer,
-    pub goldy_memory_exchange_bind_deposit_texture: FnGoldyMemoryExchangeBindDepositTexture,
+    pub goldy_memory_exchange_bind_deposit: FnGoldyMemoryExchangeBindDeposit,
     pub goldy_withdraw_transaction_destroy: FnGoldyWithdrawTransactionDestroy,
     pub goldy_withdraw_transaction_byte_size: FnGoldyWithdrawTransactionByteSize,
     pub goldy_withdraw_transaction_claim: FnGoldyWithdrawTransactionClaim,
@@ -252,13 +251,9 @@ impl GoldyFfi {
                 "goldy_memory_exchange_bind_withdraw_texture",
                 FnGoldyMemoryExchangeBindWithdrawTexture
             ),
-            goldy_memory_exchange_bind_deposit_buffer: sym!(
-                "goldy_memory_exchange_bind_deposit_buffer",
-                FnGoldyMemoryExchangeBindDepositBuffer
-            ),
-            goldy_memory_exchange_bind_deposit_texture: sym!(
-                "goldy_memory_exchange_bind_deposit_texture",
-                FnGoldyMemoryExchangeBindDepositTexture
+            goldy_memory_exchange_bind_deposit: sym!(
+                "goldy_memory_exchange_bind_deposit",
+                FnGoldyMemoryExchangeBindDeposit
             ),
             goldy_withdraw_transaction_destroy: sym!(
                 "goldy_withdraw_transaction_destroy",
