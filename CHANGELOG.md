@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fused WebGPU upload staging is retained until submission retirement.**
+  Replay submissions that fuse a deposit upload with its following compute
+  partition now consume the deposit claim at the fused submission's timeline.
+  Previously the unconsumed claim was dropped at epoch zero, allowing its
+  staging buffer to be reused while WebGPU still referenced it.
+
 ### Changed
 
 - **Examples present through Goldy types** — windowed examples bind

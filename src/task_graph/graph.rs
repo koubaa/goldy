@@ -1888,6 +1888,7 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_last_tv(part_idx + 1, last_tv);
                 boundary.record(separate, false, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &merged_waves, last_tv);
+                consume_waves_deposits(ir, &merged_waves, &mut deposit_claims, last_tv);
                 part_idx += 2;
                 continue;
             }
@@ -3321,20 +3322,17 @@ mod slice_retention_tests {
         let ir = upload_then_compute_ir(buf.handle, p.handle);
 
         let mut state = IrSubmitState::new();
+        let pool = Arc::new(crate::deposit_pool::DepositExchangePool::new());
+        let handle = pool.take_or_alloc(&ctx, 64, 1).unwrap();
+        let claim = crate::exchange::DepositClaim::new(handle, 64, Arc::clone(&pool));
         let mut uploads = std::collections::HashMap::new();
-        uploads.insert(
-            0,
-            ResolvedDeposit {
-                parent: buf.handle,
-                offset: 0,
-                len: 64,
-            },
-        );
+        uploads.insert(0, claim.resolved());
         let mut present_slots = Vec::new();
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let mut partial = PartitionSubmitResult::default();
         let mut partial_tv = 0u64;
         let mut deposit_claims = std::collections::HashMap::new();
+        deposit_claims.insert(0, Some(claim));
         state
             .submit_pipelined_and_retain_with_presents(
                 &ctx,
@@ -3356,6 +3354,16 @@ mod slice_retention_tests {
                 "replay path must fuse upload+compute when capability is enabled"
             );
         });
+        assert!(
+            deposit_claims.get(&0).is_some_and(Option::is_none),
+            "fused upload must consume its deposit claim"
+        );
+        assert_eq!(
+            pool.parked_epoch(handle),
+            Some(partial_tv),
+            "fused upload backing must be parked at its submission epoch"
+        );
+        assert_ne!(partial_tv, 0, "mock submit must produce a nonzero epoch");
     }
 
     // ------------------------------------------------------------------
