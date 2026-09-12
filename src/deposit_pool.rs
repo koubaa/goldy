@@ -139,6 +139,14 @@ impl DepositExchangePool {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn parked_epoch(&self, handle: BufferHandle) -> Option<TimelineValue> {
+        self.lock()
+            .iter()
+            .find(|entry| entry.handle == handle && !entry.claimed)
+            .map(|entry| entry.ready_after)
+    }
+
     /// Force a parked backing with this affinity to look in-flight until `tv`.
     pub(crate) fn mark_affinity_inflight(&self, affinity: u64, tv: TimelineValue) -> bool {
         let mut entries = self.lock();
