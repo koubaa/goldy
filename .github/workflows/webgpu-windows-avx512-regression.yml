@@ -1,0 +1,72 @@
+# Temporary full-job regression run for Slang AVX-512 JIT failures.
+# Remove after GitHub Actions verification.
+name: WebGPU Windows AVX-512 Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cursor/disable-slang-avx512-ci-3d18
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SLANG_DISABLE_AVX512: "1"
+
+jobs:
+  test-webgpu-windows:
+    name: WebGPU Tests (Windows / DX12 WARP)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      GOLDY_VALIDATION: all
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-webgpu-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-webgpu-
+
+      - name: Add Windows SDK DXC to PATH
+        shell: pwsh
+        run: |
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.*\x64' -Directory |
+                    Sort-Object Name | Select-Object -Last 1
+          if ($sdkBin -and (Test-Path "$($sdkBin.FullName)\dxcompiler.dll")) {
+            Write-Host "Found DXC at: $($sdkBin.FullName)"
+            "$($sdkBin.FullName)" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          } else {
+            Write-Host "WARNING: dxcompiler.dll not found in Windows SDK"
+          }
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run tests (WebGPU + WARP)
+        env:
+          GOLDY_BACKEND: webgpu
+          WGPU_BACKEND: dx12
+          WGPU_FORCE_FALLBACK_ADAPTER: "1"
+        run: cargo nextest run --no-default-features --features webgpu --test-threads=1
+
+      - name: Run goldy-ffi integration tests (WebGPU + WARP)
+        env:
+          GOLDY_BACKEND: webgpu
+          WGPU_BACKEND: dx12
+          WGPU_FORCE_FALLBACK_ADAPTER: "1"
+        run: cargo nextest run -p goldy-ffi --no-default-features --features webgpu --test-threads=1
