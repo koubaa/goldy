@@ -77,7 +77,7 @@ rustc-hash = "2"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 # Optional: `update-screenshots` binary only
 image = { version = "0.25.10", optional = true }
-dirs = "6.0"
+dirs = "7.0"
 scopeguard = "1.2"
 bincode = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
