@@ -103,7 +103,7 @@ windows = { version = "0.62", optional = true, features = [
 ] }
 
 gpu-allocator = { version = "0.28", optional = true, features = ["d3d12"] }
-windows-core = { version = "0.62", optional = true }
+windows-core = { version = "0.100", optional = true }
 
 # Page-protect debug allocations (`GOLDY_VALIDATION=host_access`) on Unix.
 [target.'cfg(unix)'.dependencies]
