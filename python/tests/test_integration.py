@@ -92,8 +92,8 @@ def test_parcel_write(device):
     ctx = device.create_context()
     upload = goldy.Scheme(ctx)
     memory = goldy.MemoryExchange(ctx)
-    deposit = memory.bind_deposit_buffer(upload, buffer[0], 16)
-    deposit.write(upload, np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
+    deposit = memory.bind_deposit(upload, goldy.DepositTarget.buffer(buffer[0], 16))
+    deposit.write(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
     frame = upload.submit()
     frame.wait_until_settled()
 
@@ -137,7 +137,7 @@ def test_scheme_render_target_lease(device):
 
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
-    lease = scheme.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
+    lease = ctx.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
     assert lease is not None
 
 
@@ -147,7 +147,7 @@ def test_scheme_render_target_lease_with_depth(device):
 
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
-    lease = scheme.lease_render_target(
+    lease = ctx.lease_render_target(
         1024,
         768,
         goldy.TextureFormat.RGBA8_UNORM,
@@ -173,7 +173,7 @@ def test_render_clear_via_scheme(device):
     )
 
     scheme = goldy.Scheme(ctx)
-    rt = scheme.lease_render_target(width, height, goldy.TextureFormat.RGBA8_UNORM)
+    rt = ctx.lease_render_target(width, height, goldy.TextureFormat.RGBA8_UNORM)
     with scheme.render_pass("clear", rt, goldy.TargetLoad.clear(goldy.Color.RED)) as rp:
         pass
 
@@ -272,7 +272,7 @@ def test_triangle_via_scheme(device):
 
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
-    rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
+    rt = ctx.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
     with scheme.render_pass(
         "triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
     ) as rp:

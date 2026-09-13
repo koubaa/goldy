@@ -12,7 +12,7 @@ Example:
     >>> # Graphics via Scheme (headless)
     >>> ctx = goldy.Context(device)
     >>> scheme = goldy.Scheme(ctx)
-    >>> rt = scheme.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
+    >>> rt = ctx.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
     >>> with scheme.render_pass("clear", rt, goldy.TargetLoad.clear(goldy.Color.CORNFLOWER_BLUE)) as rp:
     ...     pass
     >>> submission = scheme.submit()
@@ -76,7 +76,7 @@ from goldy._goldy import (
     SchemeRenderPass,
     SchemeRenderTargetLease,
     SchemeSubmission,
-    MemoryExchange, WithdrawTransaction, WithdrawClaim, DepositTransaction,
+    MemoryExchange, DepositTarget, WithdrawTransaction, WithdrawClaim, DepositTransaction,
     PresentLease,
     SurfaceExchange,
     Transaction,
@@ -125,7 +125,7 @@ __all__ = [
     "SchemeRenderPass",
     "SchemeRenderTargetLease",
     "SchemeSubmission",
-    "MemoryExchange", "WithdrawTransaction", "WithdrawClaim", "DepositTransaction",
+    "MemoryExchange", "DepositTarget", "WithdrawTransaction", "WithdrawClaim", "DepositTransaction",
     "PresentLease",
     "SurfaceExchange",
     "Transaction",

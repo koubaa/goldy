@@ -4,6 +4,7 @@
 //! outlives every context. Submit, wait, signal, and reclamation APIs live here.
 
 use crate::backend::ContextHandle;
+use crate::deposit_pool::DepositExchangePool;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::parcel::BytesByKind;
@@ -33,8 +34,10 @@ pub(crate) struct ContextInner {
     reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
     submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
     high_water_timeline: AtomicU64,
-    /// Epoch-gated transient parcel pool backing scheme-held leases.
+    /// Epoch-gated transient parcel pool backing context-minted leases.
     transient_pool: Mutex<TransientPool>,
+    /// Exchange-owned CPU-writable staging for memory deposits.
+    deposit_pool: Arc<DepositExchangePool>,
 }
 
 impl Clone for Context {
@@ -53,6 +56,7 @@ impl std::fmt::Debug for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
+        self.deposit_pool.drain_backend(&self.device, self.handle);
         // Drop the transient pool (and its parked parcels) while the device is alive.
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
@@ -102,6 +106,7 @@ impl Context {
                 submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
                 transient_pool: Mutex::new(TransientPool::new()),
+                deposit_pool: Arc::new(DepositExchangePool::new()),
             }),
         })
     }
@@ -132,6 +137,22 @@ impl Context {
     {
         let mut pool = self.inner.transient_pool.lock().unwrap();
         f(&mut pool)
+    }
+
+    pub(crate) fn deposit_pool(&self) -> &Arc<DepositExchangePool> {
+        &self.inner.deposit_pool
+    }
+
+    /// Fresh deposit-staging allocations made by this context's memory exchange.
+    #[doc(hidden)]
+    pub fn deposit_staging_alloc_count(&self) -> usize {
+        self.inner.deposit_pool.alloc_count()
+    }
+
+    /// Live deposit-staging backings currently owned by the exchange pool.
+    #[doc(hidden)]
+    pub fn deposit_staging_live_count(&self) -> usize {
+        self.inner.deposit_pool.live_count()
     }
 
     /// Acquire a one-submission texture from this context's transient pool.
@@ -204,6 +225,71 @@ impl Context {
     /// Does not increment when a retired bin entry is reused. Monotonically increasing.
     pub fn transient_texture_alloc_count(&self) -> usize {
         self.with_transient_pool(|pool| pool.texture_alloc_count())
+    }
+
+    /// Mint a transient texture lease from this context's pool.
+    ///
+    /// The lease is self-describing and may be bound by any scheme on this context.
+    /// Schemes intern a clone on first use; pool return happens when the last clone
+    /// is dropped, gated by the parcel's last-referenced epoch.
+    pub fn lease_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        access: crate::types::TextureKind,
+        flags: crate::types::TextureFlags,
+    ) -> Result<crate::scheme::Lease<crate::scheme::LeaseTexture>, GoldyError> {
+        crate::scheme::Lease::mint_texture(self, width, height, format, access, flags)
+    }
+
+    /// Mint a transient buffer lease from this context's pool.
+    ///
+    /// # Write-first invariant
+    ///
+    /// The pool may reissue a previously-used buffer parcel whose epoch has retired.
+    /// The recycled bytes are **not** cleared. The first node that accesses this lease
+    /// must declare [`crate::NodeAccess::Write`], [`crate::NodeAccess::Overwrite`], or
+    /// `ReadWrite`, never pure `Read` — otherwise the shader observes the previous
+    /// tenant's data.
+    ///
+    /// A full inaugural-write shape check (unique-minimal-write scheme validation per
+    /// design §8) is not yet implemented; callers are responsible for this invariant today.
+    pub fn lease_buffer(&self, size: u64) -> Result<crate::scheme::Lease<crate::scheme::LeaseBuffer>, GoldyError> {
+        self.lease_buffer_with(
+            size,
+            crate::types::BufferKind::Scattered,
+            crate::types::BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::lease_buffer`] but with explicit kind and flags.
+    ///
+    /// Use this when the shader requires a buffer kind other than `Scattered` (e.g.
+    /// `Broadcast` for uniform buffers). The pool bins buffers by `(size, kind, flags)`,
+    /// so only identically-described buffers are ever reused across submissions.
+    pub fn lease_buffer_with(
+        &self,
+        size: u64,
+        kind: crate::types::BufferKind,
+        flags: crate::types::BufferFlags,
+    ) -> Result<crate::scheme::Lease<crate::scheme::LeaseBuffer>, GoldyError> {
+        crate::scheme::Lease::mint_buffer(self, size, kind, flags)
+    }
+
+    /// Mint a render-target lease allocated on this context's device.
+    ///
+    /// Render targets are not pooled yet; dropping the last lease clone frees the GPU
+    /// object. Stamp registration happens when a scheme first binds the lease.
+    #[cfg(feature = "graphics")]
+    pub fn lease_render_target(
+        &self,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        depth_format: Option<crate::types::DepthFormat>,
+    ) -> Result<crate::scheme::Lease<crate::scheme::LeaseRenderTarget>, GoldyError> {
+        crate::scheme::Lease::mint_render_target(self, width, height, format, depth_format)
     }
 
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
@@ -426,7 +512,7 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
-            // `RetainedPool::release` parks parcels here for epoch-gated reuse (leases,
+            // `Context::release_*` parks parcels here for epoch-gated reuse (leases,
             // future scheme-held transients). When callers park buffers here but do not
             // acquire through the transient pool, those parked buffers are not re-issued
             // — only dropped once `ready_after` retires. Without this drain at every frame

@@ -48,9 +48,9 @@ Do not describe **Designed**, **Experimental**, or **Speculative** capabilities 
 | Ownership | `NodeAccess` on scheme nodes | Precedences derived from access modes |
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | Crate-private; clients use settlement APIs |
 | Gate | Submission gate, `Context::boundary_crossed` | Epoch-driven reclamation |
-| Exchange | `SurfaceExchange`, `MemoryExchange` | `Transaction` → `Claim` → `consume` / `discard` |
+| Exchange | `SurfaceExchange`, `MemoryExchange` | Present/withdraw: `Transaction` → `Claim` → `consume` / `discard`. Deposit: `Transaction` → internal `Claim` → consume at copy dispatch |
 | Warehouse | `BudgetPolicy`, `VramAllocator` | Bound on committed parcel extent |
-| Lease | `Lease<T>`, `LeaseRenderTarget` | Temporary view of a parcel for scheme recording |
+| Lease | `Lease<LeaseTexture>`, `Lease<LeaseBuffer>`, `Lease<LeaseRenderTarget>`, `PresentLease` | Temporary tenancy minted by the lessor (`Context` / surface pool); schemes intern on first use |
 
 ### Internal terms
 
@@ -64,5 +64,6 @@ Do not describe **Designed**, **Experimental**, or **Speculative** capabilities 
 
 1. [Machine Specification](./specification.md) — normative semantics
 2. [Goldy Runtime Mapping](./goldy-runtime.md) — what Goldy ships vs designs
-3. [Design Thesis](./design-thesis.md) — why this model on modern GPUs
-4. The rest of this book — tutorials, programming model, and APIs
+3. [Render Passes and Schemes](./render-passes.md) — raster grain vs pass clustering
+4. [Design Thesis](./design-thesis.md) — why this model on modern GPUs
+5. The rest of this book — tutorials, programming model, and APIs

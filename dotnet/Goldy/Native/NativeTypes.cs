@@ -89,3 +89,18 @@ internal struct SamplerDescNative
         LodMaxClamp = 32.0f,
     };
 }
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeDepositTarget
+{
+    public uint Kind;
+    public nint Buffer;
+    public ulong DstOffset;
+    public ulong Capacity;
+    public nint Texture;
+    public uint X;
+    public uint Y;
+    public uint Width;
+    public uint Height;
+    public uint SrcRowPitch;
+}

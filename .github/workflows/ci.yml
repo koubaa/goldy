@@ -18,6 +18,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Slang's LLVM host-callable JIT can intermittently emit AVX-512 instructions
+  # unsupported by virtualized CI hosts (slang#11062), causing SIGILL/0xc000001d.
+  SLANG_DISABLE_AVX512: "1"
   # Lavapipe CI image (ghcr.io/koubaa/goldy/lavapipe-ci:latest) is inlined in
   # container.image below — workflow env cannot be referenced there.
 

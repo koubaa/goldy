@@ -1,15 +1,16 @@
-//! Conway's Game of Life — hybrid Scheme via goldy-ffi-client.
+//! Conway's Game of Life — two retained schemes, alternating resubmit (ffi-client).
 //!
 //! Ping-pong cell grids live in one retained record buffer (fields `"a"` / `"b"`).
-//! Each simulation step runs an ephemeral compute scheme; the display scheme is
-//! rebuilt when the active field flips.
+//! Orientation AB reads `a` and writes `b`; BA is the swap. Each is recorded once
+//! (and again on resize). Simulation steps alternate which scheme submits. Idle
+//! redraws skip submit and leave the last present on the surface.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease,
-    ShaderModule, SurfaceExchange, TargetLoad, Transaction,
+    Buffer, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule,
+    SurfaceExchange, TargetLoad, Transaction,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -125,39 +126,27 @@ fn create_initial_state() -> Vec<u32> {
     cells
 }
 
-fn run_compute_step(
-    ctx: &Context,
+fn record_scheme(
+    scheme: &mut Scheme,
+    surface: &SurfaceExchange,
     cells: &Buffer,
     read_field: &str,
     write_field: &str,
-    pipeline: &ComputePipeline,
-) -> goldy_ffi_client::Result<()> {
+    compute_pipeline: &ComputePipeline,
+    render_pipeline: &RenderPipeline,
+    scene_rt: &SchemeRenderTargetLease,
+) -> goldy_ffi_client::Result<Transaction> {
     let read = cells.field(field_unit(read_field))?;
     let write = cells.field(field_unit(write_field))?;
-    let mut scheme = Scheme::new(ctx)?;
     {
-        let mut node = scheme.compute_node("game_of_life", pipeline);
+        let mut node = scheme.compute_node("game_of_life", compute_pipeline);
         node.with_parcel(&read, NodeAccess::Read);
         node.with_parcel(&write, NodeAccess::Overwrite);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
-    scheme.submit()?;
-    Ok(())
-}
-
-fn record_display_scheme(
-    scheme: &mut Scheme,
-    surface: &SurfaceExchange,
-    cells: &Buffer,
-    current_field: &str,
-    render_pipeline: &RenderPipeline,
-    scene_rt: &SchemeRenderTargetLease,
-) -> goldy_ffi_client::Result<Transaction> {
-    let unit = field_unit(current_field);
-    let current = cells.field(unit)?;
     {
         let mut pass = scheme.render_pass("game_of_life_render", scene_rt, TargetLoad::Discard);
-        pass.with_parcel(&current, NodeAccess::Read);
+        pass.with_parcel(&write, NodeAccess::Read);
         pass.set_pipeline(render_pipeline);
         pass.draw_fullscreen();
         pass.finish_recorded();
@@ -165,16 +154,54 @@ fn record_display_scheme(
     surface.bind_render_target(scheme, scene_rt)
 }
 
+fn build_scheme(
+    ctx: &Context,
+    surface: &SurfaceExchange,
+    cells: &Buffer,
+    read_field: &str,
+    write_field: &str,
+    compute_pipeline: &ComputePipeline,
+    render_pipeline: &RenderPipeline,
+) -> goldy_ffi_client::Result<(Scheme, Transaction)> {
+    let mut scheme = Scheme::new(ctx)?;
+    let (width, height) = surface.size();
+    let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
+    let present = record_scheme(
+        &mut scheme,
+        surface,
+        cells,
+        read_field,
+        write_field,
+        compute_pipeline,
+        render_pipeline,
+        &scene_rt,
+    )?;
+    Ok((scheme, present))
+}
+
+fn build_schemes(
+    ctx: &Context,
+    surface: &SurfaceExchange,
+    cells: &Buffer,
+    compute_pipeline: &ComputePipeline,
+    render_pipeline: &RenderPipeline,
+) -> goldy_ffi_client::Result<((Scheme, Transaction), (Scheme, Transaction))> {
+    Ok((
+        build_scheme(ctx, surface, cells, "a", "b", compute_pipeline, render_pipeline)?,
+        build_scheme(ctx, surface, cells, "b", "a", compute_pipeline, render_pipeline)?,
+    ))
+}
+
 struct RenderState {
     window: Arc<Window>,
     ctx: Context,
     surface: SurfaceExchange,
-    scene_rt: SchemeRenderTargetLease,
-    display_scheme: Scheme,
-    present: Transaction,
+    scheme_ab: Scheme,
+    scheme_ba: Scheme,
+    present_ab: Transaction,
+    present_ba: Transaction,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
-    _retained_pool: RetainedPool,
     cells: Buffer,
     use_buffer_a: bool,
     frame_count: u32,
@@ -192,8 +219,7 @@ impl RenderState {
         let surface = surface_from_window(&ctx, window.as_ref())?;
 
         let initial = create_initial_state();
-        let mut retained_pool = RetainedPool::new(&device)?;
-        let cells = retained_pool.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
+        let cells = device.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
 
         let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -209,11 +235,8 @@ impl RenderState {
             },
         )?;
 
-        let mut display_scheme = Scheme::new(&ctx)?;
-        let (width, height) = surface.size();
-        let scene_rt =
-            display_scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
-        let present = record_display_scheme(&mut display_scheme, &surface, &cells, "a", &render_pipeline, &scene_rt)?;
+        let ((scheme_ab, present_ab), (scheme_ba, present_ba)) =
+            build_schemes(&ctx, &surface, &cells, &compute_pipeline, &render_pipeline)?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
         println!("Features Gosper Glider Gun + random cells");
@@ -223,12 +246,12 @@ impl RenderState {
             window,
             ctx,
             surface,
-            scene_rt,
-            display_scheme,
-            present,
+            scheme_ab,
+            scheme_ba,
+            present_ab,
+            present_ba,
             compute_pipeline,
             render_pipeline,
-            _retained_pool: retained_pool,
             cells,
             use_buffer_a: true,
             frame_count: 0,
@@ -237,45 +260,41 @@ impl RenderState {
         })
     }
 
-    fn rebuild_display_scheme(&mut self) -> goldy_ffi_client::Result<()> {
-        let current_field = if self.use_buffer_a { "a" } else { "b" };
-        let mut display_scheme = Scheme::new(&self.ctx)?;
-        let (width, height) = self.surface.size();
-        self.scene_rt = display_scheme.lease_render_target(
-            width.max(1),
-            height.max(1),
-            self.surface.format(),
-            None::<DepthFormat>,
-        )?;
-        self.present = record_display_scheme(
-            &mut display_scheme,
+    fn record_orientations(&mut self) -> goldy_ffi_client::Result<()> {
+        let (ab, ba) = build_schemes(
+            &self.ctx,
             &self.surface,
             &self.cells,
-            current_field,
+            &self.compute_pipeline,
             &self.render_pipeline,
-            &self.scene_rt,
         )?;
-        self.display_scheme = display_scheme;
+        (self.scheme_ab, self.present_ab) = ab;
+        (self.scheme_ba, self.present_ba) = ba;
+        Ok(())
+    }
+
+    fn step(&mut self) -> goldy_ffi_client::Result<()> {
+        let (scheme, present) = if self.use_buffer_a {
+            (&mut self.scheme_ab, &self.present_ab)
+        } else {
+            (&mut self.scheme_ba, &self.present_ba)
+        };
+        let mut submission = scheme.submit()?;
+        present.claim(&mut submission)?.consume()?;
+        self.use_buffer_a = !self.use_buffer_a;
         Ok(())
     }
 
     fn render(&mut self) -> goldy_ffi_client::Result<()> {
-        self.frame_count += 1;
-
         let now = std::time::Instant::now();
-        let should_update = now.duration_since(self.last_update).as_millis() > 33;
+        let should_step = self.frame_count == 0 || now.duration_since(self.last_update).as_millis() > 33;
 
-        if should_update {
+        if should_step {
             self.last_update = now;
-
-            let (read_field, write_field) = if self.use_buffer_a { ("a", "b") } else { ("b", "a") };
-            run_compute_step(&self.ctx, &self.cells, read_field, write_field, &self.compute_pipeline)?;
-            self.use_buffer_a = !self.use_buffer_a;
-            self.rebuild_display_scheme()?;
+            self.step()?;
+            self.frame_count += 1;
         }
 
-        let mut submission = self.display_scheme.submit()?;
-        self.present.claim(&mut submission)?.consume()?;
         self.window.request_redraw();
         Ok(())
     }
@@ -342,9 +361,13 @@ impl ApplicationHandler for App {
                             tracing::error!("Failed to resize surface exchange: {e}");
                             return;
                         }
-                        if let Err(e) = state.rebuild_display_scheme() {
-                            tracing::error!("Failed to rebuild display scheme: {e}");
+                        if let Err(e) = state.record_orientations() {
+                            tracing::error!("Failed to rerecord schemes: {e}");
+                            return;
                         }
+                        state.last_update = std::time::Instant::now()
+                            .checked_sub(std::time::Duration::from_millis(34))
+                            .unwrap_or(state.last_update);
                     }
                 }
             }

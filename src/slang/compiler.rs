@@ -389,7 +389,40 @@ pub fn builtin_type_stride(name: &str) -> Option<u32> {
         "float3x3" => Some(36),
         "float4x4" => Some(64),
         "DispatchShape" => Some(12),
-        _ => None,
+        _ => {
+            // `Interlocked<T>` is a 4-byte atomic cell (see goldy_exp). Default Slang
+            // layout treats the wrapper struct as uniform-padded (~16B/field).
+            let trimmed = name.trim();
+            let inner = trimmed
+                .strip_prefix("Interlocked<")
+                .and_then(|rest| rest.strip_suffix('>'))
+                .map(str::trim);
+            inner.and_then(builtin_type_stride)
+        }
+    }
+}
+
+fn slang_type_basename(name: &str) -> &str {
+    name.rsplit(['.', ':']).next().unwrap_or(name).trim()
+}
+
+fn is_interlocked_type_name(name: &str) -> bool {
+    let base = slang_type_basename(name);
+    base == "Interlocked" || base.starts_with("Interlocked<")
+}
+
+fn align_up_u32(value: u32, align: u32) -> u32 {
+    if align <= 1 {
+        return value;
+    }
+    value.div_ceil(align) * align
+}
+
+fn natural_field_align(size: u32) -> u32 {
+    match size {
+        8 => 8,
+        16 | 36 | 64 => 16,
+        _ => 4,
     }
 }
 
@@ -1237,6 +1270,21 @@ impl SlangCompiler {
             | None => SlangParameterCategory::ShaderResource,
             Some(ResourceCategory::Broadcast) => unreachable!("handled above"),
         };
+
+        // Default Slang type layout is uniform/cbuffer. Nested `Interlocked<T>`
+        // wrappers then report ~16B per cell (e.g. AtomicPathBbox 60, BumpAllocators
+        // 116) while GPU structured buffers and host `repr(C)` use 4-byte cells.
+        if matches!(
+            category,
+            Some(ResourceCategory::Scattered) | Some(ResourceCategory::StorageImage) | None
+        ) {
+            if let Some(ty) = self.reflect_type_ptr(request, type_name) {
+                if let Some((size, true)) = self.type_natural_storage_stride(ty) {
+                    return Some(size);
+                }
+            }
+        }
+
         self.reflect_type_size_with_category(request, type_name, layout_cat)
             .or_else(|| {
                 if matches!(
@@ -1251,6 +1299,126 @@ impl SlangCompiler {
                     None
                 }
             })
+    }
+
+    fn reflect_type_ptr(&self, request: *mut SlangCompileRequest, type_name: &str) -> Option<*mut SlangReflectionType> {
+        let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
+        if reflection_ptr.is_null() {
+            return None;
+        }
+
+        let mut candidates = vec![type_name.to_string()];
+        if !type_name.contains('.') {
+            candidates.push(format!("shader.{type_name}"));
+        }
+
+        for candidate in &candidates {
+            let name_cstr = CString::new(candidate.as_str()).ok()?;
+            let ty = unsafe { (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr()) };
+            if !ty.is_null() {
+                return Some(ty);
+            }
+        }
+        None
+    }
+
+    /// Structured-buffer size of `ty` under C packing, with `Interlocked<T>` = sizeof(T).
+    ///
+    /// The `bool` is true when an `Interlocked` wrapper was found (callers should then
+    /// prefer this size over Slang Default/uniform layout).
+    fn type_natural_storage_stride(&self, ty: *mut SlangReflectionType) -> Option<(u32, bool)> {
+        self.type_natural_storage_info(ty, 0)
+    }
+
+    fn type_natural_storage_info(&self, ty: *mut SlangReflectionType, depth: u32) -> Option<(u32, bool)> {
+        if ty.is_null() || depth > 24 {
+            return None;
+        }
+        use super::ffi::SlangTypeKind;
+
+        let name = unsafe {
+            let ptr = (self.library.reflection_type_get_name)(ty);
+            if ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
+        };
+        let field_count = unsafe { (self.library.reflection_type_get_field_count)(ty) };
+        if is_interlocked_type_name(&name) || self.is_interlocked_cell(ty, field_count) {
+            if field_count > 0 {
+                let field = unsafe { (self.library.reflection_type_get_field_by_index)(ty, 0) };
+                if !field.is_null() {
+                    let inner = unsafe { (self.library.reflection_variable_get_type)(field) };
+                    if let Some((size, _)) = self.type_natural_storage_info(inner, depth + 1) {
+                        return Some((size, true));
+                    }
+                }
+            }
+            let inner = unsafe { (self.library.reflection_type_get_element_type)(ty) };
+            if let Some((size, _)) = self.type_natural_storage_info(inner, depth + 1) {
+                return Some((size, true));
+            }
+            return Some((4, true));
+        }
+
+        if let Some(size) = builtin_type_stride(&name) {
+            return Some((size, false));
+        }
+
+        let kind = unsafe { (self.library.reflection_type_get_kind)(ty) };
+        if kind == SlangTypeKind::Scalar as i32 {
+            return Some((4, false));
+        }
+        if kind == SlangTypeKind::Vector as i32 {
+            let cols = unsafe { (self.library.reflection_type_get_column_count)(ty) }.max(1);
+            return Some((cols.saturating_mul(4), false));
+        }
+
+        if field_count == 0 {
+            let inner = unsafe { (self.library.reflection_type_get_element_type)(ty) };
+            if !inner.is_null() && inner != ty {
+                return self.type_natural_storage_info(inner, depth + 1);
+            }
+            return None;
+        }
+
+        let mut cursor = 0u32;
+        let mut max_align = 1u32;
+        let mut has_interlocked = false;
+        for i in 0..field_count {
+            let field = unsafe { (self.library.reflection_type_get_field_by_index)(ty, i) };
+            if field.is_null() {
+                continue;
+            }
+            let field_ty = unsafe { (self.library.reflection_variable_get_type)(field) };
+            let (size, nested_interlocked) = self.type_natural_storage_info(field_ty, depth + 1)?;
+            has_interlocked |= nested_interlocked;
+            let align = if nested_interlocked {
+                4
+            } else {
+                natural_field_align(size)
+            };
+            max_align = max_align.max(align);
+            cursor = align_up_u32(cursor, align).saturating_add(size);
+        }
+        Some((align_up_u32(cursor, max_align.max(1)), has_interlocked))
+    }
+
+    fn is_interlocked_cell(&self, ty: *mut SlangReflectionType, field_count: u32) -> bool {
+        if field_count != 1 {
+            return false;
+        }
+        let field = unsafe { (self.library.reflection_type_get_field_by_index)(ty, 0) };
+        if field.is_null() {
+            return false;
+        }
+        let name_ptr = unsafe { (self.library.reflection_variable_get_name)(field) };
+        if name_ptr.is_null() {
+            return false;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy();
+        name == "_v"
     }
 
     fn reflect_type_size_with_category(
@@ -2515,6 +2683,76 @@ mod struct_layout_validate_tests {
             strides[1],
             Some(8),
             "Scattered<Pair> element stride should be 8: {strides:?}"
+        );
+    }
+
+    /// Nested `Interlocked<T>` cells are 4 bytes in storage. Slang Default layout
+    /// pads each wrapper as a uniform struct (~16B), which must not become the
+    /// structured-buffer element stride (ekrano PathBbox 24 / BumpAllocators 32).
+    #[test]
+    fn stride_extraction_interlocked_struct_uses_four_byte_cells() {
+        use super::{ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable; skipping");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("shaders").to_string_lossy().into_owned();
+
+        let source = r#"
+            import goldy_exp;
+
+            struct AtomicPathBbox {
+                Interlocked<int> x0;
+                Interlocked<int> y0;
+                Interlocked<int> x1;
+                Interlocked<int> y1;
+                uint draw_flags;
+                uint trans_ix;
+            };
+
+            struct BumpAllocators {
+                Interlocked<uint> failed;
+                Interlocked<uint> binning;
+                Interlocked<uint> ptcl;
+                Interlocked<uint> tile;
+                Interlocked<uint> seg_counts;
+                Interlocked<uint> segments;
+                Interlocked<uint> blend;
+                Interlocked<uint> lines;
+            };
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Scattered<AtomicPathBbox> path_bboxes, Scattered<BumpAllocators> bump, ThreadId id) {
+                InterlockedAdd(bump[0].lines, 1);
+                path_bboxes[id.x].draw_flags = 0;
+            }
+        "#;
+
+        let result = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("__SPIRV__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("compilation failed");
+
+        let strides = &result.reflection.binding_element_strides;
+        assert_eq!(strides.len(), 2, "expected 2 binding slots: {strides:?}");
+        assert_eq!(
+            strides[0],
+            Some(24),
+            "Scattered<AtomicPathBbox> must be 6×4, not uniform-padded: {strides:?}"
+        );
+        assert_eq!(
+            strides[1],
+            Some(32),
+            "Scattered<BumpAllocators> must be 8×4, not uniform-padded: {strides:?}"
         );
     }
 

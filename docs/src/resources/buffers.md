@@ -119,13 +119,13 @@ bitflags! {
 | `COPY_SRC` | Buffer can be a copy source |
 | `COPY_DST` | Buffer can be a copy destination |
 | `CPU_READABLE` | Medium hint for host-visible storage. Prefer [`MemoryExchange::bind_withdraw`](../compute/settlement.md) for observation. Not a public host-read API. |
-| `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/settlement.md) for application uploads. |
+| `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit`](../compute/settlement.md) for application uploads. |
 
 Query `DeviceCapabilities::has_zero_copy_storage_readback` to detect whether withdraw staging can elide a GPU copy on the current backend.
 
 ## Writing Data
 
-Prefer [`MemoryExchange::bind_deposit_buffer`](../compute/settlement.md) for CPU→GPU uploads. Direct host writes on `CPU_WRITABLE` staging parcels remain for deposit/staging internals:
+Prefer [`MemoryExchange::bind_deposit`](../compute/settlement.md) for CPU→GPU uploads. Direct host writes on `CPU_WRITABLE` staging parcels remain for deposit/staging internals:
 
 ### Raw bytes
 

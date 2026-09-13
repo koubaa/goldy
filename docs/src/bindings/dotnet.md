@@ -142,7 +142,7 @@ public sealed class MemoryExchange : IDisposable
     public MemoryExchange(Context ctx);
     public WithdrawTransaction BindWithdraw(Scheme scheme, Parcel parcel);
     public WithdrawTransaction BindWithdrawTexture(Scheme scheme, Texture texture);
-    public DepositTransaction BindDepositBuffer(Scheme scheme, Parcel destination, ulong capacity);
+    public DepositTransaction BindDeposit(Scheme scheme, DepositTarget target);
 }
 
 public sealed class WithdrawTransaction

@@ -138,13 +138,11 @@ scheme
 
 // --- Render loop ---
 let mut upload = Scheme::new(&ctx);
-let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload,
-    &uniform_buffer,
-    std::mem::size_of::<Uniforms>() as u64,
+    goldy::DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
 )?;
 uniform_deposit.write(
-    &mut upload,
     0,
     bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }),
 )?;

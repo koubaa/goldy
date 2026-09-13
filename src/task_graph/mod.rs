@@ -112,7 +112,7 @@ pub(crate) enum ResourceId {
     PresentLease(u32),
     /// Scheme-scoped logical deposit: late-bound CPU-writable staging parcel.
     ///
-    /// Declared via [`crate::MemoryExchange::bind_deposit_buffer`]; physical backing is
+    /// Declared via [`crate::MemoryExchange::bind_deposit`]; physical backing is
     /// selected by [`crate::exchange::DepositTransaction::write`] and resolved at submit
     /// through [`SlotResolver::deposits`].
     Deposit(u32),

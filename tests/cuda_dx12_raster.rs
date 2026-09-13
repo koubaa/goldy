@@ -8,11 +8,11 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat,
-    Instance, MemoryExchange, NodeAccess, PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Sampler, SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot, SurfaceConfig,
-    SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepositTarget, DepthFormat, DepthStencilState,
+    DeviceDescriptor, IndexFormat, Instance, MemoryExchange, NodeAccess, PresentMode, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, SamplerDesc, Scheme,
+    ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat,
+    TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -206,7 +206,7 @@ fn cuda_raster_rgba8_triangle_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba8Unorm, None)
         .expect("rgba8 render target");
     {
@@ -290,7 +290,7 @@ fn cuda_raster_triangle_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -428,7 +428,7 @@ fn cuda_raster_depth_occlusion_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, Some(DepthFormat::Depth32Float))
         .expect("depth render target");
     {
@@ -518,7 +518,7 @@ fn cuda_raster_indexed_triangle_readback() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -613,7 +613,7 @@ fn cuda_raster_to_present_multi_frame() {
         let mut scheme = Scheme::new(&ctx);
         let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
         let (w, h) = surface.size();
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(w, h, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         {
@@ -722,7 +722,7 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
         .node("gen_verts", &compute)
         .with_parcel(&vertex_buffer, goldy::NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -836,7 +836,7 @@ fn cuda_compute_generated_indices_raster() {
         .node("gen_indices", &compute)
         .with_parcel(&index_buffer, goldy::NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -931,11 +931,14 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
 
     let mut upload = Scheme::new(&ctx);
     let deposit = MemoryExchange::new(&ctx)
-        .bind_deposit_buffer(&mut upload, &vertex_buffer, vertex_buffer.byte_size())
+        .bind_deposit(
+            &mut upload,
+            DepositTarget::buffer(&vertex_buffer, vertex_buffer.byte_size()),
+        )
         .expect("deposit");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -976,9 +979,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
             Vertex2D::new(-0.5, -0.5, Color::BLACK),
             Vertex2D::new(0.5, -0.5, Color::BLACK),
         ];
-        deposit
-            .write(&mut upload, 0, bytemuck::cast_slice(&verts))
-            .expect("warmup deposit");
+        deposit.write(0, bytemuck::cast_slice(&verts)).expect("warmup deposit");
         upload.submit().expect("warmup upload");
         let grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &readback)
@@ -995,9 +996,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
             Vertex2D::new(-0.5, -0.5, *color),
             Vertex2D::new(0.5, -0.5, *color),
         ];
-        deposit
-            .write(&mut upload, 0, bytemuck::cast_slice(&verts))
-            .expect("deposit write");
+        deposit.write(0, bytemuck::cast_slice(&verts)).expect("deposit write");
         upload.submit().expect("upload submit");
 
         let grant = MemoryExchange::new(scheme.context())
@@ -1078,7 +1077,7 @@ fn cuda_raster_goldy_vertex_color_2d() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1224,7 +1223,7 @@ fn cuda_raster_bindless_buffer_tint() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1333,7 +1332,7 @@ fn cuda_raster_bindless_tint_change_rerecords() {
 
     // Frame 1: green tint.
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1367,7 +1366,7 @@ fn cuda_raster_bindless_tint_change_rerecords() {
 
     // Frame 2: blue tint — changed bindings must not replay the green list.
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -1476,7 +1475,7 @@ fn cuda_raster_bindless_sampled_texture() {
         .expect("readback texture");
 
     let mut scheme = Scheme::new(&ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {

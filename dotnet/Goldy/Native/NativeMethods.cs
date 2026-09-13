@@ -122,6 +122,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_context_destroy")]
     internal static partial void ContextDestroy(nint ctx);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_context_lease_render_target")]
+    internal static partial nint ContextLeaseRenderTarget(
+        nint ctx, uint width, uint height, TextureFormat format, [MarshalAs(UnmanagedType.U1)] bool hasDepth, DepthFormat depthFormat);
+
     // ========================================================================
     // Scheme
     // ========================================================================
@@ -231,14 +235,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_withdraw_texture")]
     internal static partial nint MemoryExchangeBindWithdrawTexture(nint exchange, nint scheme, nint texture);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_deposit_buffer")]
-    internal static partial nint MemoryExchangeBindDepositBuffer(
-        nint exchange, nint scheme, nint destination, ulong capacity);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_deposit_texture")]
-    internal static partial nint MemoryExchangeBindDepositTexture(
-        nint exchange, nint scheme, nint destination, uint x, uint y, uint width, uint height,
-        ulong capacity, uint srcRowPitch);
+    [LibraryImport(LibName, EntryPoint = "goldy_memory_exchange_bind_deposit")]
+    internal static partial nint MemoryExchangeBindDeposit(nint exchange, nint scheme, in NativeDepositTarget target);
 
     [LibraryImport(LibName, EntryPoint = "goldy_withdraw_transaction_destroy")]
     internal static partial void WithdrawTransactionDestroy(nint transaction);
@@ -281,7 +279,7 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_deposit_transaction_write")]
     internal static partial GoldyResult DepositTransactionWrite(
-        nint transaction, nint scheme, ulong offset, nint data, nuint dataSize);
+        nint transaction, ulong offset, nint data, nuint dataSize);
 
     // ========================================================================
     // RetainedPool / Parcel

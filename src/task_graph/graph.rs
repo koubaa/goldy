@@ -1142,6 +1142,8 @@ pub(crate) struct PresentSubmitOptions<'a> {
     pub deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
     /// Scheme upload-buffer resolutions for this submission (may be empty).
     pub deposits: &'a std::collections::HashMap<u32, super::ResolvedDeposit>,
+    /// Per-submission deposit claims; consumed at the copy-dispatch partition.
+    pub deposit_claims: Option<&'a mut std::collections::HashMap<u32, Option<crate::exchange::DepositClaim>>>,
     pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
@@ -1348,6 +1350,21 @@ fn dynamic_partition_slot_key(
     h.finish()
 }
 
+fn consume_waves_deposits(
+    ir: &GraphIR,
+    waves: &[super::ir::Wave],
+    claims: &mut Option<&mut std::collections::HashMap<u32, Option<crate::exchange::DepositClaim>>>,
+    tv: TimelineValue,
+) {
+    if let Some(claims) = claims.as_mut() {
+        crate::exchange::consume_deposit_claims(
+            crate::task_graph::analysis::partition_deposit_ids(ir, waves),
+            claims,
+            tv,
+        );
+    }
+}
+
 fn seed_upload_resolver(
     resolver: &mut super::SlotResolver,
     deposits: &std::collections::HashMap<u32, super::ResolvedDeposit>,
@@ -1494,6 +1511,7 @@ fn submit_resolved_ir_partitions_fresh(
         present_slots,
         mut deferred_acquire,
         deposits,
+        mut deposit_claims,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1671,6 +1689,7 @@ fn submit_resolved_ir_partitions_fresh(
                 let waves = &cache.as_ref().unwrap().schedule.waves[wave_range.clone()];
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, waves, last_tv);
+                consume_waves_deposits(ir, waves, &mut deposit_claims, last_tv);
             }
             if has_present {
                 result.note_present_bindings(&present_bindings, last_tv);
@@ -1699,6 +1718,7 @@ fn submit_resolved_ir_partitions_replay(
         present_slots,
         mut deferred_acquire,
         deposits,
+        mut deposit_claims,
         resource_stamps,
         stamp_targets,
         ir_clean,
@@ -1868,6 +1888,7 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_last_tv(part_idx + 1, last_tv);
                 boundary.record(separate, false, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &merged_waves, last_tv);
+                consume_waves_deposits(ir, &merged_waves, &mut deposit_claims, last_tv);
                 part_idx += 2;
                 continue;
             }
@@ -1956,6 +1977,7 @@ fn submit_resolved_ir_partitions_replay(
                 last_tv = replay.partition_last_tv[part_idx].unwrap();
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
                 *partial_tv = last_tv;
                 *partial = result.clone();
                 part_idx += 1;
@@ -1984,6 +2006,7 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_last_tv(part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
                 if has_present {
                     result.note_present_bindings(&present_bindings, last_tv);
                 }
@@ -2021,6 +2044,7 @@ fn submit_resolved_ir_partitions_replay(
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                    consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
                     result.note_present_bindings(&present_bindings, last_tv);
                     *partial_tv = last_tv;
                     *partial = result.clone();
@@ -2046,6 +2070,7 @@ fn submit_resolved_ir_partitions_replay(
                         replay.record_last_tv(part_idx, last_tv);
                         boundary.record(separate, has_render, last_tv);
                         apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                        consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
                         if has_present {
                             result.note_present_bindings(&present_bindings, last_tv);
                         }
@@ -2078,6 +2103,7 @@ fn submit_resolved_ir_partitions_replay(
                 result.records += 1;
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
                 if has_present {
                     result.note_present_bindings(&present_bindings, last_tv);
                 }
@@ -2097,6 +2123,7 @@ fn submit_resolved_ir_partitions_replay(
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                    consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
                     *partial_tv = last_tv;
                     *partial = result.clone();
                     part_idx += 1;
@@ -2116,6 +2143,7 @@ fn submit_resolved_ir_partitions_replay(
             result.records += 1;
             boundary.record(separate, has_render, last_tv);
             apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+            consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
             *partial_tv = last_tv;
             *partial = result.clone();
             part_idx += 1;
@@ -2293,6 +2321,7 @@ impl IrSubmitState {
         present_slots: &'a mut Vec<ResolvedPresentSlot>,
         deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
         deposits: &'a std::collections::HashMap<u32, super::ResolvedDeposit>,
+        deposit_claims: &'a mut std::collections::HashMap<u32, Option<crate::exchange::DepositClaim>>,
         ir_clean: bool,
         partial: &'a mut PartitionSubmitResult,
         partial_tv: &'a mut TimelineValue,
@@ -2311,6 +2340,7 @@ impl IrSubmitState {
                 present_slots,
                 deferred_acquire,
                 deposits,
+                deposit_claims: Some(deposit_claims),
                 resource_stamps: &self.resource_stamps,
                 stamp_targets: &self.stamp_targets,
                 ir_clean,
@@ -2587,6 +2617,7 @@ mod slice_retention_tests {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let mut present_slots = Vec::new();
         let empty_uploads = std::collections::HashMap::new();
+        let mut deposit_claims = std::collections::HashMap::new();
         let mut partial = PartitionSubmitResult::default();
         let mut partial_tv = 0u64;
         state
@@ -2596,6 +2627,7 @@ mod slice_retention_tests {
                 &mut present_slots,
                 None,
                 &empty_uploads,
+                &mut deposit_claims,
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
@@ -2687,6 +2719,7 @@ mod slice_retention_tests {
                     present_slots: &mut present_slots,
                     deferred_acquire: None,
                     deposits: &empty_uploads,
+                    deposit_claims: None,
                     resource_stamps: &empty_stamps,
                     stamp_targets: &[],
                     ir_clean,
@@ -2789,6 +2822,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred),
                 deposits: &empty_uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -2849,6 +2883,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred2),
                 deposits: &empty_uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: true,
@@ -2985,6 +3020,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: Some(&mut deferred),
                 deposits: &empty_uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -3109,6 +3145,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
                 deposits: &empty_uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -3240,6 +3277,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
                 deposits: &uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -3284,19 +3322,17 @@ mod slice_retention_tests {
         let ir = upload_then_compute_ir(buf.handle, p.handle);
 
         let mut state = IrSubmitState::new();
+        let pool = Arc::new(crate::deposit_pool::DepositExchangePool::new());
+        let handle = pool.take_or_alloc(&ctx, 64, 1).unwrap();
+        let claim = crate::exchange::DepositClaim::new(handle, 64, Arc::clone(&pool));
         let mut uploads = std::collections::HashMap::new();
-        uploads.insert(
-            0,
-            ResolvedDeposit {
-                parent: buf.handle,
-                offset: 0,
-                len: 64,
-            },
-        );
+        uploads.insert(0, claim.resolved());
         let mut present_slots = Vec::new();
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let mut partial = PartitionSubmitResult::default();
         let mut partial_tv = 0u64;
+        let mut deposit_claims = std::collections::HashMap::new();
+        deposit_claims.insert(0, Some(claim));
         state
             .submit_pipelined_and_retain_with_presents(
                 &ctx,
@@ -3304,6 +3340,7 @@ mod slice_retention_tests {
                 &mut present_slots,
                 None,
                 &uploads,
+                &mut deposit_claims,
                 false,
                 &mut partial,
                 &mut partial_tv,
@@ -3317,6 +3354,16 @@ mod slice_retention_tests {
                 "replay path must fuse upload+compute when capability is enabled"
             );
         });
+        assert!(
+            deposit_claims.get(&0).is_some_and(Option::is_none),
+            "fused upload must consume its deposit claim"
+        );
+        assert_eq!(
+            pool.parked_epoch(handle),
+            Some(partial_tv),
+            "fused upload backing must be parked at its submission epoch"
+        );
+        assert_ne!(partial_tv, 0, "mock submit must produce a nonzero epoch");
     }
 
     // ------------------------------------------------------------------
@@ -3378,6 +3425,7 @@ mod slice_retention_tests {
         let mut present_slots = Vec::new();
         let mut partial = PartitionSubmitResult::default();
         let mut partial_tv = 0u64;
+        let mut deposit_claims = std::collections::HashMap::new();
         state
             .submit_pipelined_and_retain_with_presents(
                 ctx,
@@ -3385,6 +3433,7 @@ mod slice_retention_tests {
                 &mut present_slots,
                 None,
                 deposits,
+                &mut deposit_claims,
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
@@ -3637,6 +3686,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
                 deposits: &uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,
@@ -3714,6 +3764,7 @@ mod slice_retention_tests {
                 present_slots: &mut present_slots,
                 deferred_acquire: None,
                 deposits: &uploads,
+                deposit_claims: None,
                 resource_stamps: &empty_stamps,
                 stamp_targets: &[],
                 ir_clean: false,

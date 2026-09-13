@@ -12,6 +12,14 @@ pub type FnGoldyComputePipelineDestroy = unsafe extern "C" fn(*mut GoldyComputeP
 
 pub type FnGoldyContextCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyContext;
 pub type FnGoldyContextDestroy = unsafe extern "C" fn(*mut GoldyContext);
+pub type FnGoldyContextLeaseRenderTarget = unsafe extern "C" fn(
+    *const GoldyContext,
+    u32,
+    u32,
+    GoldyTextureFormat,
+    bool,
+    GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease;
 
 pub type FnGoldySchemeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyScheme;
 pub type FnGoldySchemeDestroy = unsafe extern "C" fn(*mut GoldyScheme);
@@ -45,22 +53,10 @@ pub type FnGoldyMemoryExchangeBindWithdrawTexture = unsafe extern "C" fn(
     *mut GoldyScheme,
     *const GoldyTexture,
 ) -> *mut GoldyWithdrawTransaction;
-pub type FnGoldyMemoryExchangeBindDepositBuffer = unsafe extern "C" fn(
+pub type FnGoldyMemoryExchangeBindDeposit = unsafe extern "C" fn(
     *const GoldyMemoryExchange,
     *mut GoldyScheme,
-    *const GoldyParcel,
-    u64,
-) -> *mut GoldyDepositTransaction;
-pub type FnGoldyMemoryExchangeBindDepositTexture = unsafe extern "C" fn(
-    *const GoldyMemoryExchange,
-    *mut GoldyScheme,
-    *const GoldyTexture,
-    u32,
-    u32,
-    u32,
-    u32,
-    u64,
-    u32,
+    *const GoldyDepositTarget,
 ) -> *mut GoldyDepositTransaction;
 pub type FnGoldyWithdrawTransactionDestroy = unsafe extern "C" fn(*mut GoldyWithdrawTransaction);
 pub type FnGoldyWithdrawTransactionByteSize = unsafe extern "C" fn(*const GoldyWithdrawTransaction) -> u64;
@@ -77,7 +73,7 @@ pub type FnGoldyDepositTransactionDestroy = unsafe extern "C" fn(*mut GoldyDepos
 pub type FnGoldyDepositTransactionCapacity = unsafe extern "C" fn(*const GoldyDepositTransaction) -> u64;
 pub type FnGoldyDepositTransactionId = unsafe extern "C" fn(*const GoldyDepositTransaction) -> u32;
 pub type FnGoldyDepositTransactionWrite =
-    unsafe extern "C" fn(*const GoldyDepositTransaction, *mut GoldyScheme, u64, *const u8, usize) -> GoldyResult;
+    unsafe extern "C" fn(*const GoldyDepositTransaction, u64, *const u8, usize) -> GoldyResult;
 
 pub type FnGoldySchemeLeaseRenderTarget = unsafe extern "C" fn(
     *mut GoldyScheme,

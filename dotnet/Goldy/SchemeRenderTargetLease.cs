@@ -3,7 +3,7 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// Stable render-target lease declared on a <see cref="Scheme"/>.
+/// Stable render-target lease minted by a <see cref="Context"/>.
 /// </summary>
 public sealed class SchemeRenderTargetLease : IDisposable
 {

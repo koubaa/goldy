@@ -70,6 +70,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<exchange::PyClaim>()?;
     m.add_class::<surface_exchange::PySurfaceExchange>()?;
     m.add_class::<memory_exchange::PyMemoryExchange>()?;
+    m.add_class::<memory_exchange::PyDepositTarget>()?;
     m.add_class::<memory_exchange::PyWithdrawTransaction>()?;
     m.add_class::<memory_exchange::PyWithdrawClaim>()?;
     m.add_class::<memory_exchange::PyDepositTransaction>()?;

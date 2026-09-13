@@ -79,7 +79,7 @@ impl Instance {
 
     pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
         let ptr = non_null(unsafe { sys::goldy_instance_create_device_for_adapter(self.ptr, adapter_id) })?;
-        Ok(Device { ptr })
+        Ok(Device::from_ptr(ptr))
     }
 }
 

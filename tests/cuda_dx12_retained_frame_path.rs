@@ -148,7 +148,7 @@ fn cuda_raster_direct_retained_steady_state() {
     let mut scheme = Scheme::new(&ctx);
     let (lease, present) = surface.bind_destination(&mut scheme).expect("bind destination");
     let (width, height) = surface.size();
-    let target = scheme
+    let target = ctx
         .lease_render_target(width, height, TextureFormat::Rgba8Unorm, None)
         .expect("render target");
     {

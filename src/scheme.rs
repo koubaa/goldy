@@ -17,6 +17,7 @@ use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::cpu_dispatch::{CpuBindingExec, CpuDispatchExec, CpuMain};
 use crate::error::GoldyError;
+use crate::exchange::{DepositBinding, DepositClaim, DepositTarget};
 use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
 #[cfg(feature = "graphics")]
@@ -615,10 +616,6 @@ struct WithdrawInfo {
     staging_pool: Arc<WithdrawStagingPool>,
 }
 
-/// Stable index of a scheme-held lease declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LeaseId(pub(crate) u32);
-
 /// Stable identity of one recorded scheme node, returned when the node is finalized.
 ///
 /// Nodes are only ever appended to a scheme, so an id stays valid — and keeps pointing at
@@ -642,107 +639,194 @@ impl NodeId {
     }
 }
 
-/// Marker type for texture leases acquired via [`Scheme::lease_texture`].
+/// Marker type for texture leases acquired via [`Context::lease_texture`].
 pub struct LeaseTexture;
 
-/// Marker type for buffer leases acquired via [`Scheme::lease_buffer`].
+/// Marker type for buffer leases acquired via [`Context::lease_buffer`].
 pub struct LeaseBuffer;
 
-/// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
+/// Marker type for render-target leases acquired via [`Context::lease_render_target`].
 #[cfg(feature = "graphics")]
 pub struct LeaseRenderTarget;
 
-/// Epoch-gated pool of physical staging parcels for one logical deposit.
-struct DepositPool {
-    size: u64,
-    /// All physical parcels kept alive for retained CB variants.
-    parcels: Vec<Parcel>,
-    /// Parcel selected for the next submit (`None` until [`DepositTransaction::write`](crate::exchange::DepositTransaction::write)).
-    pending: Option<usize>,
+/// Pool-owned backing for a [`Lease`]: a transient parcel or an offscreen render target.
+enum LeaseBacking {
+    Parcel(Parcel),
+    #[cfg(feature = "graphics")]
+    RenderTarget(RenderTarget),
 }
 
-impl DepositPool {
-    fn new(size: u64) -> Self {
+/// Self-describing lease inner: owns the backing and a handle back to its context/pool.
+///
+/// Return-to-pool happens here when both the user's [`Lease`] and every interned scheme
+/// clone are gone. Before the parcel is parked, drop waits until every last-referenced
+/// epoch has retired so backing is not recycled (or destroyed at process exit) while
+/// GPU/CPU work still holds it.
+pub(crate) struct LeaseInner {
+    ctx: Context,
+    backing: Option<LeaseBacking>,
+}
+
+impl LeaseInner {
+    fn parcel(&self) -> &Parcel {
+        match self.backing.as_ref().expect("lease backing taken") {
+            LeaseBacking::Parcel(parcel) => parcel,
+            #[cfg(feature = "graphics")]
+            LeaseBacking::RenderTarget(_) => panic!("render-target lease has no parcel"),
+        }
+    }
+
+    #[cfg(feature = "graphics")]
+    fn rt(&self) -> &RenderTarget {
+        match self.backing.as_ref().expect("lease backing taken") {
+            LeaseBacking::RenderTarget(rt) => rt,
+            LeaseBacking::Parcel(_) => panic!("parcel lease is not a render target"),
+        }
+    }
+}
+
+impl Drop for LeaseInner {
+    fn drop(&mut self) {
+        let Some(backing) = self.backing.take() else {
+            return;
+        };
+        match backing {
+            LeaseBacking::Parcel(mut parcel) => {
+                // `Scheme::drop` already waits the scheme high-water, but the last Arc is
+                // often the caller's `Lease` after the scheme is gone. Skipping this wait
+                // (the a90cff78 hole) returned backing to the transient pool while work
+                // was still in flight. Use `Parcel::wait_until_settled` (Ready is a
+                // no-op) rather than `Context::wait_until`, whose `finish_timeline_wait`
+                // deadlocks multi-window teardown when the epoch is already retired.
+                let _ = parcel.wait_until_settled();
+                let ready_after = parcel.last_referenced();
+                parcel.release_bookkeeping();
+                if parcel.texture_descriptor().is_some() {
+                    let home_device = parcel.home_device().clone();
+                    let texture = crate::Texture::from_returned_parcel(parcel, home_device);
+                    self.ctx.with_transient_pool(|pool| {
+                        pool.adopt(StampedParcel {
+                            hold: crate::retained_pool::RetainedHold::Texture(texture),
+                            ready_after,
+                        });
+                    });
+                } else {
+                    self.ctx
+                        .with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+                }
+            }
+            #[cfg(feature = "graphics")]
+            LeaseBacking::RenderTarget(_) => {
+                // Render targets are not pooled yet; dropping the backing frees the GPU object.
+            }
+        }
+    }
+}
+
+/// One-submission tenancy of pool property, minted by the lessor ([`Context`]).
+///
+/// The lease is self-describing: it carries its backing (as [`PresentLease`] carries
+/// its pool) and may be bound by any scheme on the same context. Schemes intern a
+/// clone of the inner [`Arc`] on first use so the backing outlives every IR node
+/// that references its handle. Pool return happens when the last clone is dropped:
+/// drop waits for the parcel to settle, then parks the backing for epoch-gated reuse.
+pub struct Lease<T> {
+    pub(crate) inner: Arc<LeaseInner>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Lease<T> {
+    fn clone(&self) -> Self {
         Self {
-            size,
-            parcels: Vec::new(),
-            pending: None,
+            inner: Arc::clone(&self.inner),
+            _marker: PhantomData,
         }
     }
+}
 
-    fn select_or_alloc(&mut self, ctx: &Context) -> Result<usize, GoldyError> {
-        if let Some(idx) = self.pending {
-            return Ok(idx);
-        }
-        if let Some(idx) = self.parcels.iter().position(|p| p.is_settled_on(ctx)) {
-            self.pending = Some(idx);
-            return Ok(idx);
-        }
-        let parcel = ctx
-            .with_transient_pool(|pool| {
-                pool.acquire_buffer(
-                    ctx,
-                    self.size,
-                    crate::types::BufferKind::Scattered,
-                    BufferFlags::CPU_WRITABLE,
-                    None,
-                )
-            })
+impl Lease<LeaseTexture> {
+    pub(crate) fn mint_texture(
+        ctx: &Context,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<Self, GoldyError> {
+        let texture = ctx
+            .with_transient_pool(|pool| pool.acquire_texture(ctx, width, height, format, access, flags))
             .map_err(|e| ctx.classify(e))?;
-        self.parcels.push(parcel);
-        let idx = self.parcels.len() - 1;
-        self.pending = Some(idx);
-        Ok(idx)
-    }
-
-    fn stage(&mut self, ctx: &Context, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
-        if offset.saturating_add(data.len() as u64) > self.size {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "deposit write: [{offset}..{}] exceeds declaration size {}",
-                offset + data.len() as u64,
-                self.size
-            )));
-        }
-        let idx = self.select_or_alloc(ctx)?;
-        self.parcels[idx]
-            .write_bytes(offset, data)
-            .map_err(|e| ctx.classify(e))?;
-        Ok(())
-    }
-
-    fn resolve_pending(&self) -> Option<crate::task_graph::ResolvedDeposit> {
-        let idx = self.pending?;
-        let parcel = &self.parcels[idx];
-        let parent = parcel.buffer_handle().expect("deposit parcels are whole buffers");
-        Some(crate::task_graph::ResolvedDeposit {
-            parent,
-            offset: 0,
-            len: parcel.byte_size(),
+        Ok(Self {
+            inner: Arc::new(LeaseInner {
+                ctx: ctx.clone(),
+                backing: Some(LeaseBacking::Parcel(texture.into_lease_parcel())),
+            }),
+            _marker: PhantomData,
         })
     }
 
-    fn stamp_pending(&mut self, ctx: crate::backend::ContextHandle, tv: TimelineValue) {
-        if let Some(idx) = self.pending.take() {
-            self.parcels[idx].mark_referenced(ctx, tv);
-        }
+    /// Typed resource descriptor handle for this texture lease (advanced binding).
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.inner.parcel().handle(access)
     }
 
-    fn return_all(self, ctx: &Context) {
-        for mut parcel in self.parcels {
-            let ready_after = parcel.last_referenced();
-            parcel.release_bookkeeping();
-            ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
-        }
+    pub(crate) fn parcel(&self) -> &Parcel {
+        self.inner.parcel()
     }
 }
 
-/// One-submission tenancy of pool property held by a [`Scheme`].
-///
-/// Leases have no cross-scheme identity; the scheme owns the N=1 backing parcel
-/// for the declaration's lifetime.
-pub struct Lease<T> {
-    pub(crate) id: LeaseId,
-    _marker: PhantomData<T>,
+impl Lease<LeaseBuffer> {
+    pub(crate) fn mint_buffer(
+        ctx: &Context,
+        size: u64,
+        kind: crate::types::BufferKind,
+        flags: crate::types::BufferFlags,
+    ) -> Result<Self, GoldyError> {
+        let backing = ctx
+            .with_transient_pool(|pool| pool.acquire_buffer(ctx, size, kind, flags, None))
+            .map_err(|e| ctx.classify(e))?;
+        Ok(Self {
+            inner: Arc::new(LeaseInner {
+                ctx: ctx.clone(),
+                backing: Some(LeaseBacking::Parcel(backing)),
+            }),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Typed resource descriptor handle for this buffer lease (advanced binding).
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.inner.parcel().handle(access)
+    }
+
+    pub(crate) fn parcel(&self) -> &Parcel {
+        self.inner.parcel()
+    }
+}
+
+#[cfg(feature = "graphics")]
+impl Lease<LeaseRenderTarget> {
+    pub(crate) fn mint_render_target(
+        ctx: &Context,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<Self, GoldyError> {
+        let rt = RenderTarget::new_with_depth(ctx.device(), width, height, format, depth_format)
+            .map_err(|e| ctx.classify(e))?;
+        Ok(Self {
+            inner: Arc::new(LeaseInner {
+                ctx: ctx.clone(),
+                backing: Some(LeaseBacking::RenderTarget(rt)),
+            }),
+            _marker: PhantomData,
+        })
+    }
+
+    pub(crate) fn rt(&self) -> &RenderTarget {
+        self.inner.rt()
+    }
 }
 
 /// Outcome counters for [`Scheme::submit`] (retention-recovery assertions and telemetry).
@@ -796,6 +880,7 @@ struct IrSubmitPrep {
     ir_clean: bool,
     had_replay: bool,
     deposit_resolutions: std::collections::HashMap<u32, crate::task_graph::ResolvedDeposit>,
+    deposit_claims: std::collections::HashMap<u32, Option<DepositClaim>>,
 }
 
 /// A retained scheme: a set of dispatches held across submissions with COW dirty tracking.
@@ -808,13 +893,10 @@ pub struct Scheme {
     /// Context this scheme submits on. Fixed at construction; many schemes per context,
     /// exactly one context per scheme.
     ctx: Context,
-    /// N=1 backing parcels for [`Lease`] declarations, indexed by [`LeaseId`].
-    leases: Vec<Parcel>,
-    /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
-    #[cfg(feature = "graphics")]
-    rt_leases: Vec<RenderTarget>,
-    /// Epoch-gated CPU-writable staging pools for deposit declarations.
-    deposits: Vec<DepositPool>,
+    /// Interned lease clones: held for lifetime so backing outlives IR handles, not for lookup.
+    interned_leases: Vec<Arc<LeaseInner>>,
+    /// Recorded deposit relationships (topology only; staging lives on the exchange).
+    deposits: Vec<Arc<DepositBinding>>,
     /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
     cpu_dispatches: Vec<CpuDispatchExec>,
     /// COW dirty level: structural vs params-only vs clean. Cleared by a successful submit.
@@ -869,9 +951,7 @@ impl Scheme {
             ir: GraphIR::default(),
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
-            leases: Vec::new(),
-            #[cfg(feature = "graphics")]
-            rt_leases: Vec::new(),
+            interned_leases: Vec::new(),
             deposits: Vec::new(),
             cpu_dispatches: Vec::new(),
             dirty: SchemeDirty::Structure,
@@ -1177,175 +1257,155 @@ impl Scheme {
         dest.mark_gpu_built();
         Ok(())
     }
-    ///
-    /// `dst_offset` is relative to the start of `destination` (added to any buffer-range base).
-    /// The recorded copy size is `capacity.min(destination.byte_size().saturating_sub(dst_offset))`.
-    pub(crate) fn register_deposit_buffer(
-        &mut self,
-        destination: &Parcel,
-        dst_offset: u64,
-        capacity: u64,
-    ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
-        if capacity == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_buffer requires non-zero capacity"
-            )));
-        }
-        self.mark_structure_dirty();
-        let dst_resource = destination.resource_id();
-        if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_buffer requires a buffer parcel destination"
-            )));
-        }
-        let remaining = destination.byte_size().saturating_sub(dst_offset);
-        if remaining == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_buffer: dst_offset {dst_offset} exceeds destination size {}",
-                destination.byte_size()
-            )));
-        }
-        let copy_size = capacity.min(remaining);
-        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
-        self.deposits.push(DepositPool::new(capacity));
-        self.submit_state.register_parcel_stamp(destination);
-        let src_resource = ResourceId::Deposit(deposit_id);
-        let abs_dst_offset = destination.source_offset() + dst_offset;
-        let dst_access = if dst_offset == 0 && copy_size == destination.byte_size() {
-            NodeAccess::Overwrite
-        } else {
-            NodeAccess::Write
-        };
-        self.ir.nodes.push(TaskNode {
-            label: "deposit_buffer",
-            bindings: vec![
-                ResourceBinding {
-                    resource: src_resource,
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: dst_resource,
-                    access: dst_access,
-                },
-            ],
-            kind: NodeKind::CopyBuffer {
-                src: src_resource,
-                src_offset: 0,
-                dst: dst_resource,
-                dst_offset: abs_dst_offset,
-                size: copy_size,
-            },
-        });
-        Ok(crate::exchange::DepositTransaction {
-            scheme_id: self.scheme_id,
-            deposit_id,
-            capacity,
-        })
-    }
 
-    /// Register a destination-bound texture-region deposit (called by [`crate::MemoryExchange`]).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn register_deposit_texture(
+    /// Record a deposit copy into `target` (called by [`crate::MemoryExchange::bind_deposit`]).
+    pub(crate) fn register_deposit(
         &mut self,
-        destination: &crate::Texture,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        capacity: u64,
-        src_row_pitch: u32,
+        target: DepositTarget<'_>,
     ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
-        if capacity == 0 {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_texture requires non-zero capacity"
-            )));
-        }
         self.mark_structure_dirty();
-        let x_end = x
-            .checked_add(width)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: x+width overflow")))?;
-        let y_end = y
-            .checked_add(height)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit_texture: y+height overflow")))?;
-        if x_end > destination.width() || y_end > destination.height() {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_texture: {}x{} at ({},{}) exceeds {}x{} texture",
-                width,
-                height,
+        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
+        let src_resource = ResourceId::Deposit(deposit_id);
+        let capacity = match target {
+            DepositTarget::Buffer {
+                destination,
+                dst_offset,
+                capacity,
+            } => {
+                if capacity == 0 {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit requires non-zero capacity"
+                    )));
+                }
+                let dst_resource = destination.resource_id();
+                if !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit buffer target requires a buffer parcel destination"
+                    )));
+                }
+                let remaining = destination.byte_size().saturating_sub(dst_offset);
+                if remaining == 0 {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit: dst_offset {dst_offset} exceeds destination size {}",
+                        destination.byte_size()
+                    )));
+                }
+                let copy_size = capacity.min(remaining);
+                self.submit_state.register_parcel_stamp(destination);
+                let abs_dst_offset = destination.source_offset() + dst_offset;
+                let dst_access = if dst_offset == 0 && copy_size == destination.byte_size() {
+                    NodeAccess::Overwrite
+                } else {
+                    NodeAccess::Write
+                };
+                self.ir.nodes.push(TaskNode {
+                    label: "deposit_buffer",
+                    bindings: vec![
+                        ResourceBinding {
+                            resource: src_resource,
+                            access: NodeAccess::Read,
+                        },
+                        ResourceBinding {
+                            resource: dst_resource,
+                            access: dst_access,
+                        },
+                    ],
+                    kind: NodeKind::CopyBuffer {
+                        src: src_resource,
+                        src_offset: 0,
+                        dst: dst_resource,
+                        dst_offset: abs_dst_offset,
+                        size: copy_size,
+                    },
+                });
+                capacity
+            }
+            DepositTarget::Texture {
+                destination,
                 x,
                 y,
-                destination.width(),
-                destination.height()
-            )));
-        }
-        let bpp = u64::from(destination.format().bytes_per_pixel());
-        let min_bytes = if src_row_pitch == 0 {
-            (width as u64) * (height as u64) * bpp
-        } else {
-            (src_row_pitch as u64) * (height as u64)
-        };
-        if min_bytes > capacity {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_deposit_texture: copy range exceeds deposit capacity"
-            )));
-        }
-        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
-        self.deposits.push(DepositPool::new(capacity));
-        let th = destination.gpu_handle();
-        let src_resource = ResourceId::Deposit(deposit_id);
-        let dst_access = if x == 0 && y == 0 && width == destination.width() && height == destination.height() {
-            NodeAccess::Overwrite
-        } else {
-            NodeAccess::Write
-        };
-        self.ir.nodes.push(TaskNode {
-            label: "deposit_texture",
-            bindings: vec![
-                ResourceBinding {
-                    resource: src_resource,
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: ResourceId::Texture(th),
-                    access: dst_access,
-                },
-            ],
-            kind: NodeKind::CopyBufferToTexture {
-                src: src_resource,
-                src_offset: 0,
+                width,
+                height,
+                capacity,
                 src_row_pitch,
-                dst: th,
-                x,
-                y,
-                width,
-                height,
-            },
-        });
-        Ok(crate::exchange::DepositTransaction {
+            } => {
+                if capacity == 0 {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit requires non-zero capacity"
+                    )));
+                }
+                let x_end = x
+                    .checked_add(width)
+                    .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit: x+width overflow")))?;
+                let y_end = y
+                    .checked_add(height)
+                    .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("bind_deposit: y+height overflow")))?;
+                if x_end > destination.width() || y_end > destination.height() {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit: {}x{} at ({},{}) exceeds {}x{} texture",
+                        width,
+                        height,
+                        x,
+                        y,
+                        destination.width(),
+                        destination.height()
+                    )));
+                }
+                let bpp = u64::from(destination.format().bytes_per_pixel());
+                let min_bytes = if src_row_pitch == 0 {
+                    (width as u64) * (height as u64) * bpp
+                } else {
+                    (src_row_pitch as u64) * (height as u64)
+                };
+                if min_bytes > capacity {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "bind_deposit: copy range exceeds deposit capacity"
+                    )));
+                }
+                let th = destination.gpu_handle();
+                let dst_access = if x == 0 && y == 0 && width == destination.width() && height == destination.height() {
+                    NodeAccess::Overwrite
+                } else {
+                    NodeAccess::Write
+                };
+                self.ir.nodes.push(TaskNode {
+                    label: "deposit_texture",
+                    bindings: vec![
+                        ResourceBinding {
+                            resource: src_resource,
+                            access: NodeAccess::Read,
+                        },
+                        ResourceBinding {
+                            resource: ResourceId::Texture(th),
+                            access: dst_access,
+                        },
+                    ],
+                    kind: NodeKind::CopyBufferToTexture {
+                        src: src_resource,
+                        src_offset: 0,
+                        src_row_pitch,
+                        dst: th,
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                });
+                capacity
+            }
+        };
+        let binding = Arc::new(DepositBinding {
             scheme_id: self.scheme_id,
             deposit_id,
             capacity,
-        })
-    }
-
-    /// Stage bytes for a deposit transaction (called by [`crate::exchange::DepositTransaction::write`]).
-    pub(crate) fn stage_deposit(
-        &mut self,
-        scheme_id: u64,
-        deposit_id: u32,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<(), GoldyError> {
-        if scheme_id != self.scheme_id {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "DepositTransaction belongs to a different scheme"
-            )));
-        }
-        let pool = self
-            .deposits
-            .get_mut(deposit_id as usize)
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("deposit write: unknown deposit {deposit_id}")))?;
-        pool.stage(&self.ctx, offset, data)
+            affinity: crate::deposit_pool::next_deposit_affinity(),
+            pending: Mutex::new(None),
+            ctx: self.ctx.clone(),
+            pool: Arc::clone(self.ctx.deposit_pool()),
+            scheme_alive: Arc::new(AtomicBool::new(true)),
+        });
+        self.deposits.push(Arc::clone(&binding));
+        Ok(crate::exchange::DepositTransaction { inner: binding })
     }
 
     /// Append a CPU-writable buffer → texture copy node (identity only; no bytes in IR).
@@ -1511,9 +1571,27 @@ impl Scheme {
         });
     }
 
-    /// Declare a transient texture lease backed by the context's transient pool (N=1).
+    /// Intern `lease` on first use so its backing outlives IR nodes that reference it.
     ///
-    /// The backing parcel is held until the scheme is dropped. Structural mutation.
+    /// Render-target stamps are registered here (moved from mint time) so submit still
+    /// knows the stamp before the first present WAR.
+    pub(crate) fn intern_lease(&mut self, inner: &Arc<LeaseInner>) {
+        if self.interned_leases.iter().any(|held| Arc::ptr_eq(held, inner)) {
+            return;
+        }
+        #[cfg(feature = "graphics")]
+        if let Some(LeaseBacking::RenderTarget(rt)) = inner.backing.as_ref() {
+            self.submit_state
+                .register_stamp_parts(ResourceId::RenderTarget(rt.backend_handle()), rt.stamp_handle());
+        }
+        self.interned_leases.push(Arc::clone(inner));
+    }
+
+    /// Declare a transient texture lease backed by the context's transient pool.
+    ///
+    /// Prefer [`Context::lease_texture`]: the context is the lessor. This forwarder
+    /// remains for callers that still mint through the scheme.
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_texture")]
     pub fn lease_texture(
         &mut self,
         width: u32,
@@ -1522,71 +1600,37 @@ impl Scheme {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Lease<LeaseTexture>, GoldyError> {
-        self.mark_structure_dirty();
-        let texture = self
-            .ctx
-            .with_transient_pool(|pool| pool.acquire_texture(&self.ctx, width, height, format, access, flags))
-            .map_err(|e| self.ctx.classify(e))?;
-        let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
-        self.leases.push(texture.into_lease_parcel());
-        Ok(Lease {
-            id,
-            _marker: PhantomData,
-        })
+        self.ctx.lease_texture(width, height, format, access, flags)
     }
 
-    /// Declare a transient buffer lease backed by the context's transient pool (N=1).
+    /// Declare a transient buffer lease backed by the context's transient pool.
     ///
-    /// The backing parcel is held until the scheme is dropped. Structural mutation.
-    ///
-    /// # Write-first invariant
-    ///
-    /// The pool may reissue a previously-used buffer parcel whose epoch has retired.
-    /// The recycled bytes are **not** cleared. The first node that accesses this lease
-    /// must declare [`NodeAccess::Write`], [`NodeAccess::Overwrite`], or `ReadWrite`, never pure `Read` — otherwise
-    /// the shader observes the previous tenant's data.
-    ///
-    /// A full inaugural-write shape check (unique-minimal-write scheme validation per
-    /// design §8) is not yet implemented; callers are responsible for this invariant today.
+    /// Prefer [`Context::lease_buffer`]. See that method for the write-first invariant.
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_buffer")]
     pub fn lease_buffer(&mut self, size: u64) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.lease_buffer_with(
-            size,
-            crate::types::BufferKind::Scattered,
-            crate::types::BufferFlags::empty(),
-        )
+        self.ctx.lease_buffer(size)
     }
 
     /// Like [`Self::lease_buffer`] but with explicit kind and flags.
     ///
-    /// Use this when the shader requires a buffer kind other than `Scattered` (e.g.
-    /// `Broadcast` for uniform buffers). The pool bins buffers by `(size, kind, flags)`,
-    /// so only identically-described buffers are ever reused across submissions.
-    ///
-    /// See [`Self::lease_buffer`] for the write-first invariant that applies to all buffer
-    /// leases regardless of kind.
+    /// Prefer [`Context::lease_buffer_with`].
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_buffer_with")]
     pub fn lease_buffer_with(
         &mut self,
         size: u64,
         kind: crate::types::BufferKind,
         flags: crate::types::BufferFlags,
     ) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.mark_structure_dirty();
-        let backing = self
-            .ctx
-            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags, None))
-            .map_err(|e| self.ctx.classify(e))?;
-        let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
-        self.leases.push(backing);
-        Ok(Lease {
-            id,
-            _marker: PhantomData,
-        })
+        self.ctx.lease_buffer_with(size, kind, flags)
     }
 
-    /// Declare a render-target lease owned by this scheme (N=1).
+    /// Declare a render-target lease allocated on this scheme's context.
     ///
-    /// The backing render target is held until the scheme is dropped. Structural mutation.
+    /// Prefer [`Context::lease_render_target`]: the context is the lessor. Stamp
+    /// registration happens when the lease is first bound (`render_pass`,
+    /// `copy_to_present`, `copy_to_texture`).
     #[cfg(feature = "graphics")]
+    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_render_target")]
     pub fn lease_render_target(
         &mut self,
         width: u32,
@@ -1594,35 +1638,26 @@ impl Scheme {
         format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<Lease<LeaseRenderTarget>, GoldyError> {
-        self.mark_structure_dirty();
-        let rt = RenderTarget::new_with_depth(self.ctx.device(), width, height, format, depth_format)
-            .map_err(|e| self.ctx.classify(e))?;
-        let handle = rt.backend_handle();
-        let stamp = rt.stamp_handle();
-        self.submit_state
-            .register_stamp_parts(ResourceId::RenderTarget(handle), stamp);
-        let id = LeaseId(u32::try_from(self.rt_leases.len()).expect("render target lease id overflow"));
-        self.rt_leases.push(rt);
-        Ok(Lease {
-            id,
-            _marker: PhantomData,
-        })
+        self.ctx.lease_render_target(width, height, format, depth_format)
     }
 
-    /// Borrow the backing render target for a scheme-held lease.
+    /// Intern `lease` and borrow its backing render target.
     #[cfg(feature = "graphics")]
-    pub(crate) fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
-        &self.rt_leases[lease.id.0 as usize]
+    pub(crate) fn intern_rt<'a>(&mut self, lease: &'a Lease<LeaseRenderTarget>) -> &'a RenderTarget {
+        self.intern_lease(&lease.inner);
+        lease.rt()
     }
 
-    /// Typed resource descriptor handle for a scheme-held texture lease (advanced binding).
+    /// Typed resource descriptor handle for a texture lease (advanced binding).
+    #[deprecated(since = "0.2.0", note = "use Lease::handle")]
     pub fn lease_handle(&self, lease: &Lease<LeaseTexture>, access: ResourceAccess) -> Option<ResourceHandle> {
-        self.leases[lease.id.0 as usize].handle(access)
+        lease.handle(access)
     }
 
-    /// Typed resource descriptor handle for a scheme-held buffer lease (advanced binding).
+    /// Typed resource descriptor handle for a buffer lease (advanced binding).
+    #[deprecated(since = "0.2.0", note = "use Lease::handle")]
     pub fn lease_buffer_handle(&self, lease: &Lease<LeaseBuffer>, access: ResourceAccess) -> Option<ResourceHandle> {
-        self.leases[lease.id.0 as usize].handle(access)
+        lease.handle(access)
     }
 
     /// Declare a compute dispatch node, returning a builder for access declarations.
@@ -1951,7 +1986,8 @@ impl Scheme {
             params_dirty,
             ir_clean: self.dirty == SchemeDirty::Clean && !topo_dirty,
             had_replay: self.submit_state.has_cb_replay(),
-            deposit_resolutions: self.resolve_deposits_for_submit()?,
+            deposit_resolutions: HashMap::new(),
+            deposit_claims: HashMap::new(),
         })
     }
 
@@ -1965,11 +2001,36 @@ impl Scheme {
     }
 
     fn stamp_deposits_and_cpu(&mut self, tv: TimelineValue) {
-        let ctx_h = self.ctx.backend_handle();
-        for pool in &mut self.deposits {
-            pool.stamp_pending(ctx_h, tv);
-        }
         self.stamp_cpu_dispatches(tv);
+    }
+
+    fn claim_deposits_into(&mut self, prep: &mut IrSubmitPrep) -> Result<(), GoldyError> {
+        let mut referenced = HashSet::new();
+        for node in &self.ir.nodes {
+            for b in &node.bindings {
+                if let ResourceId::Deposit(id) = b.resource {
+                    referenced.insert(id);
+                }
+            }
+        }
+        for id in referenced {
+            let binding = self
+                .deposits
+                .get(id as usize)
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
+            let handle = binding
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .ok_or_else(|| {
+                    GoldyError::Backend(anyhow::anyhow!("submit: Deposit({id}) was not written before submit"))
+                })?;
+            let claim = DepositClaim::new(handle, binding.capacity, Arc::clone(&binding.pool));
+            prep.deposit_resolutions.insert(id, claim.resolved());
+            prep.deposit_claims.insert(id, Some(claim));
+        }
+        Ok(())
     }
 
     fn finish_ir_submit_bookkeeping(
@@ -2100,7 +2161,9 @@ impl Scheme {
         &mut self,
         mut acquired: Vec<AcquiredPresent>,
     ) -> Result<Submission, GoldyError> {
-        let prep = self.prepare_ir_submit()?;
+        let mut prep = self.prepare_ir_submit()?;
+        self.claim_deposits_into(&mut prep)?;
+        let mut deposit_claims = std::mem::take(&mut prep.deposit_claims);
 
         validate_present_exchange_bindings(&self.ir, &self.present_transactions)?;
         if let Some(msg) = self.record_errors.first() {
@@ -2208,6 +2271,7 @@ impl Scheme {
                     &mut present_slots,
                     deferred,
                     &prep.deposit_resolutions,
+                    &mut deposit_claims,
                     prep.ir_clean,
                     &mut partial,
                     &mut partial_tv,
@@ -2217,7 +2281,10 @@ impl Scheme {
             self.teardown_replay_if_disabled(prep.had_replay);
             match result {
                 Ok(ok) => Ok((ok, surface_frames, surface_generations, partial)),
-                Err(e) => Err((e, surface_frames, partial, partial_tv)),
+                Err(e) => {
+                    crate::exchange::park_unconsumed_deposit_claims(&mut deposit_claims, partial_tv);
+                    Err((e, surface_frames, partial, partial_tv))
+                }
             }
         };
 
@@ -2263,7 +2330,9 @@ impl Scheme {
 
     #[cfg(not(feature = "graphics"))]
     fn submit_without_presents(&mut self) -> Result<Submission, GoldyError> {
-        let prep = self.prepare_ir_submit()?;
+        let mut prep = self.prepare_ir_submit()?;
+        self.claim_deposits_into(&mut prep)?;
+        let mut deposit_claims = std::mem::take(&mut prep.deposit_claims);
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
@@ -2279,12 +2348,14 @@ impl Scheme {
                 &mut present_slots,
                 None,
                 &prep.deposit_resolutions,
+                &mut deposit_claims,
                 prep.ir_clean,
                 &mut partial,
                 &mut partial_tv,
                 &self.cpu_dispatches,
             )
             .map_err(|e| {
+                crate::exchange::park_unconsumed_deposit_claims(&mut deposit_claims, partial_tv);
                 self.stamp_cpu_dispatches(partial_tv);
                 self.ctx.advance_high_water_timeline(partial_tv);
                 self.ctx.classify(e)
@@ -2556,7 +2627,7 @@ impl Scheme {
     pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
         self.mark_structure_dirty();
         let binding_id = self.intern_present_binding(dst);
-        let handle = self.rt_leases[src.id.0 as usize].backend_handle();
+        let handle = self.intern_rt(src).backend_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_present",
             bindings: vec![
@@ -2787,7 +2858,8 @@ impl Scheme {
     /// this scheme's context, and matching the render target's width, height, and format.
     #[cfg(feature = "graphics")]
     pub fn copy_to_texture(&mut self, src: &Lease<LeaseRenderTarget>, dst: &Parcel) -> Result<(), GoldyError> {
-        let src_rt = &self.rt_leases[src.id.0 as usize];
+        self.intern_lease(&src.inner);
+        let src_rt = src.rt();
         if !dst.is_homed_on(&self.ctx) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "parcel home device does not match scheme context"
@@ -2855,7 +2927,7 @@ impl Scheme {
         color_load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
         self.mark_structure_dirty();
-        let handle = self.rt_leases[rt.id.0 as usize].backend_handle();
+        let handle = self.intern_rt(rt).backend_handle();
         let access = if color_load.overwrites() {
             NodeAccess::Overwrite
         } else {
@@ -2918,50 +2990,24 @@ impl Scheme {
         })
     }
 
-    /// Resolve pending deposit stages into concrete handles for this submit.
-    fn resolve_deposits_for_submit(
-        &self,
-    ) -> Result<std::collections::HashMap<u32, crate::task_graph::ResolvedDeposit>, GoldyError> {
-        let mut out = std::collections::HashMap::new();
-        let mut referenced = std::collections::HashSet::new();
-        for node in &self.ir.nodes {
-            for b in &node.bindings {
-                if let ResourceId::Deposit(id) = b.resource {
-                    referenced.insert(id);
-                }
-            }
-        }
-        for id in referenced {
-            let pool = self
-                .deposits
-                .get(id as usize)
-                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
-            let resolved = pool.resolve_pending().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("submit: Deposit({id}) was not written before submit"))
-            })?;
-            out.insert(id, resolved);
-        }
-        Ok(out)
-    }
-
-    /// Test/telemetry: number of physical parcels owned by deposit `id`.
+    /// Test/telemetry: number of physical staging backings last used by this deposit.
     #[doc(hidden)]
     pub fn deposit_parcel_count(&self, deposit: &crate::exchange::DepositTransaction) -> usize {
-        self.deposits
-            .get(deposit.deposit_id as usize)
-            .map(|p| p.parcels.len())
-            .unwrap_or(0)
+        self.ctx.deposit_pool().count_for_affinity(deposit.inner.affinity)
     }
 
-    /// Test helper: mark the first physical deposit parcel as still in flight at `tv`.
+    /// Test helper: mark this deposit's last parked backing as still in flight at `tv`.
     #[doc(hidden)]
     pub fn test_mark_deposit_inflight(&mut self, deposit: &crate::exchange::DepositTransaction, tv: TimelineValue) {
-        let ctx = self.ctx.backend_handle();
-        let pool = &mut self.deposits[deposit.deposit_id as usize];
-        pool.pending = None;
-        if let Some(parcel) = pool.parcels.first() {
-            parcel.mark_referenced(ctx, tv);
-        }
+        self.ctx
+            .deposit_pool()
+            .mark_affinity_inflight(deposit.inner.affinity, tv);
+    }
+
+    /// Test helper: physical handles last used by this deposit.
+    #[doc(hidden)]
+    pub fn test_deposit_handles(&self, deposit: &crate::exchange::DepositTransaction) -> Vec<BufferHandle> {
+        self.ctx.deposit_pool().handles_for_affinity(deposit.inner.affinity)
     }
 
     /// Test helper: number of retained CB slot variants across all partitions.
@@ -2996,30 +3042,15 @@ impl Drop for Scheme {
         self.submit_state.release_backend_retained_graphs(&self.ctx);
 
         let ctx = self.ctx.clone();
-        for pool in std::mem::take(&mut self.deposits) {
-            pool.return_all(&ctx);
+        for binding in std::mem::take(&mut self.deposits) {
+            binding.discard_pending();
         }
         for exec in std::mem::take(&mut self.cpu_dispatches) {
             exec.release(&ctx);
         }
-        for mut parcel in self.leases.drain(..) {
-            let ready_after = parcel.last_referenced();
-            parcel.release_bookkeeping();
-            if parcel.texture_descriptor().is_some() {
-                let home_device = parcel.home_device().clone();
-                let texture = crate::Texture::from_returned_parcel(parcel, home_device);
-                ctx.with_transient_pool(|pool| {
-                    pool.adopt(StampedParcel {
-                        hold: crate::retained_pool::RetainedHold::Texture(texture),
-                        ready_after,
-                    });
-                });
-            } else {
-                ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
-            }
-        }
-        #[cfg(feature = "graphics")]
-        self.rt_leases.clear();
+        // Interned lease Arcs drop here (after wait_until). Pool return is in
+        // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
+        let _interned = std::mem::take(&mut self.interned_leases);
     }
 }
 
@@ -3193,7 +3224,7 @@ type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelSt
 type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
 
 pub(crate) trait SchemeBindable {
-    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult;
+    fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult;
     fn accel_kind(&self) -> Option<crate::accel::AccelKind> {
         None
     }
@@ -3209,7 +3240,7 @@ pub(crate) trait SchemeBindable {
 }
 
 impl SchemeBindable for Parcel {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         (
             Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
@@ -3222,7 +3253,7 @@ impl SchemeBindable for Parcel {
 }
 
 impl SchemeBindable for crate::Buffer {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = self.whole();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
@@ -3236,7 +3267,7 @@ impl SchemeBindable for crate::Buffer {
 }
 
 impl SchemeBindable for crate::buffer::Allocation {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         (
             Some((ResourceId::Buffer(self.handle), None)),
             self.resource_index(access),
@@ -3244,14 +3275,10 @@ impl SchemeBindable for crate::buffer::Allocation {
     }
 }
 
-impl<T> SchemeBindable for Lease<T> {
-    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
-        let parcel = &scheme.leases[self.id.0 as usize];
-        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write,
-        // Overwrite, or ReadWrite — never pure Read. The pool may recycle a buffer whose bytes
-        // come from a previous submission; a Read-only first access would observe stale data.
-        // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
-        // the unique-minimal-write shape-check lands (design §8).
+impl SchemeBindable for Lease<LeaseTexture> {
+    fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
+        scheme.intern_lease(&self.inner);
+        let parcel = self.parcel();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
@@ -3259,8 +3286,28 @@ impl<T> SchemeBindable for Lease<T> {
     }
 }
 
+impl SchemeBindable for Lease<LeaseBuffer> {
+    fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
+        scheme.intern_lease(&self.inner);
+        let parcel = self.inner.parcel();
+        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write,
+        // Overwrite, or ReadWrite — never pure Read. The pool may recycle a buffer whose bytes
+        // come from a previous submission; a Read-only first access would observe stale data.
+        // This requires a per-scheme "has-been-written" bit per lease; deferred until
+        // the unique-minimal-write shape-check lands (design §8).
+        (
+            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
+            parcel.resource_index(access),
+        )
+    }
+
+    fn buffer_parcel(&self) -> Option<Parcel> {
+        Some(self.inner.parcel().clone())
+    }
+}
+
 impl SchemeBindable for crate::Sampler {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
@@ -3268,7 +3315,7 @@ impl SchemeBindable for crate::Sampler {
 }
 
 impl SchemeBindable for crate::AccelerationStructure {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         let _ = access;
         (
             Some((self.resource_id(), None)),
@@ -3286,7 +3333,7 @@ impl SchemeBindable for crate::AccelerationStructure {
 }
 
 impl SchemeBindable for crate::Texture {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &mut Scheme, access: ResourceAccess) -> SchemeBindResult {
         // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
         // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
         // fall back to the UAV bindless index — matching historical submit behaviour in
@@ -3755,7 +3802,8 @@ impl SchemeCpuNodeBuilder<'_> {
 
     /// Bind a scheme-held buffer lease as the next slice parameter of the virtual main.
     pub fn with_lease(mut self, lease: &Lease<LeaseBuffer>, access: NodeAccess) -> Self {
-        let parcel = &self.scheme.leases[lease.id.0 as usize];
+        self.scheme.intern_lease(&lease.inner);
+        let parcel = lease.parcel();
         self.bindings
             .push(PendingCpuBinding::from_parcel(self.label, parcel, access));
         self
@@ -4222,7 +4270,7 @@ mod tests {
     use crate::types::BufferFlags;
     use crate::types::ResourceAccess;
     use crate::BufferKind;
-    use crate::MemoryExchange;
+    use crate::{DepositTarget, MemoryExchange};
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -4355,7 +4403,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let pipeline = mock_pipeline(device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
-        let lease = scheme
+        let lease = ctx
             .lease_texture(
                 4,
                 4,
@@ -4364,7 +4412,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 TextureFlags::empty(),
             )
             .expect("lease texture");
-        let _handle = scheme.leases[0].handle(ResourceAccess::Write).expect("lease handle");
+        let _handle = lease.handle(ResourceAccess::Write).expect("lease handle");
         scheme
             .node("write_tex", &pipeline)
             .with_parcel(&lease, NodeAccess::Write)
@@ -4388,20 +4436,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let mut write_scheme = Scheme::new(&ctx);
         let deposit = memory
-            .bind_deposit_buffer(&mut write_scheme, parcel, parcel.byte_size())
+            .bind_deposit(&mut write_scheme, DepositTarget::buffer(parcel, parcel.byte_size()))
             .expect("bind full deposit");
         deposit
-            .write(&mut write_scheme, 0, &vec![0u8; parcel.byte_size() as usize])
+            .write(0, &vec![0u8; parcel.byte_size() as usize])
             .expect("full deposit write");
         assert_eq!(write_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Overwrite);
 
         let mut partial_scheme = Scheme::new(&ctx);
         let partial_deposit = memory
-            .bind_deposit_buffer_at(&mut partial_scheme, parcel, 4, 4)
+            .bind_deposit(&mut partial_scheme, DepositTarget::buffer_at(parcel, 4, 4))
             .expect("bind partial deposit");
-        partial_deposit
-            .write(&mut partial_scheme, 0, &[1, 2, 3, 4])
-            .expect("partial deposit write");
+        partial_deposit.write(0, &[1, 2, 3, 4]).expect("partial deposit write");
         assert_eq!(partial_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Write);
     }
 
@@ -4750,19 +4796,19 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn lease_backing_stamped_per_submit() {
         let device = mock_device();
-        let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
+        let (mut scheme, lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
         let frame1 = scheme.submit().unwrap();
         assert_eq!(
-            scheme.leases[0].last_referenced_on(ctx.backend_handle()),
+            lease.parcel().last_referenced_on(ctx.backend_handle()),
             Some(frame1.timeline_value())
         );
 
         let frame2 = scheme.submit().unwrap();
         assert!(frame2.timeline_value() >= frame1.timeline_value());
         assert_eq!(
-            scheme.leases[0].last_referenced_on(ctx.backend_handle()),
+            lease.parcel().last_referenced_on(ctx.backend_handle()),
             Some(frame2.timeline_value()),
             "lease backing must be stamped on resubmit"
         );
@@ -4775,8 +4821,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let outstanding_before = ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture);
 
         {
-            let mut scheme = Scheme::new(&ctx);
-            let lease = scheme
+            let _scheme = Scheme::new(&ctx);
+            let lease = ctx
                 .lease_texture(
                     4,
                     4,
@@ -4790,13 +4836,113 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 "leased backing counts as pool outstanding"
             );
             drop(lease);
-            drop(scheme);
+            drop(_scheme);
         }
 
         assert_eq!(
             ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture),
             outstanding_before,
-            "outstanding drops when scheme releases lease backings"
+            "outstanding drops when the last lease clone is dropped"
+        );
+        assert_eq!(
+            ctx.with_transient_pool(|pool| pool.pending_count()),
+            1,
+            "dropped lease backing is parked in the pool"
+        );
+    }
+
+    #[test]
+    fn lease_reusable_across_schemes() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let lease = ctx.lease_buffer(64).expect("lease");
+
+        let mut scheme_a = Scheme::new(&ctx);
+        scheme_a
+            .node("a", &pipeline)
+            .with_parcel(&lease, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme_a.submit().expect("scheme a");
+
+        let mut scheme_b = Scheme::new(&ctx);
+        scheme_b
+            .node("b", &pipeline)
+            .with_parcel(&lease, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        scheme_b.submit().expect("scheme b");
+    }
+
+    #[test]
+    fn interned_lease_survives_handle_drop() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let outstanding_before = ctx.transient_outstanding_bytes().texture;
+
+        let mut scheme = Scheme::new(&ctx);
+        let lease = ctx
+            .lease_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("lease");
+        scheme
+            .node("write_tex", &pipeline)
+            .with_parcel(&lease, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let outstanding_held = ctx.transient_outstanding_bytes().texture;
+        assert!(outstanding_held > outstanding_before);
+
+        drop(lease);
+        assert_eq!(
+            ctx.transient_outstanding_bytes().texture,
+            outstanding_held,
+            "scheme intern keeps the backing alive after the user handle is dropped"
+        );
+        scheme.submit().expect("submit after lease handle drop");
+
+        drop(scheme);
+        assert_eq!(
+            ctx.transient_outstanding_bytes().texture,
+            outstanding_before,
+            "pool return happens when the interned clone is dropped"
+        );
+    }
+
+    #[test]
+    fn pool_return_waits_for_last_lease_clone() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let outstanding_before = ctx.transient_outstanding_bytes().buffer;
+
+        let lease = ctx.lease_buffer(64).expect("lease");
+        {
+            let mut scheme = Scheme::new(&ctx);
+            scheme
+                .node("write", &pipeline)
+                .with_parcel(&lease, NodeAccess::Write)
+                .dispatch(1, 1, 1);
+            scheme.submit().expect("submit");
+            drop(scheme);
+            assert!(
+                ctx.transient_outstanding_bytes().buffer > outstanding_before,
+                "user lease keeps the backing after the scheme is dropped"
+            );
+        }
+
+        drop(lease);
+        assert_eq!(
+            ctx.transient_outstanding_bytes().buffer,
+            outstanding_before,
+            "pool return happens on the last lease clone after settle"
         );
         assert_eq!(
             ctx.with_transient_pool(|pool| pool.pending_count()),
@@ -5800,6 +5946,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     fn register_exchange_with_copy(scheme: &mut Scheme, lease: &crate::swapchain_pool::PresentLease) -> Transaction {
         let rt = scheme
+            .context()
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         scheme.copy_to_present(&rt, lease);
@@ -5812,7 +5959,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         {
@@ -6056,7 +6203,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         assert_eq!(scheme.ir_node_count(), 0);
@@ -6095,7 +6242,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let tex_handle = tex.texture_handle().expect("texture handle");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         assert_eq!(scheme.ir_node_count(), 0);
@@ -6126,7 +6273,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("buffer");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6156,7 +6303,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6186,7 +6333,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6219,7 +6366,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         let err = scheme
@@ -6600,10 +6747,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(right.id, 0);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt_a = scheme
+        let rt_a = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_b = scheme
+        let rt_b = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt_a, &left);
@@ -6672,10 +6819,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let left_lease = left_pool.lease();
         let right_lease = right_pool.lease();
-        let rt_a = scheme
+        let rt_a = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_b = scheme
+        let rt_b = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt_a, &left_lease);
@@ -6706,7 +6853,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(left.id, right.id);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt, &left);
@@ -6733,10 +6880,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let left = left_pool.lease();
         let right = right_pool.lease();
-        let rt_a = scheme
+        let rt_a = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_b = scheme
+        let rt_b = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         scheme.copy_to_present(&rt_a, &left);
@@ -7176,7 +7323,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let pipeline = mock_render_pipeline(&device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
         let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
@@ -7309,10 +7456,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let pipeline = mock_render_pipeline(&device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
             .expect("rt");
-        let rt_handle = scheme.rt(&rt).backend_handle();
+        let rt_handle = rt.rt().backend_handle();
         let mut pass = scheme.render_pass("render", &rt, crate::types::TargetLoad::Discard);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();
@@ -7676,11 +7823,11 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 64)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 64))
             .unwrap();
 
         let payload_a = vec![1u8; 64];
-        upload.write(&mut scheme, 0, &payload_a).unwrap();
+        upload.write(0, &payload_a).unwrap();
         assert_eq!(scheme.deposit_parcel_count(&upload), 1);
         let _sub1 = scheme.submit().unwrap();
 
@@ -7688,7 +7835,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         scheme.test_mark_deposit_inflight(&upload, 1_000_000);
 
         let payload_b = vec![2u8; 64];
-        upload.write(&mut scheme, 0, &payload_b).unwrap();
+        upload.write(0, &payload_b).unwrap();
         assert_eq!(
             scheme.deposit_parcel_count(&upload),
             2,
@@ -7707,12 +7854,12 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 32)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 32))
             .unwrap();
 
-        upload.write(&mut scheme, 0, &[7u8; 32]).unwrap();
+        upload.write(0, &[7u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
-        upload.write(&mut scheme, 0, &[8u8; 32]).unwrap();
+        upload.write(0, &[8u8; 32]).unwrap();
         assert_eq!(
             scheme.deposit_parcel_count(&upload),
             1,
@@ -7731,7 +7878,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 16))
             .unwrap();
         let err = scheme.submit().expect_err("must require stage before submit");
         let msg = format!("{err}");
@@ -7750,15 +7897,15 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 32)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 32))
             .unwrap();
 
-        upload.write(&mut scheme, 0, &[1u8; 32]).unwrap();
+        upload.write(0, &[1u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1);
         assert_eq!(scheme.test_retained_slot_variant_count(), 1);
 
-        upload.write(&mut scheme, 0, &[2u8; 32]).unwrap();
+        upload.write(0, &[2u8; 32]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.test_retained_slot_variant_count(), 1);
         #[cfg(not(feature = "metal"))]
@@ -7769,7 +7916,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
 
         scheme.test_mark_deposit_inflight(&upload, 1_000_000);
-        upload.write(&mut scheme, 0, &[3u8; 32]).unwrap();
+        upload.write(0, &[3u8; 32]).unwrap();
         assert_eq!(scheme.deposit_parcel_count(&upload), 2);
         let _ = scheme.submit().unwrap();
         assert_eq!(
@@ -7798,9 +7945,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_texture(&mut scheme, &tex, 0, 0, 1, 1, 4, 0)
+            .bind_deposit(&mut scheme, DepositTarget::texture(&tex, 0, 0, 1, 1, 4, 0))
             .unwrap();
-        upload.write(&mut scheme, 0, &[9, 8, 7, 6]).unwrap();
+        upload.write(0, &[9, 8, 7, 6]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().records, 1);
         assert!(scheme.deposit_parcel_count(&upload) >= 1);
@@ -7816,9 +7963,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 16))
             .unwrap();
-        upload.write(&mut scheme, 0, &[4u8; 16]).unwrap();
+        upload.write(0, &[4u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
         assert_eq!(scheme.deposit_parcel_count(&upload), 1);
         drop(scheme);
@@ -7838,11 +7985,11 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .unwrap();
         let mut scheme = Scheme::new(&ctx);
         let upload = MemoryExchange::new(scheme.context())
-            .bind_deposit_buffer(&mut scheme, dst.whole(), 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(dst.whole(), 16))
             .unwrap();
-        upload.write(&mut scheme, 0, &[1u8; 16]).unwrap();
+        upload.write(0, &[1u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
-        upload.write(&mut scheme, 0, &[2u8; 16]).unwrap();
+        upload.write(0, &[2u8; 16]).unwrap();
         let _ = scheme.submit().unwrap();
 
         assert!(

@@ -14,7 +14,7 @@
  *   goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
  *   goldy::Context ctx(device);
  *   goldy::Scheme scheme(ctx);
- *   auto rt = scheme.lease_render_target(800, 600);
+ *   auto rt = ctx.lease_render_target(800, 600);
  *   // ...
  */
 
@@ -85,6 +85,7 @@ class WithdrawTransaction;
 class WithdrawClaim;
 class WithdrawBytes;
 class DepositTransaction;
+class DepositTarget;
 class ComputePipeline;
 class Sampler;
 
@@ -515,6 +516,10 @@ public:
     Context& operator=(Context&&) = default;
 
     GoldyContext* get() const { return ptr_.get(); }
+
+    [[nodiscard]] SchemeRenderTargetLease lease_render_target(
+        uint32_t width, uint32_t height, GoldyTextureFormat format,
+        bool has_depth = false, GoldyDepthFormat depth_format = GOLDY_DEPTH_FORMAT_DEPTH24_PLUS) const;
 
 private:
     std::unique_ptr<GoldyContext, detail::ContextDeleter> ptr_;
@@ -1158,7 +1163,7 @@ private:
 /**
  * @brief Stable deposit relationship recorded in one scheme.
  *
- * Write staging bytes before submit; no claim afterward.
+ * Write staging bytes before submit; submit claims the occurrence internally.
  */
 class DepositTransaction {
 public:
@@ -1179,14 +1184,68 @@ public:
         return goldy_deposit_transaction_id(ptr_.get());
     }
 
-    // Defined after Scheme.
-    void write(Scheme& scheme, const uint8_t* data, size_t size, uint64_t offset = 0);
-    void write(Scheme& scheme, const std::vector<uint8_t>& data, uint64_t offset = 0);
+    void write(const uint8_t* data, size_t size, uint64_t offset = 0) {
+        detail::throw_on_result(goldy_deposit_transaction_write(ptr_.get(), offset, data, size));
+    }
+
+    void write(const std::vector<uint8_t>& data, uint64_t offset = 0) {
+        write(data.data(), data.size(), offset);
+    }
 
     GoldyDepositTransaction* get() const { return ptr_.get(); }
 
 private:
     std::unique_ptr<GoldyDepositTransaction, detail::DepositTransactionDeleter> ptr_;
+};
+
+/**
+ * @brief Destination of a memory-exchange deposit (buffer range or texture region).
+ */
+class DepositTarget {
+public:
+    static DepositTarget buffer(const Parcel& destination, uint64_t capacity) {
+        DepositTarget t;
+        t.raw_.kind = GOLDY_DEPOSIT_TARGET_KIND_BUFFER;
+        t.raw_.buffer = destination.get();
+        t.raw_.dst_offset = 0;
+        t.raw_.capacity = capacity;
+        t.raw_.texture = nullptr;
+        t.raw_.x = 0;
+        t.raw_.y = 0;
+        t.raw_.width = 0;
+        t.raw_.height = 0;
+        t.raw_.src_row_pitch = 0;
+        return t;
+    }
+
+    static DepositTarget buffer_at(const Parcel& destination, uint64_t dst_offset, uint64_t capacity) {
+        DepositTarget t = buffer(destination, capacity);
+        t.raw_.dst_offset = dst_offset;
+        return t;
+    }
+
+    static DepositTarget texture(
+        const Texture& destination,
+        uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+        uint64_t capacity, uint32_t src_row_pitch = 0) {
+        DepositTarget t;
+        t.raw_.kind = GOLDY_DEPOSIT_TARGET_KIND_TEXTURE;
+        t.raw_.buffer = nullptr;
+        t.raw_.dst_offset = 0;
+        t.raw_.capacity = capacity;
+        t.raw_.texture = destination.get();
+        t.raw_.x = x;
+        t.raw_.y = y;
+        t.raw_.width = width;
+        t.raw_.height = height;
+        t.raw_.src_row_pitch = src_row_pitch;
+        return t;
+    }
+
+    const GoldyDepositTarget& raw() const { return raw_; }
+
+private:
+    GoldyDepositTarget raw_{};
 };
 
 /**
@@ -1211,12 +1270,7 @@ public:
     [[nodiscard]] WithdrawTransaction bind_withdraw(Scheme& scheme, const Parcel& parcel);
     [[nodiscard]] WithdrawTransaction bind_withdraw(Scheme& scheme, const Buffer& buffer, uint32_t unit = 0);
     [[nodiscard]] WithdrawTransaction bind_withdraw_texture(Scheme& scheme, const Texture& texture);
-    [[nodiscard]] DepositTransaction bind_deposit_buffer(
-        Scheme& scheme, const Parcel& destination, uint64_t capacity);
-    [[nodiscard]] DepositTransaction bind_deposit_texture(
-        Scheme& scheme, const Texture& destination,
-        uint32_t x, uint32_t y, uint32_t width, uint32_t height,
-        uint64_t capacity, uint32_t src_row_pitch = 0);
+    [[nodiscard]] DepositTransaction bind_deposit(Scheme& scheme, const DepositTarget& target);
 
     GoldyMemoryExchange* get() const { return ptr_.get(); }
 
@@ -1225,7 +1279,7 @@ private:
 };
 
 /**
- * @brief Stable render-target lease declared on a Scheme.
+ * @brief Stable render-target lease minted by a Context.
  */
 class SchemeRenderTargetLease {
 public:
@@ -1241,9 +1295,21 @@ public:
     GoldySchemeRenderTargetLease* get() const { return ptr_.get(); }
 
 private:
+    friend class Context;
     friend class Scheme;
     std::unique_ptr<GoldySchemeRenderTargetLease, detail::SchemeRenderTargetLeaseDeleter> ptr_;
 };
+
+inline SchemeRenderTargetLease Context::lease_render_target(
+    uint32_t width, uint32_t height, GoldyTextureFormat format,
+    bool has_depth, GoldyDepthFormat depth_format) const {
+    GoldySchemeRenderTargetLease* lease = goldy_context_lease_render_target(
+        ptr_.get(), width, height, format, has_depth, depth_format);
+    if (!lease) {
+        throw Exception::from_last_error();
+    }
+    return SchemeRenderTargetLease{lease};
+}
 
 /**
  * @brief Stable present lease from a SurfaceExchange.
@@ -1433,7 +1499,8 @@ public:
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
 
-    [[nodiscard]] SchemeRenderTargetLease lease_render_target(
+    [[nodiscard]] [[deprecated("mint from the lessor: Context::lease_render_target")]]
+    SchemeRenderTargetLease lease_render_target(
         uint32_t width, uint32_t height, GoldyTextureFormat format,
         bool has_depth = false, GoldyDepthFormat depth_format = GOLDY_DEPTH_FORMAT_DEPTH24_PLUS) {
         GoldySchemeRenderTargetLease* lease = goldy_scheme_lease_render_target(
@@ -1716,12 +1783,13 @@ inline SurfaceExchange::BindDestinationResult SurfaceExchange::bind_destination(
     return BindDestinationResult{PresentLease{out.lease}, Transaction{out.transaction}};
 }
 
-inline void DepositTransaction::write(Scheme& scheme, const uint8_t* data, size_t size, uint64_t offset) {
-    detail::throw_on_result(goldy_deposit_transaction_write(ptr_.get(), scheme.get(), offset, data, size));
-}
-
-inline void DepositTransaction::write(Scheme& scheme, const std::vector<uint8_t>& data, uint64_t offset) {
-    write(scheme, data.data(), data.size(), offset);
+inline DepositTransaction MemoryExchange::bind_deposit(Scheme& scheme, const DepositTarget& target) {
+    GoldyDepositTransaction* tx =
+        goldy_memory_exchange_bind_deposit(ptr_.get(), scheme.get(), &target.raw());
+    if (!tx) {
+        throw Exception::from_last_error();
+    }
+    return DepositTransaction{tx};
 }
 
 inline WithdrawTransaction MemoryExchange::bind_withdraw(Scheme& scheme, const Parcel& parcel) {
@@ -1743,28 +1811,6 @@ inline WithdrawTransaction MemoryExchange::bind_withdraw_texture(Scheme& scheme,
         throw Exception::from_last_error();
     }
     return WithdrawTransaction{tx};
-}
-
-inline DepositTransaction MemoryExchange::bind_deposit_buffer(
-    Scheme& scheme, const Parcel& destination, uint64_t capacity) {
-    GoldyDepositTransaction* tx =
-        goldy_memory_exchange_bind_deposit_buffer(ptr_.get(), scheme.get(), destination.get(), capacity);
-    if (!tx) {
-        throw Exception::from_last_error();
-    }
-    return DepositTransaction{tx};
-}
-
-inline DepositTransaction MemoryExchange::bind_deposit_texture(
-    Scheme& scheme, const Texture& destination,
-    uint32_t x, uint32_t y, uint32_t width, uint32_t height,
-    uint64_t capacity, uint32_t src_row_pitch) {
-    GoldyDepositTransaction* tx = goldy_memory_exchange_bind_deposit_texture(
-        ptr_.get(), scheme.get(), destination.get(), x, y, width, height, capacity, src_row_pitch);
-    if (!tx) {
-        throw Exception::from_last_error();
-    }
-    return DepositTransaction{tx};
 }
 
 // =============================================================================
