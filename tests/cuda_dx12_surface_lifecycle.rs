@@ -490,7 +490,7 @@ fn cuda_offscreen_rt_recreate_stress() {
             .expect("readback");
         let t0 = Instant::now();
         let mut scheme = Scheme::new(&ctx);
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(dim, dim, TextureFormat::Rgba32Float, None)
             .expect("rt");
         {
@@ -607,7 +607,7 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
         let mut scheme = Scheme::new(&ctx);
         let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
         let (w, h) = surface.size();
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(w, h, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         {
@@ -693,7 +693,7 @@ fn cuda_teardown_context_before_surface_after_raster_present() {
         let mut scheme = Scheme::new(&ctx);
         let (lease, present_tx) = surface.bind_destination(&mut scheme).expect("bind");
         let (w, h) = surface.size();
-        let rt = scheme
+        let rt = ctx
             .lease_render_target(w, h, TextureFormat::Rgba8Unorm, None)
             .expect("render target");
         {

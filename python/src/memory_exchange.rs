@@ -4,9 +4,87 @@ use crate::error::IntoPyResult;
 use crate::parcel::PyParcel;
 use crate::scheme::{PyContext, PyScheme, PySchemeSubmission};
 use crate::texture::PyTexture;
-use goldy::{DepositTransaction, MemoryExchange, WithdrawClaim, WithdrawTransaction};
+use goldy::{DepositTarget, DepositTransaction, MemoryExchange, WithdrawClaim, WithdrawTransaction};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+/// Destination of a memory-exchange deposit (buffer range or texture region).
+#[pyclass(name = "DepositTarget", module = "goldy", unsendable)]
+pub struct PyDepositTarget {
+    parcel: Option<Py<PyParcel>>,
+    texture: Option<Py<PyTexture>>,
+    dst_offset: u64,
+    capacity: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    src_row_pitch: u32,
+    is_texture: bool,
+}
+
+#[pymethods]
+impl PyDepositTarget {
+    /// Whole-parcel or ranged buffer deposit.
+    #[staticmethod]
+    #[pyo3(signature = (destination, capacity, dst_offset=0))]
+    fn buffer(destination: Py<PyParcel>, capacity: u64, dst_offset: u64) -> Self {
+        Self {
+            parcel: Some(destination),
+            texture: None,
+            dst_offset,
+            capacity,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            src_row_pitch: 0,
+            is_texture: false,
+        }
+    }
+
+    /// Texture-region deposit.
+    #[staticmethod]
+    #[pyo3(signature = (destination, x, y, width, height, capacity, src_row_pitch=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn texture(
+        destination: Py<PyTexture>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        capacity: u64,
+        src_row_pitch: u32,
+    ) -> Self {
+        Self {
+            parcel: None,
+            texture: Some(destination),
+            dst_offset: 0,
+            capacity,
+            x,
+            y,
+            width,
+            height,
+            src_row_pitch,
+            is_texture: true,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        if self.is_texture {
+            format!(
+                "DepositTarget.texture(x={}, y={}, width={}, height={}, capacity={})",
+                self.x, self.y, self.width, self.height, self.capacity
+            )
+        } else {
+            format!(
+                "DepositTarget.buffer(capacity={}, dst_offset={})",
+                self.capacity, self.dst_offset
+            )
+        }
+    }
+}
 
 /// CPU↔GPU memory exchange: withdrawals (readback) and deposits (upload).
 #[pyclass(name = "MemoryExchange", module = "goldy", unsendable)]
@@ -43,49 +121,53 @@ impl PyMemoryExchange {
         Ok(PyWithdrawTransaction { inner: tx })
     }
 
-    /// Bind a deposit into a destination buffer parcel.
-    fn bind_deposit_buffer(
+    /// Bind a deposit into a destination buffer parcel or texture region.
+    fn bind_deposit(
         &self,
+        py: Python<'_>,
         scheme: &PyScheme,
-        destination: &PyParcel,
-        capacity: u64,
+        target: &PyDepositTarget,
     ) -> PyResult<PyDepositTransaction> {
         scheme.ensure_no_active_recorder()?;
-        let tx = self
-            .inner
-            .bind_deposit_buffer(&mut scheme.inner.borrow_mut(), destination.inner.as_parcel(), capacity)
-            .into_py_result()?;
-        Ok(PyDepositTransaction { inner: tx })
-    }
-
-    /// Bind a deposit into a texture region.
-    #[pyo3(signature = (scheme, destination, x, y, width, height, capacity, src_row_pitch=0))]
-    #[allow(clippy::too_many_arguments)]
-    fn bind_deposit_texture(
-        &self,
-        scheme: &PyScheme,
-        destination: &PyTexture,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        capacity: u64,
-        src_row_pitch: u32,
-    ) -> PyResult<PyDepositTransaction> {
-        scheme.ensure_no_active_recorder()?;
-        let tx = self
-            .inner
-            .bind_deposit_texture(
-                &mut scheme.inner.borrow_mut(),
-                &*destination.inner,
-                x,
-                y,
-                width,
-                height,
-                capacity,
-                src_row_pitch,
-            )
-            .into_py_result()?;
+        let tx = if target.is_texture {
+            let texture = target
+                .texture
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("DepositTarget.texture is missing a texture"))?;
+            let texture = texture.bind(py);
+            let texture = texture.borrow();
+            self.inner
+                .bind_deposit(
+                    &mut scheme.inner.borrow_mut(),
+                    DepositTarget::texture(
+                        &*texture.inner,
+                        target.x,
+                        target.y,
+                        target.width,
+                        target.height,
+                        target.capacity,
+                        target.src_row_pitch,
+                    ),
+                )
+                .into_py_result()?
+        } else {
+            let parcel = target
+                .parcel
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("DepositTarget.buffer is missing a parcel"))?;
+            let parcel = parcel.bind(py);
+            let parcel = parcel.borrow();
+            self.inner
+                .bind_deposit(
+                    &mut scheme.inner.borrow_mut(),
+                    DepositTarget::Buffer {
+                        destination: parcel.inner.as_parcel(),
+                        dst_offset: target.dst_offset,
+                        capacity: target.capacity,
+                    },
+                )
+                .into_py_result()?
+        };
         Ok(PyDepositTransaction { inner: tx })
     }
 
@@ -170,12 +252,9 @@ impl PyDepositTransaction {
         self.inner.id()
     }
 
-    #[pyo3(signature = (scheme, data, offset=0))]
-    fn write(&self, scheme: &PyScheme, data: &[u8], offset: u64) -> PyResult<()> {
-        scheme.ensure_no_active_recorder()?;
-        self.inner
-            .write(&mut scheme.inner.borrow_mut(), offset, data)
-            .into_py_result()
+    #[pyo3(signature = (data, offset=0))]
+    fn write(&self, data: &[u8], offset: u64) -> PyResult<()> {
+        self.inner.write(offset, data).into_py_result()
     }
 
     fn __repr__(&self) -> String {

@@ -2,13 +2,16 @@
 //!
 //! Concrete exchanges ([`SurfaceExchange`], [`MemoryExchange`]) bind a relationship into a
 //! scheme and return a reusable transaction. Each successful [`crate::Scheme::submit`] may
-//! publish a claim for relationships that settle outside graph execution.
+//! produce a claim. Representation and delivery of claims are defined by the exchange:
 //!
 //! - Surface present: [`Transaction::claim`] → erased [`Claim`] → [`Claim::consume`] / discard
 //! - Memory withdraw: [`WithdrawTransaction::claim`] → [`WithdrawClaim`] → [`WithdrawBytes`]
-//! - Memory deposit: graph execution settles the upload; there is no claim
+//! - Memory deposit: [`DepositTransaction::write`] prepares an occurrence; submit claims it
+//!   internally and graph execution consumes it at the copy dispatch.
 
+use crate::backend::BufferHandle;
 use crate::context::Context;
+use crate::deposit_pool::DepositExchangePool;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
 #[cfg(feature = "graphics")]
@@ -19,6 +22,7 @@ use crate::surface::Frame as SurfaceFrame;
 #[cfg(feature = "graphics")]
 use crate::swapchain_pool::{PresentLease, SwapchainPool};
 use crate::texture::TextureCopyFootprint;
+use crate::timeline::TimelineValue;
 #[cfg(feature = "graphics")]
 use crate::types::{PresentMode, SurfaceConfig, TextureFormat};
 use crate::Buffer;
@@ -26,7 +30,8 @@ use crate::Texture;
 #[cfg(feature = "graphics")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Object-safe per-submission foreign handoff (surface present today).
 #[cfg(feature = "graphics")]
@@ -329,48 +334,18 @@ impl MemoryExchange {
         scheme.register_withdraw(parcel)
     }
 
-    /// Bind a deposit that copies staging bytes into a destination buffer parcel.
+    /// Bind a deposit into `target`. Shape (buffer range vs texture region) is target data.
     ///
-    /// Records copy topology once (destination offset 0 within the parcel). Each submission
-    /// must [`DepositTransaction::write`] before [`Scheme::submit`]; graph execution settles
-    /// the upload (no claim).
-    pub fn bind_deposit_buffer(
+    /// Records copy topology once. Each submission must [`DepositTransaction::write`] before
+    /// [`Scheme::submit`]; submit claims the occurrence internally and graph execution consumes
+    /// it at the deposit copy dispatch.
+    pub fn bind_deposit(
         &self,
         scheme: &mut Scheme,
-        destination: &Parcel,
-        capacity: u64,
+        target: DepositTarget<'_>,
     ) -> Result<DepositTransaction, GoldyError> {
-        self.bind_deposit_buffer_at(scheme, destination, 0, capacity)
-    }
-
-    /// Like [`Self::bind_deposit_buffer`], with an explicit byte offset into `destination`.
-    pub fn bind_deposit_buffer_at(
-        &self,
-        scheme: &mut Scheme,
-        destination: &Parcel,
-        dst_offset: u64,
-        capacity: u64,
-    ) -> Result<DepositTransaction, GoldyError> {
-        scheme.register_deposit_buffer(destination, dst_offset, capacity)
-    }
-
-    /// Bind a deposit that copies staging bytes into a texture region.
-    ///
-    /// Prefer a non-zero `src_row_pitch` (device footprint pitch) so the partition remains
-    /// retainable without backend repacking.
-    #[allow(clippy::too_many_arguments)]
-    pub fn bind_deposit_texture(
-        &self,
-        scheme: &mut Scheme,
-        destination: &Texture,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        capacity: u64,
-        src_row_pitch: u32,
-    ) -> Result<DepositTransaction, GoldyError> {
-        scheme.register_deposit_texture(destination, x, y, width, height, capacity, src_row_pitch)
+        let _ = &self.ctx;
+        scheme.register_deposit(target)
     }
 }
 
@@ -556,39 +531,237 @@ impl Drop for WithdrawBytes {
     }
 }
 
-/// Stable deposit relationship recorded in one [`Scheme`].
-///
-/// Topology (destination copy) is recorded at bind time. Each submission writes staging
-/// bytes via [`Self::write`]; [`Scheme::submit`] settles the upload inside graph execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DepositTransaction {
+/// Destination of a memory-exchange deposit (buffer range or texture region).
+pub enum DepositTarget<'a> {
+    /// Copy staging bytes into a buffer parcel, starting at `dst_offset` within the parcel.
+    Buffer {
+        destination: &'a Parcel,
+        dst_offset: u64,
+        capacity: u64,
+    },
+    /// Copy staging bytes into a texture region.
+    Texture {
+        destination: &'a Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        capacity: u64,
+        src_row_pitch: u32,
+    },
+}
+
+impl<'a> DepositTarget<'a> {
+    /// Whole-parcel buffer deposit with `capacity` staging bytes (offset 0).
+    pub fn buffer(destination: &'a Parcel, capacity: u64) -> Self {
+        Self::Buffer {
+            destination,
+            dst_offset: 0,
+            capacity,
+        }
+    }
+
+    /// Buffer deposit starting at `dst_offset` within `destination`.
+    pub fn buffer_at(destination: &'a Parcel, dst_offset: u64, capacity: u64) -> Self {
+        Self::Buffer {
+            destination,
+            dst_offset,
+            capacity,
+        }
+    }
+
+    /// Texture-region deposit. Prefer a non-zero `src_row_pitch` (device footprint pitch).
+    #[allow(clippy::too_many_arguments)]
+    pub fn texture(
+        destination: &'a Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        capacity: u64,
+        src_row_pitch: u32,
+    ) -> Self {
+        Self::Texture {
+            destination,
+            x,
+            y,
+            width,
+            height,
+            capacity,
+            src_row_pitch,
+        }
+    }
+}
+
+/// Shared state for one recorded deposit relationship.
+pub(crate) struct DepositBinding {
     pub(crate) scheme_id: u64,
     pub(crate) deposit_id: u32,
     pub(crate) capacity: u64,
+    pub(crate) affinity: u64,
+    pub(crate) pending: Mutex<Option<BufferHandle>>,
+    pub(crate) ctx: Context,
+    pub(crate) pool: Arc<DepositExchangePool>,
+    pub(crate) scheme_alive: Arc<AtomicBool>,
+}
+
+impl DepositBinding {
+    pub(crate) fn discard_pending(&self) {
+        if let Some(handle) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            self.pool.return_handle(handle, 0);
+        }
+        self.scheme_alive.store(false, Ordering::Release);
+    }
+}
+
+/// Stable deposit relationship recorded in one [`Scheme`].
+///
+/// Topology (destination copy) is recorded at bind time. Each submission writes staging
+/// bytes via [`Self::write`]; [`Scheme::submit`] claims the occurrence internally and graph
+/// execution consumes it at the deposit copy.
+#[derive(Clone)]
+pub struct DepositTransaction {
+    pub(crate) inner: Arc<DepositBinding>,
 }
 
 impl DepositTransaction {
     /// Staging capacity declared for this deposit.
     pub fn capacity(&self) -> u64 {
-        self.capacity
+        self.inner.capacity
     }
 
     /// Stable declaration index within the owning [`Scheme`].
     pub fn id(&self) -> u32 {
-        self.deposit_id
+        self.inner.deposit_id
     }
 
-    /// Write `data` into a settled (or newly allocated) physical staging parcel.
+    /// Write `data` into a settled (or newly allocated) physical staging backing.
     ///
-    /// Never waits: if every prior parcel is still in flight, allocates another.
+    /// Never waits: if every prior backing is still in flight, allocates another.
     /// Must be called before [`Scheme::submit`] for every deposit referenced this frame.
-    pub fn write(&self, scheme: &mut Scheme, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
-        scheme.stage_deposit(self.scheme_id, self.deposit_id, offset, data)
+    pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
+        if !self.inner.scheme_alive.load(Ordering::Acquire) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "DepositTransaction belongs to a dropped scheme"
+            )));
+        }
+        if offset.saturating_add(data.len() as u64) > self.inner.capacity {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "deposit write: [{offset}..{}] exceeds declaration size {}",
+                offset + data.len() as u64,
+                self.inner.capacity
+            )));
+        }
+        let mut pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = if let Some(handle) = *pending {
+            handle
+        } else {
+            let handle = self
+                .inner
+                .pool
+                .take_or_alloc(&self.inner.ctx, self.inner.capacity, self.inner.affinity)?;
+            *pending = Some(handle);
+            handle
+        };
+        self.inner.pool.write_handle(&self.inner.ctx, handle, offset, data)
     }
 
     /// Write `data` at offset 0.
-    pub fn write_bytes(&self, scheme: &mut Scheme, data: &[u8]) -> Result<(), GoldyError> {
-        self.write(scheme, 0, data)
+    pub fn write_bytes(&self, data: &[u8]) -> Result<(), GoldyError> {
+        self.write(0, data)
+    }
+}
+
+impl std::fmt::Debug for DepositTransaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DepositTransaction")
+            .field("scheme_id", &self.inner.scheme_id)
+            .field("deposit_id", &self.inner.deposit_id)
+            .field("capacity", &self.inner.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for DepositTransaction {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.scheme_id == other.inner.scheme_id && self.inner.deposit_id == other.inner.deposit_id
+    }
+}
+
+impl Eq for DepositTransaction {}
+
+impl std::hash::Hash for DepositTransaction {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner.scheme_id.hash(state);
+        self.inner.deposit_id.hash(state);
+    }
+}
+
+/// Linear per-submission deposit claim. Claimed at submit, consumed at the copy dispatch.
+pub(crate) struct DepositClaim {
+    handle: BufferHandle,
+    capacity: u64,
+    pool: Arc<DepositExchangePool>,
+    consumed: bool,
+}
+
+impl DepositClaim {
+    pub(crate) fn new(handle: BufferHandle, capacity: u64, pool: Arc<DepositExchangePool>) -> Self {
+        Self {
+            handle,
+            capacity,
+            pool,
+            consumed: false,
+        }
+    }
+
+    pub(crate) fn resolved(&self) -> crate::task_graph::ResolvedDeposit {
+        crate::task_graph::ResolvedDeposit {
+            parent: self.handle,
+            offset: 0,
+            len: self.capacity,
+        }
+    }
+
+    /// Settle the claim and park the backing until `ready_after`.
+    pub(crate) fn consume(mut self, ready_after: TimelineValue) {
+        self.consumed = true;
+        self.pool.return_handle(self.handle, ready_after);
+    }
+}
+
+impl Drop for DepositClaim {
+    fn drop(&mut self) {
+        if !self.consumed {
+            self.pool.return_handle(self.handle, 0);
+        }
+    }
+}
+
+/// Consume each deposit claim in `ids` at timeline `tv`.
+pub(crate) fn consume_deposit_claims(
+    ids: impl IntoIterator<Item = u32>,
+    claims: &mut std::collections::HashMap<u32, Option<DepositClaim>>,
+    tv: TimelineValue,
+) {
+    for id in ids {
+        if let Some(slot) = claims.get_mut(&id) {
+            if let Some(claim) = slot.take() {
+                claim.consume(tv);
+            }
+        }
+    }
+}
+
+/// Park every still-unconsumed claim at `tv` (submit failure / partial enqueue).
+pub(crate) fn park_unconsumed_deposit_claims(
+    claims: &mut std::collections::HashMap<u32, Option<DepositClaim>>,
+    tv: TimelineValue,
+) {
+    for slot in claims.values_mut() {
+        if let Some(claim) = slot.take() {
+            claim.consume(tv);
+        }
     }
 }
 
@@ -601,6 +774,6 @@ impl MemoryExchange {
         destination: &Buffer,
         capacity: u64,
     ) -> Result<DepositTransaction, GoldyError> {
-        self.bind_deposit_buffer(scheme, destination.whole(), capacity)
+        self.bind_deposit(scheme, DepositTarget::buffer(destination.whole(), capacity))
     }
 }

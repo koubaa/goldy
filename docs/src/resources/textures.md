@@ -74,7 +74,7 @@ bitflags! {
 
 ## Writing Data
 
-Prefer `MemoryExchange::bind_deposit_texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
+Prefer `MemoryExchange::bind_deposit` with `DepositTarget::texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
 
 ```rust
 #[allow(deprecated)]
@@ -127,7 +127,7 @@ assert!(!borrowed.is_owned());
 
 ## Depth Textures
 
-Depth textures are created through `SurfaceConfig` or [`Scheme::lease_render_target`], not directly via `Texture::new`. Available depth formats:
+Depth textures are created through `SurfaceConfig` or [`Context::lease_render_target`], not directly via `Texture::new`. Available depth formats:
 
 | Format | Bits | Stencil |
 |--------|------|---------|

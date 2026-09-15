@@ -6,8 +6,8 @@
 
 use goldy_ffi_client::{
     shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule,
-    SurfaceExchange, TargetLoad, Transaction, Vertex2D,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule, SurfaceExchange,
+    TargetLoad, Transaction, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -59,7 +59,6 @@ struct App {
     instance: Instance,
     ctx: Option<Context>,
     device: Option<goldy_ffi_client::Device>,
-    _retained_pool: Option<RetainedPool>,
     vertex_buffer: Option<goldy_ffi_client::Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -78,7 +77,6 @@ impl App {
             instance: Instance::new()?,
             ctx: None,
             device: None,
-            _retained_pool: None,
             vertex_buffer: None,
             pipeline: None,
             shader: None,
@@ -104,8 +102,7 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let mut retained_pool = RetainedPool::new(&device)?;
-        let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+        let vertex_buffer = device.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
         let surface = surface_from_window(&ctx, window.as_ref())?;
 
@@ -123,8 +120,7 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx)?;
         let (width, height) = surface.size();
-        let scene_rt =
-            scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
@@ -135,7 +131,6 @@ impl App {
 
         self.ctx = Some(ctx);
         self.device = Some(device);
-        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -204,7 +199,7 @@ impl App {
                 };
                 let (width, height) = surface.size();
                 if let Ok(rt) =
-                    scheme.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)
+                    ctx.lease_render_target(width.max(1), height.max(1), surface.format(), None::<DepthFormat>)
                 {
                     let bg_color = Color {
                         r: 0.1,

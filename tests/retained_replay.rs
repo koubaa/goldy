@@ -23,9 +23,9 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape},
-    BackendType, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-    Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
-    TextureKind, WithdrawTransaction,
+    BackendType, BufferKind, ComputePipeline, Context, DepositTarget, Device, DeviceDescriptor, Instance,
+    MemoryExchange, NodeAccess, Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
+    TextureFlags, TextureFormat, TextureKind, WithdrawTransaction,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -179,15 +179,16 @@ fn deposit_feeds_retained_worker_across_frames() {
     let mut upload = Scheme::new(&ctx);
     let memory = MemoryExchange::new(&ctx);
     let staging = memory
-        .bind_deposit_buffer(&mut upload, input.whole(), (8 * std::mem::size_of::<u32>()) as u64)
+        .bind_deposit(
+            &mut upload,
+            DepositTarget::buffer(input.whole(), (8 * std::mem::size_of::<u32>()) as u64),
+        )
         .expect("declare deposit");
 
     const FRAMES: u32 = 4;
     for submission in 1..=FRAMES {
         let data = [submission; 8];
-        staging
-            .write(&mut upload, 0, bytemuck::cast_slice(&data))
-            .expect("stage deposit");
+        staging.write(0, bytemuck::cast_slice(&data)).expect("stage deposit");
         let _ = upload.submit().expect("submit upload");
         let mut frame = worker.submit().expect("submit worker");
         for v in read_grant_u32(&grant, &mut frame, 8) {
@@ -465,7 +466,7 @@ fn lease_texture_scheme_resubmits_without_rerecord() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let mut scheme = Scheme::new(&ctx);
-    let lease = scheme
+    let lease = ctx
         .lease_texture(
             4,
             4,
@@ -502,8 +503,8 @@ fn lease_backing_pool_hygiene() {
     let alloc_count_before = ctx.transient_texture_alloc_count();
 
     {
-        let mut scheme = Scheme::new(&ctx);
-        let _lease = scheme
+        let _scheme = Scheme::new(&ctx);
+        let _lease = ctx
             .lease_texture(
                 4,
                 4,
@@ -526,11 +527,11 @@ fn lease_backing_pool_hygiene() {
     assert_eq!(
         ctx.transient_outstanding_bytes().texture,
         outstanding_before,
-        "outstanding drops when scheme releases lease backings"
+        "outstanding drops when the last lease clone is dropped"
     );
 
-    let mut scheme2 = Scheme::new(&ctx);
-    let _lease2 = scheme2
+    let _scheme2 = Scheme::new(&ctx);
+    let _lease2 = ctx
         .lease_texture(
             4,
             4,
@@ -910,4 +911,60 @@ fn withdraw_many_dropped_frames_without_read_then_read_succeeds() {
         values.iter().all(|&v| v == 42),
         "read succeeds after many dropped unread frames (staging pool must recycle)"
     );
+}
+
+/// Real-backend A/B/A deposit data correctness (allocation identity is mock-only).
+#[test]
+fn deposit_aba_data_correctness() {
+    let (device, _cb) = make_device();
+    let ctx = submission_context(&device);
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let input = pool
+        .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+        .expect("input");
+    let output = pool
+        .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+        .expect("output");
+
+    let mut worker = Scheme::new(&ctx);
+    worker
+        .node("copy", &pipeline)
+        .with_parcel(&input, NodeAccess::Read)
+        .with_parcel(&output, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let grant = MemoryExchange::new(worker.context())
+        .bind_withdraw(&mut worker, &output)
+        .expect("withdraw");
+
+    let mut upload_a = Scheme::new(&ctx);
+    let deposit_a = MemoryExchange::new(&ctx)
+        .bind_deposit(
+            &mut upload_a,
+            DepositTarget::buffer(input.whole(), (8 * std::mem::size_of::<u32>()) as u64),
+        )
+        .expect("bind A");
+    let mut upload_b = Scheme::new(&ctx);
+    let deposit_b = MemoryExchange::new(&ctx)
+        .bind_deposit(
+            &mut upload_b,
+            DepositTarget::buffer(input.whole(), (8 * std::mem::size_of::<u32>()) as u64),
+        )
+        .expect("bind B");
+
+    let run = |deposit: &goldy::DepositTransaction, upload: &mut Scheme, marker: u32, worker: &mut Scheme| {
+        deposit
+            .write(0, bytemuck::cast_slice(&[marker; 8]))
+            .expect("deposit write");
+        upload.submit().expect("upload submit").wait_until_settled().ok();
+        let mut frame = worker.submit().expect("worker");
+        for v in read_grant_u32(&grant, &mut frame, 8) {
+            assert_eq!(v, marker, "worker must observe marker {marker}");
+        }
+    };
+    run(&deposit_a, &mut upload_a, 11, &mut worker);
+    run(&deposit_b, &mut upload_b, 22, &mut worker);
+    run(&deposit_a, &mut upload_a, 33, &mut worker);
 }

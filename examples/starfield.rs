@@ -6,9 +6,10 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, DeviceDescriptor,
+    Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
 };
 use std::sync::Arc;
 use winit::{
@@ -19,7 +20,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
-use common::FrameSink;
+use common::CaptureDump;
 
 const NUM_STARS: u32 = 500;
 
@@ -66,7 +67,7 @@ fn main() -> Result<()> {
 
     if common::capture_requested() {
         let mut state = RenderState::new(None)?;
-        while !state.sink.finished() {
+        while !state.capture_done() {
             state.render()?;
         }
         return Ok(());
@@ -94,13 +95,16 @@ struct RenderState {
     window: Option<Arc<Window>>,
     device: Arc<goldy::Device>,
     ctx: goldy::Context,
-    sink: FrameSink,
+    surface: Option<SurfaceExchange>,
+    capture: Option<CaptureDump>,
+    readback: Option<Texture>,
+    present: Option<Transaction>,
+    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
     render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
-    _retained_pool: RetainedPool,
     star_buffer: Buffer,
     params_buffer: Buffer,
     upload_scheme: Scheme,
@@ -114,12 +118,12 @@ impl RenderState {
     fn create_render_pipeline(
         device: &goldy::Device,
         render_shader: &ShaderModule,
-        sink: &mut FrameSink,
+        format: TextureFormat,
     ) -> Result<RenderPipeline> {
         common::render_pipeline(
             device,
             render_shader,
-            sink.format(),
+            format,
             RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::TriangleList,
@@ -128,15 +132,31 @@ impl RenderState {
         )
     }
 
+    fn bind_frame(
+        scheme: &mut Scheme,
+        scene_rt: &Lease<LeaseRenderTarget>,
+        surface: Option<&SurfaceExchange>,
+        readback: Option<&Texture>,
+    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+        if let Some(surface) = surface {
+            let present = surface.bind_render_target(scheme, scene_rt)?;
+            Ok((Some(present), None))
+        } else {
+            let readback = readback.expect("capture readback");
+            scheme.copy_to_texture(scene_rt, readback)?;
+            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
+            Ok((None, Some(withdraw)))
+        }
+    }
+
     fn record_scheme(
         scheme: &mut Scheme,
-        sink: &mut FrameSink,
         compute_pipeline: &ComputePipeline,
         render_pipeline: &RenderPipeline,
         star_buffer: &Buffer,
         params_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
-    ) -> anyhow::Result<()> {
+    ) {
         scheme
             .node("update_stars", compute_pipeline)
             .with_parcel(star_buffer, NodeAccess::ReadWrite)
@@ -148,26 +168,44 @@ impl RenderState {
         pass.set_pipeline(render_pipeline);
         pass.draw(0..6, 0..NUM_STARS);
         pass.finish();
+    }
 
-        sink.bind_render_target(scheme, scene_rt)
+    fn target(&self) -> (TextureFormat, u32, u32) {
+        if let Some(surface) = &self.surface {
+            let (width, height) = surface.size();
+            (surface.format(), width, height)
+        } else {
+            let capture = self.capture.as_ref().expect("capture dump");
+            let (width, height) = capture.size();
+            (CaptureDump::format(), width, height)
+        }
+    }
+
+    fn capture_done(&self) -> bool {
+        self.capture.as_ref().is_none_or(CaptureDump::finished)
     }
 
     fn rerecord_scheme(&mut self) {
         let mut scheme = Scheme::new(&self.ctx);
-        let (width, height) = self.sink.size();
-        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.sink.format(), None) {
+        let (format, width, height) = self.target();
+        if let Ok(rt) = self.ctx.lease_render_target(width.max(1), height.max(1), format, None) {
             self.scene_rt = rt;
-            if Self::record_scheme(
+            Self::record_scheme(
                 &mut scheme,
-                &mut self.sink,
                 &self.compute_pipeline,
                 &self.render_pipeline,
                 &self.star_buffer,
                 &self.params_buffer,
                 &self.scene_rt,
-            )
-            .is_ok()
-            {
+            );
+            if let Ok((present, withdraw)) = Self::bind_frame(
+                &mut scheme,
+                &self.scene_rt,
+                self.surface.as_ref(),
+                self.readback.as_ref(),
+            ) {
+                self.present = present;
+                self.withdraw = withdraw;
                 self.scheme = scheme;
             }
         }
@@ -181,8 +219,25 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let mut retained_pool = RetainedPool::new(device.clone());
-        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window.as_deref())?;
+
+        let (surface, capture, readback, format, width, height) = if let Some(window) = window.as_deref() {
+            let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
+            let format = surface.format();
+            let (width, height) = surface.size();
+            (Some(surface), None, None, format, width, height)
+        } else {
+            let capture = CaptureDump::from_env()?;
+            let (width, height) = capture.size();
+            let readback = common::capture_readback(&device, width, height)?;
+            (
+                None,
+                Some(capture),
+                Some(readback),
+                CaptureDump::format(),
+                width,
+                height,
+            )
+        };
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
@@ -208,31 +263,29 @@ impl RenderState {
             });
         }
 
-        let star_buffer = retained_pool.acquire_buffer_with_data(&stars, BufferKind::Scattered)?;
+        let star_buffer = device.acquire_buffer_with_data(&stars, BufferKind::Scattered)?;
         let params_buffer =
-            retained_pool.acquire_buffer_sized::<StarfieldParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+            device.acquire_buffer_sized::<StarfieldParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
-        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &mut sink)?;
+        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, format)?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (width, height) = sink.size();
-        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), sink.format(), None)?;
+        let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_scheme(
             &mut scheme,
-            &mut sink,
             &compute_pipeline,
             &render_pipeline,
             &star_buffer,
             &params_buffer,
             &scene_rt,
-        )?;
+        );
+        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let params_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &params_buffer,
-            std::mem::size_of::<StarfieldParams>() as u64,
+            DepositTarget::buffer(&params_buffer, std::mem::size_of::<StarfieldParams>() as u64),
         )?;
 
         println!("Created starfield with {NUM_STARS} stars (Scheme + Present)");
@@ -241,13 +294,16 @@ impl RenderState {
             window,
             device,
             ctx,
-            sink,
+            surface,
+            capture,
+            readback,
+            present,
+            withdraw,
             scheme,
             scene_rt,
             compute_pipeline,
             render_shader,
             render_pipeline,
-            _retained_pool: retained_pool,
             star_buffer,
             params_buffer,
             upload_scheme,
@@ -268,12 +324,16 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        self.params_deposit
-            .write(&mut self.upload_scheme, 0, bytemuck::bytes_of(&params))?;
+        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
-        self.sink.settle(&mut submission)?;
+        if let Some(present) = &self.present {
+            present.claim(&mut submission)?.consume()?;
+        } else {
+            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            self.capture.as_mut().unwrap().write_rgba(&pixels)?;
+        }
 
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -352,13 +412,17 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        let (prev_w, prev_h) = state.sink.size();
+                        let Some(surface) = state.surface.as_ref() else {
+                            return;
+                        };
+                        let (prev_w, prev_h) = surface.size();
                         if size.width == prev_w && size.height == prev_h {
                             return;
                         }
-                        state.sink.resize(size.width, size.height).ok();
+                        let _ = surface.resize(size.width, size.height);
+                        let format = surface.format();
                         if let Ok(pipeline) =
-                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &mut state.sink)
+                            RenderState::create_render_pipeline(&state.device, &state.render_shader, format)
                         {
                             state.render_pipeline = pipeline;
                         }

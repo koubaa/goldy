@@ -27,9 +27,27 @@ public sealed class Context : IDisposable
         return new Context(handle);
     }
 
-    internal void ThrowIfDisposed()
+    public void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    /// <summary>
+    /// Mint a render-target lease on this context (the lessor).
+    /// </summary>
+    public SchemeRenderTargetLease LeaseRenderTarget(
+        uint width,
+        uint height,
+        TextureFormat format,
+        DepthFormat? depthFormat = null)
+    {
+        ThrowIfDisposed();
+        var hasDepth = depthFormat.HasValue;
+        var depth = depthFormat ?? default;
+        var lease = NativeMethods.ContextLeaseRenderTarget(Handle, width, height, format, hasDepth, depth);
+        if (lease == nint.Zero)
+            throw GoldyException.FromLastError("Context lease_render_target");
+        return new SchemeRenderTargetLease(lease);
     }
 
     public void Dispose()

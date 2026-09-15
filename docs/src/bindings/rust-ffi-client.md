@@ -100,7 +100,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     )?;
 
     let mut scheme = Scheme::new(&ctx)?;
-    let rt = scheme.lease_render_target(64, 64, TextureFormat::Rgba8Unorm, None)?;
+    let rt = ctx.lease_render_target(64, 64, TextureFormat::Rgba8Unorm, None)?;
     {
         let mut pass = scheme.render_pass("triangle", &rt, TargetLoad::Clear(Color::BLACK));
         pass.with_buffer(&vertex_buffer, NodeAccess::Read);

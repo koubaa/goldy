@@ -58,7 +58,7 @@ Blend mode, depth testing, and vertex format are still part of the pipeline — 
 
 OpenCL introduced compute to GPUs as an entirely separate API with its own device model, memory model, and dispatch semantics. Even "unified" APIs like Vulkan treat compute as a second-class citizen — compute pipelines and graphics pipelines share almost no code paths.
 
-In Goldy, compute is a first-class citizen on the same footing as graphics. Compute shaders use the same bindless resource model, the same buffer types, and the same scheme. A compute dispatch that writes to a buffer and a draw call that reads from it are just nodes in the same dependency graph.
+In Goldy, compute is a first-class citizen on the same footing as graphics. Compute shaders use the same bindless resource model, the same buffer types, and the same scheme. A compute dispatch that writes to a buffer and a **render pass node** that reads from it are peers in the graph.
 
 ```rust
 // Compute updates particles, render draws them — same scheme

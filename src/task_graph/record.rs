@@ -253,11 +253,11 @@ impl RenderPassRecord {
     /// Begin accumulating a render pass targeting a scheme-held render-target lease.
     pub fn new_for_scheme_lease(
         label: &'static str,
-        scheme: &crate::Scheme,
+        scheme: &mut crate::Scheme,
         lease: &crate::Lease<crate::LeaseRenderTarget>,
         color_load: crate::types::TargetLoad,
     ) -> Self {
-        let handle = scheme.rt(lease).backend_handle();
+        let handle = scheme.intern_rt(lease).backend_handle();
         let access = if color_load.overwrites() {
             NodeAccess::Overwrite
         } else {

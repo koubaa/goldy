@@ -95,7 +95,7 @@ def main() -> int:
     vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
     scheme = goldy.Scheme(ctx)
-    scene_rt = scheme.lease_render_target(
+    scene_rt = ctx.lease_render_target(
         max(surface.width, 1),
         max(surface.height, 1),
         surface.format,
@@ -121,7 +121,7 @@ def main() -> int:
                         ),
                     )
                     scheme = goldy.Scheme(ctx)
-                    scene_rt = scheme.lease_render_target(
+                    scene_rt = ctx.lease_render_target(
                         max(surface.width, 1),
                         max(surface.height, 1),
                         surface.format,

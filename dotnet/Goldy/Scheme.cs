@@ -31,8 +31,10 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
-    /// Declare an offscreen render-target lease on this scheme.
+    /// Declare an offscreen render-target lease on this scheme's context.
+    /// Prefer <see cref="Context.LeaseRenderTarget"/>.
     /// </summary>
+    [Obsolete("Mint from the lessor: Context.LeaseRenderTarget")]
     public SchemeRenderTargetLease LeaseRenderTarget(
         uint width,
         uint height,

@@ -1,7 +1,7 @@
 //! Internal GPU texture backing for [`crate::Texture`] parcels.
 //!
 //! Public callers acquire [`crate::Texture`] (a parcel wrapper) from
-//! [`crate::RetainedPool::acquire_texture`] or [`crate::Context::acquire_transient_texture`].
+//! [`crate::Device::acquire_texture`] or [`crate::Context::acquire_transient_texture`].
 
 use crate::backend::GpuBackend;
 use crate::device::Device;
@@ -191,7 +191,7 @@ impl TextureBacking {
     /// - GPU upload fails
     #[deprecated(
         since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> Result<()> {
@@ -235,7 +235,7 @@ impl TextureBacking {
     /// - GPU upload fails
     #[deprecated(
         since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit_texture() for batched, non-blocking uploads. \
+        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
                 This method submits synchronously and stalls the GPU."
     )]
     pub fn write(&self, data: &[u8]) -> Result<()> {

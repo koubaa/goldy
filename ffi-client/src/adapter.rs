@@ -25,6 +25,6 @@ impl<'a> Adapter<'a> {
         let ptr = non_null(unsafe {
             crate::sys::goldy_instance_create_device_for_adapter(self.instance.as_ptr(), self.info.id)
         })?;
-        Ok(Device { ptr })
+        Ok(Device::from_ptr(ptr))
     }
 }

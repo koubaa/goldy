@@ -1503,6 +1503,22 @@ pub(crate) fn partition_waves_have_upload_slots(ir: &GraphIR, waves: &[Wave]) ->
     })
 }
 
+/// Logical deposit ids referenced by `waves`, sorted and unique.
+pub(crate) fn partition_deposit_ids(ir: &GraphIR, waves: &[Wave]) -> Vec<u32> {
+    let mut ids: Vec<u32> = waves
+        .iter()
+        .flat_map(|w| w.node_indices.iter().copied())
+        .flat_map(|ni| ir.nodes[ni].bindings.iter())
+        .filter_map(|b| match b.resource {
+            ResourceId::Deposit(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 fn wave_present_binding_ids(ir: &GraphIR, wave: &Wave) -> Vec<u32> {
     #[cfg(feature = "graphics")]
     {

@@ -264,6 +264,28 @@ pub struct GoldyDepositTransaction {
     _private: [u8; 0],
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyDepositTargetKind {
+    GOLDY_DEPOSIT_TARGET_BUFFER = 0,
+    GOLDY_DEPOSIT_TARGET_TEXTURE = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GoldyDepositTarget {
+    pub kind: GoldyDepositTargetKind,
+    pub buffer: *const GoldyParcel,
+    pub dst_offset: u64,
+    pub capacity: u64,
+    pub texture: *const GoldyTexture,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub src_row_pitch: u32,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GoldyReplayStats {

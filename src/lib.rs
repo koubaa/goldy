@@ -41,6 +41,7 @@ pub mod types;
 
 pub mod cpu_dispatch;
 pub mod cpu_shaders;
+pub(crate) mod deposit_pool;
 pub(crate) mod host_access;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
@@ -76,12 +77,16 @@ pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
 pub use exchange::{Claim, SurfaceExchange};
-pub use exchange::{DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction};
+pub use exchange::{
+    DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
+};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use retained_pool::RetainedPool;
-pub use scheme::{Lease, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission};
+pub use scheme::{
+    Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission,
+};
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};
@@ -294,7 +299,7 @@ pub mod test_support {
     pub fn scheme_advance_timeline(ctx: &crate::Context) -> u64 {
         use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
         let device = Arc::new(ctx.device().clone());
-        let mut pool = RetainedPool::new(device);
+        let pool = RetainedPool::new(device);
         let buf = pool
             .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");

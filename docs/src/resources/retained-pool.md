@@ -1,20 +1,20 @@
-# RetainedPool, Buffer, and Parcel
+# Retained Pool
 
-[`RetainedPool`](../../src/retained_pool.rs) is the public door for **retained** GPU memory. Acquire returns a [`Buffer`](../../src/parcel.rs) (possibly partitioned) or a texture [`Parcel`](../../src/parcel.rs). **Bind parcels**, not raw aggregates — each parcel is one bindable unit (whole buffer, buffer range, or texture).
+[`Device`](../../src/device.rs) backs **retained** GPU memory — the same way a CPU program allocates from the process heap without asking for a separate heap handle. Acquire returns a [`Buffer`](../../src/parcel.rs) (possibly partitioned) or a texture [`Parcel`](../../src/parcel.rs). **Bind parcels**, not raw aggregates — each parcel is one bindable unit (whole buffer, buffer range, or texture).
+
+[`Context::release_buffer`](../../src/retained_pool.rs) / [`Context::release_texture`](../../src/retained_pool.rs) park a held parcel in that context's transient pool for epoch-gated reuse. A [`RetainedPool`](../../src/retained_pool.rs) type still exists as a thin `Device` handle for older call sites.
 
 ## Quick start
 
 ```rust
-use goldy::{BufferKind, BufferFlags, MemoryExchange, RetainedPool, field, Init, NodeAccess, Scheme};
-
-let mut pool = RetainedPool::new(device.clone());
+use goldy::{BufferKind, BufferFlags, MemoryExchange, field, Init, NodeAccess, Scheme};
 
 // Single-unit buffer (derefs to whole parcel):
 let vertices = [/* ... */];
-let vb = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+let vb = device.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
 // Raw bytes with explicit stride:
-let uniform_buf = pool.acquire_buffer(
+let uniform_buf = device.acquire_buffer(
     raw_bytes.len() as u64,
     BufferKind::Scattered,
     Some(16),
@@ -23,13 +23,13 @@ let uniform_buf = pool.acquire_buffer(
 )?;
 
 // Uninitialized buffer (rewrite each frame with a MemoryExchange deposit):
-let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+let uniform = device.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
 // Texture parcel:
-let tex = pool.acquire_texture(w, h, format, access, flags, Some(&pixels))?;
+let tex = device.acquire_texture(w, h, format, access, flags, Some(&pixels))?;
 
 // Partitioned record (ping-pong, level geometry):
-let cells = pool.acquire_record([
+let cells = device.acquire_record([
     field("a", Init::data(&grid_a)),
     field("b", Init::zeros::<u32>(n)),
 ])?;
@@ -40,8 +40,8 @@ let cells = pool.acquire_record([
 ```rust
 let memory = MemoryExchange::new(&ctx);
 let mut upload = Scheme::new(&ctx);
-let deposit = memory.bind_deposit_buffer(&mut upload, &*uniform, std::mem::size_of::<MyUniforms>() as u64)?;
-deposit.write(&mut upload, 0, bytemuck::bytes_of(&data))?;
+let deposit = memory.bind_deposit(&mut upload, goldy::DepositTarget::buffer(&*uniform, std::mem::size_of::<MyUniforms>() as u64))?;
+deposit.write(0, bytemuck::bytes_of(&data))?;
 upload.submit()?;
 
 let mut pass = scheme.render_pass("draw", &rt);
@@ -60,15 +60,15 @@ Binding a multi-unit `Buffer` as one descriptor panics; index into fields instea
 
 ## Release
 
-Call `pool.release(&ctx, hold)` when resizing or tearing down. While held, buffers need no epoch polling — the runtime stamps each parcel at submit.
+Call `ctx.release_buffer(buffer)` / `ctx.release_texture(texture)` (or `device.release_*(&ctx, …)`) when resizing or tearing down. While held, buffers need no epoch polling — the runtime stamps each parcel at submit.
 
 ## Bindings
 
 | Language | Types | Acquire |
 |----------|-------|---------|
-| Rust | `RetainedPool`, `Buffer`, `Parcel` | `acquire_buffer*`, `acquire_record`, `acquire_texture` |
-| Python | `goldy.RetainedPool`, `goldy.Buffer`, `goldy.Parcel` | `acquire_buffer`, `acquire_record`, `acquire_texture` |
-| C# | `RetainedPool`, `Buffer`, `Parcel`, `RecordBuilder` | `AcquireBuffer`, `Record()`, `AcquireTexture` |
-| C / ffi-client | `GoldyRetainedPool`, `GoldyBuffer`, `GoldyParcel` | `goldy_retained_pool_acquire_buffer`, `goldy_record_builder_*` |
+| Rust | `Device`, `Buffer`, `Parcel` | `acquire_buffer*`, `acquire_record`, `acquire_texture` |
+| Python | `goldy.Device`, `goldy.Buffer`, `goldy.Parcel` | `RetainedPool` still wraps the same path |
+| C# | `Device`, `Buffer`, `Parcel`, `RecordBuilder` | `RetainedPool` still wraps the same path |
+| C / ffi-client | `GoldyDevice`, `GoldyBuffer`, `GoldyParcel` | `goldy_retained_pool_*` still wraps the same path |
 
-All examples under `examples/`, `python/examples/`, `dotnet/Goldy.Examples/`, `cpp/examples/`, and `ffi-client/examples/` use this API. See the [bindings](../bindings/python.md) section for language-specific guides.
+All examples under `examples/` acquire from `Device` directly. See the [bindings](../bindings/python.md) section for language-specific guides.

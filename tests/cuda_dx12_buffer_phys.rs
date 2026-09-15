@@ -8,9 +8,9 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    test_support, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TargetLoad,
-    TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    test_support, BufferKind, Color, ComputePipeline, DepositTarget, DeviceDescriptor, Instance, MemoryExchange,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use std::sync::Arc;
 
@@ -111,7 +111,7 @@ fn draw_and_readback(
 ) -> Vec<u8> {
     let _ = device;
     let mut scheme = Scheme::new(ctx);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("render target");
     {
@@ -240,11 +240,12 @@ fn separate_deposit_then_draw_promotes_to_shared() {
 
     let mut upload = Scheme::new(&ctx);
     let deposit = MemoryExchange::new(&ctx)
-        .bind_deposit_buffer(&mut upload, &vertex_buffer, vertex_buffer.byte_size())
+        .bind_deposit(
+            &mut upload,
+            DepositTarget::buffer(&vertex_buffer, vertex_buffer.byte_size()),
+        )
         .expect("deposit");
-    deposit
-        .write(&mut upload, 0, bytemuck::cast_slice(&red_triangle()))
-        .expect("write");
+    deposit.write(0, bytemuck::cast_slice(&red_triangle())).expect("write");
     upload.submit().expect("upload");
     // Deposit alone may provisional-Native the buffer.
     let kind_after_deposit = test_support::cuda_buffer_phys_kind(&device, &vertex_buffer);
@@ -317,7 +318,7 @@ fn compute_then_raster_lands_native_and_twin() {
         .node("gen", &compute)
         .with_parcel(&vertex_buffer, goldy::NodeAccess::Write)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("rt");
     {
@@ -401,7 +402,7 @@ fn shared_then_kernel_promotes_without_invalidating_schemes() {
         .node("recolor", &recolor)
         .with_parcel(&vertex_buffer, goldy::NodeAccess::ReadWrite)
         .dispatch(1, 1, 1);
-    let rt = scheme
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("rt");
     {
@@ -482,16 +483,17 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
     {
         let mut upload = Scheme::new(&ctx);
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut upload, &vertex_buffer, vertex_buffer.byte_size())
+            .bind_deposit(
+                &mut upload,
+                DepositTarget::buffer(&vertex_buffer, vertex_buffer.byte_size()),
+            )
             .expect("deposit");
         let black = [
             Vertex2D::new(0.0, 0.5, Color::BLACK),
             Vertex2D::new(-0.5, -0.5, Color::BLACK),
             Vertex2D::new(0.5, -0.5, Color::BLACK),
         ];
-        deposit
-            .write(&mut upload, 0, bytemuck::cast_slice(&black))
-            .expect("write");
+        deposit.write(0, bytemuck::cast_slice(&black)).expect("write");
         upload.submit().expect("upload");
     } // upload scheme dropped — physical buffer identity must remain valid
 
@@ -545,16 +547,17 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
         // Brand-new deposit scheme each frame (delete/recreate stress).
         let mut upload = Scheme::new(&ctx);
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut upload, &vertex_buffer, vertex_buffer.byte_size())
+            .bind_deposit(
+                &mut upload,
+                DepositTarget::buffer(&vertex_buffer, vertex_buffer.byte_size()),
+            )
             .expect("deposit");
         let verts = [
             Vertex2D::new(0.0, 0.5, *color),
             Vertex2D::new(-0.5, -0.5, *color),
             Vertex2D::new(0.5, -0.5, *color),
         ];
-        deposit
-            .write(&mut upload, 0, bytemuck::cast_slice(&verts))
-            .expect("write");
+        deposit.write(0, bytemuck::cast_slice(&verts)).expect("write");
         upload.submit().expect("upload");
         drop(upload);
 

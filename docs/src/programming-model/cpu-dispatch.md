@@ -74,7 +74,7 @@ the copies without changing the node's contract.
 - **Retention.** A clean scheme with CPU dispatches still resubmits without re-recording;
   the GPU partitions around the host node are retained as usual. The host partition itself
   is never retained.
-- **Leases.** `with_lease` binds a scheme-held buffer lease the same way `with_parcel`
+- **Leases.** `with_lease` binds a context-minted buffer lease the same way `with_parcel`
   binds a retained parcel.
 
 Textures are not supported as CPU dispatch parameters in 0.2.x.

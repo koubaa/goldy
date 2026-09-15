@@ -6,8 +6,8 @@ use goldy::test_support::{
     mock_recorded_waits, mock_reset_tracking, mock_retained_resubmit_count,
 };
 use goldy::{
-    BufferKind, ComputePipeline, Context, Device, MemoryExchange, NodeAccess, Parcel, RetainedPool, Scheme,
-    ShaderModule,
+    BufferKind, ComputePipeline, Context, DepositTarget, Device, MemoryExchange, NodeAccess, Parcel, RetainedPool,
+    Scheme, ShaderModule,
 };
 #[cfg(feature = "graphics")]
 use goldy::{RenderPipeline, RenderPipelineDesc, TextureFormat};
@@ -127,9 +127,9 @@ fn upload_then_consumer_emits_raw_barrier() {
 
     let mut upload = Scheme::new(&ctx);
     let deposit = MemoryExchange::new(&ctx)
-        .bind_deposit_buffer(&mut upload, &parcel, 4)
+        .bind_deposit(&mut upload, DepositTarget::buffer(&parcel, 4))
         .expect("bind deposit");
-    deposit.write(&mut upload, 0, &[1, 0, 0, 0]).expect("deposit write");
+    deposit.write(0, &[1, 0, 0, 0]).expect("deposit write");
     upload.submit().expect("upload submit");
 
     clear_mock(&device);
@@ -331,7 +331,7 @@ fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
 #[cfg(feature = "graphics")]
 fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline) -> Scheme {
     let mut s = Scheme::new(ctx);
-    let rt = s
+    let rt = ctx
         .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
         .expect("render target lease");
     let mut pass = s.render_pass("render_read", &rt, goldy::TargetLoad::Discard);
@@ -427,9 +427,9 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
 fn upload_write_scheme(ctx: &Context, parcel: &Parcel) -> Scheme {
     let mut s = Scheme::new(ctx);
     let deposit = MemoryExchange::new(ctx)
-        .bind_deposit_buffer(&mut s, parcel, 4)
+        .bind_deposit(&mut s, DepositTarget::buffer(parcel, 4))
         .expect("bind deposit");
-    deposit.write(&mut s, 0, &[42, 0, 0, 0]).expect("deposit write");
+    deposit.write(0, &[42, 0, 0, 0]).expect("deposit write");
     s
 }
 

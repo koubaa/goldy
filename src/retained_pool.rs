@@ -1,9 +1,12 @@
-//! Gate-free retained allocation pool — the public door for deed-held GPU memory.
+//! Retained GPU allocation — deed-held GPU memory acquired from a [`Device`].
 //!
-//! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
-//! [`RetainedPool::acquire_record`] are the supported ways to create retained resources.
+//! [`Device::acquire_texture`], [`Device::acquire_buffer`], and
+//! [`Device::acquire_record`] are the supported ways to create retained resources.
 //! Buffers are acquired aggregates; bind their [`crate::Parcel`] units. Relinquish via
-//! [`RetainedPool::release_buffer`] / [`RetainedPool::release_texture`] or by dropping.
+//! [`crate::Context::release_buffer`] / [`crate::Context::release_texture`] or by dropping.
+//!
+//! [`RetainedPool`] is a thin `Device` handle kept for existing call sites; new code
+//! should acquire from the device directly.
 
 use crate::buffer::{alloc_scattered_subregions, ScatteredSubregionSpec, StructuredBufferElement};
 use crate::context::Context;
@@ -13,39 +16,26 @@ use crate::timeline::ReferenceTable;
 use crate::types::{BufferKind, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::ParcelType;
 use anyhow::Result;
+use std::ops::Deref;
 use std::sync::Arc;
 
-/// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
+/// A resource relinquished from the device, stamped for handoff to the transient pool.
 pub(crate) enum RetainedHold {
     Buffer(Buffer),
     Texture(Texture),
 }
 
-/// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
+/// A resource relinquished from the device, stamped for handoff to the transient pool.
 pub(crate) struct StampedParcel {
     pub(crate) hold: RetainedHold,
     /// Per-context timelines after which the resource may be reused; empty if never referenced.
     pub(crate) ready_after: ReferenceTable,
 }
 
-/// Deed-governed pool: allocates retained resources; no epoch gate while held.
-pub struct RetainedPool {
-    device: Arc<Device>,
-    bookkeeping: Arc<PoolBookkeeping>,
-}
-
-impl RetainedPool {
-    /// Create a pool tied to `device` (sole allocation door for retained memory in this unit).
-    pub fn new(device: Arc<Device>) -> Self {
-        Self {
-            device,
-            bookkeeping: Arc::new(PoolBookkeeping::new()),
-        }
-    }
-
+impl Device {
     /// Allocate a retained texture parcel. `init: Some(data)` performs a one-shot staged upload.
     pub fn acquire_texture(
-        &mut self,
+        &self,
         width: u32,
         height: u32,
         format: TextureFormat,
@@ -54,10 +44,9 @@ impl RetainedPool {
         init: Option<&[u8]>,
     ) -> Result<Texture> {
         let tex = if let Some(data) = init {
-            crate::texture::TextureBacking::with_data(&self.device, data, width, height, format, access, flags)?
+            crate::texture::TextureBacking::with_data(self, data, width, height, format, access, flags)?
         } else {
-            self.device
-                .alloc_texture(width, height, format, access, flags)
+            self.alloc_texture(width, height, format, access, flags)
                 .map_err(|e| anyhow::anyhow!("{e}"))?
         };
         self.wrap_texture(tex)
@@ -65,10 +54,10 @@ impl RetainedPool {
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// For in-place per-frame CPU rewrites, use [`crate::MemoryExchange::bind_deposit_buffer`]
+    /// For in-place per-frame CPU rewrites, use [`crate::MemoryExchange::bind_deposit`]
     /// on the buffer's whole parcel (`&*buffer` or `buffer.whole()`).
     pub fn acquire_buffer(
-        &mut self,
+        &self,
         size: u64,
         access: BufferKind,
         element_stride: Option<u32>,
@@ -81,7 +70,7 @@ impl RetainedPool {
 
     /// Allocate a retained buffer from a typed slice. Element stride is inferred from `T`.
     pub fn acquire_buffer_with_data<T: StructuredBufferElement>(
-        &mut self,
+        &self,
         data: &[T],
         access: BufferKind,
     ) -> Result<Buffer> {
@@ -90,7 +79,7 @@ impl RetainedPool {
 
     /// Allocate a retained buffer from a typed slice with explicit flags.
     pub fn acquire_buffer_with_data_and_flags<T: StructuredBufferElement>(
-        &mut self,
+        &self,
         data: &[T],
         access: BufferKind,
         flags: crate::types::BufferFlags,
@@ -103,7 +92,7 @@ impl RetainedPool {
 
     /// Allocate an uninitialized retained buffer sized for `element_count` elements of type `T`.
     pub fn acquire_buffer_sized<T: StructuredBufferElement>(
-        &mut self,
+        &self,
         element_count: u64,
         access: BufferKind,
         flags: crate::types::BufferFlags,
@@ -113,7 +102,7 @@ impl RetainedPool {
     }
 
     /// Allocate a retained buffer partitioned into named or ordinal fields.
-    pub fn acquire_record(&mut self, fields: impl IntoIterator<Item = RecordField>) -> Result<Buffer> {
+    pub fn acquire_record(&self, fields: impl IntoIterator<Item = RecordField>) -> Result<Buffer> {
         let fields: Vec<RecordField> = fields.into_iter().collect();
         assert!(!fields.is_empty(), "acquire_record requires at least one field");
 
@@ -132,7 +121,7 @@ impl RetainedPool {
                 },
             })
             .collect();
-        let (backing, views) = alloc_scattered_subregions(&self.device, &regions)?;
+        let (backing, views) = alloc_scattered_subregions(self, &regions)?;
 
         let mut field_names = Vec::with_capacity(fields.len());
         for field in &fields {
@@ -141,8 +130,8 @@ impl RetainedPool {
 
         let bytes = backing.size();
         let kind = ParcelType::Buffer;
-        self.bookkeeping.add(kind, bytes);
-        let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
+        self.bookkeeping().add(kind, bytes);
+        let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping()), kind, bytes);
         Ok(Buffer::from_partitioned(
             Arc::new(backing),
             views,
@@ -150,6 +139,21 @@ impl RetainedPool {
             guard,
             self.home_device(),
         ))
+    }
+
+    /// Committed bytes currently held through this device's retained acquire path.
+    pub fn retained_bytes_by_kind(&self) -> BytesByKind {
+        self.bookkeeping().snapshot()
+    }
+
+    /// Release a held buffer into `ctx`'s transient pool for epoch-gated reuse.
+    pub fn release_buffer(&self, ctx: &Context, buffer: Buffer) {
+        ctx.release_buffer(buffer);
+    }
+
+    /// Release a held texture parcel into `ctx`'s transient pool for epoch-gated reuse.
+    pub fn release_texture(&self, ctx: &Context, texture: Texture) {
+        ctx.release_texture(texture);
     }
 
     fn alloc_raw_buffer(
@@ -161,32 +165,56 @@ impl RetainedPool {
         init: Option<&[u8]>,
     ) -> Result<crate::buffer::Allocation> {
         if let Some(data) = init {
-            self.device
-                .alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride.unwrap_or(1), flags)
+            self.alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride.unwrap_or(1), flags)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         } else {
-            self.device
-                .alloc_buffer(size, access, element_stride, flags)
+            self.alloc_buffer(size, access, element_stride, flags)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
     }
 
-    /// Release a held texture parcel into the context transient pool for epoch-gated reuse.
-    pub fn release_texture(&mut self, ctx: &Context, texture: Texture) {
-        let stamped = self.transfer_out_texture(ctx, texture);
-        ctx.with_transient_pool(|pool| pool.adopt(stamped));
+    pub(crate) fn bookkeeping(&self) -> &Arc<PoolBookkeeping> {
+        &self.inner.bookkeeping
     }
 
-    /// Release a held buffer into the context transient pool for epoch-gated reuse.
-    pub fn release_buffer(&mut self, ctx: &Context, buffer: Buffer) {
-        let stamped = self.transfer_out_buffer(ctx, buffer);
-        ctx.with_transient_pool(|pool| pool.adopt(stamped));
+    fn home_device(&self) -> std::sync::Weak<crate::device::DeviceInner> {
+        Arc::downgrade(&self.inner)
     }
 
-    pub(crate) fn transfer_out_texture(&mut self, ctx: &Context, mut texture: Texture) -> StampedParcel {
+    fn wrap_texture(&self, tex: crate::texture::TextureBacking) -> Result<Texture> {
+        let bytes = tex.byte_size() as u64;
+        let kind = ParcelType::Texture;
+        self.bookkeeping().add(kind, bytes);
+        let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping()), kind, bytes);
+        Ok(Texture::from_backing(tex, guard, self.home_device()))
+    }
+
+    fn wrap_buffer(&self, buf: crate::buffer::Allocation) -> Result<Buffer> {
+        let bytes = buf.byte_size();
+        let kind = ParcelType::Buffer;
+        self.bookkeeping().add(kind, bytes);
+        let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping()), kind, bytes);
+        Ok(Buffer::from_single(buf, guard, self.home_device()))
+    }
+}
+
+impl Context {
+    /// Release a held texture parcel into this context's transient pool for epoch-gated reuse.
+    pub fn release_texture(&self, texture: Texture) {
+        let stamped = self.transfer_out_texture(texture);
+        self.with_transient_pool(|pool| pool.adopt(stamped));
+    }
+
+    /// Release a held buffer into this context's transient pool for epoch-gated reuse.
+    pub fn release_buffer(&self, buffer: Buffer) {
+        let stamped = self.transfer_out_buffer(buffer);
+        self.with_transient_pool(|pool| pool.adopt(stamped));
+    }
+
+    pub(crate) fn transfer_out_texture(&self, mut texture: Texture) -> StampedParcel {
         if let Some(home) = texture.home_device().upgrade() {
             debug_assert!(
-                Arc::ptr_eq(&home, &ctx.device().inner),
+                Arc::ptr_eq(&home, &self.device().inner),
                 "transfer_out: texture home_device must match submitting context's device"
             );
         }
@@ -198,10 +226,10 @@ impl RetainedPool {
         }
     }
 
-    pub(crate) fn transfer_out_buffer(&mut self, ctx: &Context, mut buffer: Buffer) -> StampedParcel {
+    pub(crate) fn transfer_out_buffer(&self, mut buffer: Buffer) -> StampedParcel {
         if let Some(home) = buffer.home_device().upgrade() {
             debug_assert!(
-                Arc::ptr_eq(&home, &ctx.device().inner),
+                Arc::ptr_eq(&home, &self.device().inner),
                 "transfer_out: buffer home_device must match submitting context's device"
             );
         }
@@ -212,30 +240,42 @@ impl RetainedPool {
             ready_after,
         }
     }
+}
 
-    /// Committed bytes currently held through this pool (buffers vs textures).
+/// Thin [`Device`] handle. Prefer [`Device::acquire_buffer`] / [`Device::acquire_texture`].
+pub struct RetainedPool {
+    device: Device,
+}
+
+impl RetainedPool {
+    /// Wrap `device` so existing call sites can acquire retained memory.
+    pub fn new(device: Arc<Device>) -> Self {
+        Self {
+            device: (*device).clone(),
+        }
+    }
+
+    /// Release a held texture parcel into the context transient pool for epoch-gated reuse.
+    pub fn release_texture(&self, ctx: &Context, texture: Texture) {
+        ctx.release_texture(texture);
+    }
+
+    /// Release a held buffer into the context transient pool for epoch-gated reuse.
+    pub fn release_buffer(&self, ctx: &Context, buffer: Buffer) {
+        ctx.release_buffer(buffer);
+    }
+
+    /// Committed bytes currently held through this device's retained acquire path.
     pub fn bytes_by_kind(&self) -> BytesByKind {
-        self.bookkeeping.snapshot()
+        self.device.retained_bytes_by_kind()
     }
+}
 
-    fn home_device(&self) -> std::sync::Weak<crate::device::DeviceInner> {
-        Arc::downgrade(&self.device.inner)
-    }
+impl Deref for RetainedPool {
+    type Target = Device;
 
-    fn wrap_texture(&self, tex: crate::texture::TextureBacking) -> Result<Texture> {
-        let bytes = tex.byte_size() as u64;
-        let kind = ParcelType::Texture;
-        self.bookkeeping.add(kind, bytes);
-        let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
-        Ok(Texture::from_backing(tex, guard, self.home_device()))
-    }
-
-    fn wrap_buffer(&self, buf: crate::buffer::Allocation) -> Result<Buffer> {
-        let bytes = buf.byte_size();
-        let kind = ParcelType::Buffer;
-        self.bookkeeping.add(kind, bytes);
-        let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
-        Ok(Buffer::from_single(buf, guard, self.home_device()))
+    fn deref(&self) -> &Device {
+        &self.device
     }
 }
 
@@ -245,7 +285,7 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::parcel::{field, Init};
     use crate::types::{ResourceAccess, TextureFormat};
-    use crate::MemoryExchange;
+    use crate::{DepositTarget, MemoryExchange};
 
     fn test_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
@@ -265,7 +305,7 @@ mod tests {
 
     #[test]
     fn acquire_texture_without_init_allocates() {
-        let mut pool = RetainedPool::new(test_device());
+        let pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
         let _p = pool.acquire_texture(64, 64, fmt, acc, flags, None).unwrap();
         assert!(pool.bytes_by_kind().texture > 0);
@@ -274,7 +314,7 @@ mod tests {
 
     #[test]
     fn acquire_buffer_without_init_allocates() {
-        let mut pool = RetainedPool::new(test_device());
+        let pool = RetainedPool::new(test_device());
         let b = pool
             .acquire_buffer(
                 256,
@@ -291,7 +331,7 @@ mod tests {
 
     #[test]
     fn acquire_record_builds_partitioned_buffer() {
-        let mut pool = RetainedPool::new(test_device());
+        let pool = RetainedPool::new(test_device());
         let cells = pool
             .acquire_record([
                 field("a", Init::data(&[1u32, 2, 3])),
@@ -307,7 +347,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot bind a partitioned buffer as one descriptor")]
     fn partitioned_buffer_whole_panics() {
-        let mut pool = RetainedPool::new(test_device());
+        let pool = RetainedPool::new(test_device());
         let cells = pool
             .acquire_record([field("a", Init::data(&[1u32])), field("b", Init::reserve::<u32>(1))])
             .unwrap();
@@ -319,7 +359,7 @@ mod tests {
     fn partitioned_buffer_deref_panics() {
         use crate::Parcel;
 
-        let mut pool = RetainedPool::new(test_device());
+        let pool = RetainedPool::new(test_device());
         let cells = pool
             .acquire_record([field("a", Init::data(&[1u32])), field("b", Init::reserve::<u32>(1))])
             .unwrap();
@@ -328,7 +368,7 @@ mod tests {
 
     #[test]
     fn detach_allocation_succeeds_on_single_unit_buffer() {
-        let mut pool = RetainedPool::new(test_device());
+        let pool = RetainedPool::new(test_device());
         let buffer = pool
             .acquire_buffer(
                 64,
@@ -345,7 +385,7 @@ mod tests {
     fn transfer_out_buffer_referenced_has_ready_after() {
         let device = test_device();
         let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
+        let pool = RetainedPool::new(device);
         let b = pool
             .acquire_buffer(
                 64,
@@ -356,7 +396,7 @@ mod tests {
             )
             .unwrap();
         b.whole().mark_referenced(ctx.backend_handle(), 42);
-        let stamped = pool.transfer_out_buffer(&ctx, b);
+        let stamped = ctx.transfer_out_buffer(b);
         assert_eq!(stamped.ready_after.get(ctx.backend_handle()), Some(42));
         assert_eq!(pool.bytes_by_kind().buffer, 0);
     }
@@ -365,7 +405,7 @@ mod tests {
     fn deposit_buffer_on_whole_buffer_parcel_succeeds() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(device);
+        let pool = RetainedPool::new(device);
         let buffer = pool
             .acquire_buffer(
                 16,
@@ -377,10 +417,10 @@ mod tests {
             .unwrap();
         let mut scheme = crate::Scheme::new(&ctx);
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut scheme, &*buffer, 16)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(&*buffer, 16))
             .expect("bind deposit");
         deposit
-            .write(&mut scheme, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))
+            .write(0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))
             .expect("deposit write");
         scheme.submit().unwrap();
     }

@@ -11,9 +11,9 @@ mod imp {
     use crate::upload::write_to_parcel;
     use goldy::{
         types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
-        BackendType, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-        Parcel, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
-        Submission, WithdrawTransaction,
+        BackendType, BufferKind, ComputePipeline, DepositTarget, Device, DeviceDescriptor, Instance, MemoryExchange,
+        NodeAccess, Parcel, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
+        StructuredBufferElement, Submission, WithdrawTransaction,
     };
     use std::sync::Arc;
 
@@ -1457,7 +1457,7 @@ mod imp {
             .expect("output");
 
         let mut scheme = Scheme::new(&ctx);
-        let scratch = scheme.lease_buffer(byte_size).expect("lease scratch");
+        let scratch = ctx.lease_buffer(byte_size).expect("lease scratch");
 
         scheme
             .node("write_iota", &write_pipe)
@@ -1533,7 +1533,7 @@ mod imp {
 
         {
             let mut scheme = Scheme::new(&ctx);
-            let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_a");
+            let scratch = ctx.lease_buffer(byte_size).expect("lease scratch_a");
             scheme
                 .node("write_iota", &iota_pipe)
                 .with_parcel(&scratch, NodeAccess::Write)
@@ -1564,7 +1564,7 @@ mod imp {
 
         {
             let mut scheme = Scheme::new(&ctx);
-            let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_b");
+            let scratch = ctx.lease_buffer(byte_size).expect("lease scratch_b");
             assert_eq!(
                 ctx.transient_buffer_alloc_count(),
                 alloc_count_before + 1,
@@ -2270,7 +2270,7 @@ mod imp {
     /// the **same** parcel then copy it to a distinct output.
     ///
     /// This is the Scheme-API migration of `test_write_buffer_reuse_across_submissions`.
-    /// Each scheme uses [`MemoryExchange::bind_deposit_buffer`] so the deposit copy is part of
+    /// Each scheme uses [`MemoryExchange::bind_deposit`] so the deposit copy is part of
     /// the same GPU submission as the compute node that reads it.  Both schemes are
     /// submitted without any CPU-side wait between them; correctness relies entirely
     /// on the staging belt handing out independent staging regions for the two uploads
@@ -2322,10 +2322,13 @@ mod imp {
         // Scheme 1: write data_a into mid, copy mid → out_a, then read out_a back.
         let mut s1 = Scheme::new(&ctx);
         let deposit_a = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut s1, &mid, (N * core::mem::size_of::<u32>()) as u64)
+            .bind_deposit(
+                &mut s1,
+                DepositTarget::buffer(&mid, (N * core::mem::size_of::<u32>()) as u64),
+            )
             .expect("bind deposit a");
         deposit_a
-            .write(&mut s1, 0, bytemuck::cast_slice(&data_a))
+            .write(0, bytemuck::cast_slice(&data_a))
             .expect("commit write a");
         s1.node("copy_a", &pipeline)
             .with_parcel(&mid, NodeAccess::Read)
@@ -2340,10 +2343,13 @@ mod imp {
         // The staging belt must not recycle the staging region used by s1.
         let mut s2 = Scheme::new(&ctx);
         let deposit_b = MemoryExchange::new(&ctx)
-            .bind_deposit_buffer(&mut s2, &mid, (N * core::mem::size_of::<u32>()) as u64)
+            .bind_deposit(
+                &mut s2,
+                DepositTarget::buffer(&mid, (N * core::mem::size_of::<u32>()) as u64),
+            )
             .expect("bind deposit b");
         deposit_b
-            .write(&mut s2, 0, bytemuck::cast_slice(&data_b))
+            .write(0, bytemuck::cast_slice(&data_b))
             .expect("commit write b");
         s2.node("copy_b", &pipeline)
             .with_parcel(&mid, NodeAccess::Read)
@@ -2937,10 +2943,10 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         let memory = MemoryExchange::new(&ctx);
         let deposit1 = memory
-            .bind_deposit_buffer(&mut scheme, &buf, bytes1.len() as u64)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(&buf, bytes1.len() as u64))
             .expect("bind deposit 1");
         // Phase 1: write data1 into buf, copy to out1.
-        deposit1.write(&mut scheme, 0, &bytes1).expect("commit write 1");
+        deposit1.write(0, &bytes1).expect("commit write 1");
         scheme
             .node("copy1", &copy_pipe)
             .with_parcel(&buf, NodeAccess::Read)
@@ -2948,9 +2954,9 @@ mod imp {
             .dispatch((N / 64) as u32, 1, 1);
         // Phase 2: overwrite buf with data2 (WAW), copy to out2.
         let deposit2 = memory
-            .bind_deposit_buffer(&mut scheme, &buf, bytes2.len() as u64)
+            .bind_deposit(&mut scheme, DepositTarget::buffer(&buf, bytes2.len() as u64))
             .expect("bind deposit 2");
-        deposit2.write(&mut scheme, 0, &bytes2).expect("commit write 2");
+        deposit2.write(0, &bytes2).expect("commit write 2");
         scheme
             .node("copy2", &copy_pipe)
             .with_parcel(&buf, NodeAccess::Read)
@@ -3382,9 +3388,9 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         let capacity = (W * H * 4) as u64;
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_texture(&mut scheme, &texture, 0, 0, W, H, capacity, 0)
+            .bind_deposit(&mut scheme, DepositTarget::texture(&texture, 0, 0, W, H, capacity, 0))
             .expect("bind deposit");
-        deposit.write(&mut scheme, 0, &pixels).expect("deposit write");
+        deposit.write(0, &pixels).expect("deposit write");
         let grant = MemoryExchange::new(&ctx)
             .bind_withdraw(&mut scheme, &texture)
             .expect("withdraw");
@@ -3413,13 +3419,13 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         let capacity = (8 * 8 * 4) as u64;
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_texture(&mut scheme, &texture, 0, 0, 8, 8, capacity, 0)
+            .bind_deposit(&mut scheme, DepositTarget::texture(&texture, 0, 0, 8, 8, capacity, 0))
             .expect("bind deposit");
         // Partial staging fills are allowed; only exceeding declaration capacity errors.
         deposit
-            .write(&mut scheme, 0, &[0u8; 10])
+            .write(0, &[0u8; 10])
             .expect("undersized write should fit within capacity");
-        let result2 = deposit.write(&mut scheme, 0, &[0u8; 8 * 8 * 4 + 4]);
+        let result2 = deposit.write(0, &[0u8; 8 * 8 * 4 + 4]);
         assert!(result2.is_err(), "deposit write should reject oversized data");
     }
 
@@ -3439,13 +3445,13 @@ mod imp {
         assert!(scheme.is_dirty(), "new scheme starts dirty");
         let capacity = (4 * 4 * 4) as u64;
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_texture(&mut scheme, &texture, 0, 0, 4, 4, capacity, 0)
+            .bind_deposit(&mut scheme, DepositTarget::texture(&texture, 0, 0, 4, 4, capacity, 0))
             .expect("bind deposit");
-        assert!(scheme.is_dirty(), "scheme must be dirty after bind_deposit_texture");
-        deposit.write(&mut scheme, 0, &[0u8; 4 * 4 * 4]).expect("first write");
+        assert!(scheme.is_dirty(), "scheme must be dirty after bind_deposit");
+        deposit.write(0, &[0u8; 4 * 4 * 4]).expect("first write");
         assert!(scheme.is_dirty(), "scheme must be dirty after deposit write");
         // Second write: scheme is already dirty, but staging another payload keeps it dirty.
-        deposit.write(&mut scheme, 0, &[0u8; 4 * 4 * 4]).expect("second write");
+        deposit.write(0, &[0u8; 4 * 4 * 4]).expect("second write");
         assert!(
             scheme.is_dirty(),
             "scheme must still be dirty after second deposit write"
@@ -3480,9 +3486,12 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         let region_capacity = (RW * RH * 4) as u64;
         let deposit = MemoryExchange::new(&ctx)
-            .bind_deposit_texture(&mut scheme, &texture, RX, RY, RW, RH, region_capacity, 0)
+            .bind_deposit(
+                &mut scheme,
+                DepositTarget::texture(&texture, RX, RY, RW, RH, region_capacity, 0),
+            )
             .expect("bind deposit");
-        deposit.write(&mut scheme, 0, &region_pixels).expect("deposit write");
+        deposit.write(0, &region_pixels).expect("deposit write");
         let grant = MemoryExchange::new(&ctx)
             .bind_withdraw(&mut scheme, &texture)
             .expect("withdraw");
@@ -3525,10 +3534,10 @@ mod imp {
         let mut scheme = Scheme::new(&ctx);
         let memory = MemoryExchange::new(&ctx);
         // Region extends beyond texture width.
-        let result = memory.bind_deposit_texture(&mut scheme, &texture, 6, 0, 4, 4, 4 * 4 * 4, 0);
+        let result = memory.bind_deposit(&mut scheme, DepositTarget::texture(&texture, 6, 0, 4, 4, 4 * 4 * 4, 0));
         assert!(result.is_err(), "x+width exceeds texture width → error");
         // Region extends beyond texture height.
-        let result2 = memory.bind_deposit_texture(&mut scheme, &texture, 0, 6, 4, 4, 4 * 4 * 4, 0);
+        let result2 = memory.bind_deposit(&mut scheme, DepositTarget::texture(&texture, 0, 6, 4, 4, 4 * 4 * 4, 0));
         assert!(result2.is_err(), "y+height exceeds texture height → error");
     }
 
@@ -3556,13 +3565,19 @@ mod imp {
         let red_capacity = (4 * 4 * 4) as u64;
         let blue_capacity = (4 * 4 * 4) as u64;
         let red_deposit = memory
-            .bind_deposit_texture(&mut scheme, &texture, 0, 0, 4, 4, red_capacity, 0)
+            .bind_deposit(
+                &mut scheme,
+                DepositTarget::texture(&texture, 0, 0, 4, 4, red_capacity, 0),
+            )
             .expect("bind red deposit");
-        red_deposit.write(&mut scheme, 0, &red).expect("write red region");
+        red_deposit.write(0, &red).expect("write red region");
         let blue_deposit = memory
-            .bind_deposit_texture(&mut scheme, &texture, 4, 4, 4, 4, blue_capacity, 0)
+            .bind_deposit(
+                &mut scheme,
+                DepositTarget::texture(&texture, 4, 4, 4, 4, blue_capacity, 0),
+            )
             .expect("bind blue deposit");
-        blue_deposit.write(&mut scheme, 0, &blue).expect("write blue region");
+        blue_deposit.write(0, &blue).expect("write blue region");
         let grant = MemoryExchange::new(&ctx)
             .bind_withdraw(&mut scheme, &texture)
             .expect("withdraw");
@@ -5209,7 +5224,7 @@ mod imp {
             .unwrap();
 
         let mut scheme = Scheme::new(&ctx);
-        let scratch = scheme.lease_buffer(64 * 4).expect("lease");
+        let scratch = ctx.lease_buffer(64 * 4).expect("lease");
         scheme
             .node("to_scratch", &copy_pipe)
             .with_parcel(&input, NodeAccess::Read)

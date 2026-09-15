@@ -8,10 +8,12 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DepositTransaction, DeviceDescriptor, Instance,
-    MemoryExchange, PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    Buffer, BufferKind, ComputePipeline, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange,
+    NodeAccess, PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture,
+    Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -20,7 +22,7 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
-use common::FrameSink;
+use common::CaptureDump;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -89,7 +91,7 @@ fn main() -> Result<()> {
         };
         app.init(None)?;
         let state = app.state.as_mut().expect("capture state");
-        while !state.sink.finished() {
+        while !state.capture.as_ref().is_none_or(CaptureDump::finished) {
             render_frame(state)?;
         }
         return Ok(());
@@ -119,7 +121,7 @@ fn main() -> Result<()> {
 struct GpuWarmup {
     ctx: goldy::Context,
     compute_pipeline: ComputePipeline,
-    retained_pool: RetainedPool,
+    device: Arc<goldy::Device>,
 }
 
 fn warm_gpu() -> Result<GpuWarmup> {
@@ -132,11 +134,10 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let ctx = device.create_context()?;
     let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-    let retained_pool = RetainedPool::new(device);
     Ok(GpuWarmup {
         ctx,
         compute_pipeline,
-        retained_pool,
+        device,
     })
 }
 
@@ -149,52 +150,74 @@ struct App {
 struct RenderState {
     window: Option<Arc<Window>>,
     ctx: goldy::Context,
-    sink: FrameSink,
+    surface: Option<SurfaceExchange>,
+    present: Option<Transaction>,
+    capture: Option<CaptureDump>,
+    readback: Option<Texture>,
+    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
-    retained_pool: RetainedPool,
     uniform_buffer: Buffer,
     upload_scheme: Scheme,
     uniform_deposit: DepositTransaction,
-    start_time: std::time::Instant,
+    start_time: Instant,
     vsync: bool,
     frame_count: u32,
 }
 
 fn record_scheme(
     scheme: &mut Scheme,
-    sink: &mut FrameSink,
-    pool: &mut RetainedPool,
     pipeline: &ComputePipeline,
     uniform: &Buffer,
     width: u32,
     height: u32,
-) -> Result<()> {
-    let target = sink.compute_color_target(scheme, pool)?;
+    surface: Option<&SurfaceExchange>,
+    readback: Option<&Texture>,
+) -> Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
-    common::bind_compute_node(
-        scheme.node("compute", pipeline).with_parcel(uniform, NodeAccess::Read),
-        &target,
-        sink,
-    )
-    .dispatch(wg_x, wg_y, 1);
-    sink.complete_compute(scheme)?;
-    Ok(())
+    if let Some(surface) = surface {
+        let (lease, present) = surface.bind_destination(scheme)?;
+        scheme
+            .node("compute", pipeline)
+            .with_parcel(uniform, NodeAccess::Read)
+            .with_present(&lease)
+            .dispatch(wg_x, wg_y, 1);
+        Ok((Some(present), None))
+    } else {
+        let target = readback.expect("capture readback");
+        scheme
+            .node("compute", pipeline)
+            .with_parcel(uniform, NodeAccess::Read)
+            .with_parcel(target, NodeAccess::Write)
+            .dispatch(wg_x, wg_y, 1);
+        let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, target)?;
+        Ok((None, Some(withdraw)))
+    }
+}
+
+fn output_size(state: &RenderState) -> (u32, u32) {
+    if let Some(surface) = &state.surface {
+        surface.size()
+    } else {
+        state.capture.as_ref().expect("capture").size()
+    }
 }
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     let mut scheme = Scheme::new(&state.ctx);
-    record_scheme(
+    let (present, withdraw) = record_scheme(
         &mut scheme,
-        &mut state.sink,
-        &mut state.retained_pool,
         &state.compute_pipeline,
         &state.uniform_buffer,
         width,
         height,
+        state.surface.as_ref(),
+        state.readback.as_ref(),
     )
     .expect("failed to record scheme");
+    state.present = present;
+    state.withdraw = withdraw;
     state.scheme = scheme;
 }
 
@@ -207,14 +230,22 @@ impl App {
         let GpuWarmup {
             ctx,
             compute_pipeline,
-            mut retained_pool,
+            device,
             ..
         } = warmup;
 
-        let mut sink = FrameSink::open(&ctx, &mut retained_pool, window.as_deref())?;
-        let (width, height) = sink.size();
+        let (surface, capture, readback, width, height) = if let Some(window) = window.as_deref() {
+            let surface = SurfaceExchange::new(&ctx, window, SurfaceConfig::default())?;
+            let (width, height) = surface.size();
+            (Some(surface), None, None, width, height)
+        } else {
+            let capture = CaptureDump::from_env()?;
+            let (width, height) = capture.size();
+            let readback = common::capture_readback(&device, width, height)?;
+            (None, Some(capture), Some(readback), width, height)
+        };
 
-        let uniform_buffer = retained_pool.acquire_buffer_with_data(
+        let uniform_buffer = device.acquire_buffer_with_data(
             &[Uniforms {
                 width,
                 height,
@@ -225,34 +256,36 @@ impl App {
         )?;
 
         let mut scheme = Scheme::new(&ctx);
-        record_scheme(
+        let (present, withdraw) = record_scheme(
             &mut scheme,
-            &mut sink,
-            &mut retained_pool,
             &compute_pipeline,
             &uniform_buffer,
             width,
             height,
+            surface.as_ref(),
+            readback.as_ref(),
         )?;
 
         let mut upload_scheme = Scheme::new(&ctx);
-        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit_buffer(
+        let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            &uniform_buffer,
-            std::mem::size_of::<Uniforms>() as u64,
+            DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
         )?;
 
         self.state = Some(RenderState {
             window,
             ctx,
-            sink,
+            surface,
+            present,
+            capture,
+            readback,
+            withdraw,
             scheme,
             compute_pipeline,
-            retained_pool,
             uniform_buffer,
             upload_scheme,
             uniform_deposit,
-            start_time: std::time::Instant::now(),
+            start_time: Instant::now(),
             vsync: true,
             frame_count: 0,
         });
@@ -322,7 +355,7 @@ impl ApplicationHandler for App {
                     } else {
                         PresentMode::Immediate
                     };
-                    if let Some(surface) = state.sink.as_surface() {
+                    if let Some(surface) = &state.surface {
                         if let Err(e) = surface.set_present_mode(mode) {
                             eprintln!("Failed to set present mode: {e}");
                         } else {
@@ -337,8 +370,10 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
-                let _ = state.sink.resize(new_size.width, new_size.height);
-                rebuild_scheme(state, new_size.width, new_size.height);
+                if let Some(surface) = &state.surface {
+                    let _ = surface.resize(new_size.width, new_size.height);
+                    rebuild_scheme(state, new_size.width, new_size.height);
+                }
                 if let Some(window) = &state.window {
                     window.request_redraw();
                 }
@@ -359,12 +394,16 @@ impl ApplicationHandler for App {
 fn render_frame(state: &mut RenderState) -> Result<()> {
     state.frame_count += 1;
 
-    let (width, height) = state.sink.size();
+    let (width, height) = output_size(state);
     if width == 0 || height == 0 {
         return Ok(());
     }
 
-    let elapsed = state.sink.time(state.start_time);
+    let elapsed = state
+        .capture
+        .as_ref()
+        .map(CaptureDump::time)
+        .unwrap_or_else(|| state.start_time.elapsed().as_secs_f32());
     let uniforms = Uniforms {
         width,
         height,
@@ -372,13 +411,16 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    state
-        .uniform_deposit
-        .write(&mut state.upload_scheme, 0, bytemuck::bytes_of(&uniforms))?;
+    state.uniform_deposit.write(0, bytemuck::bytes_of(&uniforms))?;
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;
-    state.sink.settle(&mut submission)?;
+    if let Some(present) = &state.present {
+        present.claim(&mut submission)?.consume()?;
+    } else {
+        let pixels = state.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+        state.capture.as_mut().unwrap().write_rgba(&pixels)?;
+    }
 
     Ok(())
 }

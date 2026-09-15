@@ -354,6 +354,7 @@ impl Adapter {
                 adapter: self.clone(),
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
             }),
@@ -537,6 +538,8 @@ pub(crate) struct DeviceInner {
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocatorAlloc>,
+    /// Byte ledger for parcels acquired through [`Device::acquire_buffer`] / `acquire_texture`.
+    pub(crate) bookkeeping: Arc<crate::parcel::PoolBookkeeping>,
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
@@ -691,6 +694,7 @@ impl Device {
                 adapter: self.inner.adapter.clone(),
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
+                bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
             }),
@@ -736,7 +740,7 @@ impl Device {
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
     ///
     /// Crate-internal entry point for runtime allocators and pools. Application code should
-    /// use [`RetainedPool::acquire_buffer`](crate::RetainedPool::acquire_buffer) instead.
+    /// use [`Device::acquire_buffer`](crate::Device::acquire_buffer) instead.
     /// Allocations receive an accounting deed and honor the installed allocator's budget
     /// and telemetry.
     ///
@@ -1150,7 +1154,7 @@ impl Device {
     /// No-op: texture uploads are scheduled via [`crate::Scheme`].
     #[deprecated(
         since = "0.1.0",
-        note = "Texture uploads are batched via MemoryExchange::bind_deposit_texture; there is nothing to flush."
+        note = "Texture uploads are batched via MemoryExchange::bind_deposit; there is nothing to flush."
     )]
     pub fn flush_texture_uploads(&self) -> Result<()> {
         Ok(())
@@ -1241,6 +1245,7 @@ impl Device {
                 adapter,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
             }),

@@ -60,7 +60,7 @@ use crate::shader::YieldScript;
 use crate::slang::yielding::{ContinuationDecl, YieldReflection};
 use crate::task_graph::NodeAccess;
 use crate::types::{BufferFlags, BufferKind};
-use crate::{ComputePipeline, Context, GoldyError, MemoryExchange};
+use crate::{ComputePipeline, Context, DepositTarget, GoldyError, MemoryExchange};
 
 /// A Rust view of a `[goldy_petition]` payload struct.
 ///
@@ -763,11 +763,14 @@ impl YieldDriver {
                     stats.rejected += batch.rejected;
                     stats.arena_overflow += batch.overflow;
                     let res_bytes: &[u8] = bytemuck::cast_slice(&batch.resolutions);
-                    mx.bind_deposit_buffer(&mut sub, pt.res.whole(), res_bytes.len() as u64)?
-                        .write_bytes(&mut sub, res_bytes)?;
+                    mx.bind_deposit(&mut sub, DepositTarget::buffer(pt.res.whole(), res_bytes.len() as u64))?
+                        .write_bytes(res_bytes)?;
                     if !batch.arena_bytes.is_empty() {
-                        mx.bind_deposit_buffer(&mut sub, pt.arena.whole(), batch.arena_bytes.len() as u64)?
-                            .write_bytes(&mut sub, &batch.arena_bytes)?;
+                        mx.bind_deposit(
+                            &mut sub,
+                            DepositTarget::buffer(pt.arena.whole(), batch.arena_bytes.len() as u64),
+                        )?
+                        .write_bytes(&batch.arena_bytes)?;
                     }
                 }
                 Handler::Node {

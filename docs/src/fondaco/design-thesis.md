@@ -73,6 +73,7 @@ Goldy treats graphics and compute as one scheme:
 - Compute simulation → raster present in one retained scheme
 - **Compute-to-surface**: compute writes swapchain drawables directly (no `RenderPipeline`) — [Compute to Surface](../compute/compute-to-surface.md)
 - Cross-scheme ordering via context timeline / ledger
+- Raster **draws** are machine-legal dispatches; Goldy fuses them into one pass node because 2026 APIs only fence at the framebuffer epoch — [Render Passes and Schemes](./render-passes.md)
 
 This matches how modern engines and CUDA-style workloads converge on the same memory-access patterns. Goldy provides the primitives; performance patterns remain the developer's responsibility.
 
@@ -125,5 +126,6 @@ Do not treat **Designed** or **Speculative** items as shipped. Status table: [Go
 
 1. [Machine Specification](./specification.md)
 2. [Goldy Runtime Mapping](./goldy-runtime.md)
-3. [Terminology](./terminology.md)
-4. [Motivation](../design/motivation.md) · [What Goldy Sheds](../design/what-goldy-sheds.md) · [Target Hardware](../design/hardware.md)
+3. [Render Passes and Schemes](./render-passes.md)
+4. [Terminology](./terminology.md)
+5. [Motivation](../design/motivation.md) · [What Goldy Sheds](../design/what-goldy-sheds.md) · [Target Hardware](../design/hardware.md)

@@ -87,7 +87,7 @@ def main() -> int:
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
 
-    rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
+    rt = ctx.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
     with scheme.render_pass("game_of_life_render", rt, goldy.TargetLoad.discard()) as rp:
         (
             rp.with_field(cells, "b", goldy.NodeAccess.READ)

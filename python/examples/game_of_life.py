@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Conway's Game of Life — hybrid Scheme in a window (compute + render + present).
+"""Conway's Game of Life — two retained schemes, alternating resubmit.
 
 Ping-pong cell grids live in one retained record buffer (fields `"a"` / `"b"`).
-Each simulation step runs an ephemeral compute scheme; the display scheme is
-rebuilt when the active field flips.
+Orientation AB reads `a` and writes `b`; BA is the swap. Each is recorded once
+(and again on resize). Simulation steps alternate which scheme submits. Idle
+polls skip submit and leave the last present on the surface.
 
 Requires: pip install glfw
 
@@ -95,57 +96,63 @@ def create_initial_state() -> np.ndarray:
     return cells
 
 
-def run_compute_step(
-    ctx: goldy.Context,
+def record_scheme(
+    scheme: goldy.Scheme,
+    surface: goldy.SurfaceExchange,
     cells: goldy.Buffer,
     read_field: str,
     write_field: str,
-    pipeline: goldy.ComputePipeline,
-) -> None:
-    scheme = goldy.Scheme(ctx)
-    node = scheme.node("game_of_life", pipeline)
+    compute_pipeline: goldy.ComputePipeline,
+    render_pipeline: goldy.RenderPipeline,
+    scene_rt: goldy.SchemeRenderTargetLease,
+) -> goldy.Transaction:
+    node = scheme.node("game_of_life", compute_pipeline)
     (
         node.with_field(cells, read_field, goldy.NodeAccess.READ)
         .with_field(cells, write_field, goldy.NodeAccess.OVERWRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
-    scheme.submit()
-
-
-def record_display_scheme(
-    scheme: goldy.Scheme,
-    surface: goldy.SurfaceExchange,
-    cells: goldy.Buffer,
-    current_field: str,
-    render_pipeline: goldy.RenderPipeline,
-    scene_rt: goldy.SchemeRenderTargetLease,
-) -> goldy.Transaction:
     with scheme.render_pass("game_of_life_render", scene_rt, goldy.TargetLoad.discard()) as rp:
         (
-            rp.with_field(cells, current_field, goldy.NodeAccess.READ)
+            rp.with_field(cells, write_field, goldy.NodeAccess.READ)
             .set_pipeline(render_pipeline)
             .draw_fullscreen()
         )
     return surface.bind_render_target(scheme, scene_rt)
 
 
-def rebuild_display_scheme(
+def build_scheme(
     ctx: goldy.Context,
     surface: goldy.SurfaceExchange,
     cells: goldy.Buffer,
-    current_field: str,
+    read_field: str,
+    write_field: str,
+    compute_pipeline: goldy.ComputePipeline,
     render_pipeline: goldy.RenderPipeline,
-) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.Transaction]:
-    display_scheme = goldy.Scheme(ctx)
-    scene_rt = display_scheme.lease_render_target(
+) -> tuple[goldy.Scheme, goldy.Transaction]:
+    scheme = goldy.Scheme(ctx)
+    scene_rt = ctx.lease_render_target(
         max(surface.width, 1),
         max(surface.height, 1),
         surface.format,
     )
-    present = record_display_scheme(
-        display_scheme, surface, cells, current_field, render_pipeline, scene_rt
+    present = record_scheme(
+        scheme, surface, cells, read_field, write_field, compute_pipeline, render_pipeline, scene_rt
     )
-    return display_scheme, scene_rt, present
+    return scheme, present
+
+
+def build_schemes(
+    ctx: goldy.Context,
+    surface: goldy.SurfaceExchange,
+    cells: goldy.Buffer,
+    compute_pipeline: goldy.ComputePipeline,
+    render_pipeline: goldy.RenderPipeline,
+) -> tuple[tuple[goldy.Scheme, goldy.Transaction], tuple[goldy.Scheme, goldy.Transaction]]:
+    return (
+        build_scheme(ctx, surface, cells, "a", "b", compute_pipeline, render_pipeline),
+        build_scheme(ctx, surface, cells, "b", "a", compute_pipeline, render_pipeline),
+    )
 
 
 def main() -> int:
@@ -193,14 +200,8 @@ def main() -> int:
         ),
     )
 
-    display_scheme = goldy.Scheme(ctx)
-    scene_rt = display_scheme.lease_render_target(
-        max(surface.width, 1),
-        max(surface.height, 1),
-        surface.format,
-    )
-    present = record_display_scheme(
-        display_scheme, surface, cells, "a", render_pipeline, scene_rt
+    (scheme_ab, present_ab), (scheme_ba, present_ba) = build_schemes(
+        ctx, surface, cells, compute_pipeline, render_pipeline
     )
 
     use_buffer_a = True
@@ -225,35 +226,22 @@ def main() -> int:
                             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
                         ),
                     )
-                    current_field = "a" if use_buffer_a else "b"
-                    display_scheme, scene_rt, present = rebuild_display_scheme(
-                        ctx,
-                        surface,
-                        cells,
-                        current_field,
-                        render_pipeline,
+                    (scheme_ab, present_ab), (scheme_ba, present_ba) = build_schemes(
+                        ctx, surface, cells, compute_pipeline, render_pipeline
                     )
+                    last_update = time.monotonic() - 0.034
 
             now = time.monotonic()
-            if (now - last_update) > 0.033:
+            should_step = frame_count == 0 or (now - last_update) > 0.033
+            if should_step:
                 last_update = now
-                read_field = "a" if use_buffer_a else "b"
-                write_field = "b" if use_buffer_a else "a"
-                run_compute_step(ctx, cells, read_field, write_field, compute_pipeline)
+                scheme = scheme_ab if use_buffer_a else scheme_ba
+                present = present_ab if use_buffer_a else present_ba
+                submission = scheme.submit()
+                present.claim(submission).consume()
                 use_buffer_a = not use_buffer_a
-                current_field = "a" if use_buffer_a else "b"
-                display_scheme, scene_rt, present = rebuild_display_scheme(
-                    ctx,
-                    surface,
-                    cells,
-                    current_field,
-                    render_pipeline,
-                )
+                frame_count += 1
 
-            submission = display_scheme.submit()
-            present.claim(submission).consume()
-
-            frame_count += 1
             glfw.poll_events()
 
             if glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS:
