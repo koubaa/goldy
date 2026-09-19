@@ -19,6 +19,7 @@ use std::sync::Arc;
 const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
 use crate::types::{BufferFlags, BufferKind, ResourceCategory};
+use objc::rc::autoreleasepool;
 
 /// True when this submission records GPU encoder work beyond CPU-only `WriteBuffer` nodes.
 ///
@@ -333,8 +334,8 @@ fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCate
         .find(|b| b.arg_buffer_index == index && b.access == expected_kind)
         .and_then(|b| b.element_stride)
 }
-use ::metal as mtl;
 use anyhow::{Context, Result};
+use metal as mtl;
 use mtl::{MTLBlitOption, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1534,6 +1535,19 @@ pub(super) fn submit(
     commands: &[GpuCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
+    // Metal encode (`new_command_buffer`, encoders, argument buffers) autoreleases.
+    // The render thread has no NSRunLoop pool, so drain here or malloc_blocks climb
+    // by tens per Scheme::submit (Clock canvas ~40, present ~36, encode ~20).
+    let result = autoreleasepool(|| submit_inner(state, ctx, commands, sync));
+    result
+}
+
+fn submit_inner(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit");
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
@@ -1683,6 +1697,17 @@ pub(super) fn submit(
 /// sequential execution of encoders within a command buffer, so GPU ordering
 /// is preserved without any CPU-side synchronization.
 pub(super) fn submit_graph(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[super::super::GraphCommand],
+    retain_key: Option<u64>,
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    let result = autoreleasepool(|| submit_graph_inner(state, ctx, commands, retain_key, sync));
+    result
+}
+
+fn submit_graph_inner(
     state: &mut MetalState,
     ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
