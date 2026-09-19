@@ -46,10 +46,10 @@ use super::types::{
 };
 use super::utils::depth_format_to_mtl;
 use crate::types::{DepthFormat, PresentMode, TextureFormat};
-use ::metal as mtl;
 use anyhow::{Context, Result};
 use core_graphics_types::geometry::CGSize;
 use foreign_types::{ForeignType, ForeignTypeRef};
+use metal as mtl;
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::rc::autoreleasepool;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
@@ -559,7 +559,11 @@ struct MetalPresentGpuWork {
 impl PresentGpuWork for MetalPresentGpuWork {
     fn run(self: Box<Self>) -> Result<PresentFinishState> {
         let _tz = crate::tracy_zone!("mtl.present.gpu");
-        let owned_command_buffer = self.logical_device.command_queue.new_command_buffer().to_owned();
+        // `newCommandBuffer` is autoreleased. This path runs on a Rust worker
+        // without an NSRunLoop pool, so drain that original +0 retain here while
+        // preserving the owned wrapper passed to the submission worker.
+        let owned_command_buffer =
+            autoreleasepool(|| self.logical_device.command_queue.new_command_buffer().to_owned());
         let signal_value = super::pending_submit::preallocate_device_timeline(&self.logical_device);
         super::pending_submit::enqueue_metal_present(
             &self.logical_device,
