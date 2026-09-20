@@ -28,7 +28,7 @@ fn double_u32(data: &mut [u32]) {
 }
 
 #[compute(workgroup_size = [8, 8, 1])]
-fn fill_red(output: goldy::gpu::Image<goldy::gpu::Float4>) {
+fn fill_red(output: goldy::gpu::DirectSpatial<goldy::gpu::Float4>) {
     let tid = goldy::gpu::global_id();
     output[tid.xy] = goldy::gpu::float4(1.0, 0.0, 0.0, 1.0);
 }

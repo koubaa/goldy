@@ -41,13 +41,16 @@ topology — it does not launch into a stream. Use `use goldy::gpu;` (or
 
 ## Signature mapping
 
+Rust GPU-dialect types use the same names as `shaders/goldy_exp/access.slang`
+(`BufRO`, `Scattered`, `DirectSpatial`, `ThreadId`, …).
+
 | Rust parameter | Slang / Scheme |
 |---|---|
-| `&[T]` | `BufRO<T>`, `NodeAccess::Read` |
+| `&[T]` / `gpu::BufRO<T>` | `BufRO<T>`, `NodeAccess::Read` |
 | `&mut [T]` | `Scattered<T>`, `NodeAccess::ReadWrite` |
-| `gpu::Out<T>` | `Scattered<T>`, `NodeAccess::Write` |
+| `gpu::Scattered<T>` | `Scattered<T>`, `NodeAccess::Write` |
 | `gpu::Uniform<T>` | broadcast resource, `NodeAccess::Read` |
-| `gpu::Image<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
+| `gpu::DirectSpatial<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
 | `u32` / `i32` / `f32` / `bool` | typed scalar push words (no manual `to_bits`) |
 
 Hidden builtins (appended to the Slang signature when used):

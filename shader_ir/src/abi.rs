@@ -101,11 +101,11 @@ pub enum ParamCategory {
     BufferRead,
     /// `Scattered<T>` with read+write access (from `&mut [T]`).
     BufferReadWrite,
-    /// `Scattered<T>` write-only (`gpu::Out<T>`).
+    /// `Scattered<T>` write-only (`gpu::Scattered<T>`).
     BufferWrite,
     /// Explicit `gpu::Uniform<T>` broadcast resource.
     Uniform,
-    /// `DirectSpatial<T>` storage image (`gpu::Image<T>`).
+    /// `DirectSpatial<T>` (`gpu::DirectSpatial<T>`).
     StorageImage,
     /// Typed scalar push word.
     Scalar,

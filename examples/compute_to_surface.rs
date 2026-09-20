@@ -32,7 +32,7 @@ struct Uniforms {
 }
 
 #[goldy::compute(workgroup_size = [8, 8, 1])]
-fn plasma(uniforms: &[Uniforms], output: goldy::gpu::Image<goldy::gpu::Float4>) {
+fn plasma(uniforms: &[Uniforms], output: goldy::gpu::DirectSpatial<goldy::gpu::Float4>) {
     let tid = goldy::gpu::global_id();
     let u: Uniforms = uniforms[0];
     if tid.x >= u.width || tid.y >= u.height {

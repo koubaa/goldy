@@ -386,27 +386,51 @@ enum ClassifiedParam {
 }
 
 fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
-    // gpu::Out<T> / goldy::gpu::Out<T>
-    if let Some(inner) =
-        match_path_generic(ty, &["gpu", "Out"]).or_else(|| match_path_generic(ty, &["goldy", "gpu", "Out"]))
-    {
+    // Resource names match shaders/goldy_exp/access.slang.
+    if let Some(inner) = match_gpu_generic(ty, "Scattered") {
         let elem = element_from_type(inner)?;
         return Ok(ClassifiedParam::BufferWrite(elem));
     }
-    if let Some(inner) =
-        match_path_generic(ty, &["gpu", "Uniform"]).or_else(|| match_path_generic(ty, &["goldy", "gpu", "Uniform"]))
-    {
+    if let Some(inner) = match_gpu_generic(ty, "BufRO") {
+        return match buffer_element(inner)? {
+            BufferElem::Primitive(elem) => Ok(ClassifiedParam::BufferRead(elem)),
+            BufferElem::Named(name) => Ok(ClassifiedParam::BufferReadNamed(name)),
+        };
+    }
+    if let Some(inner) = match_gpu_generic(ty, "Uniform") {
         let name = type_to_slang_name(inner)?;
         return Ok(ClassifiedParam::Uniform(name));
     }
-    if path_matches(ty, &["gpu", "Image"]) || path_matches(ty, &["goldy", "gpu", "Image"]) {
-        let elem = match match_path_generic(ty, &["gpu", "Image"])
-            .or_else(|| match_path_generic(ty, &["goldy", "gpu", "Image"]))
-        {
-            Some(inner) => image_element_slang(inner)?,
+    if match_gpu(ty, "DirectSpatial") {
+        let elem = match match_gpu_generic(ty, "DirectSpatial") {
+            Some(inner) => texel_element_slang(inner)?,
             None => "float4".into(),
         };
         return Ok(ClassifiedParam::StorageImage(elem));
+    }
+    if match_gpu(ty, "Interpolated") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Interpolated is not yet supported in #[compute] kernels",
+        ));
+    }
+    if match_gpu(ty, "ByteAddress") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::ByteAddress is not yet supported in #[compute] kernels",
+        ));
+    }
+    if match_gpu(ty, "Filter") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Filter is not yet supported in #[compute] kernels",
+        ));
+    }
+    if match_gpu(ty, "Accel") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Accel is not yet supported in #[compute] kernels",
+        ));
     }
 
     match ty {
@@ -422,7 +446,7 @@ fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
                 if r.mutability.is_some() {
                     Err(Error::new(
                         ty.span(),
-                        "named struct buffers are read-only in the MVP (`&[T]`); use gpu::Image for surfaces",
+                        "named struct buffers are read-only in the MVP (`&[T]` / gpu::BufRO); use gpu::DirectSpatial for surfaces",
                     ))
                 } else {
                     Ok(ClassifiedParam::BufferReadNamed(name))
@@ -453,7 +477,7 @@ fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
         }
         _ => Err(Error::new(
             ty.span(),
-            "unsupported kernel parameter type; expected &[T], &mut [T], gpu::Out<T>, gpu::Uniform<T>, gpu::Image<T>, or u32/i32/f32/bool",
+            "unsupported kernel parameter type; expected &[T], &mut [T], gpu::BufRO<T>, gpu::Scattered<T>, gpu::Uniform<T>, gpu::DirectSpatial<T>, or u32/i32/f32/bool",
         )),
     }
 }
@@ -470,6 +494,14 @@ fn path_matches(ty: &Type, segs: &[&str]) -> bool {
         .iter()
         .zip(segs.iter())
         .all(|(seg, expect)| seg.ident == expect)
+}
+
+fn match_gpu(ty: &Type, name: &str) -> bool {
+    path_matches(ty, &["gpu", name]) || path_matches(ty, &["goldy", "gpu", name])
+}
+
+fn match_gpu_generic<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
+    match_path_generic(ty, &["gpu", name]).or_else(|| match_path_generic(ty, &["goldy", "gpu", name]))
 }
 
 fn match_path_generic<'a>(ty: &'a Type, segs: &[&str]) -> Option<&'a Type> {
@@ -519,9 +551,9 @@ enum BufferElem {
     Named(String),
 }
 
-fn image_element_slang(ty: &Type) -> Result<String, Error> {
+fn texel_element_slang(ty: &Type) -> Result<String, Error> {
     let Type::Path(p) = ty else {
-        return Err(Error::new(ty.span(), "gpu::Image element must be a path type"));
+        return Err(Error::new(ty.span(), "gpu::DirectSpatial element must be a path type"));
     };
     let name = p
         .path
@@ -537,7 +569,7 @@ fn image_element_slang(ty: &Type) -> Result<String, Error> {
         other => {
             return Err(Error::new(
                 ty.span(),
-                format!("unsupported gpu::Image element `{other}`; use gpu::Float4"),
+                format!("unsupported gpu::DirectSpatial element `{other}`; use gpu::Float4"),
             ))
         }
     })

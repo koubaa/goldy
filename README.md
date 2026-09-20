@@ -25,7 +25,6 @@ use goldy::{
     SurfaceExchange,
 };
 
-// Host layout; `GpuType` emits the matching Slang struct at prepare time.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
 struct Uniforms {
@@ -35,7 +34,7 @@ struct Uniforms {
 }
 
 #[goldy::compute(workgroup_size = [8, 8, 1])]
-fn plasma(uniforms: &[Uniforms], output: gpu::Image<gpu::Float4>) {
+fn plasma(uniforms: &[Uniforms], output: gpu::DirectSpatial<gpu::Float4>) {
     let tid = gpu::global_id();
     let u: Uniforms = uniforms[0];
     if tid.x >= u.width || tid.y >= u.height {

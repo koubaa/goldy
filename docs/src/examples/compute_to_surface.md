@@ -15,7 +15,7 @@ cargo run --features examples --example compute_to_surface
 
 - `SurfaceExchange::bind_destination` — present-on-scheme
 - `Transaction::claim` and `Claim::consume` settlement
-- `gpu::Image<gpu::Float4>` storage-texture writes to a drawable
+- `gpu::DirectSpatial<gpu::Float4>` storage-texture writes to a drawable
 
 ## Notes
 
