@@ -41,6 +41,7 @@
 //! see [`WDDM_INTEROP.md`](WDDM_INTEROP.md) in this directory (internal; not user docs).
 
 mod capture_gate;
+mod matmul;
 mod pending_submit;
 mod pinned_host;
 mod retained_graph;
@@ -188,6 +189,8 @@ pub(crate) struct CudaBackend {
     next_slot: u32,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
+    /// One cuBLAS handle per submission context (stream), created on first MatMul.
+    cublas: HashMap<ContextHandle, Arc<matmul::CublasHandle>>,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     next_surface: SurfaceHandle,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -729,6 +732,7 @@ impl CudaBackend {
             next_slot: 0,
             next_shader: 1,
             next_compute_pipeline: 1,
+            cublas: HashMap::new(),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             next_surface: 1,
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -1887,6 +1891,11 @@ impl CudaBackend {
                         }
                     }
                 }
+                GpuCommand::MatMul { a, b, c, .. } => {
+                    updates.push((a.buffer, CudaBufferReq::KERNEL));
+                    updates.push((b.buffer, CudaBufferReq::KERNEL));
+                    updates.push((c.buffer, CudaBufferReq::KERNEL));
+                }
                 GpuCommand::ClearBuffer { buffer, .. } => {
                     updates.push((*buffer, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
                 }
@@ -1986,6 +1995,9 @@ impl CudaBackend {
                 CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
                     memories.extend(keep_alive_buffers.iter().cloned());
                 }
+                CudaOp::MatMul { c, .. } => {
+                    memories.push(Arc::clone(&c.memory));
+                }
                 _ => {}
             }
         }
@@ -2018,6 +2030,9 @@ impl CudaBackend {
                 CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
                     memories.extend(keep_alive_buffers.iter().cloned())
                 }
+                CudaOp::MatMul { c, .. } => {
+                    memories.push(Arc::clone(&c.memory));
+                }
                 _ => {}
             }
         }
@@ -2038,7 +2053,12 @@ impl CudaBackend {
             .collect()
     }
 
-    fn materialize_ops(&mut self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+    fn materialize_ops(
+        &mut self,
+        ctx: ContextHandle,
+        stream: &Arc<CudaStream>,
+        commands: &[GpuCommand],
+    ) -> Result<Vec<CudaOp>> {
         let _gate = capture_gate::lock_capture_alloc_gate();
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
@@ -2494,11 +2514,14 @@ impl CudaBackend {
                         anyhow::bail!("CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows");
                     }
                 }
-                GpuCommand::BuildAccelerationStructure(_) => {
-                    anyhow::bail!("CUDA backend does not support acceleration structures");
-                }
-                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
-                    anyhow::bail!("CUDA backend does not support ray tracing pipelines");
+                GpuCommand::MatMul {
+                    label,
+                    desc,
+                    a,
+                    b,
+                    c,
+                } => {
+                    ops.push(matmul::materialize(self, ctx, stream, *label, *desc, *a, *b, *c)?);
                 }
             }
         }
@@ -2519,7 +2542,7 @@ impl CudaBackend {
         let stream = Arc::clone(&self.context(ctx)?.stream);
         let ops = {
             let _tz = crate::tracy_zone!("cuda.submit.materialize");
-            self.materialize_ops(&stream, &effective)?
+            self.materialize_ops(ctx, &stream, &effective)?
         };
         let _tz = crate::tracy_zone!("cuda.submit.enqueue");
         self.enqueue_submit(
@@ -3820,6 +3843,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>> {
+        self.cublas.remove(&ctx);
         let context = self.contexts.remove(&ctx)?;
         let keys: Vec<u64> = self
             .retained
@@ -5035,7 +5059,7 @@ impl GpuBackend for CudaBackend {
         let gpu_commands = Self::flatten_graph_commands(commands)?;
         let effective = commands_with_sync_prologue(&gpu_commands, sync);
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let ops = self.materialize_ops(&stream, &effective)?;
+        let ops = self.materialize_ops(ctx, &stream, &effective)?;
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         let direct_present = effective.iter().find_map(|command| {
             let GpuCommand::CopyRenderTarget { src, dst } = command else {

@@ -3613,6 +3613,9 @@ impl WebGpuBackend {
                     GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
                         anyhow::bail!("WebGPU backend does not support ray tracing pipelines");
                     }
+                    GpuCommand::MatMul { .. } => {
+                        anyhow::bail!("WebGPU backend expected MatMul to be lowered to a stdlib dispatch");
+                    }
                 }
             }
         }

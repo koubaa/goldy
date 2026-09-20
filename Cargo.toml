@@ -55,6 +55,7 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
     "std",
     "driver",
     "nvrtc",
+    "cublas",
     "cuda-13010",
     "dynamic-loading",
 ] }

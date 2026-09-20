@@ -22,6 +22,12 @@ impl PreparedKernel {
         &self.pipeline
     }
 
+    /// Shared pipeline handle. Prefer this over copying [`ComputePipeline`] so Drop
+    /// stays refcounted.
+    pub fn pipeline_arc(&self) -> Arc<ComputePipeline> {
+        Arc::clone(&self.pipeline)
+    }
+
     pub fn def(&self) -> &KernelDef {
         &self.def
     }

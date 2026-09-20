@@ -20,6 +20,7 @@
 # Compute Workflows
 
 - [Settlement](./compute/settlement.md)
+- [Matrix Multiply](./compute/matmul.md)
 - [Pipelined Frames](./compute/pipelined-frames.md)
 - [Compute to Surface](./compute/compute-to-surface.md)
 

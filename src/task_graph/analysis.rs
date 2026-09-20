@@ -53,6 +53,55 @@ fn push_compute_resource_bind(
     }
 }
 
+fn emit_matmul_node(
+    commands: &mut Vec<GpuCommand>,
+    staging: &mut FrameTableStaging,
+    node: &super::ir::TaskNode,
+    resolver: Option<&SlotResolver>,
+) {
+    let NodeKind::MatMul(matmul) = &node.kind else {
+        return;
+    };
+    if matmul.native {
+        commands.push(GpuCommand::MatMul {
+            label: Some(node.label),
+            desc: matmul.desc,
+            a: matmul.a,
+            b: matmul.b,
+            c: matmul.c,
+        });
+        return;
+    }
+    let Some(pipeline) = matmul.fallback_pipeline else {
+        tracing::error!(
+            target: "goldy::matmul",
+            label = node.label,
+            "matmul fallback pipeline missing at emit; realize_matmul_nodes should have filled it"
+        );
+        return;
+    };
+    let slots = match resolver {
+        Some(r) => r.resolve_slots(&matmul.resource_slots, &node.bindings),
+        None => matmul.resource_slots.clone(),
+    };
+    let user = match crate::ops::matmul::fallback_user_slots(&matmul.desc, &matmul.a, &matmul.b, &matmul.c) {
+        Ok(words) => words.to_vec(),
+        Err(e) => {
+            tracing::error!(target: "goldy::matmul", error = %e, "matmul fallback user slots");
+            return;
+        }
+    };
+    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc);
+    commands.push(GpuCommand::SetPipeline(pipeline));
+    push_compute_resource_bind(commands, staging, &slots, &user);
+    commands.push(GpuCommand::Dispatch {
+        label: Some(node.label),
+        workgroups_x: x,
+        workgroups_y: y,
+        workgroups_z: z,
+    });
+}
+
 /// Returns true if byte range `[o1, o1+l1)` overlaps `[o2, o2+l2)`.
 ///
 /// Zero-length ranges never overlap anything.
@@ -531,7 +580,7 @@ pub(crate) fn waves_have_cpu_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
 /// Map a node's kind to the Koubaa pipeline category it belongs to.
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
-        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } => UsageKindFlags::COMPUTE,
+        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } | NodeKind::MatMul(_) => UsageKindFlags::COMPUTE,
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
@@ -877,6 +926,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 }
                 NodeKind::TraceRays { .. }
                 | NodeKind::Dispatch { .. }
+                | NodeKind::MatMul(_)
                 | NodeKind::RenderPass { .. }
                 | NodeKind::WithdrawRead { .. }
                 | NodeKind::CpuDispatch { .. } => {}
@@ -1041,6 +1091,10 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     depth: *depth,
                 });
             }
+        }
+
+        for &idx in &wave.node_indices {
+            emit_matmul_node(&mut commands, &mut frame_table, &ir.nodes[idx], resolver);
         }
 
         // Render-pass guard — not expected in pure-compute graphs.
@@ -1738,6 +1792,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                 }
                 NodeKind::Dispatch { .. }
                 | NodeKind::TraceRays { .. }
+                | NodeKind::MatMul(_)
                 | NodeKind::RenderPass { .. }
                 | NodeKind::WithdrawRead { .. }
                 | NodeKind::CpuDispatch { .. } => {}
@@ -1806,6 +1861,13 @@ pub(crate) fn emit_graph_commands_for_waves(
                         height: *height,
                         depth: *depth,
                     }));
+                }
+                NodeKind::MatMul(_) => {
+                    let mut compute = Vec::new();
+                    emit_matmul_node(&mut compute, &mut frame_table, node, resolver);
+                    for cmd in compute {
+                        commands.push(GraphCommand::Compute(cmd));
+                    }
                 }
                 NodeKind::RenderPass {
                     target,

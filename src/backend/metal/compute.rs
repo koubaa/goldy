@@ -1291,6 +1291,12 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
                 anyhow::bail!("Metal backend does not support ray tracing pipelines");
             }
+            GpuCommand::MatMul { label, desc, a, b, c } => {
+                end_compute!();
+                end_blit!();
+                super::matmul::encode(state, command_buffer, *label, *desc, *a, *b, *c)?;
+                has_recorded_gpu_work = true;
+            }
             GpuCommand::ResourceBarrier {
                 buffers: buf_entries,
                 textures: tex_entries,
@@ -1522,6 +1528,9 @@ fn stage_uploads(
                 would_have_gpu_work = true;
             }
             GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {}
+            GpuCommand::MatMul { .. } => {
+                would_have_gpu_work = true;
+            }
         }
     }
 

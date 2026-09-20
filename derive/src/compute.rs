@@ -366,6 +366,16 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 pub fn workgroup_size(&self) -> [u32; 3] {
                     self.prepared.workgroup_size()
                 }
+
+                /// Device pipeline used by this prepared kernel.
+                pub fn pipeline(&self) -> &::goldy::ComputePipeline {
+                    self.prepared.pipeline()
+                }
+
+                /// Shared device pipeline. Cloning the `Arc` does not destroy the PSO.
+                pub fn pipeline_arc(&self) -> ::std::sync::Arc<::goldy::ComputePipeline> {
+                    self.prepared.pipeline_arc()
+                }
             }
         }
     })

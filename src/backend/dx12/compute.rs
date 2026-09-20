@@ -1947,6 +1947,9 @@ fn record_gpu_command(
                 }
             }
         }
+        GpuCommand::MatMul { .. } => {
+            anyhow::bail!("DX12 backend expected MatMul to be lowered to a stdlib dispatch");
+        }
     }
     Ok(())
 }

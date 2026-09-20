@@ -1271,6 +1271,9 @@ pub(super) fn submit_with_scope(
                         }
                     }
                 }
+                GpuCommand::MatMul { .. } => {
+                    anyhow::bail!("Vulkan backend expected MatMul to be lowered to a stdlib dispatch");
+                }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
                     textures: tex_entries,
@@ -2333,6 +2336,9 @@ pub(super) fn submit_graph_with_scope(
                             super::rt_pipeline::cmd_trace_rays(logical_device, cmd, ps, *width, *height, *depth)?;
                         }
                     }
+                }
+                GpuCommand::MatMul { .. } => {
+                    anyhow::bail!("Vulkan backend expected MatMul to be lowered to a stdlib dispatch");
                 }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,

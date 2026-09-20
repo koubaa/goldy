@@ -292,6 +292,9 @@ pub enum NodeKind {
     ///
     /// A CPU dispatch always occupies its own wave and its own submit partition.
     CpuDispatch { cpu_id: u32 },
+    /// Semantic matrix multiply. Bindings schedule it; the backend realizes cuBLAS,
+    /// MPS, or the Goldy stdlib kernel on first submit.
+    MatMul(crate::ops::matmul::MatMulNode),
 }
 
 /// A single node in the task graph.

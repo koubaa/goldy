@@ -616,6 +616,9 @@ impl CpuBackend {
                 | GpuCommand::CopyTextureToReadback { .. } => {
                     cpu_graphics_unsupported()?;
                 }
+                GpuCommand::MatMul { .. } => {
+                    anyhow::bail!("CPU backend expected MatMul to be lowered to a stdlib dispatch");
+                }
             }
         }
         Ok(())

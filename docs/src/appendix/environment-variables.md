@@ -7,6 +7,7 @@ Goldy reads several environment variables at runtime for backend selection, vali
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `GOLDY_BACKEND` | `vulkan`, `vk`, `dx12`, `d3d12`, `directx`, `metal`, `mtl`, `cuda`, `webgpu`, `wgpu`, `cpu` | Platform default (macOS → Metal, Windows → DX12, Linux → Vulkan) | Override backend selection at runtime. Shipped: Vulkan, DX12, Metal. In progress: CUDA, WebGPU. `cpu` is a compute-only host-callable JIT path (never a platform default). |
+| `GOLDY_MATMUL` | `native`, `fallback` (`stdlib`, `goldy`) | `native` | Select the MatMul implementation. `native` uses cuBLAS on CUDA and MPS on Metal, and falls through to the Goldy stdlib kernel on other backends. `fallback` always uses the portable stdlib kernel (for differential tests). |
 | `GOLDY_SLANG_PATH` | File path | *(not set)* | Override the path to the Slang shared library (`slang.dll` / `libslang.dylib` / `libslang.so`). Bypasses the default search order (vendored next to executable → extracted from embedded). |
 | `GOLDY_FFI_PATH` | File path | *(not set)* | Full path to the `goldy_ffi` shared library (`goldy_ffi.dll` / `libgoldy_ffi.so` / `libgoldy_ffi.dylib`). Used by `goldy-ffi-client` for runtime library loading. |
 

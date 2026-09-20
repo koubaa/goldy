@@ -28,6 +28,7 @@ pub mod kernel;
 pub mod pipeline;
 #[cfg(feature = "graphics")]
 pub(crate) mod render_target;
+pub mod ops;
 pub mod runtime;
 pub mod sampler;
 pub mod shader;
@@ -122,6 +123,7 @@ pub use kernel::{
     prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
+pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
 #[cfg(feature = "graphics")]
 pub use pipeline::{
     MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc,

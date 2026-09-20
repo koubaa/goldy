@@ -307,6 +307,7 @@ impl Adapter {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
+                stdlib_matmul: Mutex::new(None),
             }),
         })
     }
@@ -495,6 +496,8 @@ pub(crate) struct DeviceInner {
     pub(crate) owns_backend_device: bool,
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
+    /// Lazily compiled stdlib MatMul kernel (fallback path).
+    pub(crate) stdlib_matmul: Mutex<Option<Arc<crate::compute::ComputePipeline>>>,
 }
 
 impl Clone for Runtime {
@@ -647,6 +650,7 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
+                stdlib_matmul: Mutex::new(None),
             }),
         }
     }
@@ -809,6 +813,19 @@ impl Runtime {
     /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
     pub fn backend_type(&self) -> BackendType {
         self.inner.backend.lock().unwrap().backend_type()
+    }
+
+    pub(crate) fn stdlib_matmul_f32(&self) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
+        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap().clone() {
+            return Ok(pipeline);
+        }
+        let pipeline = crate::ops::matmul::prepare_stdlib(self).map_err(GoldyError::Backend)?;
+        let mut slot = self.inner.stdlib_matmul.lock().unwrap();
+        if let Some(existing) = slot.as_ref() {
+            return Ok(Arc::clone(existing));
+        }
+        *slot = Some(Arc::clone(&pipeline));
+        Ok(pipeline)
     }
 
     /// Check if the device is still valid.
@@ -1189,6 +1206,7 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
+                stdlib_matmul: Mutex::new(None),
             }),
         })
     }

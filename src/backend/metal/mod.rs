@@ -17,6 +17,7 @@ mod buffer;
 mod compute;
 mod context;
 mod device;
+mod matmul;
 mod frame_table;
 pub(super) mod metal_capture;
 mod objc_catch;

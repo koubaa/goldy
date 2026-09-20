@@ -618,6 +618,16 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             height.hash(h);
             depth.hash(h);
         }
+        NodeKind::MatMul(node) => {
+            15u8.hash(h);
+            node.desc.hash(h);
+            node.a.hash(h);
+            node.b.hash(h);
+            node.c.hash(h);
+            node.resource_slots.hash(h);
+            node.native.hash(h);
+            node.fallback_pipeline.hash(h);
+        }
     }
 }
 
@@ -811,6 +821,16 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
             NodeKind::CpuDispatch { cpu_id } => {
                 6u8.hash(&mut h);
                 cpu_id.hash(&mut h);
+            }
+            NodeKind::MatMul(node) => {
+                15u8.hash(&mut h);
+                node.desc.hash(&mut h);
+                node.a.hash(&mut h);
+                node.b.hash(&mut h);
+                node.c.hash(&mut h);
+                hash_resource_slots_for_fingerprint(&node.resource_slots, &mut h);
+                node.native.hash(&mut h);
+                node.fallback_pipeline.hash(&mut h);
             }
             NodeKind::CopyBufferToTexture {
                 src,

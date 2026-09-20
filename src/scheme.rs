@@ -925,6 +925,8 @@ pub struct Scheme {
     specialization: crate::specialization::SchemePredictor,
     /// Counters of yielding nodes, keyed by node index.
     yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
+    /// Stdlib compute pipelines interned for semantic ops (MatMul fallback).
+    stdlib_pipelines: Vec<Arc<crate::compute::ComputePipeline>>,
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -969,6 +971,7 @@ impl Scheme {
             record_errors: Vec::new(),
             prior_built_accels: HashSet::new(),
             yield_stats: HashMap::new(),
+            stdlib_pipelines: Vec::new(),
         }
     }
 
@@ -1660,6 +1663,67 @@ impl Scheme {
         }
     }
 
+    /// Record a semantic matrix multiply. The backend chooses cuBLAS, MPS, or the
+    /// Goldy stdlib kernel on first submit (`GOLDY_MATMUL=fallback` forces stdlib).
+    pub fn matmul<'a>(&'a mut self, label: &'static str, desc: crate::ops::MatMulDesc) -> crate::ops::MatMulBuilder<'a> {
+        crate::ops::MatMulBuilder::new(self, label, desc)
+    }
+
+    pub(crate) fn push_record_error(&mut self, msg: String) {
+        self.record_errors.push(msg);
+    }
+
+    pub(crate) fn backend_type(&self) -> crate::types::BackendType {
+        self.ctx.runtime().backend_type()
+    }
+
+    pub(crate) fn register_stamp(
+        &mut self,
+        resource: ResourceId,
+        stamp: std::sync::Arc<crate::parcel::ParcelStamp>,
+    ) {
+        self.submit_state.register_stamp_parts(resource, stamp);
+    }
+
+    pub(crate) fn push_matmul_node(
+        &mut self,
+        label: &'static str,
+        desc: crate::ops::MatMulDesc,
+        a: crate::ops::matmul::BoundOperand,
+        b: crate::ops::matmul::BoundOperand,
+        c: crate::ops::matmul::BoundOperand,
+        c_access: NodeAccess,
+        native: bool,
+    ) {
+        self.mark_structure_dirty();
+        self.ir.nodes.push(TaskNode {
+            label,
+            bindings: vec![
+                ResourceBinding {
+                    resource: a.resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: b.resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: c.resource,
+                    access: c_access,
+                },
+            ],
+            kind: NodeKind::MatMul(crate::ops::matmul::MatMulNode {
+                desc,
+                a: a.operand,
+                b: b.operand,
+                c: c.operand,
+                resource_slots: vec![a.slot, b.slot, c.slot],
+                native,
+                fallback_pipeline: None,
+            }),
+        });
+    }
+
     /// Identity of the node appended most recently. Call sites push first, then ask.
     fn last_node_id(&self) -> NodeId {
         debug_assert!(!self.ir.nodes.is_empty(), "last_node_id after a push");
@@ -1876,6 +1940,8 @@ impl Scheme {
             return Err(GoldyError::StaleResource);
         }
 
+        self.realize_matmul_nodes()?;
+
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         {
             // The predictor sees the scheme as the caller left it (clean or not) and may
@@ -1923,6 +1989,29 @@ impl Scheme {
             deposit_resolutions: HashMap::new(),
             deposit_claims: HashMap::new(),
         })
+    }
+
+    fn realize_matmul_nodes(&mut self) -> Result<(), GoldyError> {
+        let needs_fallback = self.ir.nodes.iter().any(|n| {
+            matches!(
+                &n.kind,
+                NodeKind::MatMul(node) if !node.native && node.fallback_pipeline.is_none()
+            )
+        });
+        if !needs_fallback {
+            return Ok(());
+        }
+        let pipeline = self.ctx.runtime().stdlib_matmul_f32()?;
+        let handle = pipeline.handle;
+        self.stdlib_pipelines.push(pipeline);
+        for node in &mut self.ir.nodes {
+            if let NodeKind::MatMul(matmul) = &mut node.kind {
+                if !matmul.native && matmul.fallback_pipeline.is_none() {
+                    matmul.fallback_pipeline = Some(handle);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn teardown_replay_if_disabled(&mut self, had_replay: bool) {

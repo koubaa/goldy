@@ -719,6 +719,17 @@ pub(crate) enum GpuCommand {
         height: u32,
         depth: u32,
     },
+    /// Backend-selected matrix multiply (cuBLAS / MPS / equivalent).
+    ///
+    /// Fallback backends never see this variant: the emitter lowers MatMul nodes
+    /// to an ordinary stdlib dispatch instead.
+    MatMul {
+        label: Option<&'static str>,
+        desc: crate::ops::MatMulDesc,
+        a: crate::ops::matmul::MatMulOperand,
+        b: crate::ops::matmul::MatMulOperand,
+        c: crate::ops::matmul::MatMulOperand,
+    },
 }
 
 /// Create-time sizing for [`GpuBackend::create_acceleration_structure`].
