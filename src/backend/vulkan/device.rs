@@ -434,9 +434,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                     created = Some(d);
                     break;
                 }
-                Err(e)
-                    if e == vk::Result::ERROR_INITIALIZATION_FAILED && attempt + 1 < ATTEMPTS =>
-                {
+                Err(e) if e == vk::Result::ERROR_INITIALIZATION_FAILED && attempt + 1 < ATTEMPTS => {
                     tracing::warn!(
                         attempt = attempt + 1,
                         attempts = ATTEMPTS,
@@ -450,7 +448,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                 }
             }
         }
-        created.ok_or_else(|| last_err.unwrap_or(vk::Result::ERROR_INITIALIZATION_FAILED))
+        created
+            .ok_or_else(|| last_err.unwrap_or(vk::Result::ERROR_INITIALIZATION_FAILED))
             .context("Failed to create logical device")?
     };
 
