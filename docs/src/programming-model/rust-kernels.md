@@ -62,12 +62,24 @@ Hidden builtins (appended to the Slang signature when used):
 | `gpu::workgroup_id()` | `GroupId` |
 | `gpu::workgroup_barrier()` | `GroupMemoryBarrierWithGroupSync` |
 | `let mut s = gpu::workgroup_array::<T, N>()` | file-scope `groupshared T s[N]` |
+| `gpu::workgroup_sum::<N>(val, scratch)` | tree-reduce sum; every lane gets the total |
+| `gpu::workgroup_max::<N>(val, scratch)` | tree-reduce max; every lane gets the max |
+| `gpu::workgroup_softmax_in_place::<N>(buf, base, count, scratch)` | in-place softmax over `buf[base .. base+count)` |
 
 `workgroup_size` is fixed on the attribute / `KernelDef`. `.groups` / `.over_*`
 only control the grid. A different workgroup size is a different pipeline.
 
 Workgroup arrays are a **fixed** size known at compile time (not dynamic shared
 memory). Declare them at the kernel top level, then index them like a buffer.
+
+`workgroup_sum` / `workgroup_max` / `workgroup_softmax_in_place` are 1D
+collectives. `N` must be a power of two (typically `workgroup_size.x`). They
+return the reduced value to **every** lane and include a trailing barrier, so
+the result is immediately usable. Softmax writes `buf[base + t]` for
+`t < count`; unused lanes contribute identity (`-1e30` / `0`). All threads in
+the workgroup must execute the call (no divergent branches around it).
+`workgroup_sum`/`workgroup_max` must be a `let` or simple assignment, not nested
+in a larger expression. Omit `::<N>` to use `workgroup_size.x`.
 
 ## Architecture
 
@@ -101,7 +113,7 @@ Allowed: scalar arithmetic/comparisons, `let` / `let mut`, assignment,
 field/index access, `if`/`else`, `while`, `for i in 0..n`, casts, selected math
 intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`cos`/`exp`/`pow`/`length`),
 vector constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, `return`,
-workgroup shared arrays + barriers, and the ID builtins above.
+workgroup shared arrays + barriers, workgroup sum/max/softmax collectives, and the ID builtins above.
 
 `#[goldy::gpu]` structs may be passed as `&[T]` uniforms; `prepare` prepends
 the generated Slang struct.

@@ -1,6 +1,6 @@
 //! Emit canonical `[goldy_compute]` Slang from a lowered [`ShaderKernel`].
 
-use crate::{BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, ShaderKernel, Stmt, UnaryOp};
+use crate::{BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, ShaderKernel, Stmt, UnaryOp, WorkgroupReduceOp};
 
 /// Emit the portable canonical compute source (still marked `[goldy_compute]`).
 ///
@@ -136,10 +136,134 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask
             }
         }
         Stmt::WorkgroupArray { .. } => {}
+        Stmt::WorkgroupReduce {
+            op,
+            n,
+            val,
+            scratch,
+            dest,
+        } => emit_workgroup_reduce(out, level, *op, *n, val, scratch, dest, builtins),
+        Stmt::WorkgroupSoftmax {
+            n,
+            buf,
+            base,
+            count,
+            scratch,
+        } => emit_workgroup_softmax(out, level, *n, buf, base, count, scratch, builtins),
         Stmt::Expr(expr) => {
             out.push_str(&format!("{pad}{};\n", emit_expr(expr, builtins)));
         }
     }
+}
+
+fn reduce_steps(n: u32) -> u32 {
+    n.trailing_zeros()
+}
+
+fn emit_workgroup_reduce(
+    out: &mut String,
+    level: usize,
+    op: WorkgroupReduceOp,
+    n: u32,
+    val: &Expr,
+    scratch: &str,
+    dest: &Expr,
+    builtins: &BuiltinMask,
+) {
+    let pad = indent(level);
+    let inner = indent(level + 1);
+    let loop_pad = indent(level + 2);
+    let steps = reduce_steps(n);
+    out.push_str(&format!("{pad}{{\n"));
+    out.push_str(&format!("{inner}float _goldy_red = {};\n", emit_expr(val, builtins)));
+    out.push_str(&format!("{inner}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+    out.push_str(&format!(
+        "{inner}for (uint _goldy_s = 0u; _goldy_s < {steps}u; ++_goldy_s) {{\n"
+    ));
+    out.push_str(&format!("{loop_pad}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{loop_pad}if (_goldy_lid.x + (1u << _goldy_s) < {n}u)\n"));
+    match op {
+        WorkgroupReduceOp::Sum => out.push_str(&format!(
+            "{loop_pad}    _goldy_red = _goldy_red + {scratch}[_goldy_lid.x + (1u << _goldy_s)];\n"
+        )),
+        WorkgroupReduceOp::Max => out.push_str(&format!(
+            "{loop_pad}    _goldy_red = max(_goldy_red, {scratch}[_goldy_lid.x + (1u << _goldy_s)]);\n"
+        )),
+    }
+    out.push_str(&format!("{loop_pad}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{loop_pad}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    out.push_str(&format!("{inner}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{inner}{} = {scratch}[0];\n", emit_expr(dest, builtins)));
+    out.push_str(&format!("{pad}}}\n"));
+}
+
+fn emit_workgroup_softmax(
+    out: &mut String,
+    level: usize,
+    n: u32,
+    buf: &str,
+    base: &Expr,
+    count: &Expr,
+    scratch: &str,
+    builtins: &BuiltinMask,
+) {
+    let pad = indent(level);
+    let inner = indent(level + 1);
+    let loop_pad = indent(level + 2);
+    let base_s = emit_expr(base, builtins);
+    let count_s = emit_expr(count, builtins);
+    out.push_str(&format!("{pad}{{\n"));
+    out.push_str(&format!("{inner}float _goldy_sm_max = -1e30;\n"));
+    out.push_str(&format!("{inner}uint _goldy_sm_t = _goldy_lid.x;\n"));
+    out.push_str(&format!("{inner}while (_goldy_sm_t < {count_s}) {{\n"));
+    out.push_str(&format!(
+        "{loop_pad}float _goldy_sm_s = {buf}[({base_s}) + _goldy_sm_t];\n"
+    ));
+    out.push_str(&format!("{loop_pad}if (_goldy_sm_s > _goldy_sm_max) {{\n"));
+    out.push_str(&format!("{loop_pad}    _goldy_sm_max = _goldy_sm_s;\n"));
+    out.push_str(&format!("{loop_pad}}}\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_t = _goldy_sm_t + {n}u;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    emit_workgroup_reduce(
+        out,
+        level + 1,
+        WorkgroupReduceOp::Max,
+        n,
+        &Expr::Var("_goldy_sm_max".into()),
+        scratch,
+        &Expr::Var("_goldy_sm_max".into()),
+        builtins,
+    );
+    out.push_str(&format!("{inner}float _goldy_sm_sum = 0.0;\n"));
+    out.push_str(&format!("{inner}_goldy_sm_t = _goldy_lid.x;\n"));
+    out.push_str(&format!("{inner}while (_goldy_sm_t < {count_s}) {{\n"));
+    out.push_str(&format!(
+        "{loop_pad}float _goldy_sm_e = exp({buf}[({base_s}) + _goldy_sm_t] - _goldy_sm_max);\n"
+    ));
+    out.push_str(&format!("{loop_pad}{buf}[({base_s}) + _goldy_sm_t] = _goldy_sm_e;\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_sum = _goldy_sm_sum + _goldy_sm_e;\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_t = _goldy_sm_t + {n}u;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    emit_workgroup_reduce(
+        out,
+        level + 1,
+        WorkgroupReduceOp::Sum,
+        n,
+        &Expr::Var("_goldy_sm_sum".into()),
+        scratch,
+        &Expr::Var("_goldy_sm_sum".into()),
+        builtins,
+    );
+    out.push_str(&format!("{inner}_goldy_sm_t = _goldy_lid.x;\n"));
+    out.push_str(&format!("{inner}while (_goldy_sm_t < {count_s}) {{\n"));
+    out.push_str(&format!(
+        "{loop_pad}{buf}[({base_s}) + _goldy_sm_t] = {buf}[({base_s}) + _goldy_sm_t] / _goldy_sm_sum;\n"
+    ));
+    out.push_str(&format!("{loop_pad}_goldy_sm_t = _goldy_sm_t + {n}u;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    out.push_str(&format!("{inner}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{pad}}}\n"));
 }
 
 fn emit_expr(expr: &Expr, builtins: &BuiltinMask) -> String {
@@ -383,5 +507,55 @@ mod tests {
         assert!(slang.contains("groupshared float scratch[256];"));
         assert!(slang.contains("GroupMemoryBarrierWithGroupSync()"));
         assert!(!slang.contains("float scratch ="));
+    }
+
+    #[test]
+    fn emits_workgroup_sum_and_softmax() {
+        let kernel = ShaderKernel {
+            name: "collectives".into(),
+            workgroup_size: [256, 1, 1],
+            params: vec![KernelParam::buffer_read_write("att", ElementType::F32)],
+            builtins: BuiltinMask {
+                local_id: true,
+                ..BuiltinMask::NONE
+            },
+            body: vec![
+                Stmt::WorkgroupArray {
+                    name: "scratch".into(),
+                    elem: "float".into(),
+                    len: 256,
+                },
+                Stmt::Let {
+                    name: "ss".into(),
+                    mutable: true,
+                    ty: Some("float".into()),
+                    init: Expr::LitF32(1.0),
+                },
+                Stmt::WorkgroupReduce {
+                    op: WorkgroupReduceOp::Sum,
+                    n: 256,
+                    val: Expr::Var("ss".into()),
+                    scratch: "scratch".into(),
+                    dest: Expr::Var("ss".into()),
+                },
+                Stmt::WorkgroupSoftmax {
+                    n: 256,
+                    buf: "att".into(),
+                    base: Expr::LitU32(0),
+                    count: Expr::LitU32(4),
+                    scratch: "scratch".into(),
+                },
+            ],
+            source_map: SourceMap {
+                rust_file: "collectives.rs".into(),
+                rust_line: 1,
+            },
+        };
+        let slang = emit_canonical_compute_source(&kernel).source.canonical_slang;
+        assert!(slang.contains("GroupThreadId _goldy_lid"));
+        assert!(slang.contains("_goldy_red = _goldy_red + scratch[_goldy_lid.x + (1u << _goldy_s)]"));
+        assert!(slang.contains("ss = scratch[0];"));
+        assert!(slang.contains("exp(att[(0u) + _goldy_sm_t] - _goldy_sm_max)"));
+        assert!(slang.contains("_goldy_red = max(_goldy_red, scratch[_goldy_lid.x + (1u << _goldy_s)])"));
     }
 }

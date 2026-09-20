@@ -60,6 +60,13 @@ pub enum BuiltinFn {
     WorkgroupBarrier,
 }
 
+/// Tree-reduce operator for [`Stmt::WorkgroupReduce`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkgroupReduceOp {
+    Sum,
+    Max,
+}
+
 /// Expression nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -137,6 +144,30 @@ pub enum Stmt {
         name: String,
         elem: String,
         len: u32,
+    },
+    /// Tree-reduce `val` across `n` lanes; every lane receives the result in `dest`.
+    ///
+    /// `n` must be a power of two. Emitted Slang includes a trailing barrier, so
+    /// `dest` is immediately readable. All workgroup threads must execute this
+    /// statement (convergent).
+    WorkgroupReduce {
+        op: WorkgroupReduceOp,
+        n: u32,
+        val: Expr,
+        scratch: String,
+        dest: Expr,
+    },
+    /// In-place softmax over `buf[base .. base+count)`. Trailing barrier.
+    ///
+    /// Unused lanes contribute identity (`-1e30` for max, `0` for sum). `count`
+    /// must be greater than zero. All workgroup threads must execute this
+    /// statement (convergent).
+    WorkgroupSoftmax {
+        n: u32,
+        buf: String,
+        base: Expr,
+        count: Expr,
+        scratch: String,
     },
     Expr(Expr),
 }

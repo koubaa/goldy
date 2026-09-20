@@ -264,4 +264,34 @@ pub mod gpu {
     pub fn workgroup_barrier() {
         unimplemented!("gpu::workgroup_barrier is only valid inside #[goldy::compute] bodies")
     }
+
+    /// Tree-reduce `val` across the workgroup; every lane receives the sum.
+    ///
+    /// `N` must be a power of two (typically `workgroup_size.x`). `scratch` is a
+    /// `gpu::workgroup_array::<f32, N>()`. Includes a trailing barrier.
+    /// All workgroup threads must execute the call (convergent).
+    pub fn workgroup_sum<const N: usize>(_val: f32, _scratch: &mut [f32; N]) -> f32 {
+        unimplemented!("gpu::workgroup_sum is only valid inside #[goldy::compute] bodies")
+    }
+
+    /// Tree-reduce `val` across the workgroup; every lane receives the max.
+    ///
+    /// Same contract as [`workgroup_sum`]: power-of-two `N`, trailing barrier,
+    /// convergent execution.
+    pub fn workgroup_max<const N: usize>(_val: f32, _scratch: &mut [f32; N]) -> f32 {
+        unimplemented!("gpu::workgroup_max is only valid inside #[goldy::compute] bodies")
+    }
+
+    /// In-place softmax over `buf[base .. base+count)`.
+    ///
+    /// Unused lanes contribute identity (`-1e30` for max, `0` for the exp-sum).
+    /// `count` must be greater than zero. Trailing barrier; convergent.
+    pub fn workgroup_softmax_in_place<const N: usize>(
+        _buf: &mut [f32],
+        _base: u32,
+        _count: u32,
+        _scratch: &mut [f32; N],
+    ) {
+        unimplemented!("gpu::workgroup_softmax_in_place is only valid inside #[goldy::compute] bodies")
+    }
 }

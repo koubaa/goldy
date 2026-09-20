@@ -2,7 +2,7 @@
 
 use goldy_shader_ir::{
     emit_canonical_compute_source, BinOp, BuiltinFn, BuiltinMask, ElementType, Expr, KernelParam, ParamCategory,
-    ScalarType, ShaderKernel, SourceMap, Stmt, UnaryOp,
+    ScalarType, ShaderKernel, SourceMap, Stmt, UnaryOp, WorkgroupReduceOp,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -208,7 +208,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
         }
     }
 
-    let body_stmts = lower_block(&func.block.stmts, &mut builtins, &mut type_env)?;
+    let body_stmts = lower_block(&func.block.stmts, &mut builtins, &mut type_env, args.workgroup_size[0])?;
     if workgroup_array_in_nested_scope(&body_stmts) {
         return Err(Error::new(
             func.sig.ident.span(),
@@ -627,10 +627,11 @@ fn lower_block(
     stmts: &[SynStmt],
     builtins: &mut BuiltinMask,
     env: &mut std::collections::HashMap<String, String>,
+    wg_x: u32,
 ) -> Result<Vec<Stmt>, Error> {
     let mut out = Vec::new();
     for s in stmts {
-        out.push(lower_stmt(s, builtins, env)?);
+        out.extend(lower_stmt(s, builtins, env, wg_x)?);
     }
     Ok(out)
 }
@@ -639,7 +640,8 @@ fn lower_stmt(
     stmt: &SynStmt,
     builtins: &mut BuiltinMask,
     env: &mut std::collections::HashMap<String, String>,
-) -> Result<Stmt, Error> {
+    wg_x: u32,
+) -> Result<Vec<Stmt>, Error> {
     match stmt {
         SynStmt::Local(local) => {
             let (name, ascribed) = match &local.pat {
@@ -666,69 +668,112 @@ fn lower_stmt(
                 .ok_or_else(|| Error::new(local.span(), "let without initializer is unsupported"))?;
             if let Some((elem, len)) = parse_workgroup_array_init(&init.expr)? {
                 env.insert(name.ident.to_string(), format!("groupshared<{elem}>"));
-                return Ok(Stmt::WorkgroupArray {
+                return Ok(vec![Stmt::WorkgroupArray {
                     name: name.ident.to_string(),
                     elem,
                     len,
-                });
+                }]);
+            }
+            if let Some(collective) = try_parse_collective(&init.expr, builtins, wg_x)? {
+                let dest_name = name.ident.to_string();
+                return match collective {
+                    Collective::Reduce { op, n, val, scratch } => {
+                        env.insert(dest_name.clone(), "float".into());
+                        Ok(vec![
+                            Stmt::Let {
+                                name: dest_name.clone(),
+                                mutable: true,
+                                ty: Some("float".into()),
+                                init: val,
+                            },
+                            Stmt::WorkgroupReduce {
+                                op,
+                                n,
+                                val: Expr::Var(dest_name.clone()),
+                                scratch,
+                                dest: Expr::Var(dest_name),
+                            },
+                        ])
+                    }
+                    Collective::Softmax { .. } => Err(Error::new(
+                        init.expr.span(),
+                        "gpu::workgroup_softmax_in_place is a statement, not a value",
+                    )),
+                };
             }
             let expr = lower_expr(&init.expr, builtins)?;
             let ty = ascribed.or_else(|| infer_slang_ty(&expr, env));
             if let Some(ref ty) = ty {
                 env.insert(name.ident.to_string(), ty.clone());
             }
-            Ok(Stmt::Let {
+            Ok(vec![Stmt::Let {
                 name: name.ident.to_string(),
                 mutable: name.mutability.is_some(),
                 ty,
                 init: expr,
-            })
+            }])
         }
         SynStmt::Expr(expr, semi) => {
             if semi.is_none() {
                 // trailing expr — treat as expression statement (or assign)
             }
             match expr {
-                SynExpr::Assign(a) => Ok(Stmt::Assign {
-                    target: lower_expr(&a.left, builtins)?,
-                    value: lower_expr(&a.right, builtins)?,
-                }),
+                SynExpr::Assign(a) => {
+                    if let Some(collective) = try_parse_collective(&a.right, builtins, wg_x)? {
+                        return Ok(vec![lower_collective_assign(
+                            lower_expr(&a.left, builtins)?,
+                            collective,
+                            a.right.span(),
+                        )?]);
+                    }
+                    Ok(vec![Stmt::Assign {
+                        target: lower_expr(&a.left, builtins)?,
+                        value: lower_expr(&a.right, builtins)?,
+                    }])
+                }
                 SynExpr::Binary(ExprBinary { left, op, right, .. }) if assign_arith(op).is_some() => {
+                    if try_parse_collective(right, builtins, wg_x)?.is_some() {
+                        return Err(Error::new(
+                            right.span(),
+                            "workgroup collectives must be used as a `let` or simple assignment, not `+=`",
+                        ));
+                    }
                     let arith = assign_arith(op).unwrap();
-                    Ok(Stmt::Assign {
+                    Ok(vec![Stmt::Assign {
                         target: lower_expr(left, builtins)?,
                         value: Expr::Binary {
                             op: arith,
                             left: Box::new(lower_expr(left, builtins)?),
                             right: Box::new(lower_expr(right, builtins)?),
                         },
-                    })
+                    }])
                 }
                 SynExpr::If(i) => {
                     let cond = lower_expr(&i.cond, builtins)?;
-                    let then_body = lower_block_from_expr_block(&i.then_branch, builtins, env)?;
+                    let then_body = lower_block_from_expr_block(&i.then_branch, builtins, env, wg_x)?;
                     let else_body = match &i.else_branch {
                         Some((_, else_e)) => match else_e.as_ref() {
-                            SynExpr::Block(b) => Some(lower_block(&b.block.stmts, builtins, env)?),
-                            SynExpr::If(_) => Some(vec![lower_stmt(
+                            SynExpr::Block(b) => Some(lower_block(&b.block.stmts, builtins, env, wg_x)?),
+                            SynExpr::If(_) => Some(lower_stmt(
                                 &SynStmt::Expr(else_e.as_ref().clone(), None),
                                 builtins,
                                 env,
-                            )?]),
+                                wg_x,
+                            )?),
                             other => return Err(Error::new(other.span(), "unsupported else branch in #[compute]")),
                         },
                         None => None,
                     };
-                    Ok(Stmt::If {
+                    Ok(vec![Stmt::If {
                         cond,
                         then_body,
                         else_body,
-                    })
+                    }])
                 }
-                SynExpr::While(w) => Ok(Stmt::While {
+                SynExpr::While(w) => Ok(vec![Stmt::While {
                     cond: lower_expr(&w.cond, builtins)?,
-                    body: lower_block_from_expr_block(&w.body, builtins, env)?,
-                }),
+                    body: lower_block_from_expr_block(&w.body, builtins, env, wg_x)?,
+                }]),
                 SynExpr::ForLoop(f) => {
                     let Pat::Ident(var) = f.pat.as_ref() else {
                         return Err(Error::new(f.pat.span(), "for-loop variable must be a plain identifier"));
@@ -754,17 +799,40 @@ fn lower_stmt(
                         .as_ref()
                         .ok_or_else(|| Error::new(f.expr.span(), "range end required"))?;
                     env.insert(var.ident.to_string(), "uint".into());
-                    Ok(Stmt::ForRange {
+                    Ok(vec![Stmt::ForRange {
                         var: var.ident.to_string(),
                         start: lower_expr(start, builtins)?,
                         end: lower_expr(end, builtins)?,
-                        body: lower_block_from_expr_block(&f.body, builtins, env)?,
-                    })
+                        body: lower_block_from_expr_block(&f.body, builtins, env, wg_x)?,
+                    }])
                 }
-                SynExpr::Return(r) => Ok(Stmt::Return {
+                SynExpr::Return(r) => Ok(vec![Stmt::Return {
                     value: r.expr.as_ref().map(|e| lower_expr(e, builtins)).transpose()?,
-                }),
-                other => Ok(Stmt::Expr(lower_expr(other, builtins)?)),
+                }]),
+                other => {
+                    if let Some(collective) = try_parse_collective(other, builtins, wg_x)? {
+                        return match collective {
+                            Collective::Softmax {
+                                n,
+                                buf,
+                                base,
+                                count,
+                                scratch,
+                            } => Ok(vec![Stmt::WorkgroupSoftmax {
+                                n,
+                                buf,
+                                base,
+                                count,
+                                scratch,
+                            }]),
+                            Collective::Reduce { .. } => Err(Error::new(
+                                other.span(),
+                                "gpu::workgroup_sum/workgroup_max must be used as a `let` or assignment",
+                            )),
+                        };
+                    }
+                    Ok(vec![Stmt::Expr(lower_expr(other, builtins)?)])
+                }
             }
         }
         SynStmt::Item(item) => Err(Error::new(
@@ -782,8 +850,150 @@ fn lower_block_from_expr_block(
     block: &syn::Block,
     builtins: &mut BuiltinMask,
     env: &mut std::collections::HashMap<String, String>,
+    wg_x: u32,
 ) -> Result<Vec<Stmt>, Error> {
-    lower_block(&block.stmts, builtins, env)
+    lower_block(&block.stmts, builtins, env, wg_x)
+}
+
+enum Collective {
+    Reduce {
+        op: WorkgroupReduceOp,
+        n: u32,
+        val: Expr,
+        scratch: String,
+    },
+    Softmax {
+        n: u32,
+        buf: String,
+        base: Expr,
+        count: Expr,
+        scratch: String,
+    },
+}
+
+fn lower_collective_assign(dest: Expr, collective: Collective, span: proc_macro2::Span) -> Result<Stmt, Error> {
+    match collective {
+        Collective::Reduce { op, n, val, scratch } => Ok(Stmt::WorkgroupReduce {
+            op,
+            n,
+            val,
+            scratch,
+            dest,
+        }),
+        Collective::Softmax { .. } => Err(Error::new(
+            span,
+            "gpu::workgroup_softmax_in_place is a statement, not a value",
+        )),
+    }
+}
+
+fn peel_ref(expr: &SynExpr) -> &SynExpr {
+    match expr {
+        SynExpr::Reference(r) => peel_ref(&r.expr),
+        SynExpr::Paren(p) => peel_ref(&p.expr),
+        other => other,
+    }
+}
+
+fn ident_from_expr(expr: &SynExpr, what: &str) -> Result<String, Error> {
+    match peel_ref(expr) {
+        SynExpr::Path(p) if p.path.get_ident().is_some() => Ok(p.path.get_ident().unwrap().to_string()),
+        other => Err(Error::new(other.span(), format!("{what} must be a simple identifier"))),
+    }
+}
+
+fn path_const_n(path: &syn::Path) -> Result<Option<u32>, Error> {
+    let last = path.segments.last().unwrap();
+    match &last.arguments {
+        PathArguments::None => Ok(None),
+        PathArguments::AngleBracketed(ab) if ab.args.len() == 1 => match &ab.args[0] {
+            GenericArgument::Const(SynExpr::Lit(ExprLit { lit: Lit::Int(i), .. })) => {
+                let n: u32 = i.base10_parse()?;
+                if n == 0 || !n.is_power_of_two() {
+                    return Err(Error::new(
+                        i.span(),
+                        "workgroup collective N must be a power of two greater than zero",
+                    ));
+                }
+                Ok(Some(n))
+            }
+            other => Err(Error::new(
+                other.span(),
+                "workgroup collective N must be a power-of-two integer literal",
+            )),
+        },
+        PathArguments::AngleBracketed(ab) => Err(Error::new(
+            ab.span(),
+            "workgroup collectives take a single const generic `::<N>`",
+        )),
+        PathArguments::Parenthesized(p) => Err(Error::new(p.span(), "unexpected path arguments")),
+    }
+}
+
+fn resolve_collective_n(n: Option<u32>, wg_x: u32, span: proc_macro2::Span) -> Result<u32, Error> {
+    let n = n.unwrap_or(wg_x);
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::new(
+            span,
+            "workgroup collective N must be a power of two (use turbofish `::<N>` or a power-of-two workgroup_size.x)",
+        ));
+    }
+    Ok(n)
+}
+
+fn try_parse_collective(expr: &SynExpr, builtins: &mut BuiltinMask, wg_x: u32) -> Result<Option<Collective>, Error> {
+    let SynExpr::Call(ExprCall { func, args, .. }) = expr else {
+        return Ok(None);
+    };
+    let SynExpr::Path(p) = func.as_ref() else {
+        return Ok(None);
+    };
+    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let segs_str: Vec<&str> = segs.iter().map(String::as_str).collect();
+    let kind = match segs_str.as_slice() {
+        ["workgroup_sum"] | ["gpu", "workgroup_sum"] | ["goldy", "gpu", "workgroup_sum"] => {
+            Some(WorkgroupReduceOp::Sum)
+        }
+        ["workgroup_max"] | ["gpu", "workgroup_max"] | ["goldy", "gpu", "workgroup_max"] => {
+            Some(WorkgroupReduceOp::Max)
+        }
+        ["workgroup_softmax_in_place"]
+        | ["gpu", "workgroup_softmax_in_place"]
+        | ["goldy", "gpu", "workgroup_softmax_in_place"] => None,
+        _ => return Ok(None),
+    };
+    builtins.local_id = true;
+    let n = resolve_collective_n(path_const_n(&p.path)?, wg_x, p.path.span())?;
+    if segs_str.last() == Some(&"workgroup_softmax_in_place") {
+        if args.len() != 4 {
+            return Err(Error::new(
+                expr.span(),
+                "gpu::workgroup_softmax_in_place::<N>(buf, base, count, scratch)",
+            ));
+        }
+        let buf = ident_from_expr(&args[0], "softmax buffer")?;
+        let scratch = ident_from_expr(&args[3], "softmax scratch")?;
+        return Ok(Some(Collective::Softmax {
+            n,
+            buf,
+            base: lower_expr(&args[1], builtins)?,
+            count: lower_expr(&args[2], builtins)?,
+            scratch,
+        }));
+    }
+    if args.len() != 2 {
+        return Err(Error::new(
+            expr.span(),
+            "gpu::workgroup_sum/workgroup_max::<N>(val, scratch)",
+        ));
+    }
+    let op = kind.expect("reduce op");
+    Ok(Some(Collective::Reduce {
+        op,
+        n,
+        val: lower_expr(&args[0], builtins)?,
+        scratch: ident_from_expr(&args[1], "workgroup reduce scratch")?,
+    }))
 }
 
 fn lower_expr(expr: &SynExpr, builtins: &mut BuiltinMask) -> Result<Expr, Error> {
@@ -883,54 +1093,72 @@ fn lower_call(
     };
     let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     let segs_str: Vec<&str> = segs.iter().map(String::as_str).collect();
-    let builtin = match segs_str.as_slice() {
-        ["gpu", "global_id"] | ["goldy", "gpu", "global_id"] => {
-            builtins.global_id = true;
-            BuiltinFn::GlobalId
-        }
-        ["gpu", "local_id"] | ["goldy", "gpu", "local_id"] => {
-            builtins.local_id = true;
-            BuiltinFn::LocalId
-        }
-        ["gpu", "workgroup_id"] | ["goldy", "gpu", "workgroup_id"] => {
-            builtins.workgroup_id = true;
-            BuiltinFn::WorkgroupId
-        }
-        ["gpu", "workgroup_size"] | ["goldy", "gpu", "workgroup_size"] => BuiltinFn::WorkgroupSize,
-        ["abs"] | ["gpu", "abs"] | ["goldy", "gpu", "abs"] => BuiltinFn::Abs,
-        ["min"] | ["gpu", "min"] | ["goldy", "gpu", "min"] => BuiltinFn::Min,
-        ["max"] | ["gpu", "max"] | ["goldy", "gpu", "max"] => BuiltinFn::Max,
-        ["floor"] | ["gpu", "floor"] | ["goldy", "gpu", "floor"] => BuiltinFn::Floor,
-        ["ceil"] | ["gpu", "ceil"] | ["goldy", "gpu", "ceil"] => BuiltinFn::Ceil,
-        ["sqrt"] | ["gpu", "sqrt"] | ["goldy", "gpu", "sqrt"] => BuiltinFn::Sqrt,
-        ["sin"] | ["gpu", "sin"] | ["goldy", "gpu", "sin"] => BuiltinFn::Sin,
-        ["cos"] | ["gpu", "cos"] | ["goldy", "gpu", "cos"] => BuiltinFn::Cos,
-        ["exp"] | ["gpu", "exp"] | ["goldy", "gpu", "exp"] => BuiltinFn::Exp,
-        ["pow"] | ["gpu", "pow"] | ["goldy", "gpu", "pow"] => BuiltinFn::Pow,
-        ["workgroup_barrier"] | ["gpu", "workgroup_barrier"] | ["goldy", "gpu", "workgroup_barrier"] => {
-            BuiltinFn::WorkgroupBarrier
-        }
-        ["workgroup_array"] | ["gpu", "workgroup_array"] | ["goldy", "gpu", "workgroup_array"] => {
-            return Err(Error::new(
+    let builtin =
+        match segs_str.as_slice() {
+            ["gpu", "global_id"] | ["goldy", "gpu", "global_id"] => {
+                builtins.global_id = true;
+                BuiltinFn::GlobalId
+            }
+            ["gpu", "local_id"] | ["goldy", "gpu", "local_id"] => {
+                builtins.local_id = true;
+                BuiltinFn::LocalId
+            }
+            ["gpu", "workgroup_id"] | ["goldy", "gpu", "workgroup_id"] => {
+                builtins.workgroup_id = true;
+                BuiltinFn::WorkgroupId
+            }
+            ["gpu", "workgroup_size"] | ["goldy", "gpu", "workgroup_size"] => BuiltinFn::WorkgroupSize,
+            ["abs"] | ["gpu", "abs"] | ["goldy", "gpu", "abs"] => BuiltinFn::Abs,
+            ["min"] | ["gpu", "min"] | ["goldy", "gpu", "min"] => BuiltinFn::Min,
+            ["max"] | ["gpu", "max"] | ["goldy", "gpu", "max"] => BuiltinFn::Max,
+            ["floor"] | ["gpu", "floor"] | ["goldy", "gpu", "floor"] => BuiltinFn::Floor,
+            ["ceil"] | ["gpu", "ceil"] | ["goldy", "gpu", "ceil"] => BuiltinFn::Ceil,
+            ["sqrt"] | ["gpu", "sqrt"] | ["goldy", "gpu", "sqrt"] => BuiltinFn::Sqrt,
+            ["sin"] | ["gpu", "sin"] | ["goldy", "gpu", "sin"] => BuiltinFn::Sin,
+            ["cos"] | ["gpu", "cos"] | ["goldy", "gpu", "cos"] => BuiltinFn::Cos,
+            ["exp"] | ["gpu", "exp"] | ["goldy", "gpu", "exp"] => BuiltinFn::Exp,
+            ["pow"] | ["gpu", "pow"] | ["goldy", "gpu", "pow"] => BuiltinFn::Pow,
+            ["workgroup_barrier"] | ["gpu", "workgroup_barrier"] | ["goldy", "gpu", "workgroup_barrier"] => {
+                BuiltinFn::WorkgroupBarrier
+            }
+            ["workgroup_array"] | ["gpu", "workgroup_array"] | ["goldy", "gpu", "workgroup_array"] => {
+                return Err(Error::new(
+                    path.span(),
+                    "gpu::workgroup_array must be bound as `let mut name = gpu::workgroup_array::<T, N>()`",
+                ))
+            }
+            ["workgroup_sum"]
+            | ["gpu", "workgroup_sum"]
+            | ["goldy", "gpu", "workgroup_sum"]
+            | ["workgroup_max"]
+            | ["gpu", "workgroup_max"]
+            | ["goldy", "gpu", "workgroup_max"] => return Err(Error::new(
                 path.span(),
-                "gpu::workgroup_array must be bound as `let mut name = gpu::workgroup_array::<T, N>()`",
-            ))
-        }
-        ["length"] | ["gpu", "length"] | ["goldy", "gpu", "length"] => BuiltinFn::Length,
-        ["float2"] | ["gpu", "float2"] | ["goldy", "gpu", "float2"] => BuiltinFn::Float2,
-        ["float3"] | ["gpu", "float3"] | ["goldy", "gpu", "float3"] => BuiltinFn::Float3,
-        ["float4"] | ["gpu", "float4"] | ["goldy", "gpu", "float4"] => BuiltinFn::Float4,
-        ["uint2"] | ["gpu", "uint2"] | ["goldy", "gpu", "uint2"] => BuiltinFn::Uint2,
-        other => {
-            return Err(Error::new(
-                path.span(),
-                format!(
-                    "unsupported call `{}` in #[compute] kernel; use gpu::* builtins or selected math intrinsics",
-                    other.join("::")
-                ),
-            ))
-        }
-    };
+                "gpu::workgroup_sum/workgroup_max must be used as a `let` or assignment, not nested in an expression",
+            )),
+            ["workgroup_softmax_in_place"]
+            | ["gpu", "workgroup_softmax_in_place"]
+            | ["goldy", "gpu", "workgroup_softmax_in_place"] => {
+                return Err(Error::new(
+                    path.span(),
+                    "gpu::workgroup_softmax_in_place is a statement, not an expression",
+                ))
+            }
+            ["length"] | ["gpu", "length"] | ["goldy", "gpu", "length"] => BuiltinFn::Length,
+            ["float2"] | ["gpu", "float2"] | ["goldy", "gpu", "float2"] => BuiltinFn::Float2,
+            ["float3"] | ["gpu", "float3"] | ["goldy", "gpu", "float3"] => BuiltinFn::Float3,
+            ["float4"] | ["gpu", "float4"] | ["goldy", "gpu", "float4"] => BuiltinFn::Float4,
+            ["uint2"] | ["gpu", "uint2"] | ["goldy", "gpu", "uint2"] => BuiltinFn::Uint2,
+            other => {
+                return Err(Error::new(
+                    path.span(),
+                    format!(
+                        "unsupported call `{}` in #[compute] kernel; use gpu::* builtins or selected math intrinsics",
+                        other.join("::")
+                    ),
+                ))
+            }
+        };
     let mut lowered_args = Vec::new();
     for a in args {
         lowered_args.push(lower_expr(a, builtins)?);
@@ -1177,9 +1405,7 @@ fn parse_workgroup_array_init(expr: &SynExpr) -> Result<Option<(String, u32)>, E
         ));
     }
     let len = match &ab.args[1] {
-        GenericArgument::Const(SynExpr::Lit(ExprLit {
-            lit: Lit::Int(i), ..
-        })) => {
+        GenericArgument::Const(SynExpr::Lit(ExprLit { lit: Lit::Int(i), .. })) => {
             let n: u32 = i.base10_parse()?;
             if n == 0 {
                 return Err(Error::new(i.span(), "workgroup array length must be > 0"));
@@ -1201,9 +1427,7 @@ fn workgroup_array_in_nested_scope(stmts: &[Stmt]) -> bool {
         stmts.iter().any(|s| match s {
             Stmt::WorkgroupArray { .. } => true,
             Stmt::If {
-                then_body,
-                else_body,
-                ..
+                then_body, else_body, ..
             } => nested(then_body) || else_body.as_ref().is_some_and(|e| nested(e)),
             Stmt::While { body, .. } | Stmt::ForRange { body, .. } => nested(body),
             _ => false,
@@ -1212,9 +1436,7 @@ fn workgroup_array_in_nested_scope(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
         Stmt::WorkgroupArray { .. } => false,
         Stmt::If {
-            then_body,
-            else_body,
-            ..
+            then_body, else_body, ..
         } => nested(then_body) || else_body.as_ref().is_some_and(|e| nested(e)),
         Stmt::While { body, .. } | Stmt::ForRange { body, .. } => nested(body),
         _ => false,
