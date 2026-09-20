@@ -59,8 +59,11 @@ let runtime = instance
     .request_runtime(&RuntimeDescriptor::default())?;
 let ctx = runtime.create_context()?;
 
+// Scattered buffer: kernel reads uniforms[0] (width, height, time).
+let uniforms_data = [Uniforms { width, height, time: 0.0 }];
 let uniforms = runtime.acquire_buffer_with_data(&uniforms_data, BufferKind::Scattered)?;
 
+// Window swapchain exchange; later bind_destination leases a drawable for the kernel.
 let surface = SurfaceExchange::new(&ctx, &window, SurfaceConfig::default())?;
 
 // Compile the Rust kernel to [goldy_compute] Slang (or hit the shader cache).
