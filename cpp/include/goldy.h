@@ -750,20 +750,6 @@ void goldy_scheme_destroy(struct GoldyScheme *scheme);
 // `scheme` must be valid.
 bool goldy_scheme_is_dirty(const struct GoldyScheme *scheme);
 
-// Declare a render-target lease on `scheme`'s context.
-//
-// Forwarder for [`goldy_context_lease_render_target`]. Returns a heap-allocated
-// lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
-//
-// # Safety
-// `scheme` must be valid.
-struct GoldySchemeRenderTargetLease *goldy_scheme_lease_render_target(struct GoldyScheme *scheme,
-                                                                      uint32_t width,
-                                                                      uint32_t height,
-                                                                      enum GoldyTextureFormat format,
-                                                                      bool has_depth,
-                                                                      enum GoldyDepthFormat depth_format);
-
 // Number of nodes recorded in the scheme IR.
 //
 // # Safety

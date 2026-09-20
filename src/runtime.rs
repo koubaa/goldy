@@ -193,60 +193,6 @@ impl Instance {
         Ok(self.adapter_from_info(info))
     }
 
-    /// Create a device on the first adapter matching the given type.
-    ///
-    /// On Windows with the DX12 backend, set `GOLDY_DX12_FORCE_WARP=1` to create the device on
-    /// the WARP software adapter instead, even if a real GPU is present (WARP is still listed via
-    /// `GOLDY_DX12_ALLOW_WARP=1` or by setting `GOLDY_DX12_FORCE_WARP=1` alone, which also
-    /// registers the WARP adapter). Ignored for non-DX12 backends.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use Instance::request_adapter(...).request_runtime(...) instead"
-    )]
-    pub fn create_runtime(&self, preferred_type: DeviceType) -> Result<Runtime> {
-        #[cfg(all(feature = "dx12", target_os = "windows"))]
-        {
-            if self.backend_type() == BackendType::Dx12 && crate::backend::dx12::env_force_warp() {
-                tracing::info!("GOLDY_DX12_FORCE_WARP=1 — using WARP adapter");
-                return self
-                    .adapter_for_id(crate::backend::dx12::WARP_ADAPTER_ID)?
-                    .request_runtime(&RuntimeDescriptor::default());
-            }
-        }
-
-        tracing::info!(?preferred_type, "Requesting GPU device");
-        let adapters = self.enumerate_adapters();
-
-        let adapter = adapters
-            .iter()
-            .find(|a| a.inner.info.device_type == preferred_type)
-            .or_else(|| adapters.first())
-            .context("No GPU adapters available")?;
-
-        tracing::info!(
-            adapter_id = adapter.inner.info.id,
-            adapter_name = %adapter.inner.info.name,
-            adapter_type = ?adapter.inner.info.device_type,
-            "Selected GPU adapter"
-        );
-
-        adapter.request_runtime(&RuntimeDescriptor::default())
-    }
-
-    /// Create a device on a specific adapter by ID.
-    ///
-    /// The device is automatically configured with the built-in `goldy_exp`
-    /// (experimental) shader library registered. You can register additional
-    /// libraries using [`Runtime::register_library`].
-    #[deprecated(
-        since = "0.2.0",
-        note = "use Adapter::request_runtime(...) after enumerate_adapters or request_adapter"
-    )]
-    pub fn create_runtime_for_adapter(&self, adapter_id: u32) -> Result<Runtime> {
-        self.adapter_for_id(adapter_id)?
-            .request_runtime(&RuntimeDescriptor::default())
-    }
-
     /// Get the backend type (Vulkan, Metal, DX12).
     pub fn backend_type(&self) -> BackendType {
         self.backend.lock().unwrap().backend_type()
@@ -1153,15 +1099,6 @@ impl Runtime {
     /// compile will re-instantiate the compiler.
     pub fn release_idle_shader_compiler(&self) {
         self.inner.backend.lock().unwrap().release_idle_shader_compiler();
-    }
-
-    /// No-op: texture uploads are scheduled via [`crate::Scheme`].
-    #[deprecated(
-        since = "0.1.0",
-        note = "Texture uploads are batched via MemoryExchange::bind_deposit; there is nothing to flush."
-    )]
-    pub fn flush_texture_uploads(&self) -> Result<()> {
-        Ok(())
     }
 
     /// Query the platform row-pitch and staging buffer layout for an UPLOAD from a 2-D texture region.

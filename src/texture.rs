@@ -165,91 +165,11 @@ impl TextureBacking {
         }
 
         let texture = Self::new(device, width, height, format, access, flags)?;
-        #[allow(deprecated)]
-        texture.write(data)?;
+        {
+            let mut backend = texture.backend.lock().unwrap();
+            backend.write_texture_region(texture.handle, 0, 0, width, height, data)?;
+        }
         Ok(texture)
-    }
-
-    /// Write pixel data to a subregion of the texture.
-    ///
-    /// The data must match the specified width and height for the texture's format.
-    /// The region must fit within the texture bounds.
-    ///
-    /// # Arguments
-    ///
-    /// * `x` - Left offset in pixels
-    /// * `y` - Top offset in pixels
-    /// * `width` - Width of the region in pixels
-    /// * `height` - Height of the region in pixels
-    /// * `data` - Raw pixel data (must match width * height * bytes_per_pixel)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Region is out of bounds
-    /// - Data size doesn't match expected size
-    /// - GPU upload fails
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
-                This method submits synchronously and stalls the GPU."
-    )]
-    pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> Result<()> {
-        if x + width > self.width || y + height > self.height {
-            anyhow::bail!(
-                "Region out of bounds: {}x{} at ({},{}) exceeds {}x{} texture",
-                width,
-                height,
-                x,
-                y,
-                self.width,
-                self.height
-            );
-        }
-        let expected_size = (width * height * self.format.bytes_per_pixel()) as usize;
-        if data.len() != expected_size {
-            anyhow::bail!(
-                "Data size mismatch: expected {} bytes for {}x{} region, got {}",
-                expected_size,
-                width,
-                height,
-                data.len()
-            );
-        }
-        let mut backend = self.backend.lock().unwrap();
-        backend.write_texture_region(self.handle, x, y, width, height, data)
-    }
-
-    /// Write pixel data to the texture.
-    ///
-    /// The data must match the texture's dimensions and format.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - Raw pixel data (must match width * height * bytes_per_pixel)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Data size doesn't match expected size
-    /// - GPU upload fails
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
-                This method submits synchronously and stalls the GPU."
-    )]
-    pub fn write(&self, data: &[u8]) -> Result<()> {
-        let expected_size = (self.width * self.height * self.format.bytes_per_pixel()) as usize;
-        if data.len() != expected_size {
-            anyhow::bail!(
-                "Data size mismatch: expected {} bytes, got {} bytes",
-                expected_size,
-                data.len()
-            );
-        }
-
-        let mut backend = self.backend.lock().unwrap();
-        backend.write_texture(self.handle, data, self.width, self.height)
     }
 
     /// Get the width in pixels.
@@ -420,7 +340,6 @@ impl Drop for TextureBacking {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
@@ -523,42 +442,6 @@ mod tests {
             TextureKind::Interpolated,
             TextureFlags::COPY_DST,
         );
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_texture_write() {
-        let device = create_test_device();
-        let texture = TextureBacking::new(
-            &device,
-            2,
-            2,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Interpolated,
-            TextureFlags::COPY_DST,
-        )
-        .unwrap();
-
-        let data = vec![0u8; 2 * 2 * 4];
-        texture.write(&data).unwrap();
-    }
-
-    #[test]
-    fn test_texture_write_size_mismatch() {
-        let device = create_test_device();
-        let texture = TextureBacking::new(
-            &device,
-            2,
-            2,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Interpolated,
-            TextureFlags::COPY_DST,
-        )
-        .unwrap();
-
-        let data = vec![0u8; 4]; // Too small
-        let result = texture.write(&data);
 
         assert!(result.is_err());
     }

@@ -384,17 +384,6 @@ pub unsafe fn goldy_deposit_transaction_write(
     (lib().goldy_deposit_transaction_write)(transaction, offset, data, data_size)
 }
 
-pub unsafe fn goldy_scheme_lease_render_target(
-    scheme: *mut GoldyScheme,
-    width: u32,
-    height: u32,
-    format: GoldyTextureFormat,
-    has_depth: bool,
-    depth_format: GoldyDepthFormat,
-) -> *mut GoldySchemeRenderTargetLease {
-    (lib().goldy_scheme_lease_render_target)(scheme, width, height, format, has_depth, depth_format)
-}
-
 pub unsafe fn goldy_scheme_render_target_lease_destroy(lease: *mut GoldySchemeRenderTargetLease) {
     (lib().goldy_scheme_render_target_lease_destroy)(lease)
 }

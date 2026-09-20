@@ -124,7 +124,7 @@ public class SchemeTests
                 TextureFlags.CopySrc | TextureFlags.CopyDst);
 
             using var scheme = new Scheme(ctx);
-            using var rt = scheme.LeaseRenderTarget(2, 2, TextureFormat.Rgba8Unorm);
+            using var rt = ctx.LeaseRenderTarget(2, 2, TextureFormat.Rgba8Unorm);
             using (var pass = scheme.RenderPassClear("clear", rt, Color.Red))
             { }
 
@@ -187,7 +187,7 @@ public class SchemeTests
                 TextureFlags.CopySrc | TextureFlags.CopyDst);
 
             using var scheme = new Scheme(ctx);
-            using var rt = scheme.LeaseRenderTarget(64, 64, TextureFormat.Rgba8Unorm);
+            using var rt = ctx.LeaseRenderTarget(64, 64, TextureFormat.Rgba8Unorm);
             using (var pass = scheme.RenderPassClear("triangle", rt, Color.Black))
             {
                 pass

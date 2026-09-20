@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 /// **Important**: `target_format` must match the format of the render target
 /// you will render to. Mismatched formats cause undefined behavior or errors.
 ///
-/// - For scheme-leased render targets: use the format passed to [`crate::Scheme::lease_render_target`]
+/// - For scheme-leased render targets: use the format passed to [`crate::Context::lease_render_target`]
 ///
 /// # Example
 ///
@@ -41,7 +41,7 @@ pub struct RenderPipelineDesc {
     /// Target texture format.
     ///
     /// **Must match** the format of the swapchain or scheme-leased render target you render to.
-    /// Use the format passed to [`crate::Scheme::lease_render_target`].
+    /// Use the format passed to [`crate::Context::lease_render_target`].
     pub target_format: TextureFormat,
     /// Depth/stencil state (optional, None = no depth testing).
     pub depth_stencil: Option<DepthStencilState>,

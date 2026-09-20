@@ -10,7 +10,7 @@ use goldy_ffi::{
     goldy_parcel_destroy, goldy_record_builder_build, goldy_record_builder_create, goldy_record_builder_emplace,
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_runtime_acquire_texture, goldy_runtime_destroy,
     goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_field,
-    goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_lease_render_target,
+    goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_context_lease_render_target,
     goldy_scheme_render_pass_begin, goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish,
     goldy_scheme_render_pass_set_pipeline, goldy_scheme_render_pass_with_field,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
@@ -149,8 +149,8 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let rt = goldy_scheme_lease_render_target(
-            scheme,
+        let rt = goldy_context_lease_render_target(
+            ctx,
             GRID_WIDTH,
             GRID_HEIGHT,
             GoldyTextureFormat::Rgba8Unorm,

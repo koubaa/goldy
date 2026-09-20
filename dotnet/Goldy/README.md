@@ -24,7 +24,7 @@ using var readback = runtime.AcquireTexture(
     TextureFlags.CopySrc | TextureFlags.CopyDst);
 
 using var scheme = new Scheme(ctx);
-using var rt = scheme.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
+using var rt = ctx.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
 using (var pass = scheme.RenderPassClear("clear", rt, Color.CornflowerBlue)) { }
 
 scheme.CopyToTexture(rt, readback);

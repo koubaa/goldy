@@ -1066,28 +1066,6 @@ impl Texture {
         )
     }
 
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
-                This method submits synchronously and stalls the GPU."
-    )]
-    #[allow(deprecated)]
-    pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> anyhow::Result<()> {
-        self.parcel
-            .grant_texture_keepalive()?
-            .write_region(x, y, width, height, data)
-    }
-
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
-                This method submits synchronously and stalls the GPU."
-    )]
-    #[allow(deprecated)]
-    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
-        self.parcel.grant_texture_keepalive()?.write(data)
-    }
-
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
         self.parcel.release_bookkeeping();

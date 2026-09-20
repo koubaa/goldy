@@ -1469,18 +1469,6 @@ public:
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
 
-    [[nodiscard]] [[deprecated("mint from the lessor: Context::lease_render_target")]]
-    SchemeRenderTargetLease lease_render_target(
-        uint32_t width, uint32_t height, GoldyTextureFormat format,
-        bool has_depth = false, GoldyDepthFormat depth_format = GOLDY_DEPTH_FORMAT_DEPTH24_PLUS) {
-        GoldySchemeRenderTargetLease* lease = goldy_scheme_lease_render_target(
-            ptr_.get(), width, height, format, has_depth, depth_format);
-        if (!lease) {
-            throw Exception::from_last_error();
-        }
-        return SchemeRenderTargetLease{lease};
-    }
-
     void copy_to_texture(const SchemeRenderTargetLease& src, const Texture& dst) {
         detail::throw_on_result(goldy_scheme_copy_to_texture(ptr_.get(), src.get(), dst.get()));
     }

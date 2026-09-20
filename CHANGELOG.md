@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Deprecated `Instance::create_runtime` / `create_runtime_for_adapter`,
+  `Runtime::flush_texture_uploads`, `Scheme::lease_*` / `lease_handle` /
+  `lease_buffer_handle`, `Texture::write` / `write_region`, and the
+  `goldy_scheme_lease_render_target` C/C++/Python/.NET forwarders. Mint leases
+  from `Context`, construct runtimes with `request_adapter` → `request_runtime`,
+  and upload textures with `MemoryExchange::bind_deposit` or
+  `Runtime::acquire_texture(..., init)`.
+
 ## [0.3.0] - 2026-09-19
 
 ### Changed
@@ -31,10 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Context::lease_texture` / `lease_buffer` / `lease_render_target`. Schemes
   intern a clone on first use (`with_parcel`, `render_pass`, `copy_to_present`,
   …) so the backing outlives IR handles. Pool return happens when the last clone
-  is dropped, epoch-gated by `parcel.last_referenced()`. `Scheme::lease_*`
-  remains as deprecated forwarders. A lease may be bound by more than one scheme
-  on the same context. FFI adds `goldy_context_lease_render_target` and keeps
-  `goldy_scheme_lease_render_target` as a forwarder.
+  is dropped, epoch-gated by `parcel.last_referenced()`. A lease may be bound by
+  more than one scheme on the same context. FFI adds
+  `goldy_context_lease_render_target`.
 
 ### Added
 

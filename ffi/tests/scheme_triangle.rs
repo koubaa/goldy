@@ -8,7 +8,7 @@ use goldy_ffi::{
     goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
     goldy_parcel_destroy, goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_runtime_acquire_buffer,
     goldy_runtime_acquire_texture, goldy_runtime_destroy, goldy_scheme_copy_to_texture, goldy_scheme_create,
-    goldy_scheme_destroy, goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin,
+    goldy_scheme_destroy, goldy_context_lease_render_target, goldy_scheme_render_pass_begin,
     goldy_scheme_render_pass_draw, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
     goldy_scheme_render_pass_set_vertex_buffer_parcel, goldy_scheme_render_pass_with_parcel,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
@@ -116,8 +116,8 @@ fn scheme_triangle_readback_center_pixel_lit() {
         let scheme = goldy_scheme_create(ctx);
         assert!(!scheme.is_null());
 
-        let rt = goldy_scheme_lease_render_target(
-            scheme,
+        let rt = goldy_context_lease_render_target(
+            ctx,
             W,
             H,
             GoldyTextureFormat::Rgba8Unorm,

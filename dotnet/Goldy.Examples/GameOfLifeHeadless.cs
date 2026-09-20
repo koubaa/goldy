@@ -67,7 +67,7 @@ static class GameOfLifeHeadless
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
 
-        var rt = scheme.LeaseRenderTarget(GridWidth, GridHeight, TextureFormat.Rgba8Unorm);
+        var rt = ctx.LeaseRenderTarget(GridWidth, GridHeight, TextureFormat.Rgba8Unorm);
         using (var current = cells.Field(1))
         using (var pass = scheme.RenderPassDiscard("game_of_life_render", rt))
         {

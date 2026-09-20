@@ -74,15 +74,18 @@ bitflags! {
 
 ## Writing Data
 
-Prefer `MemoryExchange::bind_deposit` with `DepositTarget::texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
+Use `MemoryExchange::bind_deposit` with `DepositTarget::texture` for batched, non-blocking uploads:
 
 ```rust
-#[allow(deprecated)]
-texture.write(&pixels)?;
-
-#[allow(deprecated)]
-texture.write_region(x, y, width, height, &region_pixels)?;
+let memory = MemoryExchange::new(&ctx);
+let deposit = memory.bind_deposit(
+    &mut scheme,
+    DepositTarget::texture(&texture, 0, 0, width, height, pixels.len() as u64, 0),
+)?;
+deposit.write(0, &pixels)?;
 ```
+
+For a one-shot fill at acquire time, pass `init` to [`Runtime::acquire_texture`].
 
 ## Reading Data
 

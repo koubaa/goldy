@@ -167,10 +167,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_wait_until_settled")]
     internal static partial GoldyResult SchemeSubmissionWaitUntilSettled(nint submission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_lease_render_target")]
-    internal static partial nint SchemeLeaseRenderTarget(
-        nint scheme, uint width, uint height, TextureFormat format, [MarshalAs(UnmanagedType.U1)] bool hasDepth, DepthFormat depthFormat);
-
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_target_lease_destroy")]
     internal static partial void SchemeRenderTargetLeaseDestroy(nint lease);
 

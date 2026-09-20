@@ -101,40 +101,6 @@ pub unsafe extern "C" fn goldy_context_lease_render_target(
     mint_render_target_lease(&(*ctx).inner, width, height, format, has_depth, depth_format)
 }
 
-/// Declare a render-target lease on `scheme`'s context.
-///
-/// Forwarder for [`goldy_context_lease_render_target`]. Returns a heap-allocated
-/// lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
-///
-/// # Safety
-/// `scheme` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_lease_render_target(
-    scheme: *mut GoldyScheme,
-    width: u32,
-    height: u32,
-    format: GoldyTextureFormat,
-    has_depth: bool,
-    depth_format: GoldyDepthFormat,
-) -> *mut GoldySchemeRenderTargetLease {
-    if scheme.is_null() {
-        set_last_error("Scheme pointer is null");
-        return std::ptr::null_mut();
-    }
-    if (*scheme).has_active_recorder() {
-        set_last_error("Cannot lease_render_target while recording a node");
-        return std::ptr::null_mut();
-    }
-    mint_render_target_lease(
-        (*scheme).inner.context(),
-        width,
-        height,
-        format,
-        has_depth,
-        depth_format,
-    )
-}
-
 /// Destroy a render-target lease handle.
 ///
 /// Drops this handle. The backing stays alive while any scheme still holds an interned

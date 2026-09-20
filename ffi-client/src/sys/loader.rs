@@ -92,7 +92,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_deposit_transaction_capacity: FnGoldyDepositTransactionCapacity,
     pub goldy_deposit_transaction_id: FnGoldyDepositTransactionId,
     pub goldy_deposit_transaction_write: FnGoldyDepositTransactionWrite,
-    pub goldy_scheme_lease_render_target: FnGoldySchemeLeaseRenderTarget,
     pub goldy_scheme_render_target_lease_destroy: FnGoldySchemeRenderTargetLeaseDestroy,
     pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
     pub goldy_scheme_render_pass_with_buffer_unit: FnGoldySchemeRenderPassWithBufferUnit,
@@ -274,7 +273,6 @@ impl GoldyFfi {
             ),
             goldy_deposit_transaction_id: sym!("goldy_deposit_transaction_id", FnGoldyDepositTransactionId),
             goldy_deposit_transaction_write: sym!("goldy_deposit_transaction_write", FnGoldyDepositTransactionWrite),
-            goldy_scheme_lease_render_target: sym!("goldy_scheme_lease_render_target", FnGoldySchemeLeaseRenderTarget),
             goldy_scheme_render_target_lease_destroy: sym!(
                 "goldy_scheme_render_target_lease_destroy",
                 FnGoldySchemeRenderTargetLeaseDestroy

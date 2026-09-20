@@ -89,7 +89,7 @@ int main() {
             GOLDY_TEXTURE_KIND_DIRECT, copy_readback_flags());
 
         goldy::Scheme scheme(ctx);
-        goldy::SchemeRenderTargetLease rt = scheme.lease_render_target(
+        goldy::SchemeRenderTargetLease rt = ctx.lease_render_target(
             kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
         {
             auto pass = scheme.render_pass("triangle", rt, goldy::TargetLoad::clear(goldy::Color::black()));

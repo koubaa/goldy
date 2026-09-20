@@ -65,7 +65,7 @@ static class GameOfLifeWindow
         RenderPipeline renderPipeline)
     {
         var displayScheme = new Scheme(ctx);
-        var rt = displayScheme.LeaseRenderTarget(
+        var rt = ctx.LeaseRenderTarget(
             Math.Max(surface.Width, 1u),
             Math.Max(surface.Height, 1u),
             surface.Format);
@@ -129,7 +129,7 @@ static class GameOfLifeWindow
 
             var useBufferA = true;
             var displayScheme = new Scheme(ctx);
-            var sceneRt = displayScheme.LeaseRenderTarget(
+            var sceneRt = ctx.LeaseRenderTarget(
                 Math.Max(surface.Width, 1u),
                 Math.Max(surface.Height, 1u),
                 surface.Format);

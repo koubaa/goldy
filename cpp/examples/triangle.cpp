@@ -81,7 +81,7 @@ goldy::SurfaceExchange create_surface_exchange(const goldy::Context& ctx, GLFWwi
     void* surface = glfwGetWaylandWindow(window);
     if (!display || !surface) {
         throw std::runtime_error(
-            "Wayland handles unavailable ù run under a Wayland session (Vulkan backend requires Wayland on Linux)");
+            "Wayland handles unavailable ? run under a Wayland session (Vulkan backend requires Wayland on Linux)");
     }
     return goldy::SurfaceExchange(ctx, display, surface);
 #endif
@@ -140,7 +140,7 @@ GpuState init_gpu(goldy::Runtime device, GLFWwindow* window) {
     width = std::max(width, 1u);
     height = std::max(height, 1u);
     goldy::SchemeRenderTargetLease scene_rt =
-        scheme.lease_render_target(width, height, exchange.format());
+        ctx.lease_render_target(width, height, exchange.format());
     const goldy::Color bg_color{0.1f, 0.1f, 0.2f, 1.0f};
     goldy::Transaction present =
         record_scheme(scheme, exchange, pipeline, vertex_buffer, scene_rt, bg_color);
@@ -197,7 +197,7 @@ void handle_resize(GpuState& gpu, GLFWwindow* window) {
     auto [new_w, new_h] = gpu.exchange.size();
     new_w = std::max(new_w, 1u);
     new_h = std::max(new_h, 1u);
-    gpu.scene_rt = gpu.scheme.lease_render_target(new_w, new_h, gpu.exchange.format());
+    gpu.scene_rt = gpu.ctx.lease_render_target(new_w, new_h, gpu.exchange.format());
 
     const goldy::Color bg_color{0.1f, 0.1f, 0.2f, 1.0f};
     gpu.present = record_scheme(

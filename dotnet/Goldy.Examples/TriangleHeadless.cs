@@ -53,8 +53,8 @@ static class TriangleHeadless
         const uint width = 100;
         const uint height = 100;
 
-        using var scheme = new Scheme(ctx);
-        using var rt = scheme.LeaseRenderTarget(width, height, TextureFormat.Rgba8Unorm);
+            using var scheme = new Scheme(ctx);
+            using var rt = ctx.LeaseRenderTarget(width, height, TextureFormat.Rgba8Unorm);
         using (var pass = scheme.RenderPassClear("triangle", rt, new Color(0.1f, 0.1f, 0.2f, 1.0f)))
         {
             pass

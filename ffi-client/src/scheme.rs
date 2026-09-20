@@ -8,7 +8,7 @@ use crate::sys::{
     self, GoldyPresentLease, GoldyReplayStats, GoldyScheme, GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
 use crate::texture::Texture;
-use crate::types::{DepthFormat, IndexFormat, NodeAccess, TextureFormat};
+use crate::types::{IndexFormat, NodeAccess, TextureFormat};
 use std::ffi::CString;
 use std::ops::Range;
 
@@ -122,23 +122,6 @@ impl Scheme {
             records: stats.records,
             resubmit_hits: stats.resubmit_hits,
         })
-    }
-
-    pub fn lease_render_target(
-        &mut self,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-        depth_format: Option<DepthFormat>,
-    ) -> Result<SchemeRenderTargetLease> {
-        let (has_depth, depth) = match depth_format {
-            Some(d) => (true, d),
-            None => (false, DepthFormat::Depth24Plus),
-        };
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_scheme_lease_render_target(self.ptr, width, height, format.into(), has_depth, depth.into())
-        });
-        Ok(SchemeRenderTargetLease::from_ptr(ptr))
     }
 
     pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Texture) -> Result<()> {

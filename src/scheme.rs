@@ -1587,77 +1587,11 @@ impl Scheme {
         self.interned_leases.push(Arc::clone(inner));
     }
 
-    /// Declare a transient texture lease backed by the context's transient pool.
-    ///
-    /// Prefer [`Context::lease_texture`]: the context is the lessor. This forwarder
-    /// remains for callers that still mint through the scheme.
-    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_texture")]
-    pub fn lease_texture(
-        &mut self,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-        access: TextureKind,
-        flags: TextureFlags,
-    ) -> Result<Lease<LeaseTexture>, GoldyError> {
-        self.ctx.lease_texture(width, height, format, access, flags)
-    }
-
-    /// Declare a transient buffer lease backed by the context's transient pool.
-    ///
-    /// Prefer [`Context::lease_buffer`]. See that method for the write-first invariant.
-    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_buffer")]
-    pub fn lease_buffer(&mut self, size: u64) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.ctx.lease_buffer(size)
-    }
-
-    /// Like [`Self::lease_buffer`] but with explicit kind and flags.
-    ///
-    /// Prefer [`Context::lease_buffer_with`].
-    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_buffer_with")]
-    pub fn lease_buffer_with(
-        &mut self,
-        size: u64,
-        kind: crate::types::BufferKind,
-        flags: crate::types::BufferFlags,
-    ) -> Result<Lease<LeaseBuffer>, GoldyError> {
-        self.ctx.lease_buffer_with(size, kind, flags)
-    }
-
-    /// Declare a render-target lease allocated on this scheme's context.
-    ///
-    /// Prefer [`Context::lease_render_target`]: the context is the lessor. Stamp
-    /// registration happens when the lease is first bound (`render_pass`,
-    /// `copy_to_present`, `copy_to_texture`).
-    #[cfg(feature = "graphics")]
-    #[deprecated(since = "0.2.0", note = "mint from the lessor: Context::lease_render_target")]
-    pub fn lease_render_target(
-        &mut self,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-        depth_format: Option<DepthFormat>,
-    ) -> Result<Lease<LeaseRenderTarget>, GoldyError> {
-        self.ctx.lease_render_target(width, height, format, depth_format)
-    }
-
     /// Intern `lease` and borrow its backing render target.
     #[cfg(feature = "graphics")]
     pub(crate) fn intern_rt<'a>(&mut self, lease: &'a Lease<LeaseRenderTarget>) -> &'a RenderTarget {
         self.intern_lease(&lease.inner);
         lease.rt()
-    }
-
-    /// Typed resource descriptor handle for a texture lease (advanced binding).
-    #[deprecated(since = "0.2.0", note = "use Lease::handle")]
-    pub fn lease_handle(&self, lease: &Lease<LeaseTexture>, access: ResourceAccess) -> Option<ResourceHandle> {
-        lease.handle(access)
-    }
-
-    /// Typed resource descriptor handle for a buffer lease (advanced binding).
-    #[deprecated(since = "0.2.0", note = "use Lease::handle")]
-    pub fn lease_buffer_handle(&self, lease: &Lease<LeaseBuffer>, access: ResourceAccess) -> Option<ResourceHandle> {
-        lease.handle(access)
     }
 
     /// Declare a compute dispatch node, returning a builder for access declarations.

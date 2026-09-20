@@ -128,22 +128,6 @@ impl PyScheme {
         })
     }
 
-    #[pyo3(signature = (width, height, format, depth_format=None))]
-    fn lease_render_target(
-        &self,
-        width: u32,
-        height: u32,
-        format: PyTextureFormat,
-        depth_format: Option<PyDepthFormat>,
-    ) -> PyResult<PySchemeRenderTargetLease> {
-        self.ensure_no_active_recorder()?;
-        let ctx = self.inner.borrow().context().clone();
-        let lease = ctx
-            .lease_render_target(width, height, format.into(), depth_format.map(Into::into))
-            .into_py_result()?;
-        Ok(PySchemeRenderTargetLease { inner: lease })
-    }
-
     fn render_pass(
         slf: Py<Self>,
         py: Python<'_>,

@@ -17,13 +17,14 @@ static class TriangleWindow
     }
 
     static (SchemeRenderTargetLease rt, Transaction transaction) RecordScheme(
+        Context ctx,
         Scheme scheme,
         SurfaceExchange surface,
         RenderPipeline pipeline,
         Parcel vertexParcel,
         Color bg)
     {
-        var rt = scheme.LeaseRenderTarget(
+        var rt = ctx.LeaseRenderTarget(
             Math.Max(surface.Width, 1u),
             Math.Max(surface.Height, 1u),
             surface.Format);
@@ -87,7 +88,7 @@ static class TriangleWindow
 
             var bg = new Color(0.1f, 0.1f, 0.2f, 1.0f);
             var scheme = new Scheme(ctx);
-            var (sceneRt, transaction) = RecordScheme(scheme, surface, pipeline, vertexParcel, bg);
+            var (sceneRt, transaction) = RecordScheme(ctx, scheme, surface, pipeline, vertexParcel, bg);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -103,7 +104,7 @@ static class TriangleWindow
                         transaction.Dispose();
                         scheme.Dispose();
                         scheme = new Scheme(ctx);
-                        (sceneRt, transaction) = RecordScheme(scheme, surface, pipeline, vertexParcel, bg);
+                        (sceneRt, transaction) = RecordScheme(ctx, scheme, surface, pipeline, vertexParcel, bg);
                     }
                 }
 

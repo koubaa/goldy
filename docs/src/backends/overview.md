@@ -141,8 +141,9 @@ let device = instance
     })?
     .request_runtime(&RuntimeDescriptor::default())?;
 
-// Or target a specific adapter by ID:
-let device = instance.create_runtime_for_adapter(adapter.id())?;
+// Or target a specific adapter by ID after enumeration:
+let adapters = instance.enumerate_adapters();
+let device = adapters[0].request_runtime(&RuntimeDescriptor::default())?;
 ```
 
 ## Backend Capabilities

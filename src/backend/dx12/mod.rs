@@ -6,7 +6,7 @@
 //! ## WARP (software D3D12)
 //!
 //! Set **`GOLDY_DX12_FORCE_WARP=1`** to run on the DX12 WARP software rasterizer.
-//! This registers WARP with DXGI and redirects [`Instance::create_runtime`](crate::Instance::create_runtime)
+//! This registers WARP with DXGI and redirects [`Instance::request_adapter`](crate::Instance::request_adapter)
 //! to it, even when hardware GPUs are present. Use on headless CI (no GPU) or locally to
 //! reproduce WARP-specific rendering bugs.
 //!
@@ -72,7 +72,7 @@ pub const WARP_ADAPTER_ID: u32 = u32::MAX;
 
 /// Whether `GOLDY_DX12_FORCE_WARP=1` is set.
 ///
-/// Registers WARP with DXGI and redirects [`Instance::create_runtime`](crate::Instance::create_runtime)
+/// Registers WARP with DXGI and redirects [`Instance::request_adapter`](crate::Instance::request_adapter)
 /// to the WARP adapter regardless of what hardware GPUs are present.
 pub(crate) fn env_force_warp() -> bool {
     std::env::var("GOLDY_DX12_FORCE_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
