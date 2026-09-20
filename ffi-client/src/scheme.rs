@@ -8,7 +8,7 @@ use crate::sys::{
     self, GoldyPresentLease, GoldyReplayStats, GoldyScheme, GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
 use crate::texture::Texture;
-use crate::types::{IndexFormat, NodeAccess, TextureFormat};
+use crate::types::{IndexFormat, NodeAccess};
 use std::ffi::CString;
 use std::ops::Range;
 

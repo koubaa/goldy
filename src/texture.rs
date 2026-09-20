@@ -167,7 +167,7 @@ impl TextureBacking {
         let texture = Self::new(device, width, height, format, access, flags)?;
         {
             let mut backend = texture.backend.lock().unwrap();
-            backend.write_texture_region(texture.handle, 0, 0, width, height, data)?;
+            backend.write_texture(texture.handle, data, width, height)?;
         }
         Ok(texture)
     }

@@ -1444,6 +1444,7 @@ pub(crate) trait GpuBackend:
     fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()>;
     /// Write pixel data to a subregion of the texture.
     /// The data must match width*height*bpp for the texture's format.
+    #[allow(dead_code)]
     fn write_texture_region(
         &mut self,
         texture: TextureHandle,

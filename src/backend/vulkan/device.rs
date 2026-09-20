@@ -418,12 +418,41 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .enabled_extension_names(&device_extensions)
         .push_next(&mut features2);
 
-    let device = unsafe {
-        state
-            .instance
-            .create_device(physical_device_handle, &device_create_info, None)
-    }
-    .context("Failed to create logical device")?;
+    // NVIDIA ICDs on shared CI GPUs sometimes return VK_ERROR_INITIALIZATION_FAILED
+    // for a second vkCreateDevice shortly after the previous process tore down.
+    let device = {
+        const ATTEMPTS: u32 = 6;
+        let mut last_err: Option<vk::Result> = None;
+        let mut created = None;
+        for attempt in 0..ATTEMPTS {
+            match unsafe {
+                state
+                    .instance
+                    .create_device(physical_device_handle, &device_create_info, None)
+            } {
+                Ok(d) => {
+                    created = Some(d);
+                    break;
+                }
+                Err(e)
+                    if e == vk::Result::ERROR_INITIALIZATION_FAILED && attempt + 1 < ATTEMPTS =>
+                {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        attempts = ATTEMPTS,
+                        "vkCreateDevice INITIALIZATION_FAILED; retrying"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(150 * (attempt as u64 + 1)));
+                    last_err = Some(e);
+                }
+                Err(e) => {
+                    return Err(e).context("Failed to create logical device");
+                }
+            }
+        }
+        created.ok_or_else(|| last_err.unwrap_or(vk::Result::ERROR_INITIALIZATION_FAILED))
+            .context("Failed to create logical device")?
+    };
 
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
