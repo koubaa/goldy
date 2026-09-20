@@ -3,8 +3,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example compute_simple`
 
 use goldy_ffi_client::{
-    BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-    RequestAdapterOptions, Scheme, ShaderModule,
+    BufferKind, ComputePipeline, Context, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions,
+    RuntimeDescriptor, Scheme, ShaderModule,
 };
 
 const COMPUTE_SRC: &str = r#"
@@ -26,7 +26,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let instance = Instance::new()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?;
+        .request_runtime(&RuntimeDescriptor::default())?;
 
     let data = [0f32; 64];
     let buffer = device.acquire_buffer_with_data(&data, BufferKind::Scattered)?;

@@ -23,7 +23,7 @@ its target API:
 ┌─────────────────────────────────────────────────────────────┐
 │                    Goldy Core API                           │
 │                                                             │
-│   Device, Buffer, Texture, Pipeline, Scheme, ...          │
+│   Runtime, Buffer, Texture, Pipeline, Scheme, ...          │
 └─────────────────────────────────────────────────────────────┘
         │                    │                    │
         ▼                    ▼                    ▼
@@ -128,7 +128,7 @@ Each adapter reports a `DeviceType`:
 | `Cpu` | Software renderer (e.g. WARP on DX12, lavapipe on Vulkan) |
 | `Other` | Unknown or unrecognized device class |
 
-### Creating a Device
+### Creating a Runtime
 
 Request a device with a preferred `DeviceType`. If no adapter matches,
 Goldy falls back to the first available adapter:
@@ -139,15 +139,15 @@ let device = instance
         power_preference: PowerPreference::HighPerformance,
         ..Default::default()
     })?
-    .request_device(&DeviceDescriptor::default())?;
+    .request_runtime(&RuntimeDescriptor::default())?;
 
 // Or target a specific adapter by ID:
-let device = instance.create_device_for_adapter(adapter.id())?;
+let device = instance.create_runtime_for_adapter(adapter.id())?;
 ```
 
 ## Backend Capabilities
 
-### Device Capabilities
+### Runtime Capabilities
 
 Query format preferences and backend-specific capabilities after creating
 a device:
@@ -246,7 +246,7 @@ Texture notes for CUDA:
   launches onto imported scratch remain supported but are costlier under WDDM.
   The DXGI swapchain is matching `R8G8B8A8_UNORM` so present is a single
   `CopyResource`.
-- `DeviceCapabilities` on CUDA advertise `preferred_surface_format = Rgba8Unorm` and
+- `RuntimeCapabilities` on CUDA advertise `preferred_surface_format = Rgba8Unorm` and
   `preferred_render_target_format = Rgba8Unorm` (no BGRA in supported lists).
 - CUDA has no separate sampler object — filtering is baked into each `CUtexObject`.
   A dispatch may use at most one distinct `Filter` configuration; additional distinct
@@ -275,7 +275,7 @@ parity with the shipped Vulkan/DX12/Metal backends.
 
 Compute buffers, scalar uniforms, **indirect dispatch**, and **2D textures/samplers** work.
 Submit is **non-blocking**: the context timeline advances from wgpu's
-`on_submitted_work_done` callback (pumped by `Device::poll`). Host waits
+`on_submitted_work_done` callback (pumped by `Runtime::poll`). Host waits
 (`Context::wait_until`, withdraw) block on the submission index, not on submit
 itself. Resources bind as a single `@group(0)` in shader-parameter order (no bindless heap). Texture
 notes:

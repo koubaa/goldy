@@ -1,6 +1,6 @@
 //! Smoke tests for [`goldy::FrameOrchestrator`] end-frame paths.
 
-use goldy::{DeviceDescriptor, FrameOrchestrator, Instance, RequestAdapterOptions};
+use goldy::{FrameOrchestrator, Instance, RequestAdapterOptions, RuntimeDescriptor};
 
 #[test]
 fn orchestrator_double_begin_fails() {
@@ -8,7 +8,7 @@ fn orchestrator_double_begin_fails() {
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("device");
     let ctx = device.create_context().expect("context");
 
@@ -26,7 +26,7 @@ fn orchestrator_reclaim_empty_is_ok() {
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("device");
     let ctx = device.create_context().expect("context");
 
@@ -40,7 +40,7 @@ fn end_frame_externally_ordered_leaves_ring_empty() {
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("device");
     let ctx = device.create_context().expect("context");
 

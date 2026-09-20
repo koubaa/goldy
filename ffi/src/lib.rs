@@ -5,12 +5,12 @@
 
 mod compute;
 mod context;
-mod device;
 mod error;
 mod instance;
 mod memory_exchange;
 mod pipeline;
 mod retained_pool;
+mod runtime;
 mod sampler;
 mod scheme;
 mod shader;
@@ -19,12 +19,12 @@ mod types;
 
 pub use compute::*;
 pub use context::*;
-pub use device::*;
 pub use error::*;
 pub use instance::*;
 pub use memory_exchange::*;
 pub use pipeline::*;
 pub use retained_pool::*;
+pub use runtime::*;
 pub use sampler::*;
 pub use scheme::*;
 pub use shader::*;

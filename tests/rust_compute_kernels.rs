@@ -6,8 +6,8 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, BufferKind, DepositTarget, DeviceDescriptor, Instance, MemoryExchange,
-    RequestAdapterOptions, RetainedPool, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
+    compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions, Runtime,
+    RuntimeDescriptor, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 
@@ -70,7 +70,7 @@ fn read_tight_vertex(verts: &[TightVertex], out: &mut [f32]) {
     }
 }
 
-fn float4_storage_format(device: &goldy::Device) -> TextureFormat {
+fn float4_storage_format(device: &goldy::Runtime) -> TextureFormat {
     match device.backend_type() {
         BackendType::Cuda | BackendType::WebGpu => TextureFormat::Rgba32Float,
         _ => TextureFormat::Rgba8Unorm,
@@ -83,7 +83,7 @@ fn main() {
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("device");
     submission::clamp_test_threads(&mut args, &device);
     let device = Arc::new(device);
@@ -103,7 +103,7 @@ fn main() {
             let device = Arc::clone(&device);
             move || {
                 let ctx = device.create_context()?;
-                let mut pool = RetainedPool::new(Arc::clone(&device));
+                let pool = &device;
                 let n = 64usize;
                 let input: Vec<u32> = (0..n as u32).collect();
                 let data = pool.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
@@ -126,7 +126,7 @@ fn main() {
             let device = Arc::clone(&device);
             move || {
                 let ctx = device.create_context()?;
-                let mut pool = RetainedPool::new(Arc::clone(&device));
+                let pool = &device;
                 let n = 256usize;
                 let a = 2.0f32;
                 let x_data: Vec<f32> = (0..n).map(|i| i as f32).collect();
@@ -183,18 +183,12 @@ fn main() {
             let device = Arc::clone(&device);
             move || {
                 let ctx = device.create_context()?;
-                let mut pool = RetainedPool::new(Arc::clone(&device));
+                let pool = &device;
                 let format = float4_storage_format(&device);
                 let width = 8u32;
                 let height = 8u32;
-                let texture = pool.acquire_texture(
-                    width,
-                    height,
-                    format,
-                    TextureKind::Direct,
-                    TextureFlags::COPY_SRC,
-                    None,
-                )?;
+                let texture =
+                    pool.acquire_texture(width, height, format, TextureKind::Direct, TextureFlags::COPY_SRC, None)?;
 
                 let kernel = fill_red::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
@@ -212,7 +206,7 @@ fn main() {
                 assert_eq!(std::mem::size_of::<PlasmaUniforms>(), 12);
                 assert_eq!(PlasmaUniforms::gpu_element_stride(), 12);
                 let ctx = device.create_context()?;
-                let pool = RetainedPool::new(Arc::clone(&device));
+                let pool = Arc::clone(&device);
                 let uniforms = pool.acquire_buffer_with_data(
                     &[PlasmaUniforms {
                         width: 0,
@@ -258,7 +252,7 @@ fn main() {
                 assert_eq!(std::mem::size_of::<TightVertex>(), 20);
                 assert_eq!(TightVertex::gpu_element_stride(), 32);
                 let ctx = device.create_context()?;
-                let pool = RetainedPool::new(Arc::clone(&device));
+                let pool = Arc::clone(&device);
                 let verts = pool.acquire_buffer_with_data(
                     &[TightVertex {
                         position: [0.0; 3],
@@ -269,10 +263,8 @@ fn main() {
                 let out = pool.acquire_buffer_with_data(&[0.0f32; 5], BufferKind::Scattered)?;
 
                 let mut upload = Scheme::new(&ctx);
-                let deposit = MemoryExchange::new(&ctx).bind_deposit(
-                    &mut upload,
-                    DepositTarget::buffer_elements::<TightVertex>(&verts, 1),
-                )?;
+                let deposit = MemoryExchange::new(&ctx)
+                    .bind_deposit(&mut upload, DepositTarget::buffer_elements::<TightVertex>(&verts, 1))?;
                 deposit.write_data(
                     0,
                     &[TightVertex {

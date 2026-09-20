@@ -18,19 +18,19 @@ mod heap_tests {
 
     use crate::buffer::Allocation;
     use crate::parcel::Parcel;
-    use crate::test_support::{scheme_advance_timeline, SerialGpuDevice};
+    use crate::test_support::{scheme_advance_timeline, SerialGpuRuntime};
     use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
     use crate::{BufferKind, MemoryExchange, Scheme};
     use std::sync::Arc;
 
-    fn submission_context(device: &crate::Device) -> crate::Context {
+    fn submission_context(device: &crate::Runtime) -> crate::Context {
         device.create_context().expect("context")
     }
 
-    fn make_device() -> SerialGpuDevice {
-        // Device-global deferred VRAM ring: exclusive so parallel shared-device tests
+    fn make_device() -> SerialGpuRuntime {
+        // Runtime-global deferred VRAM ring: exclusive so parallel shared-device tests
         // cannot leave foreign epochs that block `has_deferred_payloads` asserts.
-        SerialGpuDevice::exclusive()
+        SerialGpuRuntime::exclusive()
     }
 
     fn scheme_submit_pipelined(ctx: &crate::Context) -> crate::timeline::TimelineValue {
@@ -574,14 +574,12 @@ mod heap_tests {
     ) -> (
         crate::Scheme,
         crate::timeline::TimelineValue,
-        crate::retained_pool::RetainedPool,
+        crate::Runtime,
         crate::Buffer,
     ) {
-        use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
-        use std::sync::Arc;
+        use crate::{BufferFlags, BufferKind, Runtime, Scheme};
 
-        let device = Arc::new(ctx.device().clone());
-        let mut pool = RetainedPool::new(device);
+        let pool = ctx.runtime().clone();
         let buf = pool
             .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");

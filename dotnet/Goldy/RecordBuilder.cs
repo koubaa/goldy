@@ -63,11 +63,11 @@ public sealed class RecordBuilder : IDisposable
     /// <summary>
     /// Allocate the backing buffer and return the partitioned record.
     /// </summary>
-    public Buffer Build(RetainedPool pool)
+    public Buffer Build(Runtime runtime)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(pool);
-        var buffer = NativeMethods.RecordBuilderBuild(Handle, pool.Handle);
+        ArgumentNullException.ThrowIfNull(runtime);
+        var buffer = NativeMethods.RecordBuilderBuild(Handle, runtime.Handle);
         if (buffer == nint.Zero)
             throw GoldyException.FromLastError("RecordBuilder build");
         _disposed = true;

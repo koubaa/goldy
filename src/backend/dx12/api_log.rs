@@ -78,7 +78,7 @@ static INIT: Once = Once::new();
 
 /// Idempotent; call at the start of every `Dx12Backend::new()`. Only the *first* call
 /// process-wide actually opens/truncates the file and spawns the writer thread — `Dx12Backend`
-/// is constructed once per `Device`, and with many devices created across parallel tests we
+/// is constructed once per `Runtime`, and with many devices created across parallel tests we
 /// must not re-truncate (and thereby erase) an already-open log.
 pub(super) fn init() {
     INIT.call_once(|| {

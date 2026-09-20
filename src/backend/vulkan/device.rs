@@ -1,4 +1,4 @@
-//! Device management logic.
+//! Runtime management logic.
 
 use super::types::{self, PhysicalDeviceInfo};
 use super::{DeviceHandle, VulkanState};
@@ -112,8 +112,8 @@ pub(super) fn query_rt_mesh_features(instance: &ash::Instance, handle: vk::Physi
 pub(super) fn adapter_capabilities(
     physical_devices: &[PhysicalDeviceInfo],
     adapter_id: u32,
-) -> crate::device::DeviceCapabilities {
-    let mut caps = crate::device::DeviceCapabilities {
+) -> crate::runtime::RuntimeCapabilities {
+    let mut caps = crate::runtime::RuntimeCapabilities {
         host_sidecar_on_submit_worker: true,
         ..Default::default()
     };
@@ -232,7 +232,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     // dynamicRendering and synchronization2 are mandatory in 1.3+ (guaranteed by 1.4).
     // Descriptor indexing sub-features are still optional; we request them here.
     let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
-        // Device timeline semaphore (`VkSemaphoreType::TIMELINE`) for `gpu_progress` / deferred destroy.
+        // Runtime timeline semaphore (`VkSemaphoreType::TIMELINE`) for `gpu_progress` / deferred destroy.
         .timeline_semaphore(true)
         .descriptor_binding_partially_bound(true)
         .descriptor_binding_sampled_image_update_after_bind(true)
@@ -462,7 +462,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         debug_assert_eq!(
             sparse_buffer_block_size,
             64 * 1024,
-            "sparse_buffer_block_size deviates from the 64 KiB assumed by DeviceCapabilities::buffer_page_size"
+            "sparse_buffer_block_size deviates from the 64 KiB assumed by RuntimeCapabilities::buffer_page_size"
         );
     }
 
@@ -1057,7 +1057,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Destroy surfaces owned by this device before the generic texture loop.
-            // A secondary `Device` clone (e.g. GoldyRenderer's tracked allocator device)
+            // A secondary `Runtime` clone (e.g. GoldyRenderer's tracked allocator device)
             // may drop before `Surface`, so this path must use the full `surface::destroy`
             // implementation (work_done semaphores, scratch-slot memory, command buffers).
             let surface_handles: Vec<_> = state

@@ -101,7 +101,7 @@ static class GameOfLifeWindow
         try
         {
             using var instance = new Instance();
-            using var device = instance.RequestAdapter().RequestDevice();
+            using var device = instance.RequestAdapter().RequestRuntime();
             using var ctx = device.CreateContext();
             using var surface = GlfwSurfaceExchange.Create(ctx, window);
 
@@ -109,11 +109,10 @@ static class GameOfLifeWindow
             var renderSrc = ShaderPaths.Load("game_of_life_render.slang");
 
             var initial = CreateInitialState();
-            using var retainedPool = new RetainedPool(device);
-            using var record = retainedPool.Record();
+            using var record = device.Record();
             record.EmplaceField<uint>("a", initial);
             record.EmplaceField<uint>("b", initial);
-            using var cells = record.Build(retainedPool);
+            using var cells = record.Build(device);
 
             using var computeShader = new ShaderModule(device, computeSrc);
             using var renderShader = new ShaderModule(device, renderSrc);

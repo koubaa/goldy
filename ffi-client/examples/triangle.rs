@@ -5,9 +5,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example triangle`
 
 use goldy_ffi_client::{
-    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule, SurfaceExchange,
-    TargetLoad, Transaction, Vertex2D,
+    shader::builtins, BufferKind, Color, Context, DepthFormat, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, SchemeRenderTargetLease, ShaderModule,
+    SurfaceExchange, TargetLoad, Transaction, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -58,7 +58,7 @@ fn record_scheme(
 struct App {
     instance: Instance,
     ctx: Option<Context>,
-    device: Option<goldy_ffi_client::Device>,
+    device: Option<goldy_ffi_client::Runtime>,
     vertex_buffer: Option<goldy_ffi_client::Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -94,7 +94,7 @@ impl App {
         let device = self
             .instance
             .request_adapter(&RequestAdapterOptions::default())?
-            .request_device(&DeviceDescriptor::default())?;
+            .request_runtime(&RuntimeDescriptor::default())?;
         let ctx = Context::new(&device)?;
 
         let vertices = [

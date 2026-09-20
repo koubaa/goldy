@@ -19,7 +19,7 @@ cargo run --features examples --example ray_query
 
 ## Notes
 
-The example exits 0 when `DeviceCapabilities::ray_query` is false, and on the WebGPU backend,
+The example exits 0 when `RuntimeCapabilities::ray_query` is false, and on the WebGPU backend,
 where Slang's WGSL target has no `TraceRayInline`.
 
 ## Source

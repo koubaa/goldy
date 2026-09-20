@@ -441,7 +441,7 @@ impl WithdrawClaim {
             .map_err(|_| GoldyError::Backend(anyhow::anyhow!("withdraw readback byte size exceeds address space")))?;
         let mut bytes = vec![0u8; byte_size];
         let read_result = {
-            let backend = self.ctx.device().inner.backend.lock().unwrap();
+            let backend = self.ctx.runtime().inner.backend.lock().unwrap();
             match self.read_kind {
                 WithdrawReadKind::Buffer => backend.read_readback_buffer(slot.staging, &mut bytes),
                 WithdrawReadKind::Texture(layout) => {
@@ -565,12 +565,9 @@ impl<'a> DepositTarget<'a> {
     /// Buffer deposit sized for `count` structured elements of `T`.
     ///
     /// Capacity uses [`StructuredBufferElement::gpu_element_stride`], which is the
-    /// packed Slang ABI stride for [`crate::GpuType`] (not `size_of::<T>()`).
+    /// packed Slang ABI stride for [`struct@crate::GpuType`] (not `size_of::<T>()`).
     pub fn buffer_elements<T: StructuredBufferElement>(destination: &'a Parcel, count: u64) -> Self {
-        Self::buffer(
-            destination,
-            count.saturating_mul(T::gpu_element_stride() as u64),
-        )
+        Self::buffer(destination, count.saturating_mul(T::gpu_element_stride() as u64))
     }
 
     /// Buffer deposit starting at `dst_offset` within `destination`.
@@ -678,8 +675,8 @@ impl DepositTransaction {
         self.inner.pool.write_handle(&self.inner.ctx, handle, offset, data)
     }
 
-    /// Write typed elements, packed for [`crate::GpuType`] the same way as
-    /// [`crate::Buffer::write_data`] / `acquire_buffer_with_data`.
+    /// Write typed elements, packed for [`struct@crate::GpuType`] the same way as
+    /// [`crate::Runtime::acquire_buffer_with_data`].
     pub fn write_data<T: StructuredBufferElement>(&self, offset: u64, data: &[T]) -> Result<(), GoldyError> {
         let encoded = T::gpu_encode_slice(data);
         self.write(offset, encoded.as_ref())

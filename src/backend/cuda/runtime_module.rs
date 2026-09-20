@@ -1,4 +1,4 @@
-//! Device-side updater kernel for CUDA graph indirect dispatch.
+//! Runtime-side updater kernel for CUDA graph indirect dispatch.
 //!
 //! Compiles (via NVRTC) and loads a tiny kernel that reads a [`DispatchShape`]
 //! and updates a device-updatable CUDA graph kernel node via

@@ -523,7 +523,7 @@ impl GpuBackend for VulkanBackend {
         device::enumerate(&self.state.physical_devices)
     }
 
-    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
         device::adapter_capabilities(&self.state.physical_devices, adapter_id)
     }
 

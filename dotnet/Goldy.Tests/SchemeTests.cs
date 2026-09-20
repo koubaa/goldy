@@ -20,11 +20,10 @@ public class SchemeTests
         try
         {
             using var instance = new Instance();
-            using var device = instance.RequestAdapter().RequestDevice();
+            using var device = instance.RequestAdapter().RequestRuntime();
 
             uint[] initial = Enumerable.Range(0, 64).Select(i => (uint)i).ToArray();
-            using var retainedPool = new RetainedPool(device);
-            using var buffer = retainedPool.AcquireBuffer<uint>(initial, BufferKind.Scattered);
+            using var buffer = device.AcquireBuffer<uint>(initial, BufferKind.Scattered);
             using var shader = new ShaderModule(device, fillShader);
             using var pipeline = new ComputePipeline(device, shader);
             using var ctx = device.CreateContext();
@@ -72,10 +71,9 @@ public class SchemeTests
         try
         {
             using var instance = new Instance();
-            using var device = instance.RequestAdapter().RequestDevice();
+            using var device = instance.RequestAdapter().RequestRuntime();
 
-            using var retainedPool = new RetainedPool(device);
-            using var texture = retainedPool.AcquireTexture(
+            using var texture = device.AcquireTexture(
                 16,
                 16,
                 TextureFormat.Rgba8Unorm,
@@ -116,10 +114,9 @@ public class SchemeTests
         try
         {
             using var instance = new Instance();
-            using var device = instance.RequestAdapter().RequestDevice();
+            using var device = instance.RequestAdapter().RequestRuntime();
             using var ctx = device.CreateContext();
-            using var retainedPool = new RetainedPool(device);
-            using var readback = retainedPool.AcquireTexture(
+            using var readback = device.AcquireTexture(
                 2,
                 2,
                 TextureFormat.Rgba8Unorm,
@@ -159,7 +156,7 @@ public class SchemeTests
         try
         {
             using var instance = new Instance();
-            using var device = instance.RequestAdapter().RequestDevice();
+            using var device = instance.RequestAdapter().RequestRuntime();
             using var ctx = device.CreateContext();
 
             using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
@@ -180,10 +177,9 @@ public class SchemeTests
                 new() { Px = -0.5f, Py = 0.5f, R = 0, G = 1, B = 0, A = 1 },
                 new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
             ];
-            using var retainedPool = new RetainedPool(device);
-            using var vertexBuffer = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+            using var vertexBuffer = device.AcquireBuffer(vertices, BufferKind.Scattered);
             using var vertexParcel = vertexBuffer.Field(0);
-            using var readback = retainedPool.AcquireTexture(
+            using var readback = device.AcquireTexture(
                 64,
                 64,
                 TextureFormat.Rgba8Unorm,

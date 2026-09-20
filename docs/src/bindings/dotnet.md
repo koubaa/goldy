@@ -13,7 +13,7 @@ dotnet add package Goldy
 Or add to your `.csproj` directly:
 
 ```xml
-<PackageReference Include="Goldy" Version="0.2.*" />
+<PackageReference Include="Goldy" Version="0.3.*" />
 ```
 
 The NuGet package bundles native Goldy + Slang libraries for all supported platforms — no separate native installation is needed.
@@ -39,10 +39,9 @@ dotnet add reference path/to/goldy/dotnet/Goldy/Goldy.csproj
 using Goldy;
 
 using var instance = new Instance();
-using var device = instance.RequestAdapter().RequestDevice();
-using var ctx = device.CreateContext();
-using var retainedPool = new RetainedPool(device);
-using var readback = retainedPool.AcquireTexture(
+using var runtime = instance.RequestAdapter().RequestRuntime();
+using var ctx = runtime.CreateContext();
+using var readback = runtime.AcquireTexture(
     100, 100, TextureFormat.Rgba8Unorm, TextureKind.Direct,
     TextureFlags.CopySrc | TextureFlags.CopyDst);
 
@@ -105,7 +104,7 @@ using var pipeline = new RenderPipeline(device, shader, new RenderPipelineDesc
 All Goldy objects implement `IDisposable`. Use `using` declarations or `using` blocks to ensure GPU resources are released promptly:
 
 ```csharp
-using var device = instance.RequestAdapter().RequestDevice();
+using var runtime = instance.RequestAdapter().RequestRuntime();
 using var ctx = device.CreateContext();
 using var scheme = new Scheme(ctx);
 ```
@@ -116,8 +115,8 @@ using var scheme = new Scheme(ctx);
 |--------|------|----|
 | Instance creation | `Instance::new()?` | `new Instance()` |
 | Error handling | `Result<T, GoldyError>` | Exceptions |
-| Device lifetime | `Arc<Device>` | `IDisposable` / `using` |
-| Retained buffer | `retained_pool.acquire_buffer_with_data(&data, access)` | `retainedPool.AcquireBuffer<T>(data, access)` → `Parcel` |
+| Runtime lifetime | `Arc<Runtime>` | `IDisposable` / `using` |
+| Retained buffer | `runtime.acquire_buffer_with_data(&data, access)` | `runtime.AcquireBuffer<T>(data, access)` → `Parcel` |
 | Submission | `scheme.submit()?` | `scheme.Submit()` → `SchemeSubmission` |
 | Enums | `DeviceType::DiscreteGpu` | `DeviceType.DiscreteGpu` |
 

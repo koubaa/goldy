@@ -1,11 +1,11 @@
 # Parcels
 
-A **parcel** is the unit of data Goldy schemes actually operate on: a whole buffer, a range within a buffer, or a texture. Every resource you acquire from a [`RetainedPool`](../resources/retained-pool.md) or a transient allocator hands you one or more parcels, and every `with_parcel` call on a scheme node passes exactly one.
+A **parcel** is the unit of data Goldy schemes actually operate on: a whole buffer, a range within a buffer, or a texture. Every resource you acquire from a [`Runtime`](../resources/runtime-owned-memory.md) or a transient allocator hands you one or more parcels, and every `with_parcel` call on a scheme node passes exactly one.
 
 ```rust
 use goldy::{BufferKind, ResourceAccess};
 
-let parcel = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
+let parcel = runtime.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
 let handle = parcel.handle(ResourceAccess::Write).unwrap();
 let again = parcel.handle(ResourceAccess::Write).unwrap();
 assert_eq!(handle, again);
@@ -106,8 +106,8 @@ void cs_main(SimParams params, Scattered<Particle> particles, ThreadId id) {
 **Rust dispatch**:
 
 ```rust
-let params_buf = retained_pool.acquire_buffer_with_data(&[sim_params], BufferKind::Broadcast)?;
-let particle_buf = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
+let params_buf = runtime.acquire_buffer_with_data(&[sim_params], BufferKind::Broadcast)?;
+let particle_buf = runtime.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
 
 let shader = ShaderModule::from_slang(&device, PARTICLE_UPDATE_SOURCE)?;
 let pipeline = ComputePipeline::new(&device, &shader)?;

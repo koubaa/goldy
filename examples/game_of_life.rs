@@ -9,8 +9,8 @@
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, ComputePipeline, Context, DeviceDescriptor, Init, Instance, Lease, LeaseRenderTarget,
-    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    field, Buffer, ComputePipeline, Context, Init, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
     ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
     VertexBufferLayout, WithdrawTransaction,
 };
@@ -284,7 +284,7 @@ impl RenderState {
         let device = Arc::new(
             instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

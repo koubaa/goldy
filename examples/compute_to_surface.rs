@@ -8,8 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange, PresentMode,
-    RequestAdapterOptions, Scheme, SurfaceConfig, SurfaceExchange, Texture, Transaction, WithdrawTransaction,
+    Buffer, BufferKind, DepositTarget, DepositTransaction, Instance, MemoryExchange, PresentMode,
+    RequestAdapterOptions, RuntimeDescriptor, Scheme, SurfaceConfig, SurfaceExchange, Texture, Transaction,
+    WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -102,11 +103,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Device, context, and compiled compute pipeline — everything except the window/surface.
+/// Runtime, context, and compiled compute pipeline — everything except the window/surface.
 struct GpuWarmup {
     ctx: goldy::Context,
     kernel: plasma::Kernel,
-    device: Arc<goldy::Device>,
+    device: Arc<goldy::Runtime>,
 }
 
 fn warm_gpu() -> Result<GpuWarmup> {
@@ -114,15 +115,11 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let device = Arc::new(
         instance
             .request_adapter(&RequestAdapterOptions::default())?
-            .request_device(&DeviceDescriptor::default())?,
+            .request_runtime(&RuntimeDescriptor::default())?,
     );
     let ctx = device.create_context()?;
     let kernel = plasma::Kernel::prepare(&device)?;
-    Ok(GpuWarmup {
-        ctx,
-        kernel,
-        device,
-    })
+    Ok(GpuWarmup { ctx, kernel, device })
 }
 
 #[derive(Default)]
@@ -160,15 +157,11 @@ fn record_scheme(
 ) -> Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
     if let Some(surface) = surface {
         let (lease, present) = surface.bind_destination(scheme)?;
-        kernel
-            .record(scheme, "compute", uniform, &lease)
-            .over_2d(width, height);
+        kernel.record(scheme, "compute", uniform, &lease).over_2d(width, height);
         Ok((Some(present), None))
     } else {
         let target = readback.expect("capture readback");
-        kernel
-            .record(scheme, "compute", uniform, target)
-            .over_2d(width, height);
+        kernel.record(scheme, "compute", uniform, target).over_2d(width, height);
         let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, target)?;
         Ok((None, Some(withdraw)))
     }

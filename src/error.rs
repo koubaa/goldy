@@ -8,7 +8,7 @@ pub enum GoldyError {
     /// The GPU device has been lost and cannot process further commands.
     ///
     /// Any resources associated with this device are now invalid. The caller
-    /// should drop the [`Device`](crate::Device) and re-create from a new
+    /// should drop the [`Runtime`](crate::Runtime) and re-create from a new
     /// [`Instance`](crate::Instance) if recovery is desired.
     #[error("GPU device lost")]
     DeviceLost,

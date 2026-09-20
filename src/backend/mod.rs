@@ -44,13 +44,13 @@ pub(crate) mod webgpu;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 
-pub(crate) use crate::device::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::handles::{
     AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
     RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, TextureHandle,
 };
 #[cfg(feature = "graphics")]
 pub(crate) use crate::handles::{SurfaceHandle, SwapchainImageHandle};
+pub(crate) use crate::runtime::{AdapterInfo, BufferHeapStats, TextureHeapStats, VideoMemoryInfo};
 pub(crate) use crate::texture::TextureCopyFootprint;
 
 /// Shared primitives reused across Vulkan, DX12, and Metal backends, and by
@@ -1140,12 +1140,12 @@ pub(crate) trait GpuBackend:
     fn enumerate_adapters(&self) -> Vec<AdapterInfo>;
 
     /// Immutable capability snapshot for a physical adapter (no logical device required).
-    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
         let _ = adapter_id;
-        crate::device::DeviceCapabilities::default()
+        crate::runtime::RuntimeCapabilities::default()
     }
 
-    // Device management
+    // Runtime management
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle>;
     fn destroy_device(&mut self, device: DeviceHandle);
     fn is_device_valid(&self, device: DeviceHandle) -> bool;
@@ -1188,7 +1188,7 @@ pub(crate) trait GpuBackend:
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///
     /// Backends set this flag atomically when they detect device loss so that
-    /// [`Device::is_device_lost`](crate::Device::is_device_lost) can be polled from the
+    /// [`Runtime::is_device_lost`](crate::Runtime::is_device_lost) can be polled from the
     /// render loop without acquiring any lock. The default returns `false` for
     /// backends that have not yet wired up the flag.
     fn is_device_lost(&self, _device: DeviceHandle) -> bool {
@@ -1890,7 +1890,7 @@ pub(crate) trait GpuBackend:
         0
     }
 
-    /// Device-level deferred deletions (bindless buffer/texture destroys that may span
+    /// Runtime-level deferred deletions (bindless buffer/texture destroys that may span
     /// contexts). Per-context [`Self::deferred_deletion_pending_count`] stays separate.
     #[doc(hidden)]
     fn device_deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {

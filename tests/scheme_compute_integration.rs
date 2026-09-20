@@ -11,13 +11,13 @@ mod imp {
     use crate::upload::write_to_parcel;
     use goldy::{
         types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
-        BackendType, BufferKind, ComputePipeline, DepositTarget, Device, DeviceDescriptor, Instance, MemoryExchange,
-        NodeAccess, Parcel, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
-        StructuredBufferElement, Submission, WithdrawTransaction,
+        BackendType, BufferKind, ComputePipeline, DepositTarget, Instance, MemoryExchange, NodeAccess, Parcel,
+        RequestAdapterOptions, Runtime, RuntimeDescriptor, Sampler, Scheme, ShaderModule, StructuredBufferElement,
+        Submission, WithdrawTransaction,
     };
     use std::sync::Arc;
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         if std::env::var("GOLDY_DX12_ALLOW_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
             let instance = Instance::new().expect("Failed to create instance");
@@ -25,7 +25,7 @@ mod imp {
                 power_preference: goldy::PowerPreference::None,
                 force_fallback_adapter: true,
             }) {
-                if let Ok(dev) = adapter.request_device(&DeviceDescriptor::default()) {
+                if let Ok(dev) = adapter.request_runtime(&RuntimeDescriptor::default()) {
                     return dev;
                 }
             }
@@ -35,12 +35,12 @@ mod imp {
         instance
             .request_adapter(&RequestAdapterOptions::default())
             .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("device")
     }
 
     fn test_alloc_texture(
-        device: &Device,
+        device: &Runtime,
         data: &[u8],
         width: u32,
         height: u32,
@@ -48,7 +48,7 @@ mod imp {
         access: TextureKind,
         flags: TextureFlags,
     ) -> goldy::Texture {
-        RetainedPool::new(Arc::new(device.clone()))
+        Arc::new(device.clone())
             .acquire_texture(width, height, format, access, flags, Some(data))
             .expect("acquire_texture")
     }
@@ -78,14 +78,14 @@ mod imp {
         bytemuck::cast_slice(&loan).to_vec()
     }
 
-    fn float4_storage_format(device: &Device) -> TextureFormat {
+    fn float4_storage_format(device: &Runtime) -> TextureFormat {
         match device.backend_type() {
             BackendType::Cuda | BackendType::WebGpu => TextureFormat::Rgba32Float,
             _ => TextureFormat::Rgba8Unorm,
         }
     }
 
-    fn assert_write_texture_red_pixel(device: &Device, output: &[u8]) {
+    fn assert_write_texture_red_pixel(device: &Runtime, output: &[u8]) {
         if matches!(device.backend_type(), BackendType::Cuda | BackendType::WebGpu) {
             let floats: &[f32] = bytemuck::cast_slice(output);
             assert_eq!(floats[0], 1.0, "R channel");
@@ -111,7 +111,7 @@ mod imp {
     }
 
     fn dispatch_u32_write_and_read(ctx: &goldy::Context, shader_src: &str, out: &Parcel, count: usize) -> Vec<u32> {
-        let device = ctx.device();
+        let device = ctx.runtime();
         let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
         let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
 
@@ -290,7 +290,7 @@ mod imp {
     /// `bias` stays a runtime read, and it has to keep arriving correctly after `factor` is
     /// baked — that is what proves the push-constant layout is unchanged, and therefore that a
     /// baked pipeline can be swapped under an already-recorded dispatch.
-    fn scheme_bakes_scalar_param_without_shader_cooperation(device: &Device) {
+    fn scheme_bakes_scalar_param_without_shader_cooperation(device: &Runtime) {
         use goldy::slang::virtual_main::scalar_specialization_macro;
 
         // This test swaps pipelines by hand and counts records; keep the predictor out of it.
@@ -305,7 +305,7 @@ mod imp {
         let universal = ComputePipeline::new(device, &universal_module).expect("universal pipeline");
         let baked = ComputePipeline::new(device, &baked_module).expect("baked pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let data = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("data buffer");
@@ -363,7 +363,7 @@ mod imp {
     /// The predictor, end to end: a dispatch whose scalar params hold still is moved onto a
     /// specialized program without anyone asking, computes exactly what it did before, and
     /// comes back to the caller's program the moment a baked param changes.
-    fn scheme_predictor_specializes_stable_params_transparently(device: &Device) {
+    fn scheme_predictor_specializes_stable_params_transparently(device: &Runtime) {
         let _spec = goldy::test_support::SpecializationOverride::force_enabled();
         let ctx = submission_context(&device);
         // WebGPU derives bind group layouts from shader usage, so goldy declines to predict
@@ -372,7 +372,7 @@ mod imp {
 
         let module = ShaderModule::from_slang(device, SCALED_BIAS_SHADER).expect("shader");
         let universal = ComputePipeline::new(device, &module).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let data = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("data buffer");
@@ -459,7 +459,7 @@ mod imp {
     /// End-to-end specialization: compile a variant from one module, swap it onto a recorded
     /// dispatch node, and confirm the GPU runs the new program while the rest of the scheme
     /// stays retained and keeps its record count.
-    fn scheme_specialized_variant_swap(device: &Device) {
+    fn scheme_specialized_variant_swap(device: &Runtime) {
         // This test swaps pipelines by hand and counts records; keep the predictor out of it.
         let _spec = goldy::test_support::SpecializationOverride::force_disabled();
         let ctx = submission_context(&device);
@@ -475,7 +475,7 @@ mod imp {
         let specialized = ComputePipeline::new(device, &specialized_module).expect("specialized pipeline");
         let fill_42 = ComputePipeline::new(device, &ShaderModule::from_slang(device, FILL_42_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let tinted = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("tinted buffer");
@@ -560,7 +560,7 @@ mod imp {
     // Migrated from task_graph_integration.rs
     // ---------------------------------------------------------------------------
 
-    fn scheme_graph_linear_chain(device: &Device) {
+    fn scheme_graph_linear_chain(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let double_pipe =
@@ -568,7 +568,7 @@ mod imp {
         let add_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .unwrap();
@@ -607,7 +607,7 @@ mod imp {
         }
     }
 
-    fn scheme_graph_independent_dispatches(device: &Device) {
+    fn scheme_graph_independent_dispatches(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe_42 =
@@ -615,7 +615,7 @@ mod imp {
         let pipe_99 =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_99_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf_a = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .unwrap();
@@ -649,7 +649,7 @@ mod imp {
         }
     }
 
-    fn scheme_graph_diamond_dependency(device: &Device) {
+    fn scheme_graph_diamond_dependency(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let fill_pipe = ComputePipeline::new(
@@ -661,7 +661,7 @@ mod imp {
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap()).unwrap();
         let sum_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, SUM_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .unwrap();
@@ -710,12 +710,12 @@ mod imp {
         }
     }
 
-    fn scheme_graph_fill_readback(device: &Device) {
+    fn scheme_graph_fill_readback(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .unwrap();
@@ -735,13 +735,13 @@ mod imp {
         }
     }
 
-    fn scheme_zeros_then_dispatch_reads_zeros(device: &Device) {
+    fn scheme_zeros_then_dispatch_reads_zeros(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&(1..=64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .unwrap();
@@ -768,13 +768,13 @@ mod imp {
         }
     }
 
-    fn scheme_write_then_dispatch_reads_uploaded_data(device: &Device) {
+    fn scheme_write_then_dispatch_reads_uploaded_data(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .unwrap();
@@ -802,14 +802,14 @@ mod imp {
         }
     }
 
-    fn scheme_stress_zeros_then_dispatch_large(device: &Device) {
+    fn scheme_stress_zeros_then_dispatch_large(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 16384;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&(1..=N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
             .unwrap();
@@ -838,7 +838,7 @@ mod imp {
         assert_eq!(nonzero_count, 0, "expected all zeros after zero write");
     }
 
-    fn scheme_stress_many_zero_writes_many_dispatches(device: &Device) {
+    fn scheme_stress_many_zero_writes_many_dispatches(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe =
@@ -846,7 +846,7 @@ mod imp {
 
         const N: usize = 1024;
         const NUM_BUFS: usize = 8;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
 
         let mut srcs = Vec::new();
         let mut outs = Vec::new();
@@ -890,14 +890,14 @@ mod imp {
         }
     }
 
-    fn scheme_stress_write_then_dispatch_chain(device: &Device) {
+    fn scheme_stress_write_then_dispatch_chain(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 1024;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&(1..=N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
             .unwrap();
@@ -925,7 +925,7 @@ mod imp {
         }
     }
 
-    fn scheme_stress_two_phase_submission(device: &Device) {
+    fn scheme_stress_two_phase_submission(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let double_pipe =
@@ -934,7 +934,7 @@ mod imp {
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
         const N: usize = 4096;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&(0..N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
             .unwrap();
@@ -971,14 +971,14 @@ mod imp {
         }
     }
 
-    fn scheme_stress_rapid_submissions(device: &Device) {
+    fn scheme_stress_rapid_submissions(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let add_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
         const N: usize = 256;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&vec![0u32; N], BufferKind::Scattered)
             .unwrap();
@@ -1017,7 +1017,7 @@ mod imp {
     // Migrated from compute_integration.rs
     // ---------------------------------------------------------------------------
 
-    fn scheme_compute_dispatch_empty(device: &Device) {
+    fn scheme_compute_dispatch_empty(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(
@@ -1031,7 +1031,7 @@ mod imp {
         scheme.submit().expect("submit");
     }
 
-    fn scheme_compute_write_and_readback(device: &Device) {
+    fn scheme_compute_write_and_readback(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(
@@ -1040,7 +1040,7 @@ mod imp {
         )
         .expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buffer = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("buffer");
@@ -1060,7 +1060,7 @@ mod imp {
         }
     }
 
-    fn scheme_compute_with_uav_parcel(device: &Device) {
+    fn scheme_compute_with_uav_parcel(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(
@@ -1069,7 +1069,7 @@ mod imp {
         )
         .expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buffer = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("buffer");
@@ -1089,7 +1089,7 @@ mod imp {
         }
     }
 
-    fn scheme_compute_with_srv_and_uav_parcels(device: &Device) {
+    fn scheme_compute_with_srv_and_uav_parcels(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(
@@ -1098,7 +1098,7 @@ mod imp {
         )
         .expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let input = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("input");
@@ -1122,10 +1122,10 @@ mod imp {
         assert_eq!(output_vals, input_vals, "copy must reproduce input in output");
     }
 
-    fn scheme_parcel_write_zeros_full(device: &Device) {
+    fn scheme_parcel_write_zeros_full(device: &Runtime) {
         let ctx = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("parcel");
@@ -1138,11 +1138,11 @@ mod imp {
         }
     }
 
-    fn scheme_parcel_write_zeros_partial(device: &Device) {
+    fn scheme_parcel_write_zeros_partial(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const SENTINEL: u32 = 0xDEAD_BEEF;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data(&vec![SENTINEL; 64], BufferKind::Scattered)
             .expect("parcel");
@@ -1160,11 +1160,11 @@ mod imp {
         }
     }
 
-    fn scheme_parcel_write_zeros_to_end(device: &Device) {
+    fn scheme_parcel_write_zeros_to_end(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const SENTINEL: u32 = 0xCAFE_BABE;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data(&vec![SENTINEL; 64], BufferKind::Scattered)
             .expect("parcel");
@@ -1182,7 +1182,7 @@ mod imp {
         }
     }
 
-    fn scheme_zeros_before_copy_dispatch(device: &Device) {
+    fn scheme_zeros_before_copy_dispatch(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(
@@ -1191,7 +1191,7 @@ mod imp {
         )
         .expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let input = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("input");
@@ -1219,7 +1219,7 @@ mod imp {
 
     /// GPU ordering: copy scheme writes 42s → `write_to_parcel` zeros output → increment scheme.
     /// Correct result is 1 (0 + 1). Cross-scheme serialization replaces in-graph `clear_buffer`.
-    fn scheme_write_to_parcel_zeros_between_submissions(device: &Device) {
+    fn scheme_write_to_parcel_zeros_between_submissions(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe = ComputePipeline::new(
@@ -1233,7 +1233,7 @@ mod imp {
         )
         .expect("inc pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let input = pool
             .acquire_buffer_with_data(&vec![42u32; 64], BufferKind::Scattered)
             .expect("input");
@@ -1285,7 +1285,7 @@ mod imp {
 
     /// Cross-scheme ordering: an upload micro-scheme may return its [`Submission`] without
     /// waiting; the next worker [`Scheme::submit`] on the same context still sees the upload.
-    fn scheme_upload_frame_unwaited_serializes_before_worker_submit(device: &Device) {
+    fn scheme_upload_frame_unwaited_serializes_before_worker_submit(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe = ComputePipeline::new(
@@ -1294,7 +1294,7 @@ mod imp {
         )
         .expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let input = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("input");
@@ -1326,7 +1326,7 @@ mod imp {
         }
     }
 
-    fn scheme_compute_many_resource_slots(device: &Device) {
+    fn scheme_compute_many_resource_slots(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let pipe = ComputePipeline::new(
@@ -1336,7 +1336,7 @@ mod imp {
         .expect("pipeline");
 
         const N: usize = 16;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let a = pool
             .acquire_buffer_with_data(&[1u32; N], BufferKind::Scattered)
             .expect("a");
@@ -1377,7 +1377,7 @@ mod imp {
         }
     }
 
-    fn scheme_regular_buffer_write_then_copy(device: &Device) {
+    fn scheme_regular_buffer_write_then_copy(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let write_pipe = ComputePipeline::new(
@@ -1394,7 +1394,7 @@ mod imp {
         const N: usize = 64;
         let byte_size = N * 4;
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let scratch = pool
             .acquire_buffer(
                 byte_size as u64,
@@ -1434,7 +1434,7 @@ mod imp {
         assert_eq!(read_grant_u32(&grant, &mut frame, N), expected);
     }
 
-    fn scheme_transient_buffer_write_then_copy(device: &Device) {
+    fn scheme_transient_buffer_write_then_copy(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let write_pipe = ComputePipeline::new(
@@ -1451,7 +1451,7 @@ mod imp {
         const N: usize = 64;
         let byte_size = (N * 4) as u64;
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let mut output = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("output");
@@ -1496,7 +1496,7 @@ mod imp {
     /// each reuse the same physical backing *across* submissions once the prior epoch retires
     /// (pool high-water recycling). This test verifies that cross-submission correctness:
     /// each scheme observes only its own writes and the outputs are independent.
-    fn scheme_transient_buffer_recycling(device: &Device) {
+    fn scheme_transient_buffer_recycling(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let iota_pipe = ComputePipeline::new(
@@ -1518,7 +1518,7 @@ mod imp {
         const N: usize = 64;
         let byte_size = (N * 4) as u64;
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let output_a = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("output_a");
@@ -1822,7 +1822,7 @@ mod imp {
     }
     "#;
 
-    fn scheme_compute_with_struct_buffer(device: &Device) {
+    fn scheme_compute_with_struct_buffer(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let shader = ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("compile shader");
@@ -1844,7 +1844,7 @@ mod imp {
             4
         ];
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buffer = pool
             .acquire_buffer_with_data(&particles, BufferKind::Scattered)
             .expect("buffer");
@@ -1868,7 +1868,7 @@ mod imp {
     "#;
 
     /// [`BufferFlags::CPU_READABLE`] is a medium hint — grant readback uses the same path as any buffer parcel.
-    fn scheme_cpu_readable_compute_write_and_read(device: &Device) {
+    fn scheme_cpu_readable_compute_write_and_read(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
@@ -1877,7 +1877,7 @@ mod imp {
         const N: usize = 64;
         let initial: Vec<u32> = (0..N as u32).collect();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buffer = pool
             .acquire_buffer_with_data_and_flags(&initial, BufferKind::Scattered, BufferFlags::CPU_READABLE)
             .expect("buffer");
@@ -1898,14 +1898,14 @@ mod imp {
     }
 
     /// CPU-visible data uploaded via [`write_to_parcel`] round-trips through grant readback.
-    fn scheme_cpu_readable_write_to_parcel_roundtrip(device: &Device) {
+    fn scheme_cpu_readable_write_to_parcel_roundtrip(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const N: usize = 16;
         let initial: Vec<u32> = vec![0xABCD_1234u32; N];
         let new_values: Vec<u32> = (100..100 + N as u32).collect();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data_and_flags(&initial, BufferKind::Scattered, BufferFlags::CPU_READABLE)
             .expect("parcel");
@@ -1917,7 +1917,7 @@ mod imp {
         }
     }
 
-    fn scheme_scattered_typed_variable_assignment(device: &Device) {
+    fn scheme_scattered_typed_variable_assignment(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let shader = ShaderModule::from_slang(&device, TYPED_PAIR_SHADER).expect("compile shader");
@@ -1932,7 +1932,7 @@ mod imp {
         impl StructuredBufferElement for Pair {}
 
         let input_data: Vec<Pair> = (0..8).map(|i| Pair { a: i + 1, b: i + 10 }).collect();
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let input = pool
             .acquire_buffer_with_data(&input_data, BufferKind::Scattered)
             .expect("input");
@@ -1963,7 +1963,7 @@ mod imp {
         }
     }
 
-    fn scheme_compute_write_to_texture(device: &Device) {
+    fn scheme_compute_write_to_texture(device: &Runtime) {
         let ctx = submission_context(&device);
         let format = float4_storage_format(device);
 
@@ -1975,7 +1975,7 @@ mod imp {
         let wg_x = width.div_ceil(8);
         let wg_y = height.div_ceil(8);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let texture = pool
             .acquire_texture(width, height, format, TextureKind::Direct, TextureFlags::COPY_SRC, None)
             .expect("texture");
@@ -1997,9 +1997,9 @@ mod imp {
         assert_write_texture_red_pixel(device, output);
     }
 
-    /// Verify that a [`goldy::Texture`] from [`RetainedPool`] can be bound via
+    /// Verify that a [`goldy::Texture`] from [`Runtime`] can be bound via
     /// [`goldy::scheme::SchemeNodeBuilder::with_parcel`] using its parcel stamp.
-    fn scheme_with_parcel_raw_texture(device: &Device) {
+    fn scheme_with_parcel_raw_texture(device: &Runtime) {
         let ctx = submission_context(&device);
         let format = float4_storage_format(device);
 
@@ -2052,9 +2052,9 @@ mod imp {
         );
     }
 
-    fn scheme_wave_inclusive_scan_uniform_64(device: &Device) {
+    fn scheme_wave_inclusive_scan_uniform_64(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2064,9 +2064,9 @@ mod imp {
         }
     }
 
-    fn scheme_wave_inclusive_scan_ramp_64(device: &Device) {
+    fn scheme_wave_inclusive_scan_ramp_64(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2078,9 +2078,9 @@ mod imp {
         }
     }
 
-    fn scheme_wave_inclusive_scan_uniform_256(device: &Device) {
+    fn scheme_wave_inclusive_scan_uniform_256(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(256 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2090,9 +2090,9 @@ mod imp {
         }
     }
 
-    fn scheme_workgroup_reduce_uint_correct(device: &Device) {
+    fn scheme_workgroup_reduce_uint_correct(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2100,9 +2100,9 @@ mod imp {
         assert_eq!(result[0], 64, "workgroup_reduce thread 0");
     }
 
-    fn scheme_workgroup_inclusive_scan_uint_correct(device: &Device) {
+    fn scheme_workgroup_inclusive_scan_uint_correct(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2112,9 +2112,9 @@ mod imp {
         }
     }
 
-    fn scheme_workgroup_broadcast_correct(device: &Device) {
+    fn scheme_workgroup_broadcast_correct(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2124,9 +2124,9 @@ mod imp {
         }
     }
 
-    fn scheme_workgroup_upper_bound_linear(device: &Device) {
+    fn scheme_workgroup_upper_bound_linear(device: &Runtime) {
         let ctx = submission_context(&device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2136,7 +2136,7 @@ mod imp {
         }
     }
 
-    fn scheme_texture_dual_view_round_trip(device: &Device) {
+    fn scheme_texture_dual_view_round_trip(device: &Runtime) {
         const W: u32 = 4;
         const H: u32 = 4;
         const N: usize = (W * H) as usize;
@@ -2144,7 +2144,7 @@ mod imp {
         let ctx = submission_context(&device);
         let format = float4_storage_format(device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let tex = pool
             .acquire_texture(
                 W,
@@ -2200,14 +2200,14 @@ mod imp {
         }
     }
 
-    fn scheme_two_contexts_both_submit_and_complete(device: &Device) {
+    fn scheme_two_contexts_both_submit_and_complete(device: &Runtime) {
         let ctx_a = submission_context(&device);
         let ctx_b = submission_context(&device);
 
         let shader = ShaderModule::from_slang(&device, IN_PLACE_DOUBLE_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf_a = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("buf_a");
@@ -2243,11 +2243,11 @@ mod imp {
         }
     }
 
-    fn scheme_two_contexts_reclaim_independently(device: &Device) {
+    fn scheme_two_contexts_reclaim_independently(device: &Runtime) {
         let ctx_a = submission_context(&device);
         let _ctx_b = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");
@@ -2276,7 +2276,7 @@ mod imp {
     /// on the staging belt handing out independent staging regions for the two uploads
     /// (tagged with each scheme's timeline value) and not recycling the first region
     /// until the first submission's GPU work has completed.
-    fn scheme_deposit_buffer_reuse_across_submissions(device: &Device) {
+    fn scheme_deposit_buffer_reuse_across_submissions(device: &Runtime) {
         const N: usize = 16;
 
         let ctx = submission_context(&device);
@@ -2287,7 +2287,7 @@ mod imp {
         )
         .expect("pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let mid = pool
             .acquire_buffer(
                 (N * core::mem::size_of::<u32>()) as u64,
@@ -2370,7 +2370,7 @@ mod imp {
     // Migrated from compute_integration.rs — uniform scalar params via with_param
     // ---------------------------------------------------------------------------
 
-    fn scheme_uniform_param_uint_roundtrip(device: &Device) {
+    fn scheme_uniform_param_uint_roundtrip(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2383,7 +2383,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2402,7 +2402,7 @@ mod imp {
         assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], EXPECTED);
     }
 
-    fn scheme_uniform_param_uint_zero(device: &Device) {
+    fn scheme_uniform_param_uint_zero(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2415,7 +2415,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer_with_data(&[0xDEAD_BEEFu32], BufferKind::Scattered)
             .expect("out");
@@ -2433,7 +2433,7 @@ mod imp {
         assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], 0);
     }
 
-    fn scheme_uniform_param_uint_max(device: &Device) {
+    fn scheme_uniform_param_uint_max(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2446,7 +2446,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2464,7 +2464,7 @@ mod imp {
         assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], u32::MAX);
     }
 
-    fn scheme_uniform_param_float_reinterpret(device: &Device) {
+    fn scheme_uniform_param_float_reinterpret(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2477,7 +2477,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2499,7 +2499,7 @@ mod imp {
         assert_eq!(read_grant_u32(&grant, &mut submission, 1)[0], bits);
     }
 
-    fn scheme_uniform_two_independent_scalar_params(device: &Device) {
+    fn scheme_uniform_two_independent_scalar_params(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2513,7 +2513,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let out = pool
             .acquire_buffer(8, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("out");
@@ -2537,7 +2537,7 @@ mod imp {
         assert_eq!(result[1], B);
     }
 
-    fn scheme_uniform_scalar_after_two_buffer_params(device: &Device) {
+    fn scheme_uniform_scalar_after_two_buffer_params(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2553,7 +2553,7 @@ mod imp {
 
         const N: usize = 64;
         let input: Vec<u32> = (0..N as u32).collect();
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let inp = pool
             .acquire_buffer_with_data(&input, BufferKind::Scattered)
             .expect("inp");
@@ -2579,7 +2579,7 @@ mod imp {
         assert_eq!(result, expected);
     }
 
-    fn scheme_dispatch_batch_distinct_scalars(device: &Device) {
+    fn scheme_dispatch_batch_distinct_scalars(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
     [goldy_compute]
@@ -2592,7 +2592,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let a = pool
             .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("a");
@@ -2627,7 +2627,7 @@ mod imp {
     // ---------------------------------------------------------------------------
 
     /// Two fields in one buffer. Shader copies from field A to field B.
-    fn scheme_buffer_view_copy_between_sub_regions(device: &Device) {
+    fn scheme_buffer_view_copy_between_sub_regions(device: &Runtime) {
         use goldy::{ordinal, Init};
 
         let ctx = submission_context(&device);
@@ -2645,7 +2645,7 @@ mod imp {
         }
         let dst = vec![0u32; N];
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let cells = pool
             .acquire_record([ordinal(Init::data(&src)), ordinal(Init::data(&dst))])
             .expect("acquire_record");
@@ -2675,7 +2675,7 @@ mod imp {
     }
 
     /// Shader doubles values in one field — the sibling field must be untouched.
-    fn scheme_buffer_view_isolation(device: &Device) {
+    fn scheme_buffer_view_isolation(device: &Runtime) {
         use goldy::{ordinal, Init};
 
         let ctx = submission_context(&device);
@@ -2693,7 +2693,7 @@ mod imp {
             *slot = (i + 1) as u32;
         }
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let cells = pool
             .acquire_record([ordinal(Init::data(&sentinel)), ordinal(Init::data(&work))])
             .expect("acquire_record");
@@ -2747,7 +2747,7 @@ mod imp {
     "#;
 
     /// Producer writes `DispatchShape{4,1,1}`; consumer `dispatch(&shape)` doubles 256 values.
-    fn scheme_compute_dispatch_indirect(device: &Device) {
+    fn scheme_compute_dispatch_indirect(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let write_pipe = ComputePipeline::new(
@@ -2762,7 +2762,7 @@ mod imp {
         .expect("create work pipeline");
 
         const N: usize = 256;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let shape = pool
             .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
             .expect("shape buffer");
@@ -2792,7 +2792,7 @@ mod imp {
     }
 
     /// Indirect dispatch fails when the shape parcel's backing buffer was released before submit.
-    fn scheme_dispatch_indirect_invalid_buffer(device: &Device) {
+    fn scheme_dispatch_indirect_invalid_buffer(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let work_pipe = ComputePipeline::new(
@@ -2801,7 +2801,7 @@ mod imp {
         )
         .expect("create work pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let work = pool
             .acquire_buffer_with_data(&vec![1u32; 64], BufferKind::Scattered)
             .expect("work buffer");
@@ -2824,7 +2824,7 @@ mod imp {
     }
 
     /// Non-`DispatchShape` parcels are rejected at scheme-build time.
-    fn scheme_dispatch_indirect_wrong_type_rejected(device: &Device) {
+    fn scheme_dispatch_indirect_wrong_type_rejected(device: &Runtime) {
         let _ctx = submission_context(&device);
 
         let work_pipe = ComputePipeline::new(
@@ -2833,7 +2833,7 @@ mod imp {
         )
         .expect("create work pipeline");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let shape = pool
             .acquire_buffer_sized::<u32>(3, BufferKind::Scattered, BufferFlags::empty())
             .expect("u32 buffer standing in for shape");
@@ -2855,7 +2855,7 @@ mod imp {
     }
 
     /// Zero-fill via upload, then producer-written indirect shape, then copy dispatch.
-    fn scheme_stress_zeros_then_indirect_dispatch(device: &Device) {
+    fn scheme_stress_zeros_then_indirect_dispatch(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let write_pipe = ComputePipeline::new(
@@ -2870,7 +2870,7 @@ mod imp {
         .expect("create copy pipeline");
 
         const N: usize = 256;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let shape = pool
             .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
             .expect("shape buffer");
@@ -2917,14 +2917,14 @@ mod imp {
     ///
     /// Because the scheme contains deposit copy nodes it is never retained — it
     /// records fresh on every `submit()`.
-    fn scheme_stress_alternating_write_dispatch(device: &Device) {
+    fn scheme_stress_alternating_write_dispatch(device: &Runtime) {
         let ctx = submission_context(&device);
 
         let copy_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 256;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .unwrap();
@@ -2983,12 +2983,12 @@ mod imp {
 
     // ─── clear_parcel ─────────────────────────────────────────────────────
 
-    fn scheme_clear_parcel_full(device: &Device) {
+    fn scheme_clear_parcel_full(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const N: usize = 64;
         let byte_size = (N * 4) as u64;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; N], BufferKind::Scattered)
             .expect("buf");
@@ -3006,7 +3006,7 @@ mod imp {
         }
     }
 
-    fn scheme_clear_parcel_partial_preserves_edges(device: &Device) {
+    fn scheme_clear_parcel_partial_preserves_edges(device: &Runtime) {
         let ctx = submission_context(&device);
 
         // 64 u32s: indices [0..16] = 0xAAAA, [16..48] = 0xBBBB (to be cleared), [48..64] = 0xCCCC
@@ -3022,7 +3022,7 @@ mod imp {
             }
         }
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&init, BufferKind::Scattered)
             .expect("buf");
@@ -3053,14 +3053,14 @@ mod imp {
         }
     }
 
-    fn scheme_clear_parcel_size_zero_fills_to_end(device: &Device) {
+    fn scheme_clear_parcel_size_zero_fills_to_end(device: &Runtime) {
         let ctx = submission_context(&device);
 
         // 64 u32s: first 16 stay, rest cleared via size=0 (fill-to-end).
         const N: usize = 64;
         let init: Vec<u32> = (0..N as u32).collect();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&init, BufferKind::Scattered)
             .expect("buf");
@@ -3085,10 +3085,10 @@ mod imp {
         }
     }
 
-    fn scheme_clear_parcel_requires_buffer_parcel(device: &Device) {
+    fn scheme_clear_parcel_requires_buffer_parcel(device: &Runtime) {
         let ctx = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let tex_parcel = pool
             .acquire_texture(
                 4,
@@ -3107,12 +3107,12 @@ mod imp {
 
     // ─── copy_buffer_parcel ───────────────────────────────────────────────────────
 
-    fn scheme_copy_buffer_parcel_basic(device: &Device) {
+    fn scheme_copy_buffer_parcel_basic(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const N: usize = 64;
         let byte_size = (N * 4) as u64;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&(1..=N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("src");
@@ -3135,13 +3135,13 @@ mod imp {
         }
     }
 
-    fn scheme_copy_buffer_parcel_partial_with_offsets(device: &Device) {
+    fn scheme_copy_buffer_parcel_partial_with_offsets(device: &Runtime) {
         let ctx = submission_context(&device);
 
         // src: 64 u32s [0..63]. Copy src[16..32] (bytes 64..128) into dst[0..16].
         const N_SRC: usize = 64;
         const N_DST: usize = 16;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&(0..N_SRC as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("src");
@@ -3171,10 +3171,10 @@ mod imp {
         }
     }
 
-    fn scheme_copy_buffer_parcel_rejects_texture_src(device: &Device) {
+    fn scheme_copy_buffer_parcel_rejects_texture_src(device: &Runtime) {
         let ctx = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let tex = pool
             .acquire_texture(
                 4,
@@ -3194,10 +3194,10 @@ mod imp {
         assert!(result.is_err(), "copy_buffer_parcel should reject texture as src");
     }
 
-    fn scheme_copy_buffer_parcel_rejects_texture_dst(device: &Device) {
+    fn scheme_copy_buffer_parcel_rejects_texture_dst(device: &Runtime) {
         let ctx = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");
@@ -3217,12 +3217,12 @@ mod imp {
         assert!(result.is_err(), "copy_buffer_parcel should reject texture as dst");
     }
 
-    fn scheme_copy_buffer_parcel_resubmit_does_not_rerecord(device: &Device) {
+    fn scheme_copy_buffer_parcel_resubmit_does_not_rerecord(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const N: usize = 64;
         let byte_size = (N * 4) as u64;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&(0..N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("src");
@@ -3272,7 +3272,7 @@ mod imp {
     /// recorded copy without a Metal blit+wait on the write path (see `Buffer::write` /
     /// `BufferFlags::CPU_WRITABLE`). Distinct from the CPU→CPU roundtrip in
     /// `compute_integration::test_cpu_writable_write_read_roundtrip`.
-    fn scheme_cpu_writable_staging_write_then_copy(device: &Device) {
+    fn scheme_cpu_writable_staging_write_then_copy(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const N: usize = 64;
@@ -3280,7 +3280,7 @@ mod imp {
         let data: Vec<u32> = (0xABC0_0000u32..).take(N).collect();
         let bytes: Vec<u8> = bytemuck::cast_slice(&data).to_vec();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         // Staging buffer: CPU-writable, written via parcel.write() before each submit.
         let staging = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
@@ -3306,7 +3306,7 @@ mod imp {
         }
     }
 
-    fn scheme_cpu_writable_staging_update_each_frame(device: &Device) {
+    fn scheme_cpu_writable_staging_update_each_frame(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const N: usize = 64;
@@ -3316,7 +3316,7 @@ mod imp {
         let bytes1: Vec<u8> = bytemuck::cast_slice(&data1).to_vec();
         let bytes2: Vec<u8> = bytemuck::cast_slice(&data2).to_vec();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let staging = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
             .expect("staging");
@@ -3363,7 +3363,7 @@ mod imp {
 
     // ─── write_texture ─────────────────────────────────────────────────────
 
-    fn scheme_write_texture_round_trip(device: &Device) {
+    fn scheme_write_texture_round_trip(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const W: u32 = 8;
@@ -3404,7 +3404,7 @@ mod imp {
         );
     }
 
-    fn scheme_write_texture_wrong_size_returns_error(device: &Device) {
+    fn scheme_write_texture_wrong_size_returns_error(device: &Runtime) {
         let ctx = submission_context(&device);
         let texture = test_alloc_texture(
             &device,
@@ -3429,7 +3429,7 @@ mod imp {
         assert!(result2.is_err(), "deposit write should reject oversized data");
     }
 
-    fn scheme_write_texture_marks_scheme_dirty(device: &Device) {
+    fn scheme_write_texture_marks_scheme_dirty(device: &Runtime) {
         let ctx = submission_context(&device);
         let texture = test_alloc_texture(
             &device,
@@ -3460,7 +3460,7 @@ mod imp {
 
     // ─── write_texture_region ─────────────────────────────────────────────
 
-    fn scheme_write_texture_region_round_trip(device: &Device) {
+    fn scheme_write_texture_region_round_trip(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const W: u32 = 8;
@@ -3519,7 +3519,7 @@ mod imp {
         }
     }
 
-    fn scheme_write_texture_region_oob_returns_error(device: &Device) {
+    fn scheme_write_texture_region_oob_returns_error(device: &Runtime) {
         let ctx = submission_context(&device);
         let texture = test_alloc_texture(
             &device,
@@ -3541,7 +3541,7 @@ mod imp {
         assert!(result2.is_err(), "y+height exceeds texture height → error");
     }
 
-    fn scheme_write_texture_region_multiple_non_overlapping(device: &Device) {
+    fn scheme_write_texture_region_multiple_non_overlapping(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const W: u32 = 8;
@@ -3607,7 +3607,7 @@ mod imp {
 
     // ─── copy_texture_region ───────────────────────────────────────────────────
 
-    fn scheme_copy_texture_region_offset_preserves_untouched(device: &Device) {
+    fn scheme_copy_texture_region_offset_preserves_untouched(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const SW: u32 = 4;
@@ -3663,7 +3663,7 @@ mod imp {
         }
     }
 
-    fn scheme_copy_texture_region_validation_failures(device: &Device) {
+    fn scheme_copy_texture_region_validation_failures(device: &Runtime) {
         let ctx = submission_context(&device);
         let a = test_alloc_texture(
             &device,
@@ -3702,7 +3702,7 @@ mod imp {
         );
     }
 
-    fn scheme_copy_texture_region_then_worker_read_orders(device: &Device) {
+    fn scheme_copy_texture_region_then_worker_read_orders(device: &Runtime) {
         // Upload-scheme region copy then a second scheme withdraw must observe the written
         // pixels (cross-scheme parcel ledger ordering).
         let ctx = submission_context(&device);
@@ -3745,7 +3745,7 @@ mod imp {
 
     // ─── copy_buffer_to_texture_parcel ───────────────────────────────────────────
 
-    fn scheme_copy_buffer_to_texture_parcel_full_texture(device: &Device) {
+    fn scheme_copy_buffer_to_texture_parcel_full_texture(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const W: u32 = 4;
@@ -3762,7 +3762,7 @@ mod imp {
             .collect();
 
         // CPU-writable staging buffer.
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let staging = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
             .expect("staging");
@@ -3796,10 +3796,10 @@ mod imp {
         );
     }
 
-    fn scheme_copy_buffer_to_texture_parcel_oob_returns_error(device: &Device) {
+    fn scheme_copy_buffer_to_texture_parcel_oob_returns_error(device: &Runtime) {
         let ctx = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let staging = pool
             .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
             .expect("staging");
@@ -3822,10 +3822,10 @@ mod imp {
         assert!(result2.is_err(), "y+height exceeds texture height → error");
     }
 
-    fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src(device: &Device) {
+    fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src(device: &Runtime) {
         let ctx = submission_context(&device);
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         // Use a texture parcel (not a buffer) as the src — should error.
         let tex_parcel = pool
             .acquire_texture(
@@ -3855,7 +3855,7 @@ mod imp {
         );
     }
 
-    fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained(device: &Device) {
+    fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const W: u32 = 4;
@@ -3863,7 +3863,7 @@ mod imp {
         let byte_size = (W * H * 4) as u64;
         let pixels = vec![128u8; byte_size as usize];
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let staging = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
             .expect("staging");
@@ -3911,7 +3911,7 @@ mod imp {
     /// layout-settle re-record. Aspirational layout-settle re-recording is described in
     /// `partition_copy_texture_layout_fingerprint` comments but is not wired through the
     /// `ir_clean` sticky-key path.
-    fn scheme_copy_buffer_to_texture_pitched_resubmit_is_retained(device: &Device) {
+    fn scheme_copy_buffer_to_texture_pitched_resubmit_is_retained(device: &Runtime) {
         let ctx = submission_context(&device);
 
         const W: u32 = 4;
@@ -3929,7 +3929,7 @@ mod imp {
         let tight_len = (W * H * 4) as usize;
         let pixels = vec![128u8; tight_len];
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let staging = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
             .expect("staging");
@@ -4007,8 +4007,8 @@ mod imp {
         shared: goldy::Buffer,
     }
 
-    fn cross_retention_buffers(device: &Device) -> CrossRetentionBuffers {
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    fn cross_retention_buffers(device: &Runtime) -> CrossRetentionBuffers {
+        let pool = &device;
         let input = pool
             .acquire_buffer_with_data(
                 &(0..CROSS_RETENTION_ELEMS as u32).collect::<Vec<_>>(),
@@ -4021,7 +4021,7 @@ mod imp {
         CrossRetentionBuffers { input, shared }
     }
 
-    fn cross_retention_copy_pipeline(device: &Device) -> ComputePipeline {
+    fn cross_retention_copy_pipeline(device: &Runtime) -> ComputePipeline {
         let shader = ShaderModule::from_slang(device, COPY_SHADER).expect("shader");
         ComputePipeline::new(device, &shader).expect("pipeline")
     }
@@ -4073,7 +4073,7 @@ mod imp {
     /// against this foreign read, which the worker must resolve with a baked prologue
     /// barrier — forcing exactly one topology-driven re-record.
     fn cross_retention_copy_reader(ctx: &goldy::Context, shared: &goldy::Buffer) -> (Scheme, goldy::Buffer) {
-        let mut pool = RetainedPool::new(Arc::new(ctx.device().clone()));
+        let pool = ctx.runtime();
         let dst = pool
             .acquire_buffer_with_data(&vec![0u32; CROSS_RETENTION_ELEMS], BufferKind::Scattered)
             .expect("copy reader dst");
@@ -4140,7 +4140,7 @@ mod imp {
     /// every frame never dirties the writer's topology. Cross-submit ordering is handled by
     /// the *reader's* own lease/wait, not by a baked prologue barrier in the worker's CB, so
     /// the worker records exactly once and resubmits thereafter.
-    fn cross_scheme_grant_read_reader_is_topology_invisible(device: &Device) {
+    fn cross_scheme_grant_read_reader_is_topology_invisible(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4159,7 +4159,7 @@ mod imp {
     /// A topology-visible foreign reader (`copy_buffer_parcel` of the shared parcel) forces
     /// exactly one worker topology record, then the worker resubmits (mirrors a
     /// worker + texture readback path that produces `records == 2`).
-    fn cross_scheme_copy_reader_forces_one_topology_record(device: &Device) {
+    fn cross_scheme_copy_reader_forces_one_topology_record(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4176,7 +4176,7 @@ mod imp {
     }
 
     /// Write + grant-read in one scheme: no foreign topology edge, so one record only.
-    fn single_scheme_write_then_readback_records_once(device: &Device) {
+    fn single_scheme_write_then_readback_records_once(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4215,7 +4215,7 @@ mod imp {
     }
 
     /// `grant_read` steady state stays at one record for many frames (no thrash, no drift).
-    fn cross_scheme_grant_reader_steady_state_stays_at_one(device: &Device) {
+    fn cross_scheme_grant_reader_steady_state_stays_at_one(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4233,7 +4233,7 @@ mod imp {
 
     /// After the one-time topology refresh (topology-visible copy reader), additional frames
     /// must not re-record.
-    fn cross_scheme_copy_reader_steady_state_does_not_thrash(device: &Device) {
+    fn cross_scheme_copy_reader_steady_state_does_not_thrash(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4250,7 +4250,7 @@ mod imp {
     }
 
     /// A foreign writer on the shared parcel causes the same one-time topology record.
-    fn cross_scheme_foreign_writer_forces_one_topology_record(device: &Device) {
+    fn cross_scheme_foreign_writer_forces_one_topology_record(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4278,7 +4278,7 @@ mod imp {
     ///
     /// What is order-*independent* is the steady state: after warmup the worker stops
     /// re-recording and resubmits its retained command buffer.
-    fn cross_scheme_submit_order_steady_state_is_stable(device: &Device) {
+    fn cross_scheme_submit_order_steady_state_is_stable(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
 
@@ -4327,7 +4327,7 @@ mod imp {
 
     /// Two topology-visible foreign readers on the same parcel still cost the worker only one
     /// topology record (the interaction set gains *the parcel*, not per-reader edges).
-    fn cross_scheme_two_foreign_copy_readers_record_once_then_stable(device: &Device) {
+    fn cross_scheme_two_foreign_copy_readers_record_once_then_stable(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4354,7 +4354,7 @@ mod imp {
     /// over-conservative execution/memory dependency is harmless — so the worker keeps
     /// resubmitting without a fresh record. Scheme teardown is therefore a no-op for peer
     /// retention, which is the cheap and safe choice (no thrash on transient observers).
-    fn cross_scheme_copy_reader_disappearing_does_not_re_dirty(device: &Device) {
+    fn cross_scheme_copy_reader_disappearing_does_not_re_dirty(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4397,7 +4397,7 @@ mod imp {
 
     /// Disjoint parcels: a topology-visible foreign reader on an unrelated parcel must not
     /// perturb worker retention.
-    fn cross_scheme_disjoint_parcels_never_cross_dirty(device: &Device) {
+    fn cross_scheme_disjoint_parcels_never_cross_dirty(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let worker_buffers = cross_retention_buffers(&device);
@@ -4425,7 +4425,7 @@ mod imp {
     /// the worker invisible (records == 1); once a *copy* reader of the same parcel appears,
     /// the worker takes exactly one topology record (records == 2). This pins the precise
     /// semantic boundary between the transient-lease path and the transfer-node path.
-    fn cross_scheme_grant_then_copy_reader_boundary(device: &Device) {
+    fn cross_scheme_grant_then_copy_reader_boundary(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4469,7 +4469,7 @@ mod imp {
     /// data. It does not: cross-submit ordering for the lease is enforced on the *reader's*
     /// submission (a wait on the worker's last write of the parcel), so each frame's loan
     /// reflects the worker's latest output while the worker stays at a single record.
-    fn cross_scheme_grant_read_observes_worker_writes_without_re_record(device: &Device) {
+    fn cross_scheme_grant_read_observes_worker_writes_without_re_record(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4494,7 +4494,7 @@ mod imp {
     }
 
     /// Retained worker output stays correct after the topology refresh frame.
-    fn cross_scheme_retained_worker_after_foreign_reader_reads_correct_values(device: &Device) {
+    fn cross_scheme_retained_worker_after_foreign_reader_reads_correct_values(device: &Runtime) {
         let ctx = submission_context(&device);
         let pipeline = cross_retention_copy_pipeline(&device);
         let buffers = cross_retention_buffers(&device);
@@ -4519,9 +4519,9 @@ mod imp {
     const CROSS_RETENTION_TEX_W: u32 = 16;
     const CROSS_RETENTION_TEX_H: u32 = 16;
 
-    fn cross_retention_texture(device: &Device) -> goldy::Texture {
+    fn cross_retention_texture(device: &Runtime) -> goldy::Texture {
         let format = float4_storage_format(device);
-        RetainedPool::new(Arc::new(device.clone()))
+        Arc::new(device.clone())
             .acquire_texture(
                 CROSS_RETENTION_TEX_W,
                 CROSS_RETENTION_TEX_H,
@@ -4568,7 +4568,7 @@ mod imp {
     /// settle to `GENERAL` (see `texture.rs::settled_shader_read_layout`). This test guards
     /// against a regression of that crash. Withdraw is topology-invisible, so the worker
     /// records once (bootstrap only) — unlike the old `copy_texture` reader.
-    fn cross_scheme_texture_readback_retained_loop_records_twice(device: &Device) {
+    fn cross_scheme_texture_readback_retained_loop_records_twice(device: &Runtime) {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("texture pipeline");
@@ -4612,7 +4612,7 @@ mod imp {
     /// Covered on every enabled backend feature (`metal`, `vulkan`, `dx12`). Locally we
     /// typically only have Metal; run with `--features vulkan` / `--features dx12` on a
     /// machine that has those drivers to confirm stamp retirement on those paths.
-    fn scheme_return_transient_texture_invalidates_retained_scheme(device: &Device) {
+    fn scheme_return_transient_texture_invalidates_retained_scheme(device: &Runtime) {
         let ctx = submission_context(&device);
         let format = float4_storage_format(device);
         let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
@@ -4640,11 +4640,11 @@ mod imp {
     }
 
     /// CUDA rejects BGRA array formats (no channel swizzle matching Goldy).
-    fn cuda_rejects_bgra_texture(device: &Device) {
+    fn cuda_rejects_bgra_texture(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
-        let err = RetainedPool::new(Arc::new(device.clone())).acquire_texture(
+        let err = device.acquire_texture(
             4,
             4,
             TextureFormat::Bgra8Unorm,
@@ -4661,7 +4661,7 @@ mod imp {
     }
 
     /// CUDA `DirectSpatial<float4>` + `Rgba8Unorm` uses a specialized pack/unpack surface view.
-    fn cuda_float4_writes_rgba8_unorm(device: &Device) {
+    fn cuda_float4_writes_rgba8_unorm(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -4670,7 +4670,7 @@ mod imp {
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let width = 8u32;
         let height = 8u32;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let texture = pool
             .acquire_texture(
                 width,
@@ -4698,7 +4698,7 @@ mod imp {
     }
 
     /// Load/modify/store through the float4↔rgba8 view (filter-style RMW).
-    fn cuda_float4_rgba8_rmw(device: &Device) {
+    fn cuda_float4_rgba8_rmw(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -4730,7 +4730,7 @@ mod imp {
             px[2] = 0;
             px[3] = 255;
         }
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let texture = pool
             .acquire_texture(
                 width,
@@ -4759,7 +4759,7 @@ mod imp {
     }
 
     /// Same `DirectSpatial<float4>` pipeline launches against float then unorm (two PTX variants).
-    fn cuda_float4_variant_cache_float_then_unorm(device: &Device) {
+    fn cuda_float4_variant_cache_float_then_unorm(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -4768,7 +4768,7 @@ mod imp {
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let width = 8u32;
         let height = 8u32;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
 
         let float_tex = pool
             .acquire_texture(
@@ -4821,7 +4821,7 @@ mod imp {
     }
 
     /// Same `DirectSpatial<float4>`→`Rgba8Unorm` kernel must survive CUDA graph resubmit.
-    fn cuda_float4_rgba8_retained_resubmit(device: &Device) {
+    fn cuda_float4_rgba8_retained_resubmit(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -4831,7 +4831,7 @@ mod imp {
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let width = 8u32;
         let height = 8u32;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let texture = pool
             .acquire_texture(
                 width,
@@ -4876,7 +4876,7 @@ mod imp {
     /// One dispatch with float4 identity + float4↔rgba8 packed view bindings.
     ///
     /// Mirrors ekrano fine: float `out_image` / present scratch + rgba8 filter layers.
-    fn cuda_mixed_float4_identity_and_rgba8_copy(device: &Device) {
+    fn cuda_mixed_float4_identity_and_rgba8_copy(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -4906,7 +4906,7 @@ mod imp {
             px[2] = 0;
             px[3] = 255;
         }
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let filter_tex = pool
             .acquire_texture(
                 width,
@@ -4947,7 +4947,7 @@ mod imp {
     }
 
     /// CUDA `DirectSpatial<uint8_t4>` may write `Rgba8Unorm` (size-matched surface store).
-    fn cuda_uint8_t4_writes_rgba8_unorm(device: &Device) {
+    fn cuda_uint8_t4_writes_rgba8_unorm(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -4968,7 +4968,7 @@ mod imp {
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let width = 8u32;
         let height = 8u32;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let texture = pool
             .acquire_texture(
                 width,
@@ -4996,7 +4996,7 @@ mod imp {
     }
 
     /// CUDA `DirectSpatial<half4>` may write `Rgba16Float` (size-matched surface store).
-    fn cuda_half4_writes_rgba16_float(device: &Device) {
+    fn cuda_half4_writes_rgba16_float(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -5017,7 +5017,7 @@ mod imp {
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let width = 8u32;
         let height = 8u32;
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let texture = pool
             .acquire_texture(
                 width,
@@ -5047,7 +5047,7 @@ mod imp {
     }
 
     /// CUDA bakes sampler state into each CUtexObject; distinct Filters in one dispatch are rejected.
-    fn cuda_rejects_multiple_distinct_samplers(device: &Device) {
+    fn cuda_rejects_multiple_distinct_samplers(device: &Runtime) {
         if device.backend_type() != BackendType::Cuda {
             return;
         }
@@ -5070,7 +5070,7 @@ mod imp {
         let ctx = submission_context(&device);
         let shader = ShaderModule::from_slang(&device, SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let tex = pool
             .acquire_texture(
                 4,
@@ -5109,7 +5109,7 @@ mod imp {
 
     /// GPU → CPU → GPU chain on one parcel, resubmitted so the host node runs inside a
     /// replayed scheme and observes the previous frame's device writes.
-    fn scheme_cpu_dispatch_between_gpu_dispatches(device: &Device) {
+    fn scheme_cpu_dispatch_between_gpu_dispatches(device: &Runtime) {
         let ctx = submission_context(device);
         let double_pipe = ComputePipeline::new(
             device,
@@ -5117,7 +5117,7 @@ mod imp {
         )
         .unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let input: Vec<u32> = (1..=64).collect();
         let data = pool.acquire_buffer_with_data(&input, BufferKind::Scattered).unwrap();
 
@@ -5159,12 +5159,12 @@ mod imp {
     }
 
     /// Read-only and overwrite bindings, scalar params, and a downstream GPU consumer.
-    fn scheme_cpu_dispatch_read_overwrite_and_params(device: &Device) {
+    fn scheme_cpu_dispatch_read_overwrite_and_params(device: &Runtime) {
         let ctx = submission_context(device);
         let add_pipe =
             ComputePipeline::new(device, &ShaderModule::from_slang(device, ADD_TEN_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src: Vec<u32> = (0..64).collect();
         let a = pool.acquire_buffer_with_data(&src, BufferKind::Scattered).unwrap();
         let out = pool
@@ -5212,11 +5212,11 @@ mod imp {
     }
 
     /// A CPU node on a scheme-held lease, fed by one GPU node and consumed by another.
-    fn scheme_cpu_dispatch_on_lease(device: &Device) {
+    fn scheme_cpu_dispatch_on_lease(device: &Runtime) {
         let ctx = submission_context(device);
         let copy_pipe = ComputePipeline::new(device, &ShaderModule::from_slang(device, COPY_SHADER).unwrap()).unwrap();
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src: Vec<u32> = (0..64).map(|x| x * 7).collect();
         let input = pool.acquire_buffer_with_data(&src, BufferKind::Scattered).unwrap();
         let output = pool
@@ -5252,9 +5252,9 @@ mod imp {
     }
 
     /// Two independent CPU nodes plus a CPU-only scheme (no GPU nodes at all).
-    fn scheme_cpu_dispatch_only_scheme(device: &Device) {
+    fn scheme_cpu_dispatch_only_scheme(device: &Runtime) {
         let ctx = submission_context(device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let a = pool
             .acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)
             .unwrap();

@@ -1,7 +1,7 @@
 //! Python wrapper for RenderPipeline.
 
-use crate::device::PyDevice;
 use crate::error::IntoPyResult;
+use crate::runtime::PyRuntime;
 use crate::shader::PyShaderModule;
 use crate::types::{PyDepthStencilState, PyPrimitiveTopology, PyTextureFormat, PyVertexBufferLayout};
 use pyo3::prelude::*;
@@ -81,7 +81,7 @@ impl PyRenderPipeline {
     ///     GoldyError: If pipeline creation fails.
     #[new]
     fn new(
-        device: &PyDevice,
+        device: &PyRuntime,
         vertex_shader: &PyShaderModule,
         fragment_shader: &PyShaderModule,
         desc: &PyRenderPipelineDesc,

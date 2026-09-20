@@ -6,7 +6,7 @@
 
 **Goldy** is a Rust GPU library that realizes the [Fondaco Machine](./fondaco/specification.md).
 
-> **Maturity**: Goldy **0.2** is the Fondaco Machine public API. SemVer applies within 0.2.x; expect breaking changes at 0.3.
+> **Maturity**: Goldy **0.3** is the Fondaco Machine public API. SemVer applies within 0.3.x; expect breaking changes at 0.4.
 
 ## The Fondaco model in Goldy
 

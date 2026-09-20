@@ -8,8 +8,8 @@ mod imp {
     use crate::submission::{skip_dx12_warp_ray_tracing, submission_context};
     use goldy::{
         types::{BackendType, BufferFlags},
-        AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
-        MemoryExchange, NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+        AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Instance, MemoryExchange, NodeAccess,
+        RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule,
     };
     use std::sync::{Arc, Mutex};
 
@@ -19,12 +19,12 @@ mod imp {
         GPU.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         Instance::new()
             .expect("instance")
             .request_adapter(&RequestAdapterOptions::default())
             .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("device")
     }
 
@@ -57,7 +57,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             return;
         }
         if !device.capabilities().ray_query {
-            eprintln!("skip: DeviceCapabilities::ray_query is false on this adapter");
+            eprintln!("skip: RuntimeCapabilities::ray_query is false on this adapter");
             return;
         }
         if device.backend_type() == BackendType::WebGpu {
@@ -69,7 +69,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
         let ctx = submission_context(&device);
 
         let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, -0.5, 0.0]];
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let verts = pool
             .acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)
             .expect("vertex buffer");
@@ -122,7 +122,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             return;
         }
         if !device.capabilities().ray_query {
-            eprintln!("skip: DeviceCapabilities::ray_query is false on this adapter");
+            eprintln!("skip: RuntimeCapabilities::ray_query is false on this adapter");
             return;
         }
         if device.backend_type() == BackendType::WebGpu {
@@ -133,7 +133,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
 
         let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, -0.5, 0.0]];
         let indices: [u32; 3] = [0, 1, 2];
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let verts = pool
             .acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)
             .expect("vertex buffer");
@@ -193,7 +193,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             return;
         }
         if !device.capabilities().ray_query {
-            eprintln!("skip: DeviceCapabilities::ray_query is false on this adapter");
+            eprintln!("skip: RuntimeCapabilities::ray_query is false on this adapter");
             return;
         }
         if device.backend_type() == BackendType::WebGpu {
@@ -215,7 +215,7 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             [0.0, 1.0, 10.0],
         ];
         let indices: [u32; 6] = [0, 1, 2, 3, 4, 5];
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let verts = pool
             .acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)
             .expect("vertex buffer");

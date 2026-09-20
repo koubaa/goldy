@@ -3,7 +3,7 @@
 Goldy's `FrameOrchestrator` manages CPU/GPU frame pacing: an in-flight ring,
 a depth cap, and present-path settlement patching. It does **not** own GPU
 bytes or run cleanup callbacks — recycle lives in [`TransientPool`](../resources/transient-allocation.md)
-and [`RetainedPool`](../resources/pooling.md).
+and [`Runtime`](../resources/pooling.md).
 
 ## The problem it solves
 

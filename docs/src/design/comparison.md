@@ -35,8 +35,7 @@ Goldy uses **bindless access**. Resources get a slot index at creation time, and
 
 ```rust
 // Goldy: bindless parcel already has a slot; bind it in the scheme
-let mut pool = RetainedPool::new(device.clone());
-let parcel = pool.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
+let parcel = runtime.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
 pass.with_parcel(&parcel, NodeAccess::Read);
 ```
 

@@ -16,10 +16,7 @@ pub fn expand_gpu_type_derive(input: &DeriveInput) -> syn::Result<TokenStream> {
 
 pub fn expand_gpu_attr(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     if !attr.is_empty() {
-        return Err(Error::new_spanned(
-            attr,
-            "#[goldy::gpu] does not take arguments",
-        ));
+        return Err(Error::new_spanned(attr, "#[goldy::gpu] does not take arguments"));
     }
     let input: DeriveInput = parse2(item)?;
     validate_gpu_attr_item(&input)?;
@@ -186,7 +183,12 @@ fn first_bundled_derive(attrs: &[Attribute]) -> Option<&Attribute> {
             return false;
         };
         nested.iter().any(|meta| {
-            let ident = meta.path().segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            let ident = meta
+                .path()
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
             BUNDLED_DERIVES.contains(&ident.as_str())
         })
     })
@@ -255,10 +257,7 @@ fn gpu_field_info(ty: &Type) -> syn::Result<(syn::Ident, usize)> {
     }
 
     if !(2..=4).contains(&outer_len) {
-        return Err(Error::new_spanned(
-            ty,
-            "GpuType vectors must have 2, 3, or 4 elements",
-        ));
+        return Err(Error::new_spanned(ty, "GpuType vectors must have 2, 3, or 4 elements"));
     }
     let prefix = if is_scalar(outer.elem.as_ref(), "f32") {
         "F32"

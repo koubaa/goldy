@@ -160,7 +160,7 @@ impl MetalBackend {
         // threads do not race on `setenv`.
         METAL_VALIDATION_INIT.call_once(|| {
             if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
-                // SAFETY: called exactly once per process, before `Device::all()` below.
+                // SAFETY: called exactly once per process, before `Runtime::all()` below.
                 unsafe { std::env::set_var("MTL_SHADER_VALIDATION", "1") };
                 tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION api)");
             }
@@ -349,7 +349,7 @@ impl GpuBackend for MetalBackend {
         device::enumerate(&self.state.adapters)
     }
 
-    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
         device::adapter_capabilities(&self.state.adapters, adapter_id)
     }
 
@@ -1245,7 +1245,7 @@ mod tests {
     ///   2. `sampler.rs` derives the stride from `sampler_encoder.encoded_length()`
     ///      and uses `set_argument_buffer` + `set_sampler_state` to write — the
     ///      same pattern as buffer and texture encoding.
-    ///   3. Device creation asserts `encoded_length() == 8` and panics loudly if
+    ///   3. Runtime creation asserts `encoded_length() == 8` and panics loudly if
     ///      the assumption is ever violated.
     ///
     /// This test verifies that a freshly-constructed device reports stride 8 for
@@ -1253,7 +1253,7 @@ mod tests {
     /// matches the per-slot size implied by `ARGUMENT_BUFFER_SIZE`.
     #[test]
     fn test_sampler_encoder_stride() {
-        use super::device::create_argument_encoders;
+        use super::runtime::create_argument_encoders;
         use super::types::ARGUMENT_BUFFER_SIZE;
         use ::metal::Device as MTLDevice;
 

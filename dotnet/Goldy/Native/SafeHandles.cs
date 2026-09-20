@@ -19,17 +19,17 @@ internal sealed class InstanceHandle : SafeHandle
 }
 
 /// <summary>
-/// SafeHandle for Goldy Device.
+/// SafeHandle for Goldy Runtime.
 /// </summary>
-internal sealed class DeviceHandle : SafeHandle
+internal sealed class RuntimeHandle : SafeHandle
 {
-    public DeviceHandle() : base(nint.Zero, true) { }
+    public RuntimeHandle() : base(nint.Zero, true) { }
     
     public override bool IsInvalid => handle == nint.Zero;
     
     protected override bool ReleaseHandle()
     {
-        NativeMethods.DeviceDestroy(handle);
+        NativeMethods.RuntimeDestroy(handle);
         return true;
     }
 }

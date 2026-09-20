@@ -28,7 +28,7 @@
 //!
 //! # Custom Libraries
 //!
-//! Register your own libraries with [`Device::register_library`](crate::Device::register_library):
+//! Register your own libraries with [`Runtime::register_library`](crate::Runtime::register_library):
 //!
 //! ```rust,ignore
 //! use goldy::ShaderLibrary;
@@ -42,7 +42,7 @@
 //! ```
 
 use crate::backend::{GpuBackend, ShaderHandle};
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::slang::{layout_validation_enabled, GpuType, LayoutCheck, OwnedLayoutCheck};
 use anyhow::{bail, Context, Result};
 use std::borrow::Cow;
@@ -143,7 +143,7 @@ impl ShaderProvenance {
 
 /// A compiled shader module.
 pub struct ShaderModule {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ShaderHandle,
     /// Everything needed to compile this module again (or a variant of it).
@@ -178,12 +178,12 @@ impl ShaderModule {
     /// "#)?;
     /// # Ok::<(), anyhow::Error>(())
     /// ```
-    pub fn from_slang(device: &Device, source: &str) -> Result<Self> {
+    pub fn from_slang(device: &Runtime, source: &str) -> Result<Self> {
         Self::from_slang_with_options(device, source, &[], &[], Default::default(), &[])
     }
 
     /// Create a shader module after injecting Slang declarations generated from Rust GPU types.
-    pub fn from_slang_with_gpu_types(device: &Device, source: &str, gpu_types: &[GpuType<'_>]) -> Result<Self> {
+    pub fn from_slang_with_gpu_types(device: &Runtime, source: &str, gpu_types: &[GpuType<'_>]) -> Result<Self> {
         Self::from_slang_with_gpu_types_and_options(device, source, &[], &[], Default::default(), &[], gpu_types)
     }
 
@@ -206,7 +206,7 @@ impl ShaderModule {
     ///     &["my_project/shaders"],
     /// )?;
     /// ```
-    pub fn from_slang_with_paths(device: &Device, source: &str, extra_paths: &[&str]) -> Result<Self> {
+    pub fn from_slang_with_paths(device: &Runtime, source: &str, extra_paths: &[&str]) -> Result<Self> {
         Self::from_slang_with_options(device, source, extra_paths, &[], Default::default(), &[])
     }
 
@@ -214,7 +214,7 @@ impl ShaderModule {
     ///
     /// Use for shader variants like MSAA (`msaa`, `msaa8`, `msaa16`).
     pub fn from_slang_with_paths_and_defines(
-        device: &Device,
+        device: &Runtime,
         source: &str,
         extra_paths: &[&str],
         defines: &[(&str, &str)],
@@ -232,7 +232,7 @@ impl ShaderModule {
     /// Use `OptimizationLevel::None` to disable compiler optimizations for
     /// shaders that hit driver bugs on software renderers (e.g. lavapipe).
     pub fn from_slang_with_options(
-        device: &Device,
+        device: &Runtime,
         source: &str,
         extra_paths: &[&str],
         defines: &[(&str, &str)],
@@ -259,7 +259,7 @@ impl ShaderModule {
     ///
     /// Use this when the types already exist in `source` or an imported shader library
     /// (for example after [`crate::ShaderLibrary::from_source_with_gpu_types`]).
-    pub fn validate_existing_gpu_types(device: &Device, source: &str, gpu_types: &[GpuType<'_>]) -> Result<()> {
+    pub fn validate_existing_gpu_types(device: &Runtime, source: &str, gpu_types: &[GpuType<'_>]) -> Result<()> {
         let mut generated_checks = Vec::with_capacity(gpu_types.len());
         let mut names = std::collections::HashSet::with_capacity(gpu_types.len());
         for gpu_type in gpu_types {
@@ -292,7 +292,7 @@ impl ShaderModule {
     }
 
     pub fn from_slang_with_gpu_types_and_options(
-        device: &Device,
+        device: &Runtime,
         source: &str,
         extra_paths: &[&str],
         defines: &[(&str, &str)],
@@ -426,7 +426,7 @@ impl ShaderModule {
     /// specialization predictor can compile variants of a shader whose module the
     /// caller already dropped.
     pub(crate) fn from_provenance(
-        device: &Device,
+        device: &Runtime,
         provenance: &ShaderProvenance,
         extra_defines: &[(&str, &str)],
     ) -> Result<Self> {
@@ -442,7 +442,7 @@ impl ShaderModule {
     }
 
     fn create_retained(
-        device: &Device,
+        device: &Runtime,
         source: Arc<str>,
         search_paths: Arc<[String]>,
         defines: Arc<[(String, String)]>,
@@ -608,13 +608,13 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::compute::ComputePipeline;
 
-    fn mock_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).expect("mock device")
+    fn mock_runtime() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device")
     }
 
     #[test]
     fn variant_merges_defines_and_keeps_original() {
-        let device = mock_device();
+        let device = mock_runtime();
         let base =
             ShaderModule::from_slang_with_paths_and_defines(&device, "void main() {}", &[], &[("A", "1"), ("B", "2")])
                 .expect("shader");
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn effective_source_is_cached_per_module() {
-        let device = mock_device();
+        let device = mock_runtime();
         let shader = ShaderModule::from_slang(
             &device,
             r#"
@@ -658,7 +658,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
 
     #[test]
     fn compute_pipeline_new_on_mock_does_not_need_slang_target() {
-        let device = mock_device();
+        let device = mock_runtime();
         let shader = ShaderModule::from_slang(&device, "void main() {}").expect("shader");
         {
             let backend = device.inner.backend.lock().unwrap();

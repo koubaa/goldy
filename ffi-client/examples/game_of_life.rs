@@ -8,8 +8,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Buffer, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, SchemeRenderTargetLease, ShaderModule,
+    Buffer, ComputePipeline, Context, DepthFormat, Instance, NodeAccess, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, SchemeRenderTargetLease, ShaderModule,
     SurfaceExchange, TargetLoad, Transaction,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -214,7 +214,7 @@ impl RenderState {
         let instance = Instance::new()?;
         let device = instance
             .request_adapter(&RequestAdapterOptions::default())?
-            .request_device(&DeviceDescriptor::default())?;
+            .request_runtime(&RuntimeDescriptor::default())?;
         let ctx = Context::new(&device)?;
         let surface = surface_from_window(&ctx, window.as_ref())?;
 

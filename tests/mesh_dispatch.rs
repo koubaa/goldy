@@ -11,8 +11,8 @@ mod imp {
     use crate::scheme_render::{acquire_readback_texture, scheme_render_and_readback};
     use crate::submission::submission_context;
     use goldy::{
-        types::BackendType, Color, Device, DeviceDescriptor, Instance, MeshPipeline, MeshPipelineDesc,
-        RequestAdapterOptions, RetainedPool, ShaderModule, TargetLoad, TextureFormat,
+        types::BackendType, Color, Instance, MeshPipeline, MeshPipelineDesc, RequestAdapterOptions, Runtime,
+        RuntimeDescriptor, ShaderModule, TargetLoad, TextureFormat,
     };
     use std::sync::{Arc, Mutex};
 
@@ -22,12 +22,12 @@ mod imp {
         GPU.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         Instance::new()
             .expect("instance")
             .request_adapter(&RequestAdapterOptions::default())
             .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("device")
     }
 
@@ -83,7 +83,7 @@ float4 fs_main(FsIn input) : SV_Target {
             device.capabilities().amplification_shaders,
         );
         if !device.capabilities().mesh_shaders {
-            eprintln!("skip: DeviceCapabilities::mesh_shaders is false on this adapter");
+            eprintln!("skip: RuntimeCapabilities::mesh_shaders is false on this adapter");
             return;
         }
         match device.backend_type() {
@@ -112,10 +112,10 @@ float4 fs_main(FsIn input) : SV_Target {
         .expect("mesh pipeline");
         eprintln!("[mesh_dispatch] pipeline ok");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let width = 16u32;
         let height = 16u32;
-        let readback = acquire_readback_texture(&mut pool, width, height, format);
+        let readback = acquire_readback_texture(&pool, width, height, format);
         eprintln!("[mesh_dispatch] scheme submit+readback");
         let raw = scheme_render_and_readback(
             &ctx,

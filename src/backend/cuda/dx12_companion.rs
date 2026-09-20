@@ -180,7 +180,7 @@ pub(super) struct Dx12Companion {
     pub free_dsv_offsets: std::sync::Mutex<Vec<u32>>,
     /// SM 6.6 bindless heaps + root signature (IA + directly-indexed descriptors).
     pub bindless: super::dx12_bindless::BindlessHeaps,
-    /// Device-level frame-table (selector/table at protocol slots 0/1).
+    /// Runtime-level frame-table (selector/table at protocol slots 0/1).
     pub frame_table: super::dx12_bindless::CompanionFrameTable,
     /// Bindless root signature shared by all graphics PSOs.
     pub graphics_root_signature: ID3D12RootSignature,

@@ -1,36 +1,23 @@
 use crate::buffer::Buffer;
 use crate::error::{non_null, Result};
 use crate::retained_pool::{RecordBuilder, RecordField};
-use crate::sys::{self, GoldyDevice, GoldyRetainedPool};
+use crate::sys::{self, GoldyRuntime};
 use crate::texture::Texture;
 use crate::types::BufferKind;
 use bytemuck::Pod;
-use std::cell::Cell;
 
-/// A GPU device handle.
-pub struct Device {
-    pub(crate) ptr: *mut GoldyDevice,
-    pool: Cell<*mut GoldyRetainedPool>,
+/// A GPU runtime handle.
+pub struct Runtime {
+    pub(crate) ptr: *mut GoldyRuntime,
 }
 
-impl Device {
-    pub(crate) fn from_ptr(ptr: *mut GoldyDevice) -> Self {
-        Self {
-            ptr,
-            pool: Cell::new(std::ptr::null_mut()),
-        }
+impl Runtime {
+    pub(crate) fn from_ptr(ptr: *mut GoldyRuntime) -> Self {
+        Self { ptr }
     }
 
-    pub(crate) fn as_ptr(&self) -> *const GoldyDevice {
+    pub(crate) fn as_ptr(&self) -> *const GoldyRuntime {
         self.ptr
-    }
-
-    pub(crate) fn retained_pool_ptr(&self) -> Result<*mut GoldyRetainedPool> {
-        if self.pool.get().is_null() {
-            let ptr = non_null(unsafe { sys::goldy_retained_pool_create(self.ptr) })?;
-            self.pool.set(ptr);
-        }
-        Ok(self.pool.get())
     }
 
     pub fn record(&self) -> Result<RecordBuilder> {
@@ -68,14 +55,7 @@ impl Device {
         };
         let stride = element_stride.unwrap_or(0);
         let ptr = non_null(unsafe {
-            sys::goldy_retained_pool_acquire_buffer(
-                self.retained_pool_ptr()?,
-                size,
-                kind.into(),
-                stride,
-                data,
-                data_size,
-            )
+            sys::goldy_runtime_acquire_buffer(self.ptr, size, kind.into(), stride, data, data_size)
         })?;
         Buffer::from_ptr(ptr)
     }
@@ -111,8 +91,8 @@ impl Device {
             None => (std::ptr::null(), 0),
         };
         let ptr = non_null(unsafe {
-            sys::goldy_retained_pool_acquire_texture(
-                self.retained_pool_ptr()?,
+            sys::goldy_runtime_acquire_texture(
+                self.ptr,
                 width,
                 height,
                 format.into(),
@@ -126,15 +106,10 @@ impl Device {
     }
 }
 
-impl Drop for Device {
+impl Drop for Runtime {
     fn drop(&mut self) {
-        let pool = self.pool.get();
-        if !pool.is_null() {
-            unsafe { sys::goldy_retained_pool_destroy(pool) };
-            self.pool.set(std::ptr::null_mut());
-        }
         if !self.ptr.is_null() {
-            unsafe { crate::sys::goldy_device_destroy(self.ptr) };
+            unsafe { crate::sys::goldy_runtime_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }

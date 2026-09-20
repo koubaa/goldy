@@ -9,8 +9,8 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, PresentMode, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig,
+    BufferKind, Color, ComputePipeline, Instance, MemoryExchange, PresentMode, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig,
     SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use raw_window_handle::{
@@ -158,7 +158,7 @@ fn cuda_surface_resize_during_present_loop() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -200,7 +200,7 @@ fn cuda_surface_minimize_restore() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -243,7 +243,7 @@ fn cuda_surface_destroy_with_inflight_submit() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -294,7 +294,7 @@ fn cuda_surface_same_size_resize_is_cheap() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -359,7 +359,7 @@ fn cuda_surface_resize_latency_microbench() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -452,7 +452,7 @@ fn cuda_offscreen_rt_recreate_stress() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -469,7 +469,7 @@ fn cuda_offscreen_rt_recreate_stress() {
         },
     )
     .expect("graphics pipeline");
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -528,7 +528,7 @@ fn cuda_surface_depth_create_and_resize() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -567,7 +567,7 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -598,7 +598,7 @@ fn cuda_teardown_surface_then_context_after_raster_present() {
         },
     )
     .expect("graphics pipeline");
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_with_data(&red_triangle_vertices(), BufferKind::Scattered)
         .expect("vertex buffer");
@@ -653,7 +653,7 @@ fn cuda_teardown_context_before_surface_after_raster_present() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -684,7 +684,7 @@ fn cuda_teardown_context_before_surface_after_raster_present() {
         },
     )
     .expect("graphics pipeline");
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_with_data(&red_triangle_vertices(), BufferKind::Scattered)
         .expect("vertex buffer");

@@ -70,8 +70,7 @@ struct Uniforms {
 Create the buffer with `BufferKind::Scattered` so it gets a bindless descriptor:
 
 ```rust
-let mut retained_pool = RetainedPool::new(device.clone());
-let uniform_buffer = retained_pool.acquire_buffer_with_data(
+let uniform_buffer = device.acquire_buffer_with_data(
     &[Uniforms { width, height, time: 0.0 }],
     BufferKind::Scattered,
 )?;

@@ -358,7 +358,7 @@ impl BindlessHeaps {
     }
 }
 
-/// Device-level frame table for companion raster (single FIFO DIRECT queue).
+/// Runtime-level frame table for companion raster (single FIFO DIRECT queue).
 pub(super) struct CompanionFrameTable {
     pub selector: ID3D12Resource,
     pub device_table: ID3D12Resource,

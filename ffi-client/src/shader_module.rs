@@ -1,5 +1,5 @@
-use crate::device::Device;
 use crate::error::{non_null, GoldyError, Result};
+use crate::runtime::Runtime;
 use crate::sys::{self, GoldyShaderModule};
 use std::ffi::CString;
 
@@ -9,7 +9,7 @@ pub struct ShaderModule {
 }
 
 impl ShaderModule {
-    pub fn from_slang(device: &Device, source: &str) -> Result<Self> {
+    pub fn from_slang(device: &Runtime, source: &str) -> Result<Self> {
         let source = CString::new(source).map_err(|e| GoldyError::from_message(e.to_string()))?;
         let ptr = non_null(unsafe { sys::goldy_shader_create(device.as_ptr(), source.as_ptr()) })?;
         Ok(Self { ptr })

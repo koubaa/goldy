@@ -1,13 +1,13 @@
-//! Submission/timeline context bound to a [`Device`].
+//! Submission/timeline context bound to a [`Runtime`].
 //!
 //! A [`Context`] holds an `Arc` clone of the device substrate so the device
 //! outlives every context. Submit, wait, signal, and reclamation APIs live here.
 
 use crate::backend::ContextHandle;
 use crate::deposit_pool::DepositExchangePool;
-use crate::device::Device;
 use crate::error::GoldyError;
 use crate::parcel::BytesByKind;
+use crate::runtime::Runtime;
 #[cfg(test)]
 use crate::timeline::is_ready;
 use crate::timeline::{ReferenceTable, TimelineValue};
@@ -20,14 +20,14 @@ use std::sync::{Arc, Mutex};
 ///
 /// Clone is cheap (`Arc` bump). Multiple contexts may be created per device; each
 /// owns its own submission timeline (semaphore/fence/event, signal queue, and on
-/// Vulkan/DX12 a fence poller). [`Device`] substrate (deletion queue, VRAM ring,
+/// Vulkan/DX12 a fence poller). [`Runtime`] substrate (deletion queue, VRAM ring,
 /// placement heap) stays device-scoped.
 pub struct Context {
     pub(crate) inner: Arc<ContextInner>,
 }
 
 pub(crate) struct ContextInner {
-    device: Device,
+    device: Runtime,
     handle: ContextHandle,
     deletion_flush: Option<Arc<dyn crate::backend::ContextDeferredDeletionFlush>>,
     gpu_progress: Option<Arc<dyn crate::backend::ContextGpuProgress>>,
@@ -67,14 +67,14 @@ impl Drop for ContextInner {
         self.gpu_progress.take();
         self.reclamation_scope.take();
         self.submit_session.take();
-        // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
+        // Runs while `Context` still holds `Arc<Runtime>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         crate::backend::destroy_context(&self.device.inner.backend, self.handle);
     }
 }
 
 impl Context {
-    pub(crate) fn new(device: Device) -> Result<Self, GoldyError> {
+    pub(crate) fn new(device: Runtime) -> Result<Self, GoldyError> {
         let handle = {
             let mut backend = device.inner.backend.lock().unwrap();
             backend
@@ -111,8 +111,8 @@ impl Context {
         })
     }
 
-    /// The device this context is bound to.
-    pub fn device(&self) -> &Device {
+    /// The runtime this context is bound to.
+    pub fn runtime(&self) -> &Runtime {
         &self.inner.device
     }
 
@@ -293,7 +293,7 @@ impl Context {
     }
 
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
-        if self.device().is_device_lost() {
+        if self.runtime().is_device_lost() {
             return GoldyError::DeviceLost;
         }
         GoldyError::Backend(e)
@@ -339,7 +339,7 @@ impl Context {
         let backend_mutex = &self.inner.device.inner.backend;
         if !already_complete {
             // Do not call `classify` while holding the backend mutex: `classify` →
-            // `Device::is_device_lost` re-locks the same mutex (non-recursive → deadlock).
+            // `Runtime::is_device_lost` re-locks the same mutex (non-recursive → deadlock).
             let submission_wait = {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();
@@ -480,8 +480,8 @@ impl Context {
 
     /// Process deferred GPU deletions and reclaim VRAM-ring payloads whose epoch has retired.
     ///
-    /// The device-installed deferred VRAM ring ([`Device::vram_allocator`]) is drained
-    /// against [`Device::timeline_retired`] (max completed over all live contexts). Any
+    /// The device-installed deferred VRAM ring ([`Runtime::vram_allocator`]) is drained
+    /// against [`Runtime::timeline_retired`] (max completed over all live contexts). Any
     /// context may call this after a `BoundaryCrossed` signal; defer/release epochs are
     /// device-global submission sequence values, so `device_retired >= epoch` proves the GPU
     /// work is done regardless of which context originally submitted the payload.
@@ -489,7 +489,7 @@ impl Context {
     /// Per-handle last-touch reclamation (tighter than `device_retired` for the VRAM ring)
     /// is a future optimization.
     pub(crate) fn boundary_crossed(&self, epoch: TimelineValue) {
-        self.boundary_crossed_inner(epoch, self.device().timeline_retired());
+        self.boundary_crossed_inner(epoch, self.runtime().timeline_retired());
     }
 
     fn boundary_crossed_inner(&self, epoch: TimelineValue, vram_retire: TimelineValue) {
@@ -508,7 +508,7 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_vram");
-            self.device().vram_allocator().boundary_crossed(vram_retire);
+            self.runtime().vram_allocator().boundary_crossed(vram_retire);
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
@@ -546,18 +546,18 @@ impl Context {
     }
 
     pub fn has_deferred_payloads(&self) -> bool {
-        self.device().vram_allocator().has_deferred_payloads()
+        self.runtime().vram_allocator().has_deferred_payloads()
     }
 
     pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
-        self.device().vram_allocator().defer_release(epoch, payload);
+        self.runtime().vram_allocator().defer_release(epoch, payload);
     }
 
     #[cfg(test)]
     pub(crate) fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
         let mut payload = crate::vram_allocator::DeferredPayload::new();
         payload.push(resource);
-        self.device().vram_allocator().defer_release(epoch, payload);
+        self.runtime().vram_allocator().defer_release(epoch, payload);
     }
 
     #[doc(hidden)]
@@ -575,7 +575,7 @@ impl Context {
     /// Snapshot GPU progress for each distinct context handle, querying each at most once.
     ///
     /// The home context uses [`Self::gpu_progress`] (lock-free poller path on CUDA/DX12).
-    /// Foreign contexts go through [`Device::context_gpu_progress`].
+    /// Foreign contexts go through [`Runtime::context_gpu_progress`].
     pub(crate) fn snapshot_gpu_progress(
         &self,
         contexts: impl IntoIterator<Item = ContextHandle>,
@@ -640,12 +640,12 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use crate::backend::mock::MockBackend;
-    use crate::device::Device;
+    use crate::runtime::Runtime;
     use crate::test_support::scheme_advance_timeline;
     use std::sync::Arc;
 
-    fn test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
     #[test]
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&device.inner), 2);
         drop(device);
         assert_eq!(ctx.gpu_progress(), 0);
-        assert_eq!(Arc::strong_count(&ctx.device().inner), 1);
+        assert_eq!(Arc::strong_count(&ctx.runtime().inner), 1);
     }
 
     #[test]

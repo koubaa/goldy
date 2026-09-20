@@ -2,7 +2,7 @@
 #![cfg(any(feature = "vulkan", feature = "dx12"))]
 
 use goldy::shader_cache::{ShaderBytecodeDiskCache, GOLDY_SHADER_CACHE_MAGIC};
-use goldy::{types::BackendType, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule};
+use goldy::{types::BackendType, ComputePipeline, Instance, RequestAdapterOptions, RuntimeDescriptor, ShaderModule};
 /// Simple compute shader (same intent as [`compute_integration::DOUBLE_SHADER`]).
 const CACHE_TEST_COMPUTE: &str = r#"
 import goldy_exp;
@@ -15,12 +15,12 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 "#;
 
 #[cfg(feature = "vulkan")]
-fn try_vulkan_gpu() -> Option<(Instance, goldy::Device)> {
+fn try_vulkan_gpu() -> Option<(Instance, goldy::Runtime)> {
     let instance = Instance::new().ok()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .ok()?
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .ok()?;
     (device.backend_type() == BackendType::Vulkan).then_some((instance, device))
 }
@@ -69,7 +69,7 @@ fn vk_pipeline_cache_survives_reload() {
     let device2 = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("second adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("second device create");
     assert_eq!(
         device2.backend_type(),
@@ -80,7 +80,7 @@ fn vk_pipeline_cache_survives_reload() {
     let _pipeline2 = ComputePipeline::new(&device2, &shader2).expect("compute pipeline after reload");
 }
 
-/// Compiled Slang shaders flush `shader_cache.bin.zst` on [`Device`] / compiler teardown.
+/// Compiled Slang shaders flush `shader_cache.bin.zst` on [`Runtime`] / compiler teardown.
 #[test]
 fn shader_cache_file_written_after_compile() {
     let Some(cache_root) = dirs::cache_dir() else {
@@ -94,7 +94,7 @@ fn shader_cache_file_written_after_compile() {
     };
     let device = match instance
         .request_adapter(&RequestAdapterOptions::default())
-        .and_then(|a| a.request_device(&DeviceDescriptor::default()))
+        .and_then(|a| a.request_runtime(&RuntimeDescriptor::default()))
     {
         Ok(d) => d,
         Err(_) => return,

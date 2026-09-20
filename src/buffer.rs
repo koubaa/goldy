@@ -1,7 +1,7 @@
 //! GPU buffer management.
 
 use crate::backend::{BufferHandle, GpuBackend};
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
 use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
@@ -23,14 +23,14 @@ fn bindless_cache_from_backend(
     }
 }
 
-/// Types allowed as elements in [`Device::acquire_buffer_with_data`](crate::Device::acquire_buffer_with_data).
+/// Types allowed as elements in [`Runtime::acquire_buffer_with_data`](crate::Runtime::acquire_buffer_with_data).
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
 /// `#[repr(C)]` structs via `#[goldy::gpu]` or `#[derive(goldy_derive::StructuredBufferElement)]`.
 ///
 /// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
 /// set element stride to 1 while shaders usually expect a larger struct stride. Use
-/// [`Device::acquire_buffer`](crate::Device::acquire_buffer) with an explicit
+/// [`Runtime::acquire_buffer`](crate::Runtime::acquire_buffer) with an explicit
 /// element stride or a typed slice instead.
 ///
 /// Unit type `()` is included so empty slices type-check.
@@ -63,7 +63,7 @@ impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T;
 
 /// Low-level GPU buffer allocation.
 pub(crate) struct Allocation {
-    device: Device,
+    device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
     /// Logical byte size (API-facing; may be smaller than reserved GPU storage).
@@ -94,7 +94,7 @@ impl Allocation {
         self.handle
     }
 
-    /// Attach the accounting deed (called from [`Device::alloc_buffer`] paths only).
+    /// Attach the accounting deed (called from [`Runtime::alloc_buffer`] paths only).
     pub(crate) fn set_deed(&mut self, deed: ParcelDeed) {
         self.deed = Some(deed);
     }
@@ -108,7 +108,7 @@ impl Allocation {
     ///
     /// - `BufferKind::Broadcast`: All threads read the same address.
     ///   Hardware optimizes for wave-wide broadcast (ConstantBuffer).
-    pub(crate) fn new(device: &Device, size: u64, access: BufferKind) -> Result<Self> {
+    pub(crate) fn new(device: &Runtime, size: u64, access: BufferKind) -> Result<Self> {
         Self::new_with_stride_and_flags(device, size, access, None, BufferFlags::empty())
     }
 
@@ -116,7 +116,7 @@ impl Allocation {
     /// reservations (e.g. Metal). `expected_max` is clamped with `initial_size`; allocation is at
     /// least `max(initial_size, expected_max)` on supporting backends.
     pub(crate) fn new_with_capacity_hint(
-        device: &Device,
+        device: &Runtime,
         initial_size: u64,
         expected_max: u64,
         access: BufferKind,
@@ -128,7 +128,7 @@ impl Allocation {
     ///
     /// Use [`BufferFlags::GPU_ONLY`] for device-local frame scratch pools on Metal.
     pub(crate) fn new_with_capacity_hint_and_flags(
-        device: &Device,
+        device: &Runtime,
         initial_size: u64,
         expected_max: u64,
         access: BufferKind,
@@ -167,7 +167,7 @@ impl Allocation {
         })
     }
     pub(crate) fn new_with_stride(
-        device: &Device,
+        device: &Runtime,
         size: u64,
         access: BufferKind,
         element_stride: Option<u32>,
@@ -177,7 +177,7 @@ impl Allocation {
 
     /// Create a buffer with optional element stride and [`BufferFlags`].
     pub(crate) fn new_with_stride_and_flags(
-        device: &Device,
+        device: &Runtime,
         size: u64,
         access: BufferKind,
         element_stride: Option<u32>,
@@ -222,7 +222,7 @@ impl Allocation {
     ///
     /// See [`Allocation::new`] and [`BufferKind::Scattered`] for access-pattern details.
     pub(crate) fn with_data<T: StructuredBufferElement>(
-        device: &Device,
+        device: &Runtime,
         data: &[T],
         access: BufferKind,
     ) -> Result<Self> {
@@ -231,7 +231,7 @@ impl Allocation {
 
     /// Like [`Self::with_data`], with explicit [`BufferFlags`].
     pub(crate) fn with_data_and_flags<T: StructuredBufferElement>(
-        device: &Device,
+        device: &Runtime,
         data: &[T],
         access: BufferKind,
         flags: BufferFlags,
@@ -276,7 +276,7 @@ impl Allocation {
     /// structs, prefer [`Allocation::with_data`] with `&[T]` so stride matches the shader type.
     ///
     /// See [`Allocation::new`] for access pattern documentation.
-    pub(crate) fn with_bytes(device: &Device, data: &[u8], access: BufferKind) -> Result<Self> {
+    pub(crate) fn with_bytes(device: &Runtime, data: &[u8], access: BufferKind) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
         Self::with_bytes_stride_and_flags(device, data, access, 1, BufferFlags::empty())
     }
@@ -289,7 +289,7 @@ impl Allocation {
     ///
     /// See [`Allocation::new`] for access pattern documentation.
     pub(crate) fn with_bytes_stride(
-        device: &Device,
+        device: &Runtime,
         data: &[u8],
         access: BufferKind,
         element_stride: u32,
@@ -299,7 +299,7 @@ impl Allocation {
 
     /// Like [`Self::with_bytes_stride`], with explicit [`BufferFlags`].
     pub(crate) fn with_bytes_stride_and_flags(
-        device: &Device,
+        device: &Runtime,
         data: &[u8],
         access: BufferKind,
         element_stride: u32,
@@ -476,12 +476,12 @@ impl Allocation {
             .map(|i| ResourceHandle::new(ResourceCategory::from(self.access), i))
     }
 
-    pub(crate) fn device(&self) -> &Device {
+    pub(crate) fn device(&self) -> &Runtime {
         &self.device
     }
 
     /// Clear the buffer (fill with zeros) from offset for size bytes.
-    pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
+    pub fn clear(&self, device: &Runtime, offset: u64, size: u64) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
         backend.clear_buffer(device.inner.handle, self.handle, offset, size)
     }
@@ -568,7 +568,7 @@ impl BufferSource for Allocation {
 /// Dropping a `BufferView` unregisters its descriptor but does not free the parent's memory.
 #[derive(Clone)]
 pub struct BufferView {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
     parent_handle: BufferHandle,
@@ -618,7 +618,7 @@ impl BufferView {
     ///
     /// `offset` is relative to the view's start. If `size` is 0, clears from
     /// `offset` to the end of the view.
-    pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
+    pub fn clear(&self, device: &Runtime, offset: u64, size: u64) -> Result<()> {
         let clear_size = if size == 0 {
             self.size.saturating_sub(offset)
         } else {
@@ -715,14 +715,14 @@ pub(crate) struct ScatteredSubregionSpec<'a> {
 
 /// Allocate one `BufferKind::Scattered` backing buffer and carve typed views for each region.
 pub(crate) fn alloc_scattered_subregions(
-    device: &Device,
+    device: &Runtime,
     regions: &[ScatteredSubregionSpec<'_>],
 ) -> Result<(Allocation, Vec<BufferView>)> {
     alloc_scattered_subregions_with_alignment(device, regions, SCATTERED_SUBALLOC_ALIGNMENT)
 }
 
 fn alloc_scattered_subregions_with_alignment(
-    device: &Device,
+    device: &Runtime,
     regions: &[ScatteredSubregionSpec<'_>],
     alignment: u64,
 ) -> Result<(Allocation, Vec<BufferView>)> {

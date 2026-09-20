@@ -34,7 +34,7 @@ kernel.dispatch_1d(64, &mut [CpuBinding::u32s(&mut data)])?;
 Goldy bindless slot indices.
 
 Set `GOLDY_CPU_SHADERS=1` when you want the documented env gate (reserved for a
-future `Device` debug option). The compile APIs above are already opt-in; GPU
+future `Runtime` debug option). The compile APIs above are already opt-in; GPU
 paths ignore the variable.
 
 Host-callable JIT uses vendored `slang-llvm` next to `libslang`. No extra C++

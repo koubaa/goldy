@@ -1,13 +1,13 @@
 //! Retained GPU property: [`Buffer`] (acquired aggregate) and [`Parcel`] (bindable unit).
 //!
-//! Acquire a [`Buffer`] from [`crate::retained_pool::RetainedPool`]; bind a [`Parcel`] to
+//! Acquire a [`Buffer`] from [`crate::Runtime`]; bind a [`Parcel`] to
 //! dispatches and render passes. Each parcel is independently dependency-tracked.
 
 use crate::backend::{BufferHandle, ContextHandle};
 use crate::buffer::{Allocation, BufferSource, BufferView, StructuredBufferElement};
 use crate::context::Context;
-use crate::device::DeviceInner;
 use crate::handles::TextureHandle;
+use crate::runtime::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::TextureBacking;
 use crate::texture::TextureCopyFootprint;
@@ -168,7 +168,7 @@ impl ParcelStamp {
         if merged.is_empty() {
             return Settle::Ready;
         }
-        let device = ctx.device();
+        let device = ctx.runtime();
         let mut waiting = None;
         for (c, tv) in merged.iter() {
             let progress = device
@@ -184,8 +184,8 @@ impl ParcelStamp {
         }
     }
 
-    /// Device-wide settle: pending promises or any stamped context not yet retired.
-    pub(crate) fn settle_global(&self, device: &crate::device::Device) -> Settle {
+    /// Runtime-wide settle: pending promises or any stamped context not yet retired.
+    pub(crate) fn settle_global(&self, device: &crate::runtime::Runtime) -> Settle {
         if self.block_or_gc_pending_nonblocking() {
             return Settle::Pending;
         }
@@ -270,7 +270,7 @@ enum ParcelBacking {
 
     /// BufferRange is a sub-region of a partitioned buffer.
     ///
-    /// This is an internal Goldy type. The public API is [`crate::Device::acquire_record`]
+    /// This is an internal Goldy type. The public API is [`crate::Runtime::acquire_record`]
     /// with [`ordinal`] / [`field`] descriptors; the resulting [`Buffer`] yields
     /// `BufferRange`-backed parcels via [`Buffer::unit`] / [`Buffer::field`].
     /// [`Parcel::from_buffer_range`] is intentionally `pub(crate)`.
@@ -433,7 +433,7 @@ impl Parcel {
             return true;
         };
         matches!(
-            self.stamp.settle_global(&crate::device::Device { inner }),
+            self.stamp.settle_global(&crate::runtime::Runtime { inner }),
             Settle::Ready
         )
     }
@@ -449,7 +449,7 @@ impl Parcel {
         let Some(inner) = self.stamp.home_device.upgrade() else {
             return Ok(());
         };
-        let device = crate::device::Device { inner };
+        let device = crate::runtime::Runtime { inner };
         loop {
             match self.stamp.settle_global(&device) {
                 Settle::Ready => return Ok(()),
@@ -603,7 +603,7 @@ impl Parcel {
         self.stamp
             .home_device
             .upgrade()
-            .is_some_and(|home| Arc::ptr_eq(&home, &ctx.device().inner))
+            .is_some_and(|home| Arc::ptr_eq(&home, &ctx.runtime().inner))
     }
 }
 
@@ -638,8 +638,8 @@ enum BufferStorage {
 
 /// An acquired GPU buffer — possibly partitioned into independently bindable parcels.
 ///
-/// Release by dropping or [`crate::retained_pool::RetainedPool::release_buffer`] /
-/// [`crate::retained_pool::RetainedPool::release_texture`].
+/// Release by dropping or [`crate::Context::release_buffer`] /
+/// [`crate::Context::release_texture`].
 pub struct Buffer {
     storage: BufferStorage,
     units: Vec<Parcel>,
@@ -808,7 +808,7 @@ impl Buffer {
     }
 
     /// GPU clear on a single-unit buffer (see [`Self::clear`]).
-    pub fn clear(&self, device: &crate::Device, offset: u64, size: u64) -> anyhow::Result<()> {
+    pub fn clear(&self, device: &crate::Runtime, offset: u64, size: u64) -> anyhow::Result<()> {
         match &self.storage {
             BufferStorage::Single(b) => b.clear(device, offset, size),
             BufferStorage::Partitioned { .. } | BufferStorage::Detached => {
@@ -878,7 +878,7 @@ impl Drop for Buffer {
         if self.handoff {
             return;
         }
-        // RetainedPool outranks Scheme: dropping this buffer invalidates every scheme stamp
+        // Runtime outranks Scheme: dropping this buffer invalidates every scheme stamp
         // that still references it. Backend destroy (via Allocation Drop) then evicts retained
         // CBs that pin its bindless slots so deferred free can proceed.
         for parcel in &self.units {
@@ -889,7 +889,7 @@ impl Drop for Buffer {
 
 /// An acquired GPU texture — one bindable parcel.
 ///
-/// Release by dropping or [`crate::retained_pool::RetainedPool::release_texture`].
+/// Release by dropping or [`crate::Context::release_texture`].
 pub struct Texture {
     parcel: Parcel,
     bookkeeping: Option<BookkeepingGuard>,
@@ -1053,7 +1053,7 @@ impl Texture {
     /// Wrap an externally-owned GPU texture (e.g. swapchain drawable).
     #[cfg(feature = "graphics")]
     pub(crate) fn borrowed(
-        device: &crate::device::Device,
+        device: &crate::runtime::Runtime,
         backend: Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
         handle: crate::backend::TextureHandle,
         width: u32,
@@ -1200,7 +1200,7 @@ impl Init {
     }
 }
 
-/// One field specification for [`crate::Device::acquire_record`].
+/// One field specification for [`crate::Runtime::acquire_record`].
 pub struct RecordField {
     pub name: Option<Cow<'static, str>>,
     pub init: Init,
@@ -1229,7 +1229,7 @@ impl BufferSource for Buffer {
     }
 }
 
-/// Per-kind byte totals for resources currently held through a [`crate::retained_pool::RetainedPool`].
+/// Per-kind byte totals for resources currently held through a [`crate::Runtime`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BytesByKind {
     pub buffer: u64,
@@ -1306,19 +1306,18 @@ impl Drop for BookkeepingGuard {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::device::Device;
     use crate::exchange::MemoryExchange;
-    use crate::retained_pool::RetainedPool;
+    use crate::runtime::Runtime;
     use crate::scheme::Scheme;
     use crate::timeline::{PromiseState, Settle, TimelinePromise};
     use crate::types::{TextureFlags, TextureFormat, TextureKind};
     use std::sync::Arc;
 
-    fn mock_device() -> Arc<Device> {
-        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    fn mock_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
-    fn mock_parcel(_device: &Arc<Device>, pool: &mut RetainedPool) -> Parcel {
+    fn mock_parcel(_device: &Arc<Runtime>, pool: &Runtime) -> Parcel {
         let buffer = pool
             .acquire_record([field("x", Init::zeros::<u32>(4))])
             .expect("buffer");
@@ -1327,9 +1326,9 @@ mod tests {
 
     #[test]
     fn texture_clone_must_not_destroy_original_on_drop() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(device.clone());
+        let pool = &device;
         let tex = pool
             .acquire_texture(
                 64,
@@ -1364,10 +1363,10 @@ mod tests {
 
     #[test]
     fn settle_ready_when_never_referenced() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let parcel = mock_parcel(&device, &mut pool);
+        let parcel = mock_parcel(&device, &pool);
         assert_eq!(parcel.settle_on(&ctx), Settle::Ready);
         assert!(parcel.is_settled());
         assert!(parcel.is_settled_on(&ctx));
@@ -1376,10 +1375,10 @@ mod tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn settle_pending_with_unresolved_promise() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let parcel = mock_parcel(&device, &mut pool);
+        let parcel = mock_parcel(&device, &pool);
         let (promise, _resolver) = TimelinePromise::new();
         parcel.stamp_handle().push_pending(promise);
         assert_eq!(parcel.settle_on(&ctx), Settle::Pending);
@@ -1389,10 +1388,10 @@ mod tests {
 
     #[test]
     fn settle_waiting_when_epoch_unreached() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let parcel = mock_parcel(&device, &mut pool);
+        let parcel = mock_parcel(&device, &pool);
         parcel.mark_referenced(ctx.backend_handle(), 50);
         assert_eq!(parcel.settle_on(&ctx), Settle::Waiting(50));
         assert!(!parcel.is_settled());
@@ -1402,11 +1401,11 @@ mod tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn settle_lazy_gc_folds_resolved_promise_into_foreign_reads() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let ctx_handle = ctx.backend_handle();
-        let parcel = mock_parcel(&device, &mut pool);
+        let parcel = mock_parcel(&device, &pool);
         let stamp = parcel.stamp_handle();
         let (promise, resolver) = TimelinePromise::new();
         stamp.push_pending(promise);
@@ -1421,10 +1420,10 @@ mod tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn settle_lazy_gc_drops_abandoned_promise() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let parcel = mock_parcel(&device, &mut pool);
+        let parcel = mock_parcel(&device, &pool);
         let stamp = parcel.stamp_handle();
         let (promise, resolver) = TimelinePromise::new();
         stamp.push_pending(promise);

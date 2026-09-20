@@ -87,7 +87,7 @@ For fullscreen or procedurally-generated geometry (no vertex buffer at all), ski
 
 ## Offscreen-Only (Tests, Readback)
 
-Headless rendering — no window, no `SurfaceExchange` — records the same render pass node, then withdraws pixels through [`MemoryExchange`](../resources/retained-pool.md):
+Headless rendering — no window, no `SurfaceExchange` — records the same render pass node, then withdraws pixels through [`MemoryExchange`](../resources/runtime-owned-memory.md):
 
 ```rust
 let memory = MemoryExchange::new(&ctx);

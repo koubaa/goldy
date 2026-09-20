@@ -2,9 +2,9 @@
 
 use goldy_ffi::{
     goldy_get_last_error, goldy_instance_adapter_count, goldy_instance_create,
-    goldy_instance_create_device_for_adapter, goldy_instance_get_adapter, goldy_withdraw_bytes_copy,
+    goldy_instance_create_runtime_for_adapter, goldy_instance_get_adapter, goldy_withdraw_bytes_copy,
     goldy_withdraw_bytes_destroy, goldy_withdraw_bytes_len, goldy_withdraw_claim_consume,
-    goldy_withdraw_transaction_claim, GoldyAdapterInfo, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyResult,
+    goldy_withdraw_transaction_claim, GoldyAdapterInfo, GoldyDeviceType, GoldyInstance, GoldyResult, GoldyRuntime,
     GoldySchemeSubmission, GoldyWithdrawTransaction,
 };
 use std::ffi::CStr;
@@ -40,7 +40,7 @@ pub unsafe fn withdraw_claim_copy(
     out
 }
 
-pub unsafe fn request_device(instance: *const GoldyInstance) -> *mut GoldyDevice {
+pub unsafe fn request_runtime(instance: *const GoldyInstance) -> *mut GoldyRuntime {
     let count = goldy_instance_adapter_count(instance);
     let mut best_id: u32 = 0;
     for i in 0..count {
@@ -61,13 +61,13 @@ pub unsafe fn request_device(instance: *const GoldyInstance) -> *mut GoldyDevice
             break;
         }
     }
-    goldy_instance_create_device_for_adapter(instance, best_id)
+    goldy_instance_create_runtime_for_adapter(instance, best_id)
 }
 
-pub unsafe fn open_device() -> (*mut GoldyInstance, *mut GoldyDevice) {
+pub unsafe fn open_device() -> (*mut GoldyInstance, *mut GoldyRuntime) {
     let instance = goldy_instance_create();
     assert!(!instance.is_null(), "{}", last_ffi_message());
-    let device = request_device(instance);
+    let device = request_runtime(instance);
     assert!(!device.is_null(), "{}", last_ffi_message());
     (instance, device)
 }

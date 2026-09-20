@@ -320,7 +320,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
 
             impl #kernel_struct {
                 /// Compile (or hit the shader cache) and create a device-scoped pipeline.
-                pub fn prepare(device: &::goldy::Device) -> ::core::result::Result<Self, ::goldy::GoldyError> {
+                pub fn prepare(device: &::goldy::Runtime) -> ::core::result::Result<Self, ::goldy::GoldyError> {
                     let mut canonical_slang = ::std::string::String::new();
                     #(
                         canonical_slang.push_str(&#gpu_type_idents::GPU_TYPE.to_slang_source()?);
@@ -555,12 +555,7 @@ fn texel_element_slang(ty: &Type) -> Result<String, Error> {
     let Type::Path(p) = ty else {
         return Err(Error::new(ty.span(), "gpu::DirectSpatial element must be a path type"));
     };
-    let name = p
-        .path
-        .segments
-        .last()
-        .map(|s| s.ident.to_string())
-        .unwrap_or_default();
+    let name = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
     Ok(match name.as_str() {
         "Float4" | "float4" => "float4".into(),
         "Float3" | "float3" => "float3".into(),
@@ -1029,19 +1024,23 @@ fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) 
             ..
         } => Some("GroupId".into()),
         Expr::Call {
-            func: BuiltinFn::Float2, ..
+            func: BuiltinFn::Float2,
+            ..
         } => Some("float2".into()),
         Expr::Call {
-            func: BuiltinFn::Float3, ..
+            func: BuiltinFn::Float3,
+            ..
         } => Some("float3".into()),
         Expr::Call {
-            func: BuiltinFn::Float4, ..
+            func: BuiltinFn::Float4,
+            ..
         } => Some("float4".into()),
         Expr::Call {
             func: BuiltinFn::Uint2, ..
         } => Some("uint2".into()),
         Expr::Call {
-            func: BuiltinFn::Sin | BuiltinFn::Length | BuiltinFn::Abs | BuiltinFn::Floor | BuiltinFn::Ceil | BuiltinFn::Sqrt,
+            func:
+                BuiltinFn::Sin | BuiltinFn::Length | BuiltinFn::Abs | BuiltinFn::Floor | BuiltinFn::Ceil | BuiltinFn::Sqrt,
             ..
         } => Some("float".into()),
         Expr::LitU32(_) => Some("uint".into()),

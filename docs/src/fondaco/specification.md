@@ -200,7 +200,7 @@ Loose analogues for readers familiar with other models. The Fondaco terms above 
 | Ownership (public) | SRV, sampled image, read-only binding | Concurrent reads |
 | Ownership (private) | UAV, storage image, read-write binding | Exclusive tenant |
 | Ownership (private-inaugural) | Discard/clear load op | Exclusive write; prior state abandoned |
-| Warehouse | Device memory budget | Bound relative to other merchants |
+| Warehouse | Runtime memory budget | Bound relative to other merchants |
 | Gate | Fence, barrier, semaphore | Full intervention between dispatches |
 | Petition | System call, trap | Mid-dispatch; limited service, not full gate powers |
 | Scheme transformation | Compiler pass, kernel fusion | Observable parcel states must be preserved |

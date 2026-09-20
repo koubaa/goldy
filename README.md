@@ -54,18 +54,17 @@ fn plasma(uniforms: &[Uniforms], output: gpu::DirectSpatial<gpu::Float4>) {
 }
 
 let instance = Instance::new()?;
-let device = instance
+let runtime = instance
     .request_adapter(&RequestAdapterOptions::default())?
-    .request_device(&DeviceDescriptor::default())?;
-let ctx = device.create_context()?;
+    .request_runtime(&RuntimeDescriptor::default())?;
+let ctx = runtime.create_context()?;
 
-let pool = RetainedPool::new(&device)?;
-let uniforms = pool.alloc_buffer_with_data (&device, &uniforms_data, BufferKind::Scattered)?;
+let uniforms = runtime.acquire_buffer_with_data(&uniforms_data, BufferKind::Scattered)?;
 
 let surface = SurfaceExchange::new(&ctx, &window, SurfaceConfig::default())?;
 
 // Compile the Rust kernel to [goldy_compute] Slang (or hit the shader cache).
-let kernel = plasma::Kernel::prepare(&device)?;
+let kernel = plasma::Kernel::prepare(&runtime)?;
 
 
 let mut scheme = Scheme::new(&ctx);

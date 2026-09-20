@@ -220,7 +220,7 @@ pub(super) fn poll_retire_events(
     event_pool.recycle_many(retired_events);
 }
 
-/// Device retired value is the longest contiguous prefix of recorded+complete events.
+/// Runtime retired value is the longest contiguous prefix of recorded+complete events.
 pub(super) fn advance_device_retired(ledger: &EventLedger, device_retired: &AtomicU64) {
     loop {
         let next = device_retired.load(Ordering::Acquire) + 1;

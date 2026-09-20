@@ -4,20 +4,43 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// Deed-governed pool for retained GPU parcels.
+/// Cloneable device-scoped machine root. Owns retained parcels, shaders,
+/// pipelines, capabilities, and diagnostics.
 /// </summary>
-public sealed class RetainedPool : IDisposable
+public sealed class Runtime : IDisposable
 {
     internal readonly nint Handle;
     private bool _disposed;
 
-    public RetainedPool(Device device)
+    internal Runtime(nint handle)
     {
-        device.ThrowIfDisposed();
-        Handle = NativeMethods.RetainedPoolCreate(device.Handle);
-        if (Handle == nint.Zero)
-            throw GoldyException.FromLastError("RetainedPool creation");
+        Handle = handle;
     }
+
+    /// <summary>
+    /// Get the adapter ID this runtime was created on.
+    /// </summary>
+    public uint AdapterId => NativeMethods.RuntimeAdapterId(Handle);
+
+    /// <summary>
+    /// Check if the runtime is still valid.
+    /// </summary>
+    public bool IsValid => NativeMethods.RuntimeIsValid(Handle);
+
+    /// <summary>
+    /// Check if a shader library is registered.
+    /// </summary>
+    public bool HasLibrary(string name) => NativeMethods.RuntimeHasLibrary(Handle, name);
+
+    internal void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    /// <summary>
+    /// Create a GPU submission context for retained schemes.
+    /// </summary>
+    public Context CreateContext() => Context.Create(this);
 
     /// <summary>
     /// Begin building a partitioned record buffer.
@@ -29,13 +52,13 @@ public sealed class RetainedPool : IDisposable
     /// </summary>
     public Buffer AcquireBuffer(ulong size, BufferKind access, uint elementStride = 0)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDisposed();
         unsafe
         {
-            var buffer = NativeMethods.RetainedPoolAcquireBuffer(
+            var buffer = NativeMethods.RuntimeAcquireBuffer(
                 Handle, size, access, elementStride, nint.Zero, 0);
             if (buffer == nint.Zero)
-                throw GoldyException.FromLastError("RetainedPool acquire_buffer");
+                throw GoldyException.FromLastError("Runtime acquire_buffer");
             return new Buffer(buffer);
         }
     }
@@ -45,15 +68,15 @@ public sealed class RetainedPool : IDisposable
     /// </summary>
     public Buffer AcquireBuffer(ReadOnlySpan<byte> data, BufferKind access, uint elementStride = 0)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDisposed();
         unsafe
         {
             fixed (byte* ptr = data)
             {
-                var buffer = NativeMethods.RetainedPoolAcquireBuffer(
+                var buffer = NativeMethods.RuntimeAcquireBuffer(
                     Handle, (ulong)data.Length, access, elementStride, (nint)ptr, (nuint)data.Length);
                 if (buffer == nint.Zero)
-                    throw GoldyException.FromLastError("RetainedPool acquire_buffer");
+                    throw GoldyException.FromLastError("Runtime acquire_buffer");
                 return new Buffer(buffer);
             }
         }
@@ -79,11 +102,11 @@ public sealed class RetainedPool : IDisposable
         TextureKind access,
         TextureFlags flags = TextureFlags.None)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        var texture = NativeMethods.RetainedPoolAcquireTexture(
+        ThrowIfDisposed();
+        var texture = NativeMethods.RuntimeAcquireTexture(
             Handle, width, height, format, access, flags, nint.Zero, 0);
         if (texture == nint.Zero)
-            throw GoldyException.FromLastError("RetainedPool acquire_texture");
+            throw GoldyException.FromLastError("Runtime acquire_texture");
         return new Texture(texture);
     }
 
@@ -91,8 +114,9 @@ public sealed class RetainedPool : IDisposable
     {
         if (!_disposed)
         {
-            NativeMethods.RetainedPoolDestroy(Handle);
+            NativeMethods.RuntimeDestroy(Handle);
             _disposed = true;
         }
     }
 }
+

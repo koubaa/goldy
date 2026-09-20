@@ -24,15 +24,14 @@ static class GameOfLifeHeadless
     static void RunCore()
     {
         using var instance = new Instance();
-        using var device = instance.RequestAdapter().RequestDevice();
+        using var device = instance.RequestAdapter().RequestRuntime();
         using var ctx = device.CreateContext();
 
         var initial = InitialCells();
-        using var retainedPool = new RetainedPool(device);
-        using var record = retainedPool.Record();
+        using var record = device.Record();
         record.EmplaceField<uint>("a", initial);
         record.EmplaceField<uint>("b", initial);
-        using var cells = record.Build(retainedPool);
+        using var cells = record.Build(device);
 
         var computeSrc = ShaderPaths.Load("game_of_life.slang");
         var renderSrc = ShaderPaths.Load("game_of_life_render.slang");
@@ -50,7 +49,7 @@ static class GameOfLifeHeadless
                 Topology = PrimitiveTopology.TriangleList,
             });
 
-        using var readback = retainedPool.AcquireTexture(
+        using var readback = device.AcquireTexture(
             GridWidth,
             GridHeight,
             TextureFormat.Rgba8Unorm,

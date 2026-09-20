@@ -13,7 +13,7 @@ public sealed class Sampler : IDisposable
     /// <summary>
     /// Create a new sampler with the given descriptor.
     /// </summary>
-    public Sampler(Device device, SamplerDesc desc)
+    public Sampler(Runtime device, SamplerDesc desc)
     {
         device.ThrowIfDisposed();
         
@@ -38,7 +38,7 @@ public sealed class Sampler : IDisposable
     /// <summary>
     /// Create a sampler with default settings.
     /// </summary>
-    public Sampler(Device device)
+    public Sampler(Runtime device)
     {
         device.ThrowIfDisposed();
         

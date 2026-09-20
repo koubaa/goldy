@@ -64,8 +64,7 @@ uint32_t field_unit(const char* name) {
 
 struct GpuState {
     goldy::Context ctx;
-    goldy::Device device;
-    goldy::RetainedPool pool;
+    goldy::Runtime device;
     goldy::Buffer cells;
     goldy::ShaderModule compute_shader;
     goldy::ShaderModule render_shader;
@@ -268,15 +267,14 @@ void step(GpuState& gpu) {
     gpu.use_buffer_a = !gpu.use_buffer_a;
 }
 
-GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
+GpuState init_gpu(goldy::Runtime device, GLFWwindow* window) {
     const auto initial = create_initial_state();
 
     goldy::Context ctx(device);
-    goldy::RetainedPool pool(device);
-    auto record = pool.record();
+    auto record = device.record();
     record.emplace_named("a", initial);
     record.emplace_named("b", initial);
-    goldy::Buffer cells = record.build(pool);
+    goldy::Buffer cells = record.build(device);
 
     goldy::ShaderModule compute_shader(device, find_shader("game_of_life.slang"));
     goldy::ShaderModule render_shader(device, find_shader("game_of_life_render.slang"));
@@ -295,7 +293,6 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     return GpuState{
         std::move(ctx),
         std::move(device),
-        std::move(pool),
         std::move(cells),
         std::move(compute_shader),
         std::move(render_shader),
@@ -383,7 +380,7 @@ int main() {
         }
 
         goldy::Instance instance;
-        goldy::Device device = instance.request_adapter().request_device();
+        goldy::Runtime device = instance.request_adapter().request_runtime();
         GpuState gpu = init_gpu(std::move(device), window);
 
         const int frame_limit = demo_frame_limit();

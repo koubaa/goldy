@@ -2,18 +2,18 @@
 //!
 //! [`VramAllocator`] is the single customization point for *where* GPU memory comes from.
 //! It sits below Goldy's pooling layers; every allocation that goes through a
-//! `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity` / `Device::alloc_texture`
+//! `Runtime::alloc_buffer` / `Runtime::alloc_buffer_with_capacity` / `Runtime::alloc_texture`
 //! method passes through the installed allocator:
 //!
-//! - **Pool parcels** — [`RetainedPool`] / [`TransientPool`] → `Device::alloc_buffer` / `Device::alloc_texture`
-//! - **Standalone named buffers** — `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity`
+//! - **Pool parcels** — [`Runtime`] / [`TransientPool`] → `Runtime::alloc_buffer` / `Runtime::alloc_texture`
+//! - **Standalone named buffers** — `Runtime::alloc_buffer` / `Runtime::alloc_buffer_with_capacity`
 //!
-//! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
+//! **Accounting deed.** Each resource returned from a `Runtime::alloc_*` call carries a deed —
 //! a `Weak` back-reference to the allocator. When the backing buffer or texture is dropped,
 //! [`VramAllocator::notify_freed`] is called automatically so the allocator can update its
 //! byte counters. Sub-range [`crate::BufferView`]s carry no deed and are never accounted.
 //!
-//! External callers use `Device::alloc_buffer` / `Device::alloc_texture` (and the
+//! External callers use `Runtime::alloc_buffer` / `Runtime::alloc_texture` (and the
 //! `alloc_buffer_with_*` helpers). Internal `Allocation::new_with_stride_and_flags` is
 //! `pub(crate)` for allocator backends and in-crate tests only.
 //!
@@ -28,7 +28,7 @@
 //! ┌───────────────────────────────────────────────────┐
 //! │  Consumers (user code)                            │
 //! │  ┌──────────────┐  ┌──────────────┐  ┌─────────┐ │
-//! │  │TransientAlloc│  │Device::alloc_│  │Retained /│ │
+//! │  │TransientAlloc│  │Runtime::alloc_│  │Retained /│ │
 //! │  │ (recycling)  │  │buffer()      │  │Transient │ │
 //! │  └──────┬───────┘  └──────┬───────┘  └────┬────┘ │
 //! │         │ via bump arena  │               │      │
@@ -46,17 +46,17 @@
 //!
 //! # Usage
 //!
-//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. The default
+//! The [`Runtime`] holds an [`Arc<dyn VramAllocator>`]. The default
 //! ([`DefaultVramAllocator`]) delegates directly to the backend and implements the deferred
 //! ring at zero overhead when [`NoPolicy`] is installed.
 //! Install a custom [`AllocationPolicy`] via
-//! [`Device::ensure_allocation_policy`](crate::device::Device::ensure_allocation_policy) for byte
+//! [`Runtime::ensure_allocation_policy`](crate::runtime::Runtime::ensure_allocation_policy) for byte
 //! tracking and budget enforcement.
 //!
 //! [`Texture`]: crate::Texture
-//! [`RetainedPool`]: crate::retained_pool::RetainedPool
+//! [`Runtime`]: crate::Runtime
 //! [`TransientPool`]: crate::transient_pool::TransientPool
-//! [`Device`]: crate::device::Device
+//! [`Runtime`]: crate::runtime::Runtime
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
 //! [`AllocationPolicy`]: crate::allocation_policy::AllocationPolicy
@@ -64,7 +64,7 @@
 
 use crate::allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, NoPolicy};
 use crate::buffer::Allocation;
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::texture::TextureBacking;
 use crate::timeline::TimelineValue;
 use crate::types::*;
@@ -237,13 +237,13 @@ pub(crate) trait VramAllocator: Send + Sync {
     }
 }
 
-/// Crate-internal buffer and texture allocation hooks for [`Device::alloc_buffer`] /
-/// [`Device::alloc_texture`].
+/// Crate-internal buffer and texture allocation hooks for [`Runtime::alloc_buffer`] /
+/// [`Runtime::alloc_texture`].
 pub(crate) trait VramAllocatorAlloc: VramAllocator {
     /// Allocate a GPU buffer.
     fn alloc_buffer(
         &self,
-        device: &Device,
+        device: &Runtime,
         size: u64,
         access: BufferKind,
         element_stride: Option<u32>,
@@ -256,7 +256,7 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
     #[cfg(test)]
     fn alloc_buffer_with_capacity(
         &self,
-        device: &Device,
+        device: &Runtime,
         initial_size: u64,
         expected_max: u64,
         access: BufferKind,
@@ -268,7 +268,7 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
     /// Allocate a GPU texture.
     fn alloc_texture(
         &self,
-        device: &Device,
+        device: &Runtime,
         width: u32,
         height: u32,
         format: TextureFormat,
@@ -286,11 +286,11 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
 /// The default allocator: delegates directly to raw buffer / texture constructors
 /// with no tracking, budgeting, or overhead.
 ///
-/// Installed automatically when a [`Device`] is created. Implements the full
+/// Installed automatically when a [`Runtime`] is created. Implements the full
 /// deferred-release ring: [`VramAllocator::defer_release`], [`VramAllocator::boundary_crossed`],
 /// and [`VramAllocator::drain`].
 ///
-/// **Device-owned ring:** the ring is device-installed and keyed by device-global timeline
+/// **Runtime-owned ring:** the ring is device-installed and keyed by device-global timeline
 /// epochs from [`crate::context::Context::defer_release`].
 /// [`crate::context::Context::boundary_crossed`] drains entries
 /// when `epoch <= device_retired` (max completed over all live contexts). Any context may
@@ -344,7 +344,7 @@ impl Default for DefaultVramAllocator {
 impl VramAllocatorAlloc for DefaultVramAllocator {
     fn alloc_buffer(
         &self,
-        device: &Device,
+        device: &Runtime,
         size: u64,
         access: BufferKind,
         element_stride: Option<u32>,
@@ -366,7 +366,7 @@ impl VramAllocatorAlloc for DefaultVramAllocator {
     #[cfg(test)]
     fn alloc_buffer_with_capacity(
         &self,
-        device: &Device,
+        device: &Runtime,
         initial_size: u64,
         expected_max: u64,
         access: BufferKind,
@@ -388,7 +388,7 @@ impl VramAllocatorAlloc for DefaultVramAllocator {
 
     fn alloc_texture(
         &self,
-        device: &Device,
+        device: &Runtime,
         width: u32,
         height: u32,
         format: TextureFormat,
@@ -492,12 +492,12 @@ mod tests {
     use crate::allocation_policy::BudgetPolicy;
     use crate::backend::mock::MockBackend;
 
-    fn test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
-    /// Device with a byte budget policy installed once for the test body.
-    fn device_with_budget_policy(budget_bytes: u64) -> (Device, Arc<BudgetPolicy>) {
+    /// Runtime with a byte budget policy installed once for the test body.
+    fn device_with_budget_policy(budget_bytes: u64) -> (Runtime, Arc<BudgetPolicy>) {
         let device = test_device();
         let policy = Arc::new(BudgetPolicy::with_budget(budget_bytes));
         device
@@ -506,7 +506,7 @@ mod tests {
         (device, policy)
     }
 
-    fn device_with_policy() -> (Device, Arc<BudgetPolicy>) {
+    fn device_with_policy() -> (Runtime, Arc<BudgetPolicy>) {
         let device = test_device();
         let policy = Arc::new(BudgetPolicy::new());
         device

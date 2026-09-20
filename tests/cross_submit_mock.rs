@@ -1,46 +1,46 @@
 //! Deterministic mock-backend integration tests for epoch-driven cross-scheme sync.
 
 use goldy::test_support::{
-    mock_all_graph_syncs_some, mock_barrier_buffer_count, mock_compute_dispatch_count, mock_device,
+    mock_all_graph_syncs_some, mock_barrier_buffer_count, mock_compute_dispatch_count,
     mock_has_nonempty_deferred_host_writes, mock_has_nonempty_host_observed_waits, mock_recorded_graph_syncs,
-    mock_recorded_waits, mock_reset_tracking, mock_retained_resubmit_count,
+    mock_recorded_waits, mock_reset_tracking, mock_retained_resubmit_count, mock_runtime,
 };
 use goldy::{
-    BufferKind, ComputePipeline, Context, DepositTarget, Device, MemoryExchange, NodeAccess, Parcel, RetainedPool,
-    Scheme, ShaderModule,
+    BufferKind, ComputePipeline, Context, DepositTarget, MemoryExchange, NodeAccess, Parcel, Runtime, Scheme,
+    ShaderModule,
 };
 #[cfg(feature = "graphics")]
 use goldy::{RenderPipeline, RenderPipelineDesc, TextureFormat};
 
-fn mock_ctx(device: &Device) -> Context {
+fn mock_ctx(device: &Runtime) -> Context {
     device.create_context().expect("context")
 }
 
-fn second_ctx(device: &Device) -> Context {
+fn second_ctx(device: &Runtime) -> Context {
     device.create_context().expect("second context")
 }
 
-fn clear_mock(device: &Device) {
+fn clear_mock(device: &Runtime) {
     mock_reset_tracking(device);
 }
 
-fn recorded_waits(device: &Device) -> Vec<Vec<(u64, u64)>> {
+fn recorded_waits(device: &Runtime) -> Vec<Vec<(u64, u64)>> {
     mock_recorded_waits(device)
 }
 
-fn barrier_buffer_count(device: &Device) -> usize {
+fn barrier_buffer_count(device: &Runtime) -> usize {
     mock_barrier_buffer_count(device)
 }
 
-fn retained_resubmits(device: &Device) -> usize {
+fn retained_resubmits(device: &Runtime) -> usize {
     mock_retained_resubmit_count(device)
 }
 
-fn compute_submits(device: &Device) -> usize {
+fn compute_submits(device: &Runtime) -> usize {
     mock_compute_dispatch_count(device)
 }
 
-fn all_graph_syncs_some(device: &Device) -> bool {
+fn all_graph_syncs_some(device: &Runtime) -> bool {
     mock_all_graph_syncs_some(device)
 }
 
@@ -78,14 +78,14 @@ fn read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &ComputePipeline) -> Sc
 
 #[test]
 fn ping_pong_buffers_emit_alternating_prologue() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let buf_a = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("buf_a");
@@ -115,12 +115,12 @@ fn ping_pong_buffers_emit_alternating_prologue() {
 
 #[test]
 fn upload_then_consumer_emits_raw_barrier() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -141,12 +141,12 @@ fn upload_then_consumer_emits_raw_barrier() {
 
 #[test]
 fn retention_resubmit_bakes_prologue_no_extra_standalone_cb() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -181,12 +181,12 @@ fn retention_resubmit_bakes_prologue_no_extra_standalone_cb() {
 
 #[test]
 fn rar_and_no_alias_emit_zero_sync() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let p = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("p");
@@ -202,7 +202,7 @@ fn rar_and_no_alias_emit_zero_sync() {
 
 #[test]
 fn cross_context_raw_emits_wait() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx1 = mock_ctx(&device);
     let ctx2 = second_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
@@ -210,7 +210,7 @@ fn cross_context_raw_emits_wait() {
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -228,14 +228,14 @@ fn cross_context_raw_emits_wait() {
 
 #[test]
 fn same_context_raw_emits_barrier_not_wait() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -252,14 +252,14 @@ fn same_context_raw_emits_barrier_not_wait() {
 
 #[test]
 fn war_same_context_emits_prologue_on_write_after_read() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -283,14 +283,14 @@ fn war_same_context_emits_prologue_on_write_after_read() {
 
 #[test]
 fn war_retained_resubmit_against_scheduled_read_needs_no_live_wait() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -319,7 +319,7 @@ fn war_retained_resubmit_against_scheduled_read_needs_no_live_wait() {
 }
 
 #[cfg(feature = "graphics")]
-fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
+fn recorded_graph_syncs(device: &Runtime) -> Vec<bool> {
     mock_recorded_graph_syncs(device)
 }
 
@@ -344,12 +344,12 @@ fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline)
 
 #[test]
 fn stamp_monotonicity_never_regresses() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -380,7 +380,7 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     // After the fix, `backend_submit_graph` uses `sync.map(...)` to preserve `Some`
     // whenever the epoch ledger produced a SubmitSync, so `submit_graph` always sees
     // `sync = Some` when there is a tracked hazard.
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
 
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("write_shader");
@@ -390,7 +390,7 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     let render_pipe =
         RenderPipeline::new(&device, &vert_shader, &frag_shader, &RenderPipelineDesc::default()).expect("render_pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -435,14 +435,14 @@ fn upload_write_scheme(ctx: &Context, parcel: &Parcel) -> Scheme {
 
 #[test]
 fn topology_independent_parcels_do_not_cross_dirty() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel_a = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel_a");
@@ -464,14 +464,14 @@ fn topology_independent_parcels_do_not_cross_dirty() {
 
 #[test]
 fn topology_new_foreign_writer_sets_dirty_on_reader() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -491,14 +491,14 @@ fn topology_new_foreign_writer_sets_dirty_on_reader() {
 
 #[test]
 fn topology_same_role_rerecord_does_not_dirty_peers() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -522,14 +522,14 @@ fn topology_same_role_rerecord_does_not_dirty_peers() {
 
 #[test]
 fn topology_dropped_scheme_edge_is_pruned() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -556,14 +556,14 @@ fn topology_dropped_scheme_edge_is_pruned() {
 
 #[test]
 fn topology_dirty_clears_after_rerecord() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -596,14 +596,14 @@ fn topology_dirty_clears_after_rerecord() {
 
 #[test]
 fn topology_kind_change_on_existing_scheme_dirties_peers() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("parcel");
@@ -630,12 +630,12 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
     use goldy::types::BufferFlags;
     use goldy::Buffer;
 
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
 
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let dest = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("dest");

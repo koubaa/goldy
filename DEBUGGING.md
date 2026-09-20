@@ -164,7 +164,7 @@ When the env var is off, those checks are skipped and `from_slang_with_options` 
 
 The **`gradient`** and **`checkerboard`** examples demonstrate this with `TimeUniforms` vs `struct TimeUniforms` in the shader sources.
 
-Standalone reflection without shader creation remains available via **`Device::reflect_struct`** and **`SlangCompiler::reflect_struct_layout`**.
+Standalone reflection without shader creation remains available via **`Runtime::reflect_struct`** and **`SlangCompiler::reflect_struct_layout`**.
 
 ## Buffer stride validation (push constants)
 

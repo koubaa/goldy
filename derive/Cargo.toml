@@ -1,6 +1,6 @@
 [package]
 name = "goldy_derive"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Derive macros for goldy (compute kernels, LayoutCheckable, StructuredBufferElement, etc.)"
@@ -18,4 +18,4 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-goldy_shader_ir = { version = "0.2.0", path = "../shader_ir" }
+goldy_shader_ir = { version = "0.3.0", path = "../shader_ir" }

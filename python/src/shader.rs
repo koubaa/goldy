@@ -1,7 +1,7 @@
 //! Python wrapper for ShaderModule.
 
-use crate::device::PyDevice;
 use crate::error::IntoPyResult;
+use crate::runtime::PyRuntime;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ impl PyShaderModule {
     ///     ...     }
     ///     ... ''')
     #[staticmethod]
-    fn from_slang(device: &PyDevice, source: &str) -> PyResult<Self> {
+    fn from_slang(device: &PyRuntime, source: &str) -> PyResult<Self> {
         let shader = goldy::ShaderModule::from_slang(&device.inner, source).into_py_result()?;
         Ok(PyShaderModule {
             inner: Arc::new(shader),
@@ -62,7 +62,7 @@ impl PyShaderModule {
     /// Returns:
     ///     A new ShaderModule instance.
     #[staticmethod]
-    fn from_slang_with_paths(device: &PyDevice, source: &str, extra_paths: Vec<String>) -> PyResult<Self> {
+    fn from_slang_with_paths(device: &PyRuntime, source: &str, extra_paths: Vec<String>) -> PyResult<Self> {
         let path_refs: Vec<&str> = extra_paths.iter().map(|s| s.as_str()).collect();
         let shader = goldy::ShaderModule::from_slang_with_paths(&device.inner, source, &path_refs).into_py_result()?;
         Ok(PyShaderModule {

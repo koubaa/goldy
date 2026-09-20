@@ -1,12 +1,9 @@
-//! Python wrapper for [`goldy::RetainedPool`] and record builders.
+//! Python wrapper for [`goldy::Runtime`] and record builders.
 
 use crate::buffer::buffer_from_owned;
 use crate::buffer::PyBuffer;
-use crate::device::PyDevice;
 use crate::error::IntoPyResult;
-use crate::texture::texture_from_owned;
-use crate::texture::PyTexture;
-use crate::types::{PyBufferKind, PyTextureFormat, PyTextureKind};
+use crate::runtime::PyRuntime;
 use goldy::{field, Init, RecordField};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -22,76 +19,14 @@ struct RecordSpec {
 /// Builder for a retained partitioned buffer (one backing allocation, multiple units).
 #[pyclass(name = "RecordBuilder", module = "goldy", unsendable)]
 pub struct PyRecordBuilder {
-    specs: RefCell<Vec<RecordSpec>>,
+    pub(crate) specs: RefCell<Vec<RecordSpec>>,
 }
 
-/// Deed-governed pool for retained GPU buffers and texture parcels.
-#[pyclass(name = "RetainedPool", module = "goldy", unsendable)]
-pub struct PyRetainedPool {
-    pub(crate) inner: RefCell<goldy::RetainedPool>,
-}
-
-#[pymethods]
-impl PyRetainedPool {
-    #[new]
-    fn new(device: &PyDevice) -> Self {
+impl PyRecordBuilder {
+    pub(crate) fn empty() -> Self {
         Self {
-            inner: RefCell::new(goldy::RetainedPool::new(device.inner.clone())),
-        }
-    }
-
-    /// Acquire a retained buffer from numpy array or bytes.
-    fn acquire_buffer(&self, data: &Bound<'_, PyAny>, access: PyBufferKind) -> PyResult<PyBuffer> {
-        let (bytes, element_stride) = crate::bytes_util::extract_bytes_with_stride(data)?;
-        let buffer = self
-            .inner
-            .borrow_mut()
-            .acquire_buffer(
-                bytes.len() as u64,
-                access.into(),
-                Some(element_stride),
-                goldy::BufferFlags::empty(),
-                Some(&bytes),
-            )
-            .into_py_result()?;
-        Ok(buffer_from_owned(buffer))
-    }
-
-    /// Acquire a retained texture.
-    #[pyo3(signature = (width, height, format, kind, *, copy_src = true, copy_dst = false))]
-    fn acquire_texture(
-        &self,
-        width: u32,
-        height: u32,
-        format: PyTextureFormat,
-        kind: PyTextureKind,
-        copy_src: bool,
-        copy_dst: bool,
-    ) -> PyResult<PyTexture> {
-        let mut flags = goldy::TextureFlags::empty();
-        if copy_src {
-            flags |= goldy::TextureFlags::COPY_SRC;
-        }
-        if copy_dst {
-            flags |= goldy::TextureFlags::COPY_DST;
-        }
-        let texture = self
-            .inner
-            .borrow_mut()
-            .acquire_texture(width, height, format.into(), kind.into(), flags, None)
-            .into_py_result()?;
-        Ok(texture_from_owned(texture))
-    }
-
-    /// Begin building a partitioned buffer (one backing allocation, multiple units).
-    fn acquire_record(&self) -> PyRecordBuilder {
-        PyRecordBuilder {
             specs: RefCell::new(Vec::new()),
         }
-    }
-
-    fn __repr__(&self) -> String {
-        "RetainedPool()".to_string()
     }
 }
 
@@ -142,7 +77,7 @@ impl PyRecordBuilder {
     }
 
     /// Allocate the backing buffer and return the partitioned [`PyBuffer`].
-    fn build(&self, pool: &PyRetainedPool) -> PyResult<PyBuffer> {
+    fn build(&self, runtime: &PyRuntime) -> PyResult<PyBuffer> {
         let specs = std::mem::take(&mut *self.specs.borrow_mut());
         if specs.is_empty() {
             return Err(crate::error::GoldyError::new_err(
@@ -171,7 +106,7 @@ impl PyRecordBuilder {
             })
             .collect();
 
-        let buffer = pool.inner.borrow_mut().acquire_record(fields).into_py_result()?;
+        let buffer = runtime.inner.acquire_record(fields).into_py_result()?;
         Ok(buffer_from_owned(buffer))
     }
 

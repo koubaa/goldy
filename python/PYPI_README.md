@@ -38,7 +38,7 @@ import numpy as np
 
 # Create device
 instance = goldy.Instance()
-device = instance.request_adapter().request_device()
+device = instance.request_adapter().request_runtime()
 
 # Create vertex buffer with a triangle
 vertices = np.array([
@@ -47,8 +47,7 @@ vertices = np.array([
     -0.5,  0.5, 0.0, 1.0, 0.0, 1.0,  # green
      0.5,  0.5, 0.0, 0.0, 1.0, 1.0,  # blue
 ], dtype=np.float32)
-retained_pool = goldy.RetainedPool(device)
-vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+vertex_parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
 # Create shader and pipeline
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
@@ -95,8 +94,8 @@ python examples/triangle.py
 Retained pools accept numpy arrays directly and return buffers (use `[0]` for a single-unit parcel):
 ```python
 vertices = np.array([...], dtype=np.float32)
-pool = goldy.RetainedPool(device)
-parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+pool = device
+parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 ```
 
 Readback uses `MemoryExchange` withdraw (claim then consume):
@@ -150,8 +149,7 @@ device.register_library('mylib', '''
 | Class | Description |
 |-------|-------------|
 | `Instance` | Entry point, enumerate adapters |
-| `Device` | GPU device for creating resources |
-| `RetainedPool` | Allocates retained GPU parcels |
+| `Runtime` | Device-scoped machine root; acquire retained parcels |
 | `Parcel` | Retained buffer or texture resource |
 | `ShaderModule` | Compiled Slang shader |
 | `RenderPipeline` | Complete render state |

@@ -13,7 +13,7 @@ public sealed class ComputePipeline : IDisposable
     /// <summary>
     /// Create a new compute pipeline.
     /// </summary>
-    public ComputePipeline(Device device, ShaderModule computeShader)
+    public ComputePipeline(Runtime device, ShaderModule computeShader)
     {
         device.ThrowIfDisposed();
         

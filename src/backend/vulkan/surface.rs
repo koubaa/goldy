@@ -373,7 +373,7 @@ pub(super) fn create(
         swapchain_compute_present_command_buffers,
         swapchain_render_present_command_buffers,
     ) = {
-        let ld = devices.get(&device_handle).context("Device invalid")?;
+        let ld = devices.get(&device_handle).context("Runtime invalid")?;
         (
             alloc_and_record_prep_cbs(ld, &swapchain_images)?,
             alloc_and_record_compute_present_cbs(ld, &swapchain_images)?,
@@ -1029,7 +1029,7 @@ pub(super) fn resize(
         })
         .collect();
     {
-        let ld = devices.get(&device_handle).context("Device invalid")?;
+        let ld = devices.get(&device_handle).context("Runtime invalid")?;
         for (image, memory) in scratch_resources {
             unsafe {
                 ld.device.destroy_image(image, None);
@@ -1170,7 +1170,7 @@ pub(super) fn resize(
 
     // Pre-record per-image barrier CBs and re-register bindless textures for the new images.
     let (new_prep_cbs, new_compute_present_cbs, new_render_present_cbs) = {
-        let logical_device = devices.get(&device_handle).context("Device invalid")?;
+        let logical_device = devices.get(&device_handle).context("Runtime invalid")?;
         (
             alloc_and_record_prep_cbs(logical_device, &swapchain_images)?,
             alloc_and_record_compute_present_cbs(logical_device, &swapchain_images)?,
@@ -1368,7 +1368,7 @@ fn ensure_scratch_texture_slot(
         .and_then(|slot| slot.take())
     {
         unregister_surface_texture(&state.devices, &state.textures, old.texture_handle);
-        let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let ld = state.devices.get(&device_handle).context("Runtime invalid")?;
         unsafe {
             ld.device.destroy_image(old.image, None);
             ld.device.free_memory(old.memory, None);
@@ -1376,7 +1376,7 @@ fn ensure_scratch_texture_slot(
     }
 
     let (image, memory) = {
-        let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let ld = state.devices.get(&device_handle).context("Runtime invalid")?;
         let qf = ld.concurrent_queue_families();
         let image_info = with_image_sharing(
             vk::ImageCreateInfo::default()
@@ -1426,7 +1426,7 @@ fn ensure_scratch_texture_slot(
     // Transition UNDEFINED → GENERAL via a one-shot submit so compute shaders
     // can write immediately on the first frame that uses this slot.
     {
-        let ld = state.devices.get(&device_handle).context("Device invalid")?;
+        let ld = state.devices.get(&device_handle).context("Runtime invalid")?;
         let cb = ld.acquire_device_cmd_buffer()?;
         unsafe {
             let begin = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1514,7 +1514,7 @@ fn register_surface_texture(
 ) -> Result<TextureHandle> {
     let handle = textures.write().unwrap().alloc_handle();
 
-    let logical_device = devices.get(&device_handle).context("Device no longer valid")?;
+    let logical_device = devices.get(&device_handle).context("Runtime no longer valid")?;
 
     // Create an image view for compute storage access
     let view_info = vk::ImageViewCreateInfo::default()

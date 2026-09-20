@@ -1,19 +1,19 @@
 //! FFI bindings for Instance.
 
-use crate::device::GoldyDevice;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
+use crate::runtime::GoldyRuntime;
 use crate::types::{GoldyAdapterInfo, GoldyBackendType};
 use anyhow::Context;
-use goldy::DeviceDescriptor;
+use goldy::RuntimeDescriptor;
 use std::ptr;
 
-fn device_for_adapter(instance: &goldy::Instance, adapter_id: u32) -> anyhow::Result<goldy::Device> {
+fn device_for_adapter(instance: &goldy::Instance, adapter_id: u32) -> anyhow::Result<goldy::Runtime> {
     let adapters = instance.enumerate_adapters();
     let adapter = adapters
         .iter()
         .find(|a| a.id() == adapter_id)
         .with_context(|| format!("Adapter {adapter_id} not found"))?;
-    adapter.request_device(&DeviceDescriptor::default())
+    adapter.request_runtime(&RuntimeDescriptor::default())
 }
 
 /// Opaque handle to a Goldy Instance.
@@ -102,17 +102,17 @@ pub unsafe extern "C" fn goldy_instance_get_adapter(
 /// # Safety
 /// The instance pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_instance_create_device_for_adapter(
+pub unsafe extern "C" fn goldy_instance_create_runtime_for_adapter(
     instance: *const GoldyInstance,
     adapter_id: u32,
-) -> *mut GoldyDevice {
+) -> *mut GoldyRuntime {
     if instance.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Instance is null"));
         return ptr::null_mut();
     }
 
     match device_for_adapter(&(*instance).inner, adapter_id) {
-        Ok(device) => Box::into_raw(Box::new(GoldyDevice { inner: device })),
+        Ok(device) => Box::into_raw(Box::new(GoldyRuntime { inner: device })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
             ptr::null_mut()

@@ -1,12 +1,11 @@
-//! FFI bindings for [`goldy::RetainedPool`], [`goldy::Buffer`], [`goldy::Texture`], [`goldy::Parcel`], and record builders.
+//! FFI bindings for [`goldy::Runtime`], [`goldy::Buffer`], [`goldy::Texture`], [`goldy::Parcel`], and record builders.
 
-use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
+use crate::runtime::GoldyRuntime;
 use crate::types::{GoldyBufferKind, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind};
 use goldy::{field, Init, RecordField};
 use std::ptr;
 use std::slice;
-use std::sync::Arc;
 
 struct FfiRecordSpec {
     name: Option<String>,
@@ -18,11 +17,6 @@ struct FfiRecordSpec {
 /// Builder for a retained record buffer (one backing buffer, multiple sub-views).
 pub struct GoldyRecordBuilder {
     specs: Vec<FfiRecordSpec>,
-}
-
-/// Opaque handle to a Goldy retained allocation pool.
-pub struct GoldyRetainedPool {
-    pub(crate) inner: goldy::RetainedPool,
 }
 
 /// Opaque handle to an acquired [`goldy::Buffer`].
@@ -63,33 +57,16 @@ pub struct GoldyParcel {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn goldy_retained_pool_create(device: *const GoldyDevice) -> *mut GoldyRetainedPool {
-    if device.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
-        return ptr::null_mut();
-    }
-    let pool = goldy::RetainedPool::new(Arc::new((*device).inner.clone()));
-    Box::into_raw(Box::new(GoldyRetainedPool { inner: pool }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn goldy_retained_pool_destroy(pool: *mut GoldyRetainedPool) {
-    if !pool.is_null() {
-        drop(Box::from_raw(pool));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn goldy_retained_pool_acquire_buffer(
-    pool: *mut GoldyRetainedPool,
+pub unsafe extern "C" fn goldy_runtime_acquire_buffer(
+    runtime: *mut GoldyRuntime,
     size: u64,
     access: GoldyBufferKind,
     element_stride: u32,
     data: *const u8,
     data_size: usize,
 ) -> *mut GoldyBuffer {
-    if pool.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("RetainedPool is null"));
+    if runtime.is_null() {
+        set_last_error_from_anyhow(&anyhow::anyhow!("Runtime is null"));
         return ptr::null_mut();
     }
     if !data.is_null() && data_size == 0 {
@@ -112,7 +89,7 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_buffer(
         Some(element_stride)
     };
 
-    match (*pool)
+    match (*runtime)
         .inner
         .acquire_buffer(size, access.into(), stride, goldy::BufferFlags::empty(), init)
     {
@@ -125,8 +102,8 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_buffer(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn goldy_retained_pool_acquire_texture(
-    pool: *mut GoldyRetainedPool,
+pub unsafe extern "C" fn goldy_runtime_acquire_texture(
+    runtime: *mut GoldyRuntime,
     width: u32,
     height: u32,
     format: GoldyTextureFormat,
@@ -135,8 +112,8 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_texture(
     data: *const u8,
     data_size: usize,
 ) -> *mut GoldyTexture {
-    if pool.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("RetainedPool is null"));
+    if runtime.is_null() {
+        set_last_error_from_anyhow(&anyhow::anyhow!("Runtime is null"));
         return ptr::null_mut();
     }
     if !data.is_null() && data_size == 0 {
@@ -154,7 +131,7 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_texture(
         None
     };
 
-    match (*pool)
+    match (*runtime)
         .inner
         .acquire_texture(width, height, format.into(), access.into(), flags.into(), init)
     {
@@ -321,14 +298,14 @@ pub unsafe extern "C" fn goldy_record_builder_reserve(
 #[no_mangle]
 pub unsafe extern "C" fn goldy_record_builder_build(
     builder: *mut GoldyRecordBuilder,
-    pool: *mut GoldyRetainedPool,
+    runtime: *mut GoldyRuntime,
 ) -> *mut GoldyBuffer {
     if builder.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("RecordBuilder is null"));
         return ptr::null_mut();
     }
-    if pool.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("RetainedPool is null"));
+    if runtime.is_null() {
+        set_last_error_from_anyhow(&anyhow::anyhow!("Runtime is null"));
         drop(Box::from_raw(builder));
         return ptr::null_mut();
     }
@@ -357,7 +334,7 @@ pub unsafe extern "C" fn goldy_record_builder_build(
         })
         .collect();
 
-    match (*pool).inner.acquire_record(fields) {
+    match (*runtime).inner.acquire_record(fields) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

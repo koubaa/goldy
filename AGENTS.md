@@ -1,6 +1,6 @@
 ## Compatibility
 
-Within 0.2.x, prefer additive changes and document breakages in CHANGELOG. Major API shifts belong in a new minor (0.3) until 1.0.
+Within 0.3.x, prefer additive changes and document breakages in CHANGELOG. Major API shifts belong in a new minor until 1.0.
 
 ## Design considerations
 
@@ -12,8 +12,13 @@ There is churn happening now, it is important to keep certain architectural prin
   `Transaction` / withdraw or deposit transaction; each submission may produce a
   linear claim for externally settled handoffs (present, withdraw). Deposits
   settle inside graph execution and do not publish claims.
-- All allocations and schemes are threaded through a "context".
-- There are two kinds of pools associated with a device: "retained" and "transient". These are shared across contexts.
+- `Runtime` is the public machine agent and warehouse owner (retained parcels,
+  shaders, pipelines, capabilities). `Context` is a submission timeline with
+  transient/deposit pools; `Context::runtime()` returns the shared root. Backend
+  device handles stay private.
+- There are two kinds of pools associated with a runtime: "retained" (acquired
+  on `Runtime`) and "transient" (context-scoped leases). These are shared across
+  contexts of the same runtime.
 - We are refactoring in the direction of removing imperative APIs (like read_to_cpu) in favor of scheme submissions as the only way to affect parcels.
 
 ## Support

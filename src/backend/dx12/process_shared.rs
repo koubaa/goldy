@@ -1,6 +1,6 @@
 //! Process-wide DXGI factory + adapter list (initialized once).
 //!
-//! Each [`crate::Device`] / [`super::Dx12Backend`] owns independent [`super::Dx12State`]
+//! Each [`crate::Runtime`] / [`super::Dx12Backend`] owns independent [`super::Dx12State`]
 //! (resource tables, contexts, devices) for lock-free concurrent submit, but DXGI factory
 //! creation with `DXGI_CREATE_FACTORY_DEBUG` must not run concurrently — parallel
 //! `Instance::new` calls would otherwise hit `DXGI_ERROR_INVALID_CALL`.

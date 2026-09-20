@@ -55,7 +55,7 @@ struct TexturePendingEntry {
 /// Recycle-bin key for buffer parcels: interchangeable iff size, kind, flags, and stride match.
 ///
 /// Keying on size alone would allow an adopted non-Scattered buffer (from
-/// [`crate::retained_pool::RetainedPool::release_buffer`]) to be handed out to a
+/// [`crate::Context::release_buffer`]) to be handed out to a
 /// [`TransientPool::acquire_buffer`] caller that expects a specific kind — which would produce
 /// wrong descriptor categories or silent garbage in the shader. Stride is included so
 /// scratch buffers with different structured strides never alias.
@@ -161,7 +161,7 @@ impl TransientPool {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<Texture> {
-        let home_device = Arc::downgrade(&ctx.device().inner);
+        let home_device = Arc::downgrade(&ctx.runtime().inner);
         let key = TextureKey {
             width,
             height,
@@ -184,7 +184,7 @@ impl TransientPool {
         }
 
         let tex = ctx
-            .device()
+            .runtime()
             .alloc_texture(width, height, format, access, flags)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         self.texture_alloc_count += 1;
@@ -232,14 +232,14 @@ impl TransientPool {
         }
 
         let alloc = ctx
-            .device()
+            .runtime()
             .alloc_buffer(size, kind, element_stride, flags)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         self.buffer_alloc_count += 1;
         let bytes = alloc.byte_size();
         self.outstanding.add(ParcelType::Buffer, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Buffer, bytes);
-        let mut parcel = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
+        let mut parcel = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.runtime().inner));
         parcel.attach_bookkeeping(guard);
         Ok(parcel)
     }
@@ -253,7 +253,7 @@ impl TransientPool {
         flags: BufferFlags,
         element_stride: Option<u32>,
     ) -> Result<crate::parcel::Buffer> {
-        let home_device = Arc::downgrade(&ctx.device().inner);
+        let home_device = Arc::downgrade(&ctx.runtime().inner);
         let parcel = self.acquire_buffer(ctx, size, kind, flags, element_stride)?;
         crate::parcel::Buffer::from_transient_parcel(parcel, home_device)
     }
@@ -310,7 +310,7 @@ impl TransientPool {
                 self.park_texture(texture, ready_after);
             }
             RetainedHold::Buffer(buffer) => {
-                // Partitioned buffers (from `Device::acquire_record`) cannot be
+                // Partitioned buffers (from `Runtime::acquire_record`) cannot be
                 // reissued from the bin since the pool keys on single-parcel descriptors.
                 // Drop them directly; the backend's deferred deletion queue provides the
                 // same epoch-gated reclamation the bin would otherwise give.
@@ -503,11 +503,10 @@ impl Default for TransientPool {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::device::Device;
-    use crate::retained_pool::RetainedPool;
+    use crate::runtime::Runtime;
 
-    fn test_device() -> Arc<Device> {
-        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    fn test_device() -> Arc<Runtime> {
+        Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
     fn rgba_interpolated() -> (TextureFormat, TextureKind, TextureFlags) {
@@ -523,10 +522,10 @@ mod tests {
 
     fn park_ready_buffer(ctx: &Context) {
         let alloc = ctx
-            .device()
+            .runtime()
             .alloc_buffer(TEST_BUFFER_SIZE, SCATTERED_EMPTY.0, None, SCATTERED_EMPTY.1)
             .expect("alloc");
-        let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
+        let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.runtime().inner));
         ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ReferenceTable::new()));
     }
 
@@ -534,17 +533,17 @@ mod tests {
         let mut ready_after = ReferenceTable::new();
         crate::timeline::mark_reference(&mut ready_after, ctx.test_backend_handle(), u64::MAX);
         let alloc = ctx
-            .device()
+            .runtime()
             .alloc_buffer(TEST_BUFFER_SIZE, SCATTERED_EMPTY.0, None, SCATTERED_EMPTY.1)
             .expect("alloc");
-        let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
+        let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.runtime().inner));
         ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ready_after));
     }
 
     fn park_ready_texture(ctx: &Context) {
         let (fmt, acc, flags) = rgba_interpolated();
-        let tex = ctx.device().alloc_texture(8, 8, fmt, acc, flags).expect("alloc");
-        let home = Arc::downgrade(&ctx.device().inner);
+        let tex = ctx.runtime().alloc_texture(8, 8, fmt, acc, flags).expect("alloc");
+        let home = Arc::downgrade(&ctx.runtime().inner);
         let mut parcel = Parcel::from_texture(tex, home);
         parcel.retire_stamp_for_pool_return();
         ctx.with_transient_pool(|pool| {
@@ -570,8 +569,8 @@ mod tests {
 
     fn park_not_ready_texture(ctx: &Context) {
         let (fmt, acc, flags) = rgba_interpolated();
-        let tex = ctx.device().alloc_texture(8, 8, fmt, acc, flags).expect("alloc");
-        let home = Arc::downgrade(&ctx.device().inner);
+        let tex = ctx.runtime().alloc_texture(8, 8, fmt, acc, flags).expect("alloc");
+        let home = Arc::downgrade(&ctx.runtime().inner);
         let mut parcel = Parcel::from_texture(tex, home);
         let mut ready_after = ReferenceTable::new();
         crate::timeline::mark_reference(&mut ready_after, ctx.test_backend_handle(), u64::MAX);
@@ -598,13 +597,13 @@ mod tests {
     fn adopt_from_retained_pool_and_reuse() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut retained = RetainedPool::new(device.clone());
+        let mut retained = device.clone();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = retained.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         let handle_before = p.texture_handle().unwrap();
 
-        retained.release_texture(&ctx, p);
-        assert_eq!(retained.bytes_by_kind().texture, 0);
+        ctx.release_texture(p);
+        assert_eq!(retained.retained_bytes_by_kind().texture, 0);
         assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1);
 
         let p2 = ctx
@@ -617,7 +616,7 @@ mod tests {
     fn adopted_buffer_bins_and_reissues_via_acquire_buffer() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut retained = RetainedPool::new(device.clone());
+        let mut retained = device.clone();
         let b = retained
             .acquire_buffer(
                 64,
@@ -628,7 +627,7 @@ mod tests {
             )
             .unwrap();
         let handle_before = b.whole().buffer_handle().unwrap();
-        retained.release_buffer(&ctx, b);
+        ctx.release_buffer(b);
         assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1);
         assert!(ctx.with_transient_pool(|t| t.pending_bytes().buffer >= 64));
 

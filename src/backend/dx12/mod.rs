@@ -6,7 +6,7 @@
 //! ## WARP (software D3D12)
 //!
 //! Set **`GOLDY_DX12_FORCE_WARP=1`** to run on the DX12 WARP software rasterizer.
-//! This registers WARP with DXGI and redirects [`Instance::create_device`](crate::Instance::create_device)
+//! This registers WARP with DXGI and redirects [`Instance::create_runtime`](crate::Instance::create_runtime)
 //! to it, even when hardware GPUs are present. Use on headless CI (no GPU) or locally to
 //! reproduce WARP-specific rendering bugs.
 //!
@@ -22,7 +22,7 @@
 //! ## Reserved (tiled) buffers
 //!
 //! When **`GOLDY_DX12_DISABLE_RESERVED_BUFFERS=1`**, oversize `Buffer::new_with_capacity_hint`
-//! uses committed resources instead of reserved resources and tile heap mapping. Device
+//! uses committed resources instead of reserved resources and tile heap mapping. Runtime
 //! capabilities report `buffer_resize_cost` as `Copy` in that mode. Use this if a driver stack
 //! faults during tile mapping; capture a GPU hang dump / enable the D3D12 debug layer first.
 //!
@@ -72,7 +72,7 @@ pub const WARP_ADAPTER_ID: u32 = u32::MAX;
 
 /// Whether `GOLDY_DX12_FORCE_WARP=1` is set.
 ///
-/// Registers WARP with DXGI and redirects [`Instance::create_device`](crate::Instance::create_device)
+/// Registers WARP with DXGI and redirects [`Instance::create_runtime`](crate::Instance::create_runtime)
 /// to the WARP adapter regardless of what hardware GPUs are present.
 pub(crate) fn env_force_warp() -> bool {
     std::env::var("GOLDY_DX12_FORCE_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -584,7 +584,7 @@ impl GpuBackend for Dx12Backend {
         device::enumerate(&self.state.adapters)
     }
 
-    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
         device::adapter_capabilities(&self.state.adapters, adapter_id)
     }
 

@@ -4,8 +4,8 @@
 //! filtering modes and addressing (wrapping) behavior.
 
 use crate::backend::GpuBackend;
-use crate::device::Device;
 use crate::handles::SamplerHandle;
+use crate::runtime::Runtime;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, SamplerDesc};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{Device, Sampler, SamplerDesc, FilterMode, AddressMode};
+/// use goldy::{Runtime, Sampler, SamplerDesc, FilterMode, AddressMode};
 ///
-/// fn create_sampler(device: &Device) -> anyhow::Result<Sampler> {
+/// fn create_sampler(device: &Runtime) -> anyhow::Result<Sampler> {
 ///     Sampler::new(device, &SamplerDesc {
 ///         mag_filter: FilterMode::Linear,
 ///         min_filter: FilterMode::Linear,
@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 /// }
 /// ```
 pub struct Sampler {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: SamplerHandle,
     bindless: Option<u32>,
@@ -49,7 +49,7 @@ impl Sampler {
     /// # Errors
     ///
     /// Returns an error if GPU resource allocation fails.
-    pub fn new(device: &Device, desc: &SamplerDesc) -> Result<Self> {
+    pub fn new(device: &Runtime, desc: &SamplerDesc) -> Result<Self> {
         tracing::debug!(
             mag_filter = ?desc.mag_filter,
             min_filter = ?desc.min_filter,
@@ -72,14 +72,14 @@ impl Sampler {
     }
 
     /// Create a sampler with default settings (nearest filtering, clamp to edge).
-    pub fn default_sampler(device: &Device) -> Result<Self> {
+    pub fn default_sampler(device: &Runtime) -> Result<Self> {
         Self::new(device, &SamplerDesc::default())
     }
 
     /// Create a sampler with linear filtering and clamp to edge addressing.
     ///
     /// This is a common configuration for smooth texture sampling.
-    pub fn linear(device: &Device) -> Result<Self> {
+    pub fn linear(device: &Runtime) -> Result<Self> {
         use crate::types::FilterMode;
         Self::new(
             device,
@@ -95,7 +95,7 @@ impl Sampler {
     /// Create a sampler with nearest filtering and clamp to edge addressing.
     ///
     /// This preserves hard pixel edges (useful for pixel art).
-    pub fn nearest(device: &Device) -> Result<Self> {
+    pub fn nearest(device: &Runtime) -> Result<Self> {
         use crate::types::FilterMode;
         Self::new(
             device,
@@ -111,7 +111,7 @@ impl Sampler {
     /// Create a sampler with linear filtering and repeat addressing.
     ///
     /// This is common for tiling textures.
-    pub fn linear_repeat(device: &Device) -> Result<Self> {
+    pub fn linear_repeat(device: &Runtime) -> Result<Self> {
         use crate::types::{AddressMode, FilterMode};
         Self::new(
             device,
@@ -167,8 +167,8 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::types::{AddressMode, FilterMode};
 
-    fn create_test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn create_test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
     #[test]

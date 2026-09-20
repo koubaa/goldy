@@ -56,7 +56,7 @@ Set `GOLDY_SLANG_PATH` only to override with a custom Slang build.
 ## Verifying Installation
 
 ```rust
-use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
+use goldy::{RuntimeDescriptor, Instance, RequestAdapterOptions};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
 
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?;
+        .request_runtime(&RuntimeDescriptor::default())?;
     println!("\nUsing: {}", device.adapter_info().name);
 
     Ok(())

@@ -50,7 +50,7 @@ def ensure_context_field(text: str, stem: str) -> str:
         return text
     if "context: goldy::Context" not in text:
         text = re.sub(
-            r"(device: Arc<goldy::Device>,)\n",
+            r"(device: Arc<goldy::Runtime>,)\n",
             r"\1\n    context: goldy::Context,\n",
             text,
             count=1,

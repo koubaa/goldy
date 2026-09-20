@@ -7,10 +7,10 @@ use std::os::raw::c_int;
 pub type FnGoldyClearError = unsafe extern "C" fn();
 
 pub type FnGoldyComputePipelineCreate =
-    unsafe extern "C" fn(*const GoldyDevice, *const GoldyShaderModule) -> *mut GoldyComputePipeline;
+    unsafe extern "C" fn(*const GoldyRuntime, *const GoldyShaderModule) -> *mut GoldyComputePipeline;
 pub type FnGoldyComputePipelineDestroy = unsafe extern "C" fn(*mut GoldyComputePipeline);
 
-pub type FnGoldyContextCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyContext;
+pub type FnGoldyContextCreate = unsafe extern "C" fn(*const GoldyRuntime) -> *mut GoldyContext;
 pub type FnGoldyContextDestroy = unsafe extern "C" fn(*mut GoldyContext);
 pub type FnGoldyContextLeaseRenderTarget = unsafe extern "C" fn(
     *const GoldyContext,
@@ -107,8 +107,8 @@ pub type FnGoldySchemeRenderPassDrawFullscreen = unsafe extern "C" fn(*mut Goldy
 pub type FnGoldySchemeRenderPassFinish = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
 pub type FnGoldySchemeCopyToTexture =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldySchemeRenderTargetLease, *const GoldyTexture) -> GoldyResult;
-pub type FnGoldyRetainedPoolAcquireTexture = unsafe extern "C" fn(
-    *mut GoldyRetainedPool,
+pub type FnGoldyRuntimeAcquireTexture = unsafe extern "C" fn(
+    *mut GoldyRuntime,
     u32,
     u32,
     GoldyTextureFormat,
@@ -156,47 +156,45 @@ pub type FnGoldySurfaceExchangeCreateAppkit =
 pub type FnGoldySurfaceExchangeCreateWayland =
     unsafe extern "C" fn(*const GoldyContext, *mut c_void, *mut c_void, u32) -> *mut GoldySurfaceExchange;
 
-pub type FnGoldyDeviceAdapterId = unsafe extern "C" fn(*const GoldyDevice) -> u32;
-pub type FnGoldyDeviceDestroy = unsafe extern "C" fn(*mut GoldyDevice);
-pub type FnGoldyDeviceHasLibrary = unsafe extern "C" fn(*const GoldyDevice, *const c_char) -> bool;
-pub type FnGoldyDeviceIsValid = unsafe extern "C" fn(*const GoldyDevice) -> bool;
+pub type FnGoldyRuntimeAdapterId = unsafe extern "C" fn(*const GoldyRuntime) -> u32;
+pub type FnGoldyRuntimeDestroy = unsafe extern "C" fn(*mut GoldyRuntime);
+pub type FnGoldyRuntimeHasLibrary = unsafe extern "C" fn(*const GoldyRuntime, *const c_char) -> bool;
+pub type FnGoldyRuntimeIsValid = unsafe extern "C" fn(*const GoldyRuntime) -> bool;
 
 pub type FnGoldyGetLastError = unsafe extern "C" fn() -> *const c_char;
 
 pub type FnGoldyInstanceAdapterCount = unsafe extern "C" fn(*const GoldyInstance) -> u32;
 pub type FnGoldyInstanceBackendType = unsafe extern "C" fn(*const GoldyInstance) -> GoldyBackendType;
 pub type FnGoldyInstanceCreate = unsafe extern "C" fn() -> *mut GoldyInstance;
-pub type FnGoldyInstanceCreateDeviceForAdapter = unsafe extern "C" fn(*const GoldyInstance, u32) -> *mut GoldyDevice;
+pub type FnGoldyInstanceCreateDeviceForAdapter = unsafe extern "C" fn(*const GoldyInstance, u32) -> *mut GoldyRuntime;
 pub type FnGoldyInstanceDestroy = unsafe extern "C" fn(*mut GoldyInstance);
 pub type FnGoldyInstanceGetAdapter =
     unsafe extern "C" fn(*const GoldyInstance, u32, *mut GoldyAdapterInfo) -> GoldyResult;
 
 pub type FnGoldyRenderPipelineCreate = unsafe extern "C" fn(
-    *const GoldyDevice,
+    *const GoldyRuntime,
     *const GoldyShaderModule,
     *const GoldyShaderModule,
     *const GoldyRenderPipelineDesc,
 ) -> *mut GoldyRenderPipeline;
 pub type FnGoldyRenderPipelineDestroy = unsafe extern "C" fn(*mut GoldyRenderPipeline);
 
-pub type FnGoldySamplerCreate = unsafe extern "C" fn(*const GoldyDevice, *const GoldySamplerDesc) -> *mut GoldySampler;
-pub type FnGoldySamplerCreateDefault = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldySampler;
+pub type FnGoldySamplerCreate = unsafe extern "C" fn(*const GoldyRuntime, *const GoldySamplerDesc) -> *mut GoldySampler;
+pub type FnGoldySamplerCreateDefault = unsafe extern "C" fn(*const GoldyRuntime) -> *mut GoldySampler;
 pub type FnGoldySamplerDestroy = unsafe extern "C" fn(*mut GoldySampler);
 
 pub type FnGoldyShaderBuiltinVertexColor2d = unsafe extern "C" fn() -> *const c_char;
-pub type FnGoldyShaderCreate = unsafe extern "C" fn(*const GoldyDevice, *const c_char) -> *mut GoldyShaderModule;
+pub type FnGoldyShaderCreate = unsafe extern "C" fn(*const GoldyRuntime, *const c_char) -> *mut GoldyShaderModule;
 pub type FnGoldyShaderDestroy = unsafe extern "C" fn(*mut GoldyShaderModule);
 
-pub type FnGoldyRetainedPoolAcquireBuffer =
-    unsafe extern "C" fn(*mut GoldyRetainedPool, u64, GoldyBufferKind, u32, *const u8, usize) -> *mut GoldyBuffer;
-pub type FnGoldyRetainedPoolCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyRetainedPool;
-pub type FnGoldyRetainedPoolDestroy = unsafe extern "C" fn(*mut GoldyRetainedPool);
+pub type FnGoldyRuntimeAcquireBuffer =
+    unsafe extern "C" fn(*mut GoldyRuntime, u64, GoldyBufferKind, u32, *const u8, usize) -> *mut GoldyBuffer;
 pub type FnGoldyRecordBuilderCreate = unsafe extern "C" fn() -> *mut GoldyRecordBuilder;
 pub type FnGoldyRecordBuilderDestroy = unsafe extern "C" fn(*mut GoldyRecordBuilder);
 pub type FnGoldyRecordBuilderEmplace =
     unsafe extern "C" fn(*mut GoldyRecordBuilder, *const c_char, *const u8, usize, u64, u32) -> u32;
 pub type FnGoldyRecordBuilderBuild =
-    unsafe extern "C" fn(*mut GoldyRecordBuilder, *mut GoldyRetainedPool) -> *mut GoldyBuffer;
+    unsafe extern "C" fn(*mut GoldyRecordBuilder, *mut GoldyRuntime) -> *mut GoldyBuffer;
 pub type FnGoldyBufferDestroy = unsafe extern "C" fn(*mut GoldyBuffer);
 pub type FnGoldyBufferByteSize = unsafe extern "C" fn(*const GoldyBuffer) -> u64;
 pub type FnGoldyBufferUnitCount = unsafe extern "C" fn(*const GoldyBuffer) -> u32;

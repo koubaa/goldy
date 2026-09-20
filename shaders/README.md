@@ -160,15 +160,15 @@ Transform2D    // float2 position, float rotation, float2 scale, float _pad
 
 **Native (Rust):**
 
-The `goldy_exp` library is automatically registered when you create a `Device`:
+The `goldy_exp` library is automatically registered when you create a `Runtime`:
 
 ```rust
-use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule, shaders};
+use goldy::{RuntimeDescriptor, Instance, RequestAdapterOptions, ShaderModule, shaders};
 
 let instance = Instance::new()?;
 let device = instance
     .request_adapter(&RequestAdapterOptions::default())?
-    .request_device(&DeviceDescriptor::default())?;
+    .request_runtime(&RuntimeDescriptor::default())?;
 
 // The goldy_exp library is pre-registered - just use import goldy_exp;
 let shader = ShaderModule::from_slang(&device, shaders::PLASMA)?;
@@ -264,8 +264,8 @@ Store raw `uint*` pointers in the ParameterBlock, then:
 ```slang
 // In bindless_resources.slang - store raw pointers
 struct GoldyBindlessResources {
-    uint* storageBuffers[GOLDY_MAX_RESOURCES];  // Device pointers
-    uint* uniformBuffers[GOLDY_MAX_RESOURCES];  // Device pointers
+    uint* storageBuffers[GOLDY_MAX_RESOURCES];  // Runtime pointers
+    uint* uniformBuffers[GOLDY_MAX_RESOURCES];  // Runtime pointers
     // ... textures, samplers ...
 };
 ParameterBlock<GoldyBindlessResources> gGoldy;
@@ -463,10 +463,10 @@ shaders/
 
 ### How Library Registration Works
 
-1. When a `Device` is created, the `goldy_exp` library is automatically registered
+1. When a `Runtime` is created, the `goldy_exp` library is automatically registered
 2. The library source files are written to a temp directory
 3. The Slang compiler uses this directory to resolve `import` statements
-4. When the `Device` is dropped, the temp files are cleaned up
+4. When the `Runtime` is dropped, the temp files are cleaned up
 
 ### Creating a Shader That Uses the Library
 

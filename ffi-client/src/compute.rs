@@ -1,5 +1,5 @@
-use crate::device::Device;
 use crate::error::{non_null, Result};
+use crate::runtime::Runtime;
 use crate::shader_module::ShaderModule;
 use crate::sys::{self, GoldyComputePipeline};
 
@@ -9,7 +9,7 @@ pub struct ComputePipeline {
 }
 
 impl ComputePipeline {
-    pub fn new(device: &Device, shader: &ShaderModule) -> Result<Self> {
+    pub fn new(device: &Runtime, shader: &ShaderModule) -> Result<Self> {
         let ptr = non_null(unsafe { sys::goldy_compute_pipeline_create(device.as_ptr(), shader.as_ptr()) })?;
         Ok(Self { ptr })
     }

@@ -6,9 +6,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
+    Buffer, BufferKind, Color, ComputePipeline, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
+    ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
     WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -74,7 +74,7 @@ struct App {
 
 struct RenderState {
     window: Option<Arc<Window>>,
-    device: Arc<goldy::Device>,
+    device: Arc<goldy::Runtime>,
     ctx: goldy::Context,
     surface: Option<SurfaceExchange>,
     capture: Option<CaptureDump>,
@@ -93,7 +93,7 @@ struct RenderState {
 
 impl RenderState {
     fn create_render_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         render_shader: &ShaderModule,
         format: TextureFormat,
     ) -> Result<RenderPipeline> {
@@ -197,7 +197,7 @@ impl RenderState {
         let device = Arc::new(
             instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

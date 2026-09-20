@@ -61,9 +61,9 @@ impl DepositExchangePool {
             }
         }
 
-        let device = ctx.device().inner.handle;
+        let device = ctx.runtime().inner.handle;
         let handle = {
-            let mut backend = ctx.device().inner.backend.lock().unwrap();
+            let mut backend = ctx.runtime().inner.backend.lock().unwrap();
             backend
                 .create_buffer(device, need, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE)
                 .map_err(|e| ctx.classify(e))?
@@ -96,14 +96,14 @@ impl DepositExchangePool {
         data: &[u8],
     ) -> Result<(), GoldyError> {
         let result = {
-            let mut backend = ctx.device().inner.backend.lock().unwrap();
+            let mut backend = ctx.runtime().inner.backend.lock().unwrap();
             backend.write_buffer(handle, offset, data)
         };
         result.map_err(|e| ctx.classify(e))
     }
 
     /// Park every backing after waiting for in-flight copies (context teardown).
-    pub(crate) fn drain_backend(&self, device: &crate::device::Device, handle: crate::backend::ContextHandle) {
+    pub(crate) fn drain_backend(&self, device: &crate::runtime::Runtime, handle: crate::backend::ContextHandle) {
         let max_ready = {
             let entries = self.lock();
             entries.iter().map(|e| e.ready_after).max().unwrap_or(0)

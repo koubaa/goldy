@@ -119,7 +119,7 @@ fn validate_render_pass_commands(ir: &GraphIR) -> Result<(), GoldyError> {
                         None => {
                             return Err(validation(format!(
                                 "render pass \"{}\" recorded dispatch_mesh without set_mesh_pipeline. \
-                                 hint: bind a MeshPipeline first (requires DeviceCapabilities::mesh_shaders). \
+                                 hint: bind a MeshPipeline first (requires RuntimeCapabilities::mesh_shaders). \
                                  Vertex pipelines use set_pipeline + draw, not dispatch_mesh.",
                                 node.label
                             )));

@@ -5,10 +5,10 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance,
-    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
-    VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
 };
 mod common;
 use common::CaptureDump;
@@ -247,7 +247,7 @@ struct WindowState {
 
 impl WindowState {
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
@@ -336,7 +336,7 @@ impl WindowState {
     fn windowed(
         window: Arc<Window>,
         ctx: &goldy::Context,
-        device: &Arc<goldy::Device>,
+        device: &Arc<goldy::Runtime>,
         effect_type: EffectType,
     ) -> anyhow::Result<Self> {
         let surface = SurfaceExchange::new(ctx, window.as_ref(), SurfaceConfig::default())?;
@@ -384,7 +384,7 @@ impl WindowState {
 
     fn capture_panel(
         ctx: &goldy::Context,
-        device: &Arc<goldy::Device>,
+        device: &Arc<goldy::Runtime>,
         effect_type: EffectType,
         width: u32,
         height: u32,
@@ -519,7 +519,7 @@ impl WindowState {
 struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     windows: HashMap<WindowId, WindowState>,
     effects_to_create: Vec<EffectType>,
     frame_count: u32,
@@ -573,7 +573,7 @@ impl ApplicationHandler for App {
             match self
                 .instance
                 .request_adapter(&RequestAdapterOptions::default())
-                .and_then(|a| a.request_device(&DeviceDescriptor::default()))
+                .and_then(|a| a.request_runtime(&RuntimeDescriptor::default()))
             {
                 Ok(device) => {
                     let device = Arc::new(device);
@@ -711,7 +711,7 @@ fn capture_panels() -> anyhow::Result<()> {
     let device = Arc::new(
         instance
             .request_adapter(&RequestAdapterOptions::default())?
-            .request_device(&DeviceDescriptor::default())?,
+            .request_runtime(&RuntimeDescriptor::default())?,
     );
     let ctx = device.create_context()?;
     let mut output = CaptureDump::from_env()?;

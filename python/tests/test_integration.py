@@ -15,7 +15,7 @@ def device():
     
     try:
         instance = goldy.Instance()
-        return instance.request_adapter().request_device()
+        return instance.request_adapter().request_runtime()
     except goldy.GoldyError:
         pytest.skip("No GPU available")
 
@@ -45,7 +45,7 @@ def test_instance_creation():
 
 
 def test_device_creation(device):
-    """Test Device creation."""
+    """Test Runtime creation."""
     import goldy
     
     assert device.is_valid()
@@ -60,7 +60,7 @@ def test_device_creation(device):
 
 
 def test_parcel_creation_numpy(device):
-    """Test Parcel creation from numpy arrays via RetainedPool."""
+    """Test Parcel creation from numpy arrays via Runtime.acquire_buffer."""
     import goldy
 
     vertices = np.array([
@@ -69,13 +69,12 @@ def test_parcel_creation_numpy(device):
         0.5, 0.5, 0.0, 0.0, 1.0, 1.0,
     ], dtype=np.float32)
 
-    pool = goldy.RetainedPool(device)
-    vertex_buffer = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    vertex_buffer = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
     assert vertex_buffer.byte_size == vertices.nbytes
     assert vertex_buffer[0].byte_size == vertices.nbytes
 
     indices = np.array([0, 1, 2], dtype=np.uint16)
-    index_buffer = pool.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
+    index_buffer = device.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
     assert index_buffer.byte_size == indices.nbytes
     assert index_buffer[0].byte_size == indices.nbytes
 
@@ -84,8 +83,7 @@ def test_parcel_write(device):
     """Upload bytes into a parcel via an upload micro-scheme."""
     import goldy
 
-    pool = goldy.RetainedPool(device)
-    buffer = pool.acquire_buffer(
+    buffer = device.acquire_buffer(
         np.zeros(16, dtype=np.uint32),
         goldy.BufferKind.SCATTERED,
     )
@@ -162,8 +160,7 @@ def test_render_clear_via_scheme(device):
 
     width = height = 2
     ctx = device.create_context()
-    pool = goldy.RetainedPool(device)
-    readback = pool.acquire_texture(
+    readback = device.acquire_texture(
         width,
         height,
         goldy.TextureFormat.RGBA8_UNORM,
@@ -203,9 +200,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 """
 
-    retained_pool = goldy.RetainedPool(device)
     zeros = np.zeros(64, dtype=np.uint32)
-    buffer = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
+    buffer = device.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
     shader = goldy.ShaderModule.from_slang(device, fill_shader)
     pipeline = goldy.ComputePipeline(device, shader)
 
@@ -259,9 +255,8 @@ def test_triangle_via_scheme(device):
         ],
         dtype=np.float32,
     )
-    retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
-    readback = retained_pool.acquire_texture(
+    vertex_parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+    readback = device.acquire_texture(
         100,
         100,
         goldy.TextureFormat.RGBA8_UNORM,

@@ -3,7 +3,7 @@
 //! Isolated crate so the env override cannot race other GPU tests.
 
 use goldy::{
-    BufferKind, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RetainedPool, Scheme,
+    BufferKind, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
     ShaderModule,
 };
 use std::sync::Arc;
@@ -14,12 +14,12 @@ fn run_scheme_double_u32() {
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("device");
     assert_eq!(device.backend_type(), goldy::BackendType::Cpu);
 
     let ctx = device.create_context().expect("ctx");
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let n = 64usize;
     let input: Vec<u32> = (0..n as u32).collect();
     let data = pool

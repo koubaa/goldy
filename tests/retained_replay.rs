@@ -23,9 +23,9 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape},
-    BackendType, BufferKind, ComputePipeline, Context, DepositTarget, Device, DeviceDescriptor, Instance,
-    MemoryExchange, NodeAccess, Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
-    TextureFlags, TextureFormat, TextureKind, WithdrawTransaction,
+    BackendType, BufferKind, ComputePipeline, Context, DepositTarget, Instance, MemoryExchange, NodeAccess, Parcel,
+    RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
+    TextureKind, WithdrawTransaction,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -40,20 +40,20 @@ fn read_grant_u32(grant: &WithdrawTransaction, submission: &mut Submission, coun
     bytemuck::cast_slice(&loan).to_vec()
 }
 
-fn make_device() -> (Device, goldy::test_support::CbReuseOverride) {
+fn make_device() -> (Runtime, goldy::test_support::CbReuseOverride) {
     // Retention contract tests must not flip under GOLDY_DISABLE_CB_REUSE=1.
     let cb = goldy::test_support::CbReuseOverride::force_enabled();
     let instance = Instance::new().expect("Failed to create instance");
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("Failed to request adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("Failed to create device");
     (device, cb)
 }
 
 /// CUDA writable `DirectSpatial<float4>` requires size-matched `Rgba32Float`.
-fn writable_texture_format(device: &Device) -> TextureFormat {
+fn writable_texture_format(device: &Runtime) -> TextureFormat {
     if device.backend_type() == BackendType::Cuda {
         TextureFormat::Rgba32Float
     } else {
@@ -104,7 +104,7 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let input = pool
         .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
         .expect("input parcel");
@@ -158,7 +158,7 @@ fn deposit_feeds_retained_worker_across_frames() {
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let input = pool
         .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
         .expect("input parcel");
@@ -218,7 +218,7 @@ fn clean_scheme_resubmits_without_rerecord() {
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let input = pool
         .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
         .expect("input parcel");
@@ -288,7 +288,7 @@ fn indirect_scheme_resubmits_without_rerecord() {
     )
     .expect("create work pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let shape = pool
         .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
         .expect("shape buffer");
@@ -344,7 +344,7 @@ fn selector_advances_across_identical_submissions() {
     let shader = ShaderModule::from_slang(&device, SELECTOR_SHADER).expect("compile selector shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let selector = pool
         .acquire_buffer_with_data(&[0u32], BufferKind::Scattered)
         .expect("selector parcel");
@@ -389,7 +389,7 @@ fn two_schemes_on_one_context_do_not_collide() {
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
 
     // Scheme A: copies [1u32; 8] → out_a
     let in_a = pool
@@ -573,7 +573,7 @@ fn withdraw_concurrent_frames_distinct_backings() {
     )
     .expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -635,7 +635,7 @@ fn withdraw_texture_concurrent_frames_distinct_backings() {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let texture = pool
         .acquire_texture(
             width,
@@ -672,7 +672,7 @@ fn withdraw_texture_concurrent_frames_distinct_backings() {
     assert_eq!(stats.resubmit_hits, 1, "second dispatch submit is a retention hit");
 }
 
-fn fill_42_pipeline(device: &Device) -> ComputePipeline {
+fn fill_42_pipeline(device: &Runtime) -> ComputePipeline {
     let shader = ShaderModule::from_slang(device, FILL_42_SHADER).expect("compile fill shader");
     ComputePipeline::new(device, &shader).expect("create pipeline")
 }
@@ -693,7 +693,7 @@ fn withdraw_double_read_same_frame_errors() {
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -716,7 +716,7 @@ fn withdraw_second_consume_errors() {
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -739,7 +739,7 @@ fn withdraw_without_producing_dispatch_reads_zeros() {
     let (device, _cb) = make_device();
     let ctx = submission_context(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     const GRANT_ZERO_TEST_U32S: usize = 64;
     const GRANT_ZERO_TEST_BYTES: u64 = (GRANT_ZERO_TEST_U32S as u64) * 4;
     let zeros = vec![0u8; GRANT_ZERO_TEST_BYTES as usize];
@@ -772,7 +772,7 @@ fn withdraw_before_dispatch_node_still_reads_producer_output() {
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -800,7 +800,7 @@ fn withdraw_drop_frame_without_read_then_submit_and_read() {
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -848,7 +848,7 @@ fn withdraw_texture_sequential_resubmit_correct_data() {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let texture = pool
         .acquire_texture(
             width,
@@ -892,7 +892,7 @@ fn withdraw_many_dropped_frames_without_read_then_read_succeeds() {
     let ctx = submission_context(&device);
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -921,7 +921,7 @@ fn deposit_aba_data_correctness() {
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let input = pool
         .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
         .expect("input");

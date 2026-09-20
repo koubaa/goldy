@@ -2,7 +2,7 @@
 //!
 //! [`FrameOrchestrator`] is a **client pacing** helper only. It does not own GPU
 //! bytes or run cleanup callbacks — recycle lives in the transient pool /
-//! [`crate::RetainedPool`]. Use it to bound how far the CPU runs ahead of the GPU
+//! [`crate::Runtime`]. Use it to bound how far the CPU runs ahead of the GPU
 //! and to track open-frame / present-timeline bookkeeping.
 //!
 //! When cross-frame ordering is enforced elsewhere (scheme submit sidecars,

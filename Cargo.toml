@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "goldy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Fondaco Machine GPU runtime for Rust (Vulkan, DX12, Metal)"
@@ -40,8 +40,8 @@ exclude = [
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }
 
 [dependencies]
-goldy_derive = { version = "0.2.0", path = "derive" }
-goldy_shader_ir = { version = "0.2.0", path = "shader_ir" }
+goldy_derive = { version = "0.3.0", path = "derive" }
+goldy_shader_ir = { version = "0.3.0", path = "shader_ir" }
 
 # Vulkan bindings (native only)
 ash = { version = "0.38", optional = true }

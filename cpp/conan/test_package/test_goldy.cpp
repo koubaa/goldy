@@ -34,9 +34,9 @@ int main() {
             std::cout << "  Warning: No GPU adapters found\n";
         } else {
             // Try to create a device
-            goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
+            goldy::Runtime device = instance.create_runtime_for_adapter(adapters[0].id);
             std::cout << "  Created device: OK\n";
-            std::cout << "  Device is valid: " << (device.is_valid() ? "yes" : "no") << "\n";
+            std::cout << "  Runtime is valid: " << (device.is_valid() ? "yes" : "no") << "\n";
         }
 
         std::cout << "\nGoldy package test PASSED\n";

@@ -14,7 +14,7 @@ pub unsafe fn goldy_clear_error() {
 }
 
 pub unsafe fn goldy_compute_pipeline_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     shader: *const GoldyShaderModule,
 ) -> *mut GoldyComputePipeline {
     (lib().goldy_compute_pipeline_create)(device, shader)
@@ -24,7 +24,7 @@ pub unsafe fn goldy_compute_pipeline_destroy(pipeline: *mut GoldyComputePipeline
     (lib().goldy_compute_pipeline_destroy)(pipeline)
 }
 
-pub unsafe fn goldy_context_create(device: *const GoldyDevice) -> *mut GoldyContext {
+pub unsafe fn goldy_context_create(device: *const GoldyRuntime) -> *mut GoldyContext {
     (lib().goldy_context_create)(device)
 }
 
@@ -43,43 +43,35 @@ pub unsafe fn goldy_context_lease_render_target(
     (lib().goldy_context_lease_render_target)(ctx, width, height, format, has_depth, depth_format)
 }
 
-pub unsafe fn goldy_device_adapter_id(device: *const GoldyDevice) -> u32 {
-    (lib().goldy_device_adapter_id)(device)
+pub unsafe fn goldy_runtime_adapter_id(device: *const GoldyRuntime) -> u32 {
+    (lib().goldy_runtime_adapter_id)(device)
 }
 
-pub unsafe fn goldy_device_destroy(device: *mut GoldyDevice) {
-    (lib().goldy_device_destroy)(device)
+pub unsafe fn goldy_runtime_destroy(device: *mut GoldyRuntime) {
+    (lib().goldy_runtime_destroy)(device)
 }
 
-pub unsafe fn goldy_device_has_library(device: *const GoldyDevice, name: *const std::ffi::c_char) -> bool {
-    (lib().goldy_device_has_library)(device, name)
+pub unsafe fn goldy_runtime_has_library(device: *const GoldyRuntime, name: *const std::ffi::c_char) -> bool {
+    (lib().goldy_runtime_has_library)(device, name)
 }
 
-pub unsafe fn goldy_device_is_valid(device: *const GoldyDevice) -> bool {
-    (lib().goldy_device_is_valid)(device)
+pub unsafe fn goldy_runtime_is_valid(device: *const GoldyRuntime) -> bool {
+    (lib().goldy_runtime_is_valid)(device)
 }
 
 pub unsafe fn goldy_get_last_error() -> *const std::ffi::c_char {
     (lib().goldy_get_last_error)()
 }
 
-pub unsafe fn goldy_retained_pool_create(device: *const GoldyDevice) -> *mut GoldyRetainedPool {
-    (lib().goldy_retained_pool_create)(device)
-}
-
-pub unsafe fn goldy_retained_pool_destroy(pool: *mut GoldyRetainedPool) {
-    (lib().goldy_retained_pool_destroy)(pool)
-}
-
-pub unsafe fn goldy_retained_pool_acquire_buffer(
-    pool: *mut GoldyRetainedPool,
+pub unsafe fn goldy_runtime_acquire_buffer(
+    runtime: *mut GoldyRuntime,
     size: u64,
     access: GoldyBufferKind,
     element_stride: u32,
     data: *const u8,
     data_size: usize,
 ) -> *mut GoldyBuffer {
-    (lib().goldy_retained_pool_acquire_buffer)(pool, size, access, element_stride, data, data_size)
+    (lib().goldy_runtime_acquire_buffer)(runtime, size, access, element_stride, data, data_size)
 }
 
 pub unsafe fn goldy_record_builder_create() -> *mut GoldyRecordBuilder {
@@ -103,7 +95,7 @@ pub unsafe fn goldy_record_builder_emplace(
 
 pub unsafe fn goldy_record_builder_build(
     builder: *mut GoldyRecordBuilder,
-    pool: *mut GoldyRetainedPool,
+    pool: *mut GoldyRuntime,
 ) -> *mut GoldyBuffer {
     (lib().goldy_record_builder_build)(builder, pool)
 }
@@ -156,11 +148,11 @@ pub unsafe fn goldy_instance_create() -> *mut GoldyInstance {
     (lib().goldy_instance_create)()
 }
 
-pub unsafe fn goldy_instance_create_device_for_adapter(
+pub unsafe fn goldy_instance_create_runtime_for_adapter(
     instance: *const GoldyInstance,
     adapter_id: u32,
-) -> *mut GoldyDevice {
-    (lib().goldy_instance_create_device_for_adapter)(instance, adapter_id)
+) -> *mut GoldyRuntime {
+    (lib().goldy_instance_create_runtime_for_adapter)(instance, adapter_id)
 }
 
 pub unsafe fn goldy_instance_destroy(instance: *mut GoldyInstance) {
@@ -176,7 +168,7 @@ pub unsafe fn goldy_instance_get_adapter(
 }
 
 pub unsafe fn goldy_render_pipeline_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     vertex_shader: *const GoldyShaderModule,
     fragment_shader: *const GoldyShaderModule,
     desc: *const GoldyRenderPipelineDesc,
@@ -188,11 +180,11 @@ pub unsafe fn goldy_render_pipeline_destroy(pipeline: *mut GoldyRenderPipeline) 
     (lib().goldy_render_pipeline_destroy)(pipeline)
 }
 
-pub unsafe fn goldy_sampler_create(device: *const GoldyDevice, desc: *const GoldySamplerDesc) -> *mut GoldySampler {
+pub unsafe fn goldy_sampler_create(device: *const GoldyRuntime, desc: *const GoldySamplerDesc) -> *mut GoldySampler {
     (lib().goldy_sampler_create)(device, desc)
 }
 
-pub unsafe fn goldy_sampler_create_default(device: *const GoldyDevice) -> *mut GoldySampler {
+pub unsafe fn goldy_sampler_create_default(device: *const GoldyRuntime) -> *mut GoldySampler {
     (lib().goldy_sampler_create_default)(device)
 }
 
@@ -205,7 +197,7 @@ pub unsafe fn goldy_shader_builtin_vertex_color_2d() -> *const std::ffi::c_char 
 }
 
 pub unsafe fn goldy_shader_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     source: *const std::ffi::c_char,
 ) -> *mut GoldyShaderModule {
     (lib().goldy_shader_create)(device, source)
@@ -505,8 +497,8 @@ pub unsafe fn goldy_scheme_copy_to_texture(
     (lib().goldy_scheme_copy_to_texture)(scheme, src_lease, dst_texture)
 }
 
-pub unsafe fn goldy_retained_pool_acquire_texture(
-    pool: *mut GoldyRetainedPool,
+pub unsafe fn goldy_runtime_acquire_texture(
+    runtime: *mut GoldyRuntime,
     width: u32,
     height: u32,
     format: GoldyTextureFormat,
@@ -515,7 +507,7 @@ pub unsafe fn goldy_retained_pool_acquire_texture(
     data: *const u8,
     data_size: usize,
 ) -> *mut GoldyTexture {
-    (lib().goldy_retained_pool_acquire_texture)(pool, width, height, format, access, flags, data, data_size)
+    (lib().goldy_runtime_acquire_texture)(runtime, width, height, format, access, flags, data, data_size)
 }
 
 pub unsafe fn goldy_present_lease_destroy(lease: *mut GoldyPresentLease) {

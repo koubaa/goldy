@@ -3,15 +3,15 @@
 //! [`crate::Scheme::copy_to_present`].
 
 use crate::backend::RenderTargetHandle;
-use crate::device::Device;
 use crate::parcel::ParcelStamp;
+use crate::runtime::Runtime;
 use crate::types::*;
 use anyhow::Result;
 use std::sync::Arc;
 
 /// GPU render target backing a [`crate::Lease<crate::LeaseRenderTarget>`].
 pub(crate) struct RenderTarget {
-    _device: Device,
+    _device: Runtime,
     handle: RenderTargetHandle,
     width: u32,
     height: u32,
@@ -23,7 +23,7 @@ pub(crate) struct RenderTarget {
 impl RenderTarget {
     /// Create a new render target with an optional depth buffer.
     pub(crate) fn new_with_depth(
-        device: &Device,
+        device: &Runtime,
         width: u32,
         height: u32,
         color_format: TextureFormat,
@@ -89,8 +89,8 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
 
-    fn create_test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn create_test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
     #[test]

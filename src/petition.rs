@@ -54,12 +54,12 @@ use bytemuck::Pod;
 
 use crate::backend::shared::{MAX_BINDLESS_SLOTS, MAX_USER_SLOTS};
 use crate::parcel::{Buffer, Parcel};
-use crate::retained_pool::RetainedPool;
 use crate::scheme::{PipelineParts, Scheme};
 use crate::shader::YieldScript;
 use crate::slang::yielding::{ContinuationDecl, YieldReflection};
 use crate::task_graph::NodeAccess;
 use crate::types::{BufferFlags, BufferKind};
+use crate::Runtime;
 use crate::{ComputePipeline, Context, DepositTarget, GoldyError, MemoryExchange};
 
 /// A Rust view of a `[goldy_petition]` payload struct.
@@ -321,7 +321,7 @@ pub(crate) struct YieldDriver {
     prologue_yields_to: Vec<usize>,
     points: Vec<PointState>,
     cnt: Buffer,
-    _pool: RetainedPool,
+    _pool: Runtime,
     stats: Arc<Mutex<YieldStats>>,
 }
 
@@ -418,9 +418,8 @@ impl YieldDriver {
         }
 
         let (nx, ny, nz) = refl.prologue_numthreads;
-        let device = ctx.device().clone();
-        let mut pool = RetainedPool::new(Arc::new(device));
-        let alloc = |pool: &mut RetainedPool, what: &str, elems: u64, stride: u32| -> Result<Buffer, String> {
+        let pool = ctx.runtime().clone();
+        let alloc = |pool: &Runtime, what: &str, elems: u64, stride: u32| -> Result<Buffer, String> {
             pool.acquire_buffer(
                 elems.max(1) * stride as u64,
                 BufferKind::Scattered,
@@ -546,15 +545,15 @@ impl YieldDriver {
 
             let cap = yp.capacity as u64;
             let pay = [
-                alloc(&mut pool, "payload mailbox", cap, petition.payload_bytes)?,
-                alloc(&mut pool, "payload mailbox", cap, petition.payload_bytes)?,
+                alloc(&pool, "payload mailbox", cap, petition.payload_bytes)?,
+                alloc(&pool, "payload mailbox", cap, petition.payload_bytes)?,
             ];
             let st = [
-                alloc(&mut pool, "state mailbox", cap, c.state_bytes)?,
-                alloc(&mut pool, "state mailbox", cap, c.state_bytes)?,
+                alloc(&pool, "state mailbox", cap, c.state_bytes)?,
+                alloc(&pool, "state mailbox", cap, c.state_bytes)?,
             ];
-            let res = alloc(&mut pool, "resolution table", cap, 8)?;
-            let arena = alloc(&mut pool, "result arena", yp.arena_len as u64, result_bytes)?;
+            let res = alloc(&pool, "resolution table", cap, 8)?;
+            let arena = alloc(&pool, "result arena", yp.arena_len as u64, result_bytes)?;
             states.push(PointState {
                 cap: yp.capacity,
                 arena_len: yp.arena_len,
@@ -622,7 +621,7 @@ impl YieldDriver {
             _ => None,
         };
 
-        let cnt = alloc(&mut pool, "yield counters", refl.continuations.len() as u64, 4)?;
+        let cnt = alloc(&pool, "yield counters", refl.continuations.len() as u64, 4)?;
         let stats = Arc::new(Mutex::new(YieldStats::default()));
         Ok((
             Self {

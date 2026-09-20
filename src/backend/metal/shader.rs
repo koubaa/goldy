@@ -6,7 +6,7 @@ use super::types::{MetalState, ShaderState};
 use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{Device as MTLDevice, Library};
+use mtl::{Library, Runtime as MTLDevice};
 use std::collections::HashMap;
 
 /// Patch compute-shader MSL to fix Slang codegen bug that surfaces on Metal:

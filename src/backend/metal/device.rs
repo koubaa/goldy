@@ -1,4 +1,4 @@
-//! Device management logic.
+//! Runtime management logic.
 
 use super::super::DeviceHandle;
 use super::types::{
@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 /// upper bound.
 const INITIAL_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 use mtl::{
-    Device as MTLDevice, HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType, MTLResourceOptions,
-    MTLStorageMode,
+    HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType, MTLResourceOptions, MTLStorageMode,
+    Runtime as MTLDevice,
 };
 
 /// Enumerate available Metal devices/adapters.
@@ -53,8 +53,8 @@ pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
 pub(super) fn adapter_capabilities(
     adapters: &[MetalAdapterInfo],
     adapter_id: u32,
-) -> crate::device::DeviceCapabilities {
-    let mut caps = crate::device::DeviceCapabilities {
+) -> crate::runtime::RuntimeCapabilities {
+    let mut caps = crate::runtime::RuntimeCapabilities {
         has_zero_copy_storage_readback: true,
         buffer_resize_cost: crate::types::BufferResizeCost::Constant,
         buffer_page_size: 16 * 1024,
@@ -67,7 +67,7 @@ pub(super) fn adapter_capabilities(
         // Fuse upload blits with the following compute partition so Scheme matches
         // Classic's single-CB structure and avoids an extra commit + event wait.
         fuse_upload_with_compute_partitions: true,
-        ..crate::device::DeviceCapabilities::default()
+        ..crate::runtime::RuntimeCapabilities::default()
     };
     if let Some(entry) = adapters.iter().find(|a| a.adapter_id == adapter_id) {
         let device = &entry.device;

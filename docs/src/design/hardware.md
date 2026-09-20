@@ -72,7 +72,7 @@ GPUs from roughly 2018 onward universally support these features. The specific A
 
 Bindless, dynamic rendering, and buffer device addresses are **required**. Hardware ray tracing and mesh shaders are **not** — GTX 16-series, RDNA1, and many iGPUs meet Goldy's floor without RT cores or mesh shaders.
 
-Query them on `Adapter::capabilities()` / `Device::capabilities()` (`DeviceCapabilities`):
+Query them on `Adapter::capabilities()` / `Runtime::capabilities()` (`RuntimeCapabilities`):
 
 | Flag | Meaning |
 |------|---------|
@@ -114,10 +114,10 @@ for adapter in instance.enumerate_adapters() {
     println!("{}: {:?}", adapter.name, adapter.device_type);
 }
 
-// request_device returns an error on unsupported hardware
+// request_runtime returns an error on unsupported hardware
 let device = instance
     .request_adapter(&RequestAdapterOptions::default())?
-    .request_device(&DeviceDescriptor::default())?;
+    .request_runtime(&RuntimeDescriptor::default())?;
 ```
 
 ## The Tradeoff

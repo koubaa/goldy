@@ -17,20 +17,20 @@ mod imp {
     use crate::submission::submission_context;
     use crate::upload;
     use goldy::{
-        BackendType, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Instance, MemoryExchange,
-        NodeAccess, Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, WithdrawTransaction,
+        BackendType, BufferKind, ComputePipeline, Context, Instance, MemoryExchange, NodeAccess, Parcel,
+        RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission, WithdrawTransaction,
     };
     use std::sync::Arc;
 
-    fn request_default_device(instance: &Instance) -> Device {
+    fn request_default_device(instance: &Instance) -> Runtime {
         instance
             .request_adapter(&RequestAdapterOptions::default())
             .expect("Failed to request adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("Failed to create device")
     }
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         request_default_device(&Instance::new().expect("Failed to create instance"))
     }
 
@@ -71,12 +71,12 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         bytemuck::cast_slice::<u8, u32>(&loan)[0]
     }
 
-    fn saxpy_style_chain_closed_form(device: &Device) {
+    fn saxpy_style_chain_closed_form(device: &Runtime) {
         let ctx = submission_context(device);
         let shader = ShaderModule::from_slang(device, INC_SHADER).expect("shader");
         let pipe = ComputePipeline::new(device, &shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("buf");
@@ -98,14 +98,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_eq!(read_u32(&grant, &mut submission), STEPS + 1);
     }
 
-    fn war_write_after_read_pipelined_overwrite(device: &Device) {
+    fn war_write_after_read_pipelined_overwrite(device: &Runtime) {
         let ctx = submission_context(device);
         let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
         let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("pipe");
         let write_pipe = ComputePipeline::new(device, &write_shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&[7u32; 1], BufferKind::Scattered)
             .expect("buf");
@@ -133,14 +133,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
 
     /// Pipelined reader + retained writer: `cpu_waits` must retire on the submit worker
     /// (HostWait prequel) without blocking the render thread before enqueue.
-    fn war_retained_writer_against_pipelined_reader(device: &Device) {
+    fn war_retained_writer_against_pipelined_reader(device: &Runtime) {
         let ctx = submission_context(device);
         let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
         let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("pipe");
         let write_pipe = ComputePipeline::new(device, &write_shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let buf = pool
             .acquire_buffer_with_data(&[7u32; 1], BufferKind::Scattered)
             .expect("buf");
@@ -218,7 +218,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         (reader, grant)
     }
 
-    fn assert_retained_resubmit_stats(device: &Device, reader: &Scheme, expected_resubmit_hits: u64) {
+    fn assert_retained_resubmit_stats(device: &Runtime, reader: &Scheme, expected_resubmit_hits: u64) {
         // Metal re-records each submit; retention counters are Vulkan/DX12 only.
         if device.backend_type() == BackendType::Metal {
             return;
@@ -234,12 +234,12 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         let _ = expected_resubmit_hits;
     }
 
-    fn retained_reader_observes_independent_writer_across_resubmits(device: &Device) {
+    fn retained_reader_observes_independent_writer_across_resubmits(device: &Runtime) {
         let ctx = submission_context(device);
         let shader = ShaderModule::from_slang(device, COPY_SHADER).expect("shader");
         let pipe = ComputePipeline::new(device, &shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("src");
@@ -264,12 +264,12 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_retained_resubmit_stats(device, &reader, 2);
     }
 
-    fn retained_waw_overwrites_independent_upload(device: &Device) {
+    fn retained_waw_overwrites_independent_upload(device: &Runtime) {
         let ctx = submission_context(device);
         let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
         let write_pipe = ComputePipeline::new(device, &write_shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("src");
@@ -298,13 +298,13 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_retained_resubmit_stats(device, &worker, 2);
     }
 
-    fn retained_reader_cross_context_observes_independent_writer(device: &Device) {
+    fn retained_reader_cross_context_observes_independent_writer(device: &Runtime) {
         let ctx_producer = device.create_context().expect("producer ctx");
         let ctx_consumer = device.create_context().expect("consumer ctx");
         let shader = ShaderModule::from_slang(device, COPY_SHADER).expect("shader");
         let pipe = ComputePipeline::new(device, &shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let src = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("src");
@@ -329,14 +329,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_retained_resubmit_stats(device, &reader, 2);
     }
 
-    fn retained_resubmit_not_dirtied_by_unrelated_scheme(device: &Device) {
+    fn retained_resubmit_not_dirtied_by_unrelated_scheme(device: &Runtime) {
         let ctx = submission_context(device);
         let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
         let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("read pipe");
         let write_pipe = ComputePipeline::new(device, &write_shader).expect("write pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel_p = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("parcel_p");
@@ -377,14 +377,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_eq!(reader.replay_stats().resubmit_hits, 3);
     }
 
-    fn retained_reader_dirtied_once_by_new_writer_then_stable(device: &Device) {
+    fn retained_reader_dirtied_once_by_new_writer_then_stable(device: &Runtime) {
         let ctx = submission_context(device);
         let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
         let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("read pipe");
         let write_pipe = ComputePipeline::new(device, &write_shader).expect("write pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("parcel");
@@ -429,14 +429,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         }
     }
 
-    fn topology_re_record_produces_correct_barriers_and_data(device: &Device) {
+    fn topology_re_record_produces_correct_barriers_and_data(device: &Runtime) {
         let ctx = submission_context(device);
         let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
         let write_shader = ShaderModule::from_slang(device, OVERWRITE_SHADER).expect("shader");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("read pipe");
         let write_pipe = ComputePipeline::new(device, &write_shader).expect("write pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("parcel");
@@ -463,14 +463,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         assert_eq!(read_u32(&grant, &mut submission), 42);
     }
 
-    fn repeated_resubmit_of_b_never_dirties_a(device: &Device) {
+    fn repeated_resubmit_of_b_never_dirties_a(device: &Runtime) {
         let ctx = submission_context(device);
         let inc_shader = ShaderModule::from_slang(device, INC_SHADER).expect("shader");
         let read_shader = ShaderModule::from_slang(device, READ_SHADER).expect("shader");
         let inc_pipe = ComputePipeline::new(device, &inc_shader).expect("inc pipe");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("read pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let parcel = pool
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("parcel");
@@ -514,7 +514,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
 
     /// Per-parcel cross-submit tracking: a scheme that reads field B must not be
     /// topology-dirtied when another scheme repeatedly writes disjoint field A.
-    fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard(device: &Device) {
+    fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard(device: &Runtime) {
         use goldy::{field, Init};
 
         let ctx = submission_context(device);
@@ -523,7 +523,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         let inc_pipe = ComputePipeline::new(device, &inc_shader).expect("pipe");
         let read_pipe = ComputePipeline::new(device, &read_shader).expect("pipe");
 
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let record = pool
             .acquire_record([field("a", Init::data(&[0u32; 1])), field("b", Init::data(&[0u32; 1]))])
             .expect("acquire_record");
@@ -553,7 +553,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         );
     }
 
-    fn retained_resubmit_applies_deferred_host_write_before_gpu(device: &Device) {
+    fn retained_resubmit_applies_deferred_host_write_before_gpu(device: &Runtime) {
         if !device.capabilities().host_sidecar_on_submit_worker {
             // Metal still applies host writes on the render thread.
             return;
@@ -563,7 +563,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         use goldy::Buffer;
 
         let ctx = submission_context(device);
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let dest = pool
             .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
             .expect("dest");

@@ -209,7 +209,7 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(device: &Device, surface: &Surface) -> Result<Self> {
+    fn new(device: &Runtime, surface: &Surface) -> Result<Self> {
         // Create all pipelines upfront
         Ok(Self {
             scene_pipeline: create_scene_pipeline(device, surface.format())?,
@@ -222,7 +222,7 @@ impl Renderer {
 
 ## Mesh pipelines
 
-`MeshPipeline` replaces the vertex stage with a mesh shader (`[goldy_mesh]` / `mesh_main`) and a fragment shader. Amplification / task shaders are optional (`[goldy_amplification]` / `amp_main`) when `DeviceCapabilities::amplification_shaders` is set.
+`MeshPipeline` replaces the vertex stage with a mesh shader (`[goldy_mesh]` / `mesh_main`) and a fragment shader. Amplification / task shaders are optional (`[goldy_amplification]` / `amp_main`) when `RuntimeCapabilities::amplification_shaders` is set.
 
 Create the pipeline only when `device.capabilities().mesh_shaders` is true. Record with `set_mesh_pipeline` and `dispatch_mesh` instead of `draw`. Vulkan, DX12, and Metal implement this.
 

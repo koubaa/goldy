@@ -4,32 +4,29 @@
 
 ## Creating buffers (recommended)
 
-For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in a scheme (`with_parcel`, `set_vertex_buffer`, [`MemoryExchange`](../compute/settlement.md) deposits). All Rust, Python, FFI, and .NET examples use this path.
+For application-owned GPU memory, use [`Runtime`](runtime-owned-memory.md) and bind the returned [`Parcel`](runtime-owned-memory.md) in a scheme (`with_parcel`, `set_vertex_buffer`, [`MemoryExchange`](../compute/settlement.md) deposits). All Rust, Python, FFI, and .NET examples use this path.
 
 ```rust
-use goldy::{BufferFlags, BufferKind, RetainedPool};
+use goldy::{BufferFlags, BufferKind};
 
-let mut pool = RetainedPool::new(device.clone());
 let vertices = [/* Vertex2D ... */];
-let vertex_parcel = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+let vertex_parcel = runtime.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
 // Uninitialized storage (e.g. a uniform updated each frame via MemoryExchange deposit):
-let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+let uniform = runtime.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 ```
 
-See [`retained-pool.md`](retained-pool.md) for textures, mosaics, and release.
+See [`runtime-owned-memory.md`](runtime-owned-memory.md) for textures, mosaics, and release.
 
 ### With Raw Bytes
 
 When the data is naturally `&[u8]`, pass an explicit element stride to `acquire_buffer`:
 
 ```rust
-use goldy::{BufferFlags, BufferKind, RetainedPool};
-
-let mut pool = RetainedPool::new(device.clone());
+use goldy::{BufferFlags, BufferKind};
 
 // Stride defaults to 1 when omitted (byte-addressable)
-let parcel = pool.acquire_buffer(
+let parcel = runtime.acquire_buffer(
     raw_bytes.len() as u64,
     BufferKind::Scattered,
     None,
@@ -38,7 +35,7 @@ let parcel = pool.acquire_buffer(
 )?;
 
 // Explicit stride for structured buffer views
-let parcel = pool.acquire_buffer(
+let parcel = runtime.acquire_buffer(
     raw_bytes.len() as u64,
     BufferKind::Scattered,
     Some(16),
@@ -47,7 +44,7 @@ let parcel = pool.acquire_buffer(
 )?;
 
 // With flags (e.g. CPU_READABLE)
-let parcel = pool.acquire_buffer(
+let parcel = runtime.acquire_buffer(
     raw_bytes.len() as u64,
     BufferKind::Scattered,
     Some(16),
@@ -59,7 +56,7 @@ let parcel = pool.acquire_buffer(
 ### Empty Buffer
 
 ```rust
-let parcel = pool.acquire_buffer(
+let parcel = runtime.acquire_buffer(
     4096,
     BufferKind::Scattered,
     None,
@@ -68,7 +65,7 @@ let parcel = pool.acquire_buffer(
 )?;
 
 // With a specific element stride
-let parcel = pool.acquire_buffer(
+let parcel = runtime.acquire_buffer(
     4096,
     BufferKind::Scattered,
     Some(64),
@@ -77,11 +74,11 @@ let parcel = pool.acquire_buffer(
 )?;
 ```
 
-## Low-level `Device::alloc_*` (crate-internal)
+## Low-level `Runtime::alloc_*` (crate-internal)
 
 The runtime routes standalone allocations through [`VramAllocator`](vram-allocator.md) via
-crate-internal `Device::alloc_buffer` helpers. Application code should not call these;
-use `RetainedPool` above.
+crate-internal `Runtime::alloc_buffer` helpers. Application code should not call these;
+use `Runtime` acquire APIs above.
 
 ## Data Access Patterns
 
@@ -121,7 +118,7 @@ bitflags! {
 | `CPU_READABLE` | Medium hint for host-visible storage. Prefer [`MemoryExchange::bind_withdraw`](../compute/settlement.md) for observation. Not a public host-read API. |
 | `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit`](../compute/settlement.md) for application uploads. |
 
-Query `DeviceCapabilities::has_zero_copy_storage_readback` to detect whether withdraw staging can elide a GPU copy on the current backend.
+Query `RuntimeCapabilities::has_zero_copy_storage_readback` to detect whether withdraw staging can elide a GPU copy on the current backend.
 
 ## Writing Data
 
@@ -201,10 +198,10 @@ Dropping a `BufferView` unregisters its descriptor but does not free the parent 
 
 ## StructuredBufferElement
 
-The `StructuredBufferElement` trait marks types safe for `RetainedPool::acquire_buffer_with_data`.
+The `StructuredBufferElement` trait marks types safe for `Runtime::acquire_buffer_with_data`.
 It is implemented for common multi-byte primitives (`u16`, `u32`, `f32`, `f64`, etc.), fixed-size arrays of those types, and `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 
-**Not implemented for `u8`/`i8`** — passing `&[u8]` would set stride to 1, which almost never matches the shader's expected struct stride. Use `RetainedPool::acquire_buffer` with an explicit element stride for raw bytes.
+**Not implemented for `u8`/`i8`** — passing `&[u8]` would set stride to 1, which almost never matches the shader's expected struct stride. Use `Runtime::acquire_buffer` with an explicit element stride for raw bytes.
 
 ## Rust-generated Slang structs
 
@@ -227,7 +224,7 @@ let shader = ShaderModule::from_slang_with_gpu_types(
     source,
     &[Particle::GPU_TYPE],
 )?;
-let particles = pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
+let particles = device.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
 ```
 
 ```slang

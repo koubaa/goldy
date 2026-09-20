@@ -6,10 +6,9 @@ pub enum GoldyRecordBuilder {}
 pub enum GoldyBuffer {}
 pub enum GoldyTexture {}
 pub enum GoldyParcel {}
-pub enum GoldyRetainedPool {}
+pub enum GoldyRuntime {}
 pub enum GoldyComputePipeline {}
 pub enum GoldyContext {}
-pub enum GoldyDevice {}
 pub enum GoldyInstance {}
 pub enum GoldyRenderPipeline {}
 pub enum GoldySampler {}

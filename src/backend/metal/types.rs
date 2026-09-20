@@ -24,8 +24,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use ::metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
-    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Heap, Library, MTLPrimitiveType,
-    MTLResourceOptions, RenderPipelineState, SamplerState, SharedEvent, Texture as MTLTexture,
+    DepthStencilState as MTLDepthStencilState, Heap, Library, MTLPrimitiveType, MTLResourceOptions,
+    RenderPipelineState, Runtime as MTLDevice, SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer.
@@ -721,7 +721,7 @@ pub(crate) struct LogicalDevice {
     pub frame_table: Mutex<super::frame_table::MetalFrameTable>,
     /// Registry tracking resource indices in the argument buffer
     pub descriptors: Arc<Mutex<DescriptorRegistry>>,
-    /// Device-global submission sequence (contexts signal their own shared events).
+    /// Runtime-global submission sequence (contexts signal their own shared events).
     pub timeline_next: Arc<AtomicU64>,
     /// Highest device-global seq scheduled on the GPU queue (used for idle / flush).
     pub timeline_scheduled_max: AtomicU64,
@@ -1208,7 +1208,7 @@ fn release_slot(
     }
 }
 
-/// Device-shared descriptor registry.
+/// Runtime-shared descriptor registry.
 ///
 /// Wraps `ResourceRegistry` (the bindless slot allocator) behind an `Arc<Mutex<>>`
 /// so submit paths can acquire it independently of the global backend mutex.
@@ -1653,7 +1653,7 @@ pub(super) struct MetalState {
     pub next_sampler_handle: SamplerHandle,
     pub accels: std::collections::HashMap<AccelerationStructureHandle, AccelState>,
     pub next_accel_handle: AccelerationStructureHandle,
-    /// `None` after release via [`crate::device::Device::release_idle_shader_compiler`].
+    /// `None` after release via [`crate::runtime::Runtime::release_idle_shader_compiler`].
     /// Re-created automatically on demand when a shader must be lazily compiled.
     pub slang_compiler: Option<crate::slang::SlangCompiler>,
 }

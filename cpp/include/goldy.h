@@ -204,9 +204,6 @@ typedef struct GoldyContext GoldyContext;
 // Stable deposit relationship recorded in one scheme.
 typedef struct GoldyDepositTransaction GoldyDepositTransaction;
 
-// Opaque handle to a Goldy Device.
-typedef struct GoldyDevice GoldyDevice;
-
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
@@ -225,8 +222,8 @@ typedef struct GoldyRecordBuilder GoldyRecordBuilder;
 // Opaque handle to a Goldy RenderPipeline.
 typedef struct GoldyRenderPipeline GoldyRenderPipeline;
 
-// Opaque handle to a Goldy retained allocation pool.
-typedef struct GoldyRetainedPool GoldyRetainedPool;
+// Opaque handle to a Goldy Runtime.
+typedef struct GoldyRuntime GoldyRuntime;
 
 // Opaque handle to a Goldy Sampler.
 typedef struct GoldySampler GoldySampler;
@@ -402,7 +399,7 @@ void goldy_clear_error(void);
 //
 // # Safety
 // All pointers must be valid.
-struct GoldyComputePipeline *goldy_compute_pipeline_create(const struct GoldyDevice *device,
+struct GoldyComputePipeline *goldy_compute_pipeline_create(const struct GoldyRuntime *device,
                                                            const struct GoldyShaderModule *compute_shader);
 
 // Destroy a compute pipeline.
@@ -418,7 +415,7 @@ void goldy_compute_pipeline_destroy(struct GoldyComputePipeline *pipeline);
 //
 // # Safety
 // `device` must be valid.
-struct GoldyContext *goldy_context_create(const struct GoldyDevice *device);
+struct GoldyContext *goldy_context_create(const struct GoldyRuntime *device);
 
 // Destroy a context.
 //
@@ -473,30 +470,6 @@ enum GoldyResult goldy_deposit_transaction_write(const struct GoldyDepositTransa
                                                  const uint8_t *data,
                                                  size_t data_size);
 
-// Get the adapter ID this device was created on.
-//
-// # Safety
-// The device pointer must be valid.
-uint32_t goldy_device_adapter_id(const struct GoldyDevice *device);
-
-// Destroy a device.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_device_destroy(struct GoldyDevice *device);
-
-// Check if a shader library is registered.
-//
-// # Safety
-// The device pointer and name must be valid.
-bool goldy_device_has_library(const struct GoldyDevice *device, const char *name);
-
-// Check if the device is still valid.
-//
-// # Safety
-// The device pointer must be valid.
-bool goldy_device_is_valid(const struct GoldyDevice *device);
-
 // Get the last error message.
 //
 // Returns a pointer to a null-terminated string. The pointer is valid until
@@ -529,8 +502,8 @@ struct GoldyInstance *goldy_instance_create(void);
 //
 // # Safety
 // The instance pointer must be valid.
-struct GoldyDevice *goldy_instance_create_device_for_adapter(const struct GoldyInstance *instance,
-                                                             uint32_t adapter_id);
+struct GoldyRuntime *goldy_instance_create_runtime_for_adapter(const struct GoldyInstance *instance,
+                                                               uint32_t adapter_id);
 
 // Destroy an instance.
 //
@@ -596,7 +569,7 @@ void goldy_parcel_destroy(struct GoldyParcel *parcel);
 void goldy_present_lease_destroy(struct GoldyPresentLease *lease);
 
 struct GoldyBuffer *goldy_record_builder_build(struct GoldyRecordBuilder *builder,
-                                               struct GoldyRetainedPool *pool);
+                                               struct GoldyRuntime *runtime);
 
 struct GoldyRecordBuilder *goldy_record_builder_create(void);
 
@@ -620,7 +593,7 @@ uint32_t goldy_record_builder_reserve(struct GoldyRecordBuilder *builder,
 //
 // # Safety
 // All pointers must be valid.
-struct GoldyRenderPipeline *goldy_render_pipeline_create(const struct GoldyDevice *device,
+struct GoldyRenderPipeline *goldy_render_pipeline_create(const struct GoldyRuntime *device,
                                                          const struct GoldyShaderModule *vertex_shader,
                                                          const struct GoldyShaderModule *fragment_shader,
                                                          const struct GoldyRenderPipelineDesc *desc);
@@ -631,25 +604,45 @@ struct GoldyRenderPipeline *goldy_render_pipeline_create(const struct GoldyDevic
 // The pointer must be valid and not used after this call.
 void goldy_render_pipeline_destroy(struct GoldyRenderPipeline *pipeline);
 
-struct GoldyBuffer *goldy_retained_pool_acquire_buffer(struct GoldyRetainedPool *pool,
-                                                       uint64_t size,
-                                                       enum GoldyBufferKind access,
-                                                       uint32_t element_stride,
-                                                       const uint8_t *data,
-                                                       size_t data_size);
+struct GoldyBuffer *goldy_runtime_acquire_buffer(struct GoldyRuntime *runtime,
+                                                 uint64_t size,
+                                                 enum GoldyBufferKind access,
+                                                 uint32_t element_stride,
+                                                 const uint8_t *data,
+                                                 size_t data_size);
 
-struct GoldyTexture *goldy_retained_pool_acquire_texture(struct GoldyRetainedPool *pool,
-                                                         uint32_t width,
-                                                         uint32_t height,
-                                                         enum GoldyTextureFormat format,
-                                                         enum GoldyTextureKind access,
-                                                         struct GoldyTextureFlags flags,
-                                                         const uint8_t *data,
-                                                         size_t data_size);
+struct GoldyTexture *goldy_runtime_acquire_texture(struct GoldyRuntime *runtime,
+                                                   uint32_t width,
+                                                   uint32_t height,
+                                                   enum GoldyTextureFormat format,
+                                                   enum GoldyTextureKind access,
+                                                   struct GoldyTextureFlags flags,
+                                                   const uint8_t *data,
+                                                   size_t data_size);
 
-struct GoldyRetainedPool *goldy_retained_pool_create(const struct GoldyDevice *device);
+// Get the adapter ID this device was created on.
+//
+// # Safety
+// The device pointer must be valid.
+uint32_t goldy_runtime_adapter_id(const struct GoldyRuntime *device);
 
-void goldy_retained_pool_destroy(struct GoldyRetainedPool *pool);
+// Destroy a device.
+//
+// # Safety
+// The pointer must be valid and not used after this call.
+void goldy_runtime_destroy(struct GoldyRuntime *device);
+
+// Check if a shader library is registered.
+//
+// # Safety
+// The device pointer and name must be valid.
+bool goldy_runtime_has_library(const struct GoldyRuntime *device, const char *name);
+
+// Check if the device is still valid.
+//
+// # Safety
+// The device pointer must be valid.
+bool goldy_runtime_is_valid(const struct GoldyRuntime *device);
 
 // Create a new sampler with the given descriptor.
 //
@@ -657,7 +650,7 @@ void goldy_retained_pool_destroy(struct GoldyRetainedPool *pool);
 //
 // # Safety
 // All pointers must be valid.
-struct GoldySampler *goldy_sampler_create(const struct GoldyDevice *device,
+struct GoldySampler *goldy_sampler_create(const struct GoldyRuntime *device,
                                           const struct GoldySamplerDesc *desc);
 
 // Create a sampler with default settings.
@@ -666,7 +659,7 @@ struct GoldySampler *goldy_sampler_create(const struct GoldyDevice *device,
 //
 // # Safety
 // The device pointer must be valid.
-struct GoldySampler *goldy_sampler_create_default(const struct GoldyDevice *device);
+struct GoldySampler *goldy_sampler_create_default(const struct GoldyRuntime *device);
 
 // Destroy a sampler.
 //
@@ -930,7 +923,8 @@ const char *goldy_shader_builtin_vertex_color_2d(void);
 // # Safety
 // The device pointer must be valid.
 // The source must be a valid null-terminated UTF-8 string.
-struct GoldyShaderModule *goldy_shader_create(const struct GoldyDevice *device, const char *source);
+struct GoldyShaderModule *goldy_shader_create(const struct GoldyRuntime *device,
+                                              const char *source);
 
 // Destroy a shader module.
 //

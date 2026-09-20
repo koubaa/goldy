@@ -60,7 +60,7 @@ static class TriangleWindow
         try
         {
             using var instance = new Instance();
-            using var device = instance.RequestAdapter().RequestDevice();
+            using var device = instance.RequestAdapter().RequestRuntime();
             using var ctx = device.CreateContext();
             using var surface = GlfwSurfaceExchange.Create(ctx, window);
 
@@ -82,8 +82,7 @@ static class TriangleWindow
                 new() { Px = -0.5f, Py = 0.5f, R = 0, G = 1, B = 0, A = 1 },
                 new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
             ];
-            using var retainedPool = new RetainedPool(device);
-            using var vertexBuffer = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+            using var vertexBuffer = device.AcquireBuffer(vertices, BufferKind.Scattered);
             using var vertexParcel = vertexBuffer.Field(0);
 
             var bg = new Color(0.1f, 0.1f, 0.2f, 1.0f);

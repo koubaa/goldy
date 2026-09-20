@@ -59,7 +59,7 @@ impl Surface {
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
-        let device = context.device();
+        let device = context.runtime();
         let handle = {
             let mut backend = device.inner.backend.lock().unwrap();
             backend.create_surface(device.inner.handle, window, window, config.depth_format)?
@@ -105,7 +105,7 @@ impl Surface {
         };
 
         let texture = Some(Texture::borrowed(
-            self.context.device(),
+            self.context.runtime(),
             Arc::clone(&self.backend),
             texture_handle,
             w,
@@ -286,7 +286,7 @@ impl Drop for Frame {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::device::Device;
+    use crate::runtime::Runtime;
 
     struct MockWindow {
         width: u32,
@@ -323,14 +323,14 @@ mod tests {
         }
     }
 
-    fn create_test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn create_test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
-    fn create_test_device_with_format(format: TextureFormat) -> Device {
+    fn create_test_device_with_format(format: TextureFormat) -> Runtime {
         let mut backend = MockBackend::new();
         backend.default_surface_format = format;
-        Device::from_backend(Box::new(backend)).unwrap()
+        Runtime::from_backend(Box::new(backend)).unwrap()
     }
 
     #[test]

@@ -5,7 +5,7 @@ mod submission;
 
 #[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 mod imp {
-    //! Integration tests that must run serially against a single shared [`Device`].
+    //! Integration tests that must run serially against a single shared [`Runtime`].
     //!
     //! Each test here documents, directly above its function, which **device-global**
     //! invariant it depends on. If a test does not need isolation from other trials
@@ -15,41 +15,41 @@ mod imp {
 
     use crate::submission::submission_context;
     use goldy::{
-        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
-        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Instance, NodeAccess, RequestAdapterOptions, Runtime,
+        RuntimeDescriptor, Scheme, ShaderModule,
     };
     use std::sync::Arc;
 
-    fn request_default_device(instance: &Instance) -> Device {
+    fn request_default_device(instance: &Instance) -> Runtime {
         instance
             .request_adapter(&RequestAdapterOptions::default())
             .expect("Failed to request adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("Failed to create device")
     }
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         request_default_device(&Instance::new().expect("Failed to create instance"))
     }
 
     fn test_alloc_buffer(
-        device: &Device,
+        device: &Runtime,
         size: u64,
         kind: BufferKind,
         stride: Option<u32>,
         flags: BufferFlags,
     ) -> Buffer {
-        RetainedPool::new(Arc::new(device.clone()))
+        Arc::new(device.clone())
             .acquire_buffer(size, kind, stride, flags, None)
             .expect("acquire_buffer")
     }
 
-    /// Isolation reason: [`Device::device_deferred_deletion_pending_count`] is a
+    /// Isolation reason: [`Runtime::device_deferred_deletion_pending_count`] is a
     /// device-global counter shared by every context on this device. If any other
     /// trial is running concurrently against the same device and has an in-flight
     /// bindless buffer destroy queued, this assertion can observe a nonzero count
     /// even though this trial's own destroy already drained correctly.
-    fn headless_deferred_buffer_destroy_drains_after_timeline_wait(device: &Device) {
+    fn headless_deferred_buffer_destroy_drains_after_timeline_wait(device: &Runtime) {
         const MINIMAL_SHADER: &str = r#"
     import goldy_exp;
 

@@ -202,7 +202,7 @@ promoted straight from the cache once its streak recovers, with no compile.
 
 The PSO cache is **scheme-scoped** and bounded (16 variants, LRU). A device-scoped cache
 was the first design and does not work as stated: a `ComputePipeline` holds a strong
-`Device`, so a cache inside the device would form a reference cycle and the device would
+`Runtime`, so a cache inside the device would form a reference cycle and the device would
 never be dropped. Scoping the cache to the scheme also settles ownership — the scheme holds
 an `Arc` to the variant it has promoted, and the cache holds another, so eviction from the
 cache never destroys a pipeline a node still binds. The price is that two schemes running
@@ -372,7 +372,7 @@ while it uses auto layouts, and flips on by itself once it does not; the CPU bac
 reports no because its host-callable lowering has no bake macros, so a variant would be the
 same kernel. The predictor stays backend-agnostic either way, and the capability is
 internal: specialization is an implementation detail, so it does not belong in
-`DeviceCapabilities` where a program would branch on it. A scheme queries it once, on its
+`RuntimeCapabilities` where a program would branch on it. A scheme queries it once, on its
 first submit.
 
 ## Off switch
@@ -451,9 +451,9 @@ specialization is defined for dispatch sites, so that is deliberate.
 
 - **Cost model.** A dispatch-size (or measured-duration) term so tiny dispatches are never
   promoted. Needs profiles from a real consumer before the threshold is more than a guess.
-- **Device-level variant sharing.** Many schemes running one shader with the same stable
+- **Runtime-level variant sharing.** Many schemes running one shader with the same stable
   words compile it once each today. Sharing needs an owner that does not cycle with
-  `Device`, e.g. variants that hold a weak device reference and a cache that drains on
+  `Runtime`, e.g. variants that hold a weak device reference and a cache that drains on
   device drop.
 - **WebGPU explicit layouts.** Building the pipeline layout from the signature-derived
   `WgpuComputeLayout` would let the backend report `compute_pipeline_layout_follows_signature`

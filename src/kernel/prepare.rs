@@ -1,8 +1,8 @@
 //! Prepare a [`KernelDef`] into a device-scoped compute pipeline.
 
 use crate::compute::ComputePipeline;
-use crate::device::Device;
 use crate::kernel::{DispatchBuilder, KernelDef};
+use crate::runtime::Runtime;
 use crate::scheme::{Scheme, SchemeBindable};
 use crate::shader::ShaderModule;
 use crate::task_graph::NodeAccess;
@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Device-scoped prepared kernel: compiled pipeline + ABI metadata.
+/// Runtime-scoped prepared kernel: compiled pipeline + ABI metadata.
 pub struct PreparedKernel {
     pipeline: Arc<ComputePipeline>,
     def: KernelDef,
@@ -120,7 +120,7 @@ fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
 ///
 /// Pipeline creation happens here (not on every `record`), matching the
 /// existing `ShaderModule` + `ComputePipeline` path and disk cache.
-pub fn prepare_kernel(device: &Device, def: KernelDef) -> Result<PreparedKernel> {
+pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel> {
     if def.abi_version != goldy_shader_ir::KERNEL_ABI_VERSION {
         anyhow::bail!(
             "kernel ABI version mismatch: shader has {}, runtime expects {}",

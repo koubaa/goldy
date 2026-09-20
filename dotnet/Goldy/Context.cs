@@ -18,7 +18,7 @@ public sealed class Context : IDisposable
     /// <summary>
     /// Create a context bound to a device.
     /// </summary>
-    public static Context Create(Device device)
+    public static Context Create(Runtime device)
     {
         device.ThrowIfDisposed();
         var handle = NativeMethods.ContextCreate(device.Handle);

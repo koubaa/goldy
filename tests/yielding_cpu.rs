@@ -5,7 +5,7 @@
 #[path = "common/yielding.rs"]
 mod yielding;
 
-fn cpu_device() -> (goldy::Device, std::sync::MutexGuard<'static, ()>) {
+fn cpu_device() -> (goldy::Runtime, std::sync::MutexGuard<'static, ()>) {
     static SELECT_CPU: std::sync::Once = std::sync::Once::new();
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // Host-callable JIT is not safe to compile from several tests at once on

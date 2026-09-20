@@ -1,7 +1,7 @@
 //! Render pipeline management.
 
 use crate::backend::{GpuBackend, PipelineHandle};
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::shader::ShaderModule;
 use crate::slang::ffi::SlangStage;
 use crate::slang::graphics_link::{
@@ -64,7 +64,7 @@ impl Default for VertexBufferLayout {
 
 /// A render pipeline.
 pub struct RenderPipeline {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: PipelineHandle,
     /// Per push-constant resource slot (merged pipeline contract order).
@@ -79,7 +79,7 @@ impl RenderPipeline {
     /// Existing constructors link `[goldy_vertex]` / `[goldy_fragment]` stages automatically.
     /// Prefer [`Self::builder`] when teaching the vertex → payload → fragment model.
     pub fn new(
-        device: &Device,
+        device: &Runtime,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
         desc: &RenderPipelineDesc,
@@ -95,7 +95,7 @@ impl RenderPipeline {
     }
 
     /// Start a pipeline builder that reflects and links stage I/O.
-    pub fn builder(device: &Device) -> RenderPipelineBuilder<'_> {
+    pub fn builder(device: &Runtime) -> RenderPipelineBuilder<'_> {
         RenderPipelineBuilder {
             device,
             vertex: None,
@@ -116,7 +116,7 @@ impl RenderPipeline {
 
 /// Additive builder for [`RenderPipeline`].
 pub struct RenderPipelineBuilder<'a> {
-    device: &'a Device,
+    device: &'a Runtime,
     vertex: Option<&'a ShaderModule>,
     fragment: Option<&'a ShaderModule>,
     desc: RenderPipelineDesc,
@@ -254,7 +254,7 @@ impl Drop for RenderPipeline {
 /// [`crate::SchemeRenderPassBuilder::set_mesh_pipeline`] and
 /// [`crate::SchemeRenderPassBuilder::dispatch_mesh`].
 pub struct MeshPipeline {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: PipelineHandle,
     pub(crate) slot_access: Vec<Option<crate::types::ResourceAccess>>,
@@ -277,8 +277,8 @@ pub struct MeshPipelineDesc<'a> {
 }
 
 impl MeshPipeline {
-    /// Create a mesh pipeline when [`crate::DeviceCapabilities::mesh_shaders`] is set.
-    pub fn new(device: &Device, desc: &MeshPipelineDesc<'_>) -> Result<Self> {
+    /// Create a mesh pipeline when [`crate::RuntimeCapabilities::mesh_shaders`] is set.
+    pub fn new(device: &Runtime, desc: &MeshPipelineDesc<'_>) -> Result<Self> {
         Self::builder(device)
             .mesh(desc.mesh)
             .fragment(desc.fragment)
@@ -289,7 +289,7 @@ impl MeshPipeline {
     }
 
     /// Start a mesh pipeline builder that reflects and links stage I/O.
-    pub fn builder(device: &Device) -> MeshPipelineBuilder<'_> {
+    pub fn builder(device: &Runtime) -> MeshPipelineBuilder<'_> {
         MeshPipelineBuilder {
             device,
             mesh: None,
@@ -302,7 +302,7 @@ impl MeshPipeline {
     }
 
     /// [`Self::new`] with an optional GPU-debugger label.
-    pub fn new_with_label(device: &Device, desc: &MeshPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
+    pub fn new_with_label(device: &Runtime, desc: &MeshPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
         Self::builder(device)
             .mesh(desc.mesh)
             .fragment(desc.fragment)
@@ -324,7 +324,7 @@ impl MeshPipeline {
 
 /// Additive builder for [`MeshPipeline`].
 pub struct MeshPipelineBuilder<'a> {
-    device: &'a Device,
+    device: &'a Runtime,
     mesh: Option<&'a ShaderModule>,
     fragment: Option<&'a ShaderModule>,
     amplification: Option<&'a ShaderModule>,
@@ -373,7 +373,7 @@ impl<'a> MeshPipelineBuilder<'a> {
             .ok_or_else(|| anyhow::anyhow!("MeshPipeline::builder requires .fragment(&shader)"))?;
         anyhow::ensure!(
             self.device.capabilities().mesh_shaders,
-            "this adapter does not support mesh shaders (DeviceCapabilities::mesh_shaders is false). \
+            "this adapter does not support mesh shaders (RuntimeCapabilities::mesh_shaders is false). \
              hint: skip MeshPipeline::new, or pick an adapter with mesh shaders \
              (Vulkan VK_EXT_mesh_shader, DX12 mesh tier 1, Metal Apple7 / Mac2). \
              Query device.capabilities().mesh_shaders."
@@ -382,7 +382,7 @@ impl<'a> MeshPipelineBuilder<'a> {
             anyhow::ensure!(
                 self.device.capabilities().amplification_shaders,
                 "this adapter does not support amplification/task shaders \
-                 (DeviceCapabilities::amplification_shaders is false). \
+                 (RuntimeCapabilities::amplification_shaders is false). \
                  hint: set MeshPipelineDesc::amplification to None, or pick an adapter that \
                  reports amplification_shaders."
             );
@@ -568,11 +568,11 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
 
-    fn create_test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn create_test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
-    fn create_test_shader(device: &Device) -> ShaderModule {
+    fn create_test_shader(device: &Runtime) -> ShaderModule {
         // Mock backend doesn't actually compile shaders, so any source works
         ShaderModule::from_slang(device, "mock shader source").unwrap()
     }
