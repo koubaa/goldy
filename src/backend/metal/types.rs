@@ -24,8 +24,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use ::metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
-    DepthStencilState as MTLDepthStencilState, Heap, Library, MTLPrimitiveType, MTLResourceOptions,
-    RenderPipelineState, Device as MTLDevice, SamplerState, SharedEvent, Texture as MTLTexture,
+    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Heap, Library, MTLPrimitiveType,
+    MTLResourceOptions, RenderPipelineState, SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer.
