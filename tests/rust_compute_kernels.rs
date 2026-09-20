@@ -33,6 +33,25 @@ fn fill_red(output: goldy::gpu::DirectSpatial<goldy::gpu::Float4>) {
     output[tid.xy] = goldy::gpu::float4(1.0, 0.0, 0.0, 1.0);
 }
 
+#[compute(workgroup_size = [256, 1, 1])]
+fn workgroup_sum(data: &[f32], out: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 256>();
+    let local = goldy::gpu::local_id().x;
+    scratch[local] = data[local];
+    let mut acc = scratch[local];
+    for i in 0..8 {
+        goldy::gpu::workgroup_barrier();
+        if local + (1u32 << i) < 256 {
+            acc = acc + scratch[local + (1u32 << i)];
+        }
+        goldy::gpu::workgroup_barrier();
+        scratch[local] = acc;
+    }
+    if local == 0 {
+        out[0] = scratch[0];
+    }
+}
+
 #[goldy::gpu]
 struct PlasmaUniforms {
     width: u32,
@@ -97,7 +116,29 @@ fn main() {
             assert!(saxpy::CANONICAL_SOURCE.contains("ThreadId _goldy_gid"));
             assert!(saxpy::CANONICAL_SOURCE.contains("[numthreads(64, 1, 1)]"));
             assert!(double_u32::CANONICAL_SOURCE.contains("Scattered<uint> data"));
+            assert!(workgroup_sum::CANONICAL_SOURCE.contains("groupshared float scratch[256];"));
+            assert!(workgroup_sum::CANONICAL_SOURCE.contains("GroupMemoryBarrierWithGroupSync()"));
+            assert!(workgroup_sum::CANONICAL_SOURCE.contains("GroupThreadId _goldy_lid"));
             Ok(())
+        }),
+        libtest_mimic::Trial::test("rust_kernel_workgroup_sum_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let ctx = device.create_context()?;
+                let n = 256usize;
+                let input = vec![1.0f32; n];
+                let data = device.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
+                let out = device.acquire_buffer_with_data(&[0.0f32], BufferKind::Scattered)?;
+                let kernel = workgroup_sum::Kernel::prepare(&device)?;
+                let mut scheme = Scheme::new(&ctx);
+                kernel.record(&mut scheme, "sum", &data, &out).groups([1, 1, 1]);
+                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+                let mut frame = scheme.submit()?;
+                let bytes = grant.claim(&mut frame)?.consume()?;
+                let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                assert!((got[0] - 256.0).abs() < 1e-3, "sum {}", got[0]);
+                Ok(())
+            }
         }),
         libtest_mimic::Trial::test("rust_kernel_double_u32_gpu", {
             let device = Arc::clone(&device);

@@ -26,9 +26,11 @@ pub fn emit_canonical_compute_source(kernel: &ShaderKernel) -> KernelDef {
 
     let [wx, wy, wz] = kernel.workgroup_size;
     let body = emit_user_helper_body(&kernel.body, &kernel.builtins);
+    let shared = emit_workgroup_decls(&kernel.body);
     let sig = sig_parts.join(", ");
     let canonical = format!(
         "import goldy_exp;\n\n\
+         {shared}\
          [goldy_compute]\n\
          [numthreads({wx}, {wy}, {wz})]\n\
          void {entry}({sig}) {{\n{body}}}\n"
@@ -49,6 +51,19 @@ pub fn emit_user_helper_body(body: &[Stmt], builtins: &BuiltinMask) -> String {
     let mut out = String::new();
     for stmt in body {
         emit_stmt(&mut out, stmt, 1, builtins);
+    }
+    out
+}
+
+fn emit_workgroup_decls(body: &[Stmt]) -> String {
+    let mut out = String::new();
+    for stmt in body {
+        if let Stmt::WorkgroupArray { name, elem, len } = stmt {
+            out.push_str(&format!("groupshared {elem} {name}[{len}];\n"));
+        }
+    }
+    if !out.is_empty() {
+        out.push('\n');
     }
     out
 }
@@ -120,6 +135,7 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask
                 out.push_str(&format!("{pad}return;\n"));
             }
         }
+        Stmt::WorkgroupArray { .. } => {}
         Stmt::Expr(expr) => {
             out.push_str(&format!("{pad}{};\n", emit_expr(expr, builtins)));
         }
@@ -190,7 +206,14 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask) -> String {
         BuiltinFn::Ceil => format!("ceil({})", join_args(args, builtins)),
         BuiltinFn::Sqrt => format!("sqrt({})", join_args(args, builtins)),
         BuiltinFn::Sin => format!("sin({})", join_args(args, builtins)),
+        BuiltinFn::Cos => format!("cos({})", join_args(args, builtins)),
+        BuiltinFn::Exp => format!("exp({})", join_args(args, builtins)),
+        BuiltinFn::Pow => format!("pow({})", join_args(args, builtins)),
         BuiltinFn::Length => format!("length({})", join_args(args, builtins)),
+        BuiltinFn::WorkgroupBarrier => {
+            assert!(args.is_empty());
+            "GroupMemoryBarrierWithGroupSync()".to_string()
+        }
         BuiltinFn::Float2 => format!("float2({})", join_args(args, builtins)),
         BuiltinFn::Float3 => format!("float3({})", join_args(args, builtins)),
         BuiltinFn::Float4 => format!("float4({})", join_args(args, builtins)),
@@ -315,5 +338,50 @@ mod tests {
         assert!(def.source.canonical_slang.contains("goldy_buf_len(y)"));
         assert_eq!(def.entry, "cs_main");
         assert_eq!(def.workgroup_size, [256, 1, 1]);
+    }
+
+    #[test]
+    fn emits_groupshared_and_barrier() {
+        let kernel = ShaderKernel {
+            name: "reduce".into(),
+            workgroup_size: [256, 1, 1],
+            params: vec![KernelParam::buffer_read_write("data", ElementType::F32)],
+            builtins: BuiltinMask {
+                local_id: true,
+                ..BuiltinMask::NONE
+            },
+            body: vec![
+                Stmt::WorkgroupArray {
+                    name: "scratch".into(),
+                    elem: "float".into(),
+                    len: 256,
+                },
+                Stmt::Assign {
+                    target: Expr::Index {
+                        base: Box::new(Expr::Var("scratch".into())),
+                        index: Box::new(Expr::Field {
+                            base: Box::new(Expr::Call {
+                                func: BuiltinFn::LocalId,
+                                args: vec![],
+                            }),
+                            field: "x".into(),
+                        }),
+                    },
+                    value: Expr::LitF32(1.0),
+                },
+                Stmt::Expr(Expr::Call {
+                    func: BuiltinFn::WorkgroupBarrier,
+                    args: vec![],
+                }),
+            ],
+            source_map: SourceMap {
+                rust_file: "reduce.rs".into(),
+                rust_line: 1,
+            },
+        };
+        let slang = emit_canonical_compute_source(&kernel).source.canonical_slang;
+        assert!(slang.contains("groupshared float scratch[256];"));
+        assert!(slang.contains("GroupMemoryBarrierWithGroupSync()"));
+        assert!(!slang.contains("float scratch ="));
     }
 }

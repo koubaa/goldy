@@ -10,8 +10,8 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
     parse2, Attribute, BinOp as SynBinOp, Error, Expr as SynExpr, ExprBinary, ExprCall, ExprField, ExprIndex, ExprLit,
-    ExprMethodCall, ExprPath, ExprUnary, FnArg, ItemFn, Lit, Meta, Pat, PatType, ReturnType, Stmt as SynStmt, Type,
-    UnOp,
+    ExprMethodCall, ExprPath, ExprUnary, FnArg, GenericArgument, ItemFn, Lit, Meta, Pat, PatType, PathArguments,
+    ReturnType, Stmt as SynStmt, Type, UnOp,
 };
 
 mod kw {
@@ -209,6 +209,12 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
     }
 
     let body_stmts = lower_block(&func.block.stmts, &mut builtins, &mut type_env)?;
+    if workgroup_array_in_nested_scope(&body_stmts) {
+        return Err(Error::new(
+            func.sig.ident.span(),
+            "gpu::workgroup_array must be declared at kernel top level",
+        ));
+    }
 
     let kernel = ShaderKernel {
         name: fn_name.to_string(),
@@ -658,6 +664,14 @@ fn lower_stmt(
                 .init
                 .as_ref()
                 .ok_or_else(|| Error::new(local.span(), "let without initializer is unsupported"))?;
+            if let Some((elem, len)) = parse_workgroup_array_init(&init.expr)? {
+                env.insert(name.ident.to_string(), format!("groupshared<{elem}>"));
+                return Ok(Stmt::WorkgroupArray {
+                    name: name.ident.to_string(),
+                    elem,
+                    len,
+                });
+            }
             let expr = lower_expr(&init.expr, builtins)?;
             let ty = ascribed.or_else(|| infer_slang_ty(&expr, env));
             if let Some(ref ty) = ty {
@@ -890,6 +904,18 @@ fn lower_call(
         ["ceil"] | ["gpu", "ceil"] | ["goldy", "gpu", "ceil"] => BuiltinFn::Ceil,
         ["sqrt"] | ["gpu", "sqrt"] | ["goldy", "gpu", "sqrt"] => BuiltinFn::Sqrt,
         ["sin"] | ["gpu", "sin"] | ["goldy", "gpu", "sin"] => BuiltinFn::Sin,
+        ["cos"] | ["gpu", "cos"] | ["goldy", "gpu", "cos"] => BuiltinFn::Cos,
+        ["exp"] | ["gpu", "exp"] | ["goldy", "gpu", "exp"] => BuiltinFn::Exp,
+        ["pow"] | ["gpu", "pow"] | ["goldy", "gpu", "pow"] => BuiltinFn::Pow,
+        ["workgroup_barrier"] | ["gpu", "workgroup_barrier"] | ["goldy", "gpu", "workgroup_barrier"] => {
+            BuiltinFn::WorkgroupBarrier
+        }
+        ["workgroup_array"] | ["gpu", "workgroup_array"] | ["goldy", "gpu", "workgroup_array"] => {
+            return Err(Error::new(
+                path.span(),
+                "gpu::workgroup_array must be bound as `let mut name = gpu::workgroup_array::<T, N>()`",
+            ))
+        }
         ["length"] | ["gpu", "length"] | ["goldy", "gpu", "length"] => BuiltinFn::Length,
         ["float2"] | ["gpu", "float2"] | ["goldy", "gpu", "float2"] => BuiltinFn::Float2,
         ["float3"] | ["gpu", "float3"] | ["goldy", "gpu", "float3"] => BuiltinFn::Float3,
@@ -1040,7 +1066,17 @@ fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) 
         } => Some("uint2".into()),
         Expr::Call {
             func:
-                BuiltinFn::Sin | BuiltinFn::Length | BuiltinFn::Abs | BuiltinFn::Floor | BuiltinFn::Ceil | BuiltinFn::Sqrt,
+                BuiltinFn::Sin
+                | BuiltinFn::Cos
+                | BuiltinFn::Exp
+                | BuiltinFn::Pow
+                | BuiltinFn::Length
+                | BuiltinFn::Abs
+                | BuiltinFn::Min
+                | BuiltinFn::Max
+                | BuiltinFn::Floor
+                | BuiltinFn::Ceil
+                | BuiltinFn::Sqrt,
             ..
         } => Some("float".into()),
         Expr::LitU32(_) => Some("uint".into()),
@@ -1054,6 +1090,7 @@ fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) 
             unwrap_generic(&base_ty, "BufRO<")
                 .or_else(|| unwrap_generic(&base_ty, "Scattered<"))
                 .or_else(|| unwrap_generic(&base_ty, "DirectSpatial<"))
+                .or_else(|| unwrap_generic(&base_ty, "groupshared<"))
                 .map(str::to_string)
         }
         Expr::Cast { ty, .. } => Some(ty.clone()),
@@ -1088,4 +1125,98 @@ fn unwrap_generic<'a>(ty: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn parse_workgroup_array_init(expr: &SynExpr) -> Result<Option<(String, u32)>, Error> {
+    let SynExpr::Call(ExprCall { func, args, .. }) = expr else {
+        return Ok(None);
+    };
+    let SynExpr::Path(p) = func.as_ref() else {
+        return Ok(None);
+    };
+    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let segs_str: Vec<&str> = segs.iter().map(String::as_str).collect();
+    if !matches!(
+        segs_str.as_slice(),
+        ["workgroup_array"] | ["gpu", "workgroup_array"] | ["goldy", "gpu", "workgroup_array"]
+    ) {
+        return Ok(None);
+    }
+    if !args.is_empty() {
+        return Err(Error::new(
+            expr.span(),
+            "gpu::workgroup_array takes no runtime arguments; use turbofish `<T, N>`",
+        ));
+    }
+    let last = p.path.segments.last().unwrap();
+    let PathArguments::AngleBracketed(ab) = &last.arguments else {
+        return Err(Error::new(
+            p.path.span(),
+            "gpu::workgroup_array requires turbofish `<T, N>` (for example `::<f32, 256>`)",
+        ));
+    };
+    if ab.args.len() != 2 {
+        return Err(Error::new(
+            p.path.span(),
+            "gpu::workgroup_array requires exactly two generic arguments `<T, N>`",
+        ));
+    }
+    let elem = match &ab.args[0] {
+        GenericArgument::Type(ty) => type_to_slang_name(ty)?,
+        other => {
+            return Err(Error::new(
+                other.span(),
+                "workgroup array element type must be f32, u32, i32, or bool",
+            ))
+        }
+    };
+    if !matches!(elem.as_str(), "float" | "uint" | "int" | "bool") {
+        return Err(Error::new(
+            ab.args[0].span(),
+            "workgroup array element type must be f32, u32, i32, or bool",
+        ));
+    }
+    let len = match &ab.args[1] {
+        GenericArgument::Const(SynExpr::Lit(ExprLit {
+            lit: Lit::Int(i), ..
+        })) => {
+            let n: u32 = i.base10_parse()?;
+            if n == 0 {
+                return Err(Error::new(i.span(), "workgroup array length must be > 0"));
+            }
+            n
+        }
+        other => {
+            return Err(Error::new(
+                other.span(),
+                "workgroup array length must be an integer literal",
+            ))
+        }
+    };
+    Ok(Some((elem, len)))
+}
+
+fn workgroup_array_in_nested_scope(stmts: &[Stmt]) -> bool {
+    fn nested(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::WorkgroupArray { .. } => true,
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => nested(then_body) || else_body.as_ref().is_some_and(|e| nested(e)),
+            Stmt::While { body, .. } | Stmt::ForRange { body, .. } => nested(body),
+            _ => false,
+        })
+    }
+    stmts.iter().any(|s| match s {
+        Stmt::WorkgroupArray { .. } => false,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => nested(then_body) || else_body.as_ref().is_some_and(|e| nested(e)),
+        Stmt::While { body, .. } | Stmt::ForRange { body, .. } => nested(body),
+        _ => false,
+    })
 }

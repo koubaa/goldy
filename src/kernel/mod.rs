@@ -221,7 +221,47 @@ pub mod gpu {
         unimplemented!("gpu::sin is only valid inside #[goldy::compute] bodies")
     }
 
+    pub fn cos(_x: f32) -> f32 {
+        unimplemented!("gpu::cos is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn exp(_x: f32) -> f32 {
+        unimplemented!("gpu::exp is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn pow(_x: f32, _y: f32) -> f32 {
+        unimplemented!("gpu::pow is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn sqrt(_x: f32) -> f32 {
+        unimplemented!("gpu::sqrt is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn abs(_x: f32) -> f32 {
+        unimplemented!("gpu::abs is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn min(_a: f32, _b: f32) -> f32 {
+        unimplemented!("gpu::min is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn max(_a: f32, _b: f32) -> f32 {
+        unimplemented!("gpu::max is only valid inside #[goldy::compute] bodies")
+    }
+
     pub fn length(_v: Float2) -> f32 {
         unimplemented!("gpu::length is only valid inside #[goldy::compute] bodies")
+    }
+
+    /// Workgroup-shared array (`groupshared T name[N];` in generated Slang).
+    ///
+    /// Bind at kernel top level: `let mut scratch = gpu::workgroup_array::<f32, 256>();`
+    pub fn workgroup_array<T: Copy, const N: usize>() -> [T; N] {
+        unimplemented!("gpu::workgroup_array is only valid inside #[goldy::compute] bodies")
+    }
+
+    /// `GroupMemoryBarrierWithGroupSync` — all threads in the workgroup wait, then continue.
+    pub fn workgroup_barrier() {
+        unimplemented!("gpu::workgroup_barrier is only valid inside #[goldy::compute] bodies")
     }
 }

@@ -49,11 +49,15 @@ pub enum BuiltinFn {
     Ceil,
     Sqrt,
     Sin,
+    Cos,
+    Exp,
+    Pow,
     Length,
     Float2,
     Float3,
     Float4,
     Uint2,
+    WorkgroupBarrier,
 }
 
 /// Expression nodes.
@@ -127,6 +131,12 @@ pub enum Stmt {
     },
     Return {
         value: Option<Expr>,
+    },
+    /// `let mut scratch = gpu::workgroup_array::<T, N>()` → file-scope `groupshared`.
+    WorkgroupArray {
+        name: String,
+        elem: String,
+        len: u32,
     },
     Expr(Expr),
 }
