@@ -37,6 +37,8 @@ pub mod shaders;
 #[cfg(feature = "graphics")]
 pub(crate) mod surface;
 pub mod task_graph;
+#[cfg(feature = "tensor")]
+pub mod tensor;
 pub mod texture;
 pub mod types;
 
@@ -124,6 +126,11 @@ pub use kernel::{
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
 pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
+#[cfg(feature = "tensor")]
+pub use tensor::{
+    ScatterMode, Tensor, TensorContext, TensorDType, TensorLayout, TensorRecorder, TensorScalar, TensorShape,
+    TensorView, MAX_TENSOR_RANK,
+};
 #[cfg(feature = "graphics")]
 pub use pipeline::{
     MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc,

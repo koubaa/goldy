@@ -51,6 +51,7 @@ pub enum BuiltinFn {
     Sin,
     Cos,
     Exp,
+    Log,
     Pow,
     Length,
     Float2,

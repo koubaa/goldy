@@ -213,6 +213,24 @@ parcel = device.acquire_buffer(data, access)  # data: numpy array or bytes
 parcel.byte_size                            # int (bytes)
 ```
 
+#### `Tensor` / `TensorContext`
+
+Dense tensor algebra records into the same `Scheme`. NumPy conversion copies through
+acquire and `MemoryExchange` — there is no zero-copy host view of GPU storage.
+
+```python
+a = device.acquire_tensor(np.array([1.0, 2.0], dtype=np.float32), shape=[2])
+b = device.zeros_tensor([2], goldy.TensorDType.F32)
+tensors = goldy.TensorContext(device)
+scheme = goldy.Scheme(ctx)
+tensors.fill_f32(scheme, "fill", b, 10.0)
+c = tensors.add(scheme, "add", a, b)
+memory = goldy.MemoryExchange(ctx)
+withdraw = memory.bind_withdraw(scheme, c.parcel())
+submission = scheme.submit()
+out = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
+```
+
 #### `Scheme`
 
 ```python

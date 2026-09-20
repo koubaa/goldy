@@ -47,4 +47,12 @@ impl<'a> DispatchBuilder<'a> {
         let wz = self.workgroup_size[2].max(1);
         self.groups([width.div_ceil(wx), height.div_ceil(wy), depth.div_ceil(wz)])
     }
+
+    /// Cover a tensor view's logical element count in 1D.
+    ///
+    /// Dispatch geometry follows the view's `numel`, not the parent buffer size.
+    #[cfg(feature = "tensor")]
+    pub fn over_tensor(self, view: &crate::tensor::TensorView<'_>) -> RecordedDispatch {
+        self.over_1d(view.numel_u32())
+    }
 }

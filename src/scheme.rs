@@ -3243,8 +3243,8 @@ fn validate_dispatch_shape_parcel(parcel: &Parcel) -> Result<u64, GoldyError> {
 ///   `resource_identity` is `None` for barrier-free resources such as samplers, which only need
 ///   a bindless slot.
 /// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
-type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>;
-type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
+pub(crate) type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>;
+pub(crate) type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
 
 pub(crate) trait SchemeBindable {
     fn resolve(&self, scheme: &mut Scheme, access: ResourceAccess) -> SchemeBindResult;

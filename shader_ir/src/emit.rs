@@ -332,6 +332,7 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask) -> String {
         BuiltinFn::Sin => format!("sin({})", join_args(args, builtins)),
         BuiltinFn::Cos => format!("cos({})", join_args(args, builtins)),
         BuiltinFn::Exp => format!("exp({})", join_args(args, builtins)),
+        BuiltinFn::Log => format!("log({})", join_args(args, builtins)),
         BuiltinFn::Pow => format!("pow({})", join_args(args, builtins)),
         BuiltinFn::Length => format!("length({})", join_args(args, builtins)),
         BuiltinFn::WorkgroupBarrier => {

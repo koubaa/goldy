@@ -4,6 +4,10 @@
 buffer bindings like any other node. The backend chooses an implementation on the
 first submit and retains that plan.
 
+The tensor front end (`goldy/tensor`, on by default) derives `m`/`n`/`k`, transpose
+flags, offsets, and leading dimensions from checked [`TensorView`](./tensor.md)s and
+records the same node. `MatMulView` remains the low-level escape hatch.
+
 ```rust
 scheme
     .matmul("q_projection", MatMulDesc::gemv(dim, dim))

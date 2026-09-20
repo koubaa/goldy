@@ -20,6 +20,7 @@
 # Compute Workflows
 
 - [Settlement](./compute/settlement.md)
+- [Tensor Algebra](./compute/tensor.md)
 - [Matrix Multiply](./compute/matmul.md)
 - [Pipelined Frames](./compute/pipelined-frames.md)
 - [Compute to Surface](./compute/compute-to-surface.md)
@@ -71,6 +72,7 @@
   - [game_of_life](./examples/game_of_life.md)
   - [compute_to_surface](./examples/compute_to_surface.md)
   - [ray_query](./examples/ray_query.md)
+  - [tensor_algebra](./examples/tensor_algebra.md)
   - [solid_cube](./examples/solid_cube.md)
   - [spinning_cube](./examples/spinning_cube.md)
   - [depth_quads](./examples/depth_quads.md)

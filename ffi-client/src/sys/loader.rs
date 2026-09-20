@@ -124,6 +124,24 @@ pub(crate) struct GoldyFfi {
     pub goldy_claim_destroy: FnGoldyClaimDestroy,
     pub goldy_claim_consume: FnGoldyClaimConsume,
     pub goldy_claim_discard: FnGoldyClaimDiscard,
+    #[cfg(feature = "tensor")]
+    pub goldy_runtime_acquire_tensor: FnGoldyRuntimeAcquireTensor,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_destroy: FnGoldyTensorDestroy,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_dtype: FnGoldyTensorDtype,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_shape: FnGoldyTensorShape,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_context_create: FnGoldyTensorContextCreate,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_context_destroy: FnGoldyTensorContextDestroy,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_add: FnGoldyTensorAdd,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_matmul: FnGoldyTensorMatmul,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_fill_f32: FnGoldyTensorFillF32,
     #[cfg(windows)]
     pub goldy_surface_exchange_create_win32: FnGoldySurfaceExchangeCreateWin32,
     #[cfg(target_os = "macos")]
@@ -341,6 +359,24 @@ impl GoldyFfi {
             goldy_claim_destroy: sym!("goldy_claim_destroy", FnGoldyClaimDestroy),
             goldy_claim_consume: sym!("goldy_claim_consume", FnGoldyClaimConsume),
             goldy_claim_discard: sym!("goldy_claim_discard", FnGoldyClaimDiscard),
+            #[cfg(feature = "tensor")]
+            goldy_runtime_acquire_tensor: sym!("goldy_runtime_acquire_tensor", FnGoldyRuntimeAcquireTensor),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_destroy: sym!("goldy_tensor_destroy", FnGoldyTensorDestroy),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_dtype: sym!("goldy_tensor_dtype", FnGoldyTensorDtype),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_shape: sym!("goldy_tensor_shape", FnGoldyTensorShape),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_context_create: sym!("goldy_tensor_context_create", FnGoldyTensorContextCreate),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_context_destroy: sym!("goldy_tensor_context_destroy", FnGoldyTensorContextDestroy),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_add: sym!("goldy_tensor_add", FnGoldyTensorAdd),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_matmul: sym!("goldy_tensor_matmul", FnGoldyTensorMatmul),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_fill_f32: sym!("goldy_tensor_fill_f32", FnGoldyTensorFillF32),
             #[cfg(windows)]
             goldy_surface_exchange_create_win32: sym!(
                 "goldy_surface_exchange_create_win32",

@@ -229,12 +229,20 @@ pub mod gpu {
         unimplemented!("gpu::exp is only valid inside #[goldy::compute] bodies")
     }
 
+    pub fn log(_x: f32) -> f32 {
+        unimplemented!("gpu::log is only valid inside #[goldy::compute] bodies")
+    }
+
     pub fn pow(_x: f32, _y: f32) -> f32 {
         unimplemented!("gpu::pow is only valid inside #[goldy::compute] bodies")
     }
 
     pub fn sqrt(_x: f32) -> f32 {
         unimplemented!("gpu::sqrt is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn floor(_x: f32) -> f32 {
+        unimplemented!("gpu::floor is only valid inside #[goldy::compute] bodies")
     }
 
     pub fn abs(_x: f32) -> f32 {

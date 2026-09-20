@@ -141,6 +141,13 @@ typedef enum GoldyBufferKind {
     GOLDY_BUFFER_KIND_BROADCAST = 1,
 } GoldyBufferKind;
 
+// Dense tensor dtype.
+typedef enum GoldyTensorDType {
+    GOLDY_TENSOR_D_TYPE_F32 = 0,
+    GOLDY_TENSOR_D_TYPE_U32 = 1,
+    GOLDY_TENSOR_D_TYPE_I32 = 2,
+} GoldyTensorDType;
+
 // Spatial access pattern for textures.
 //
 // - `Interpolated`: Hardware filtering between neighbors (texture units).
@@ -244,6 +251,12 @@ typedef struct GoldyShaderModule GoldyShaderModule;
 
 // Opaque handle to a window-surface exchange.
 typedef struct GoldySurfaceExchange GoldySurfaceExchange;
+
+// Opaque owned tensor.
+typedef struct GoldyTensor GoldyTensor;
+
+// Prepared tensor kernels plus layout keepalive.
+typedef struct GoldyTensorContext GoldyTensorContext;
 
 // Opaque handle to an acquired [`goldy::Texture`].
 typedef struct GoldyTexture GoldyTexture;
@@ -352,6 +365,12 @@ typedef struct GoldySurfaceExchangeBindDestinationOut {
     struct GoldyPresentLease *lease;
     struct GoldyTransaction *transaction;
 } GoldySurfaceExchangeBindDestinationOut;
+
+// Concrete shape descriptor (`rank` leading entries of `dims` are live).
+typedef struct GoldyTensorShape {
+    uint32_t rank;
+    uint32_t dims[4];
+} GoldyTensorShape;
 
 #ifdef __cplusplus
 extern "C" {
@@ -608,6 +627,17 @@ struct GoldyBuffer *goldy_runtime_acquire_buffer(struct GoldyRuntime *runtime,
                                                  uint64_t size,
                                                  enum GoldyBufferKind access,
                                                  uint32_t element_stride,
+                                                 const uint8_t *data,
+                                                 size_t data_size);
+
+// Acquire a packed tensor. `data` may be null to leave the buffer uninitialized.
+//
+// # Safety
+// `runtime` must be valid. `dims` must have `rank` elements when `rank > 0`.
+struct GoldyTensor *goldy_runtime_acquire_tensor(struct GoldyRuntime *runtime,
+                                                 enum GoldyTensorDType dtype,
+                                                 uint32_t rank,
+                                                 const uint32_t *dims,
                                                  const uint8_t *data,
                                                  size_t data_size);
 
@@ -1014,6 +1044,34 @@ enum GoldyResult goldy_surface_exchange_resize(struct GoldySurfaceExchange *exch
 // # Safety
 // `exchange` must be valid.
 uint32_t goldy_surface_exchange_width(const struct GoldySurfaceExchange *exchange);
+
+struct GoldyTensor *goldy_tensor_add(struct GoldyTensorContext *ctx,
+                                     struct GoldyScheme *scheme,
+                                     const char *label,
+                                     const struct GoldyTensor *a,
+                                     const struct GoldyTensor *b);
+
+struct GoldyTensorContext *goldy_tensor_context_create(struct GoldyRuntime *runtime);
+
+void goldy_tensor_context_destroy(struct GoldyTensorContext *ctx);
+
+void goldy_tensor_destroy(struct GoldyTensor *tensor);
+
+enum GoldyTensorDType goldy_tensor_dtype(const struct GoldyTensor *tensor);
+
+enum GoldyResult goldy_tensor_fill_f32(struct GoldyTensorContext *ctx,
+                                       struct GoldyScheme *scheme,
+                                       const char *label,
+                                       struct GoldyTensor *tensor,
+                                       float value);
+
+struct GoldyTensor *goldy_tensor_matmul(struct GoldyTensorContext *ctx,
+                                        struct GoldyScheme *scheme,
+                                        const char *label,
+                                        const struct GoldyTensor *a,
+                                        const struct GoldyTensor *b);
+
+enum GoldyResult goldy_tensor_shape(const struct GoldyTensor *tensor, struct GoldyTensorShape *out);
 
 uint64_t goldy_texture_byte_size(const struct GoldyTexture *texture);
 

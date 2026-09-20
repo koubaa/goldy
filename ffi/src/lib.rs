@@ -15,6 +15,8 @@ mod sampler;
 mod scheme;
 mod shader;
 mod surface_exchange;
+#[cfg(feature = "tensor")]
+mod tensor;
 mod types;
 
 pub use compute::*;
@@ -29,4 +31,6 @@ pub use sampler::*;
 pub use scheme::*;
 pub use shader::*;
 pub use surface_exchange::*;
+#[cfg(feature = "tensor")]
+pub use tensor::*;
 pub use types::*;

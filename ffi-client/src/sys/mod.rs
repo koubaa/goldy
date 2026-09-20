@@ -590,6 +590,76 @@ pub unsafe fn goldy_claim_discard(claim: *mut GoldyClaim) -> GoldyResult {
     (lib().goldy_claim_discard)(claim)
 }
 
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_runtime_acquire_tensor(
+    runtime: *mut GoldyRuntime,
+    dtype: GoldyTensorDType,
+    rank: u32,
+    dims: *const u32,
+    data: *const u8,
+    data_size: usize,
+) -> *mut GoldyTensor {
+    (lib().goldy_runtime_acquire_tensor)(runtime, dtype, rank, dims, data, data_size)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_destroy(tensor: *mut GoldyTensor) {
+    (lib().goldy_tensor_destroy)(tensor)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_dtype(tensor: *const GoldyTensor) -> GoldyTensorDType {
+    (lib().goldy_tensor_dtype)(tensor)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_shape(tensor: *const GoldyTensor, out: *mut GoldyTensorShape) -> GoldyResult {
+    (lib().goldy_tensor_shape)(tensor, out)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_context_create(runtime: *mut GoldyRuntime) -> *mut GoldyTensorContext {
+    (lib().goldy_tensor_context_create)(runtime)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_context_destroy(ctx: *mut GoldyTensorContext) {
+    (lib().goldy_tensor_context_destroy)(ctx)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_add(
+    ctx: *mut GoldyTensorContext,
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    a: *const GoldyTensor,
+    b: *const GoldyTensor,
+) -> *mut GoldyTensor {
+    (lib().goldy_tensor_add)(ctx, scheme, label, a, b)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_matmul(
+    ctx: *mut GoldyTensorContext,
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    a: *const GoldyTensor,
+    b: *const GoldyTensor,
+) -> *mut GoldyTensor {
+    (lib().goldy_tensor_matmul)(ctx, scheme, label, a, b)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_fill_f32(
+    ctx: *mut GoldyTensorContext,
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    tensor: *mut GoldyTensor,
+    value: f32,
+) -> GoldyResult {
+    (lib().goldy_tensor_fill_f32)(ctx, scheme, label, tensor, value)
+}
+
 #[cfg(windows)]
 pub unsafe fn goldy_surface_exchange_create_win32(
     ctx: *const GoldyContext,

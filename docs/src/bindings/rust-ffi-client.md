@@ -13,7 +13,7 @@ This is the same native boundary used by the [C++](./cpp.md) and [.NET](./dotnet
 | Validating the C ABI from Rust | `goldy-ffi-client` |
 | Swapping the native library without recompiling the client | `goldy-ffi-client` |
 
-The ffi-client API mirrors the core Rust crate: `Instance`, `Runtime`, `Scheme`, `MemoryExchange`, `SurfaceExchange`, and the rest of the Fondaco programming model are available with the same names and patterns.
+The ffi-client API mirrors the core Rust crate: `Instance`, `Runtime`, `Scheme`, `MemoryExchange`, `SurfaceExchange`, `Tensor` / `TensorContext` (behind the `tensor` feature), and the rest of the Fondaco programming model are available with the same names and patterns.
 
 ## Installation
 

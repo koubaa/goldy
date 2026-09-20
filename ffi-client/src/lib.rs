@@ -21,6 +21,8 @@ mod scheme;
 mod shader_module;
 mod surface_exchange;
 mod sys;
+#[cfg(feature = "tensor")]
+mod tensor;
 mod texture;
 mod types;
 
@@ -44,6 +46,8 @@ pub use scheme::{
 };
 pub use shader_module::ShaderModule;
 pub use surface_exchange::SurfaceExchange;
+#[cfg(feature = "tensor")]
+pub use tensor::{Tensor, TensorContext, TensorDType, TensorShape};
 pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceType, IndexFormat, NodeAccess,

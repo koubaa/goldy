@@ -69,6 +69,8 @@ class Adapter;
 class Buffer;
 class Texture;
 class Parcel;
+class Tensor;
+class TensorContext;
 class RecordBuilder;
 class ShaderModule;
 class RenderPipeline;
@@ -256,6 +258,14 @@ struct ContextDeleter {
 
 struct BufferDeleter {
     void operator()(GoldyBuffer* p) const { if (p) goldy_buffer_destroy(p); }
+};
+
+struct TensorDeleter {
+    void operator()(GoldyTensor* p) const { if (p) goldy_tensor_destroy(p); }
+};
+
+struct TensorContextDeleter {
+    void operator()(GoldyTensorContext* p) const { if (p) goldy_tensor_context_destroy(p); }
 };
 
 struct TextureDeleter {
@@ -494,6 +504,9 @@ public:
     [[nodiscard]] Buffer acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
                                               uint32_t element_stride = 1);
 
+    [[nodiscard]] Tensor acquire_tensor(GoldyTensorDType dtype, std::span<const uint32_t> dims,
+                                        std::span<const uint8_t> init = {});
+
     [[nodiscard]] Texture acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
                                           GoldyTextureKind kind, GoldyTextureFlags flags,
                                           std::span<const uint8_t> init = {});
@@ -727,6 +740,33 @@ private:
 };
 
 /**
+ * @brief Owned dense tensor (shape/dtype/layout over a parcel).
+ */
+class Tensor {
+public:
+    Tensor() = default;
+    explicit Tensor(GoldyTensor* ptr) : ptr_(ptr) {}
+
+    Tensor(const Tensor&) = delete;
+    Tensor& operator=(const Tensor&) = delete;
+    Tensor(Tensor&&) = default;
+    Tensor& operator=(Tensor&&) = default;
+
+    GoldyTensorDType dtype() const { return goldy_tensor_dtype(ptr_.get()); }
+
+    GoldyTensorShape shape() const {
+        GoldyTensorShape out{};
+        detail::throw_on_result(goldy_tensor_shape(ptr_.get(), &out));
+        return out;
+    }
+
+    GoldyTensor* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyTensor, detail::TensorDeleter> ptr_;
+};
+
+/**
  * @brief Builder for a retained record buffer (one backing buffer, multiple sub-views).
  */
 class RecordBuilder {
@@ -838,6 +878,22 @@ inline Buffer Runtime::acquire_buffer_bytes(std::span<const uint8_t> data, Buffe
         throw Exception::from_last_error();
     }
     return Buffer(ptr);
+}
+
+inline Tensor Runtime::acquire_tensor(GoldyTensorDType dtype, std::span<const uint32_t> dims,
+                                      std::span<const uint8_t> init) {
+    const uint8_t* data = init.empty() ? nullptr : init.data();
+    GoldyTensor* ptr = goldy_runtime_acquire_tensor(
+        ptr_.get(),
+        dtype,
+        static_cast<uint32_t>(dims.size()),
+        dims.data(),
+        data,
+        init.size());
+    if (!ptr) {
+        throw Exception::from_last_error();
+    }
+    return Tensor(ptr);
 }
 
 inline RecordBuilder Runtime::record() {
@@ -1558,6 +1614,56 @@ private:
 inline Scheme::ComputeNode Scheme::compute_node(const char* label, const ComputePipeline& pipeline) {
     return ComputeNode(*this, label, pipeline);
 }
+
+/**
+ * @brief Prepared tensor kernels plus layout keepalive.
+ *
+ * Keep this alive for as long as schemes that recorded through it still exist.
+ */
+class TensorContext {
+public:
+    explicit TensorContext(Runtime& runtime) {
+        GoldyTensorContext* ptr = goldy_tensor_context_create(runtime.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    TensorContext(const TensorContext&) = delete;
+    TensorContext& operator=(const TensorContext&) = delete;
+    TensorContext(TensorContext&&) = default;
+    TensorContext& operator=(TensorContext&&) = default;
+
+    [[nodiscard]] Tensor add(Scheme& scheme, std::string_view label, const Tensor& a, const Tensor& b) {
+        std::string label_str(label);
+        GoldyTensor* ptr = goldy_tensor_add(ptr_.get(), scheme.get(), label_str.c_str(), a.get(), b.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        return Tensor{ptr};
+    }
+
+    [[nodiscard]] Tensor matmul(Scheme& scheme, std::string_view label, const Tensor& a, const Tensor& b) {
+        std::string label_str(label);
+        GoldyTensor* ptr = goldy_tensor_matmul(ptr_.get(), scheme.get(), label_str.c_str(), a.get(), b.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        return Tensor{ptr};
+    }
+
+    void fill_f32(Scheme& scheme, std::string_view label, Tensor& tensor, float value) {
+        std::string label_str(label);
+        detail::throw_on_result(
+            goldy_tensor_fill_f32(ptr_.get(), scheme.get(), label_str.c_str(), tensor.get(), value));
+    }
+
+    GoldyTensorContext* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyTensorContext, detail::TensorContextDeleter> ptr_;
+};
 
 /**
  * @brief RAII scope for recording one offscreen render pass on a scheme.

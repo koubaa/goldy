@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dense tensor layer** (`tensor` feature, default-on, independent of `graphics`) —
+  shapes, dtypes (`F32`/`U32`/`I32`), checked views, broadcasting, and a `TensorRecorder`
+  that records general tensor algebra into the existing Scheme. Semantic MatMul stays the
+  native GEMM/GEMV path; remaining ops are portable `#[goldy::compute]` kernels. This is
+  tensor algebra over Goldy, not an ML framework. C / C++ / Python / ffi-client expose
+  acquire, add, matmul, and fill; NumPy conversion copies through memory exchanges.
+
 - **Semantic MatMul** — `scheme.matmul(label, MatMulDesc)` records a backend-neutral
   GEMM/GEMV node. CUDA realizes it with cuBLAS (`cublasSgemv` / `cublasSgemm`) by
   default; Metal uses MPS; every other backend (and `GOLDY_MATMUL=fallback`) runs

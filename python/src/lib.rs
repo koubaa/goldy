@@ -24,6 +24,8 @@ mod runtime;
 mod scheme;
 mod shader;
 mod surface_exchange;
+#[cfg(feature = "tensor")]
+mod tensor;
 mod texture;
 mod types;
 
@@ -87,6 +89,13 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
+
+    #[cfg(feature = "tensor")]
+    {
+        m.add_class::<tensor::PyTensorDType>()?;
+        m.add_class::<tensor::PyTensor>()?;
+        m.add_class::<tensor::PyTensorContext>()?;
+    }
 
     Ok(())
 }

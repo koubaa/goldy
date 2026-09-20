@@ -19,12 +19,13 @@ Use `--no-default-features --features <backend>` when you need:
 
 ## Feature Flags
 
-Goldy defines one feature per backend, plus `gpu`, `graphics`, and `instrumentation`:
+Goldy defines one feature per backend, plus `gpu`, `graphics`, `tensor`, and `instrumentation`:
 
 ```toml
 [features]
-default = ["vulkan", "metal", "dx12", "instrumentation", "graphics"]
+default = ["vulkan", "metal", "dx12", "instrumentation", "graphics", "tensor"]
 graphics = ["dep:raw-window-handle"]
+tensor  = []   # dense tensor algebra; does not imply graphics
 gpu     = []   # implied by every real GPU backend (not mock)
 vulkan  = ["dep:ash", "graphics", "gpu"]
 dx12    = ["dep:windows", "dep:gpu-allocator", "dep:windows-core", "graphics", "gpu"]
@@ -70,6 +71,9 @@ return compute-only errors.
 ```bash
 # CUDA compute-only
 cargo test --no-default-features --features cuda --test scheme_compute_integration
+
+# CUDA compute-only plus tensor algebra (no graphics)
+cargo test --no-default-features --features cuda,tensor --test tensor
 
 # CUDA + DX12 presentation + first-slice raster (Windows)
 cargo check --no-default-features --features cuda,graphics,dx12
@@ -129,7 +133,7 @@ On macOS, the default backend is native Metal. Goldy does not require MoltenVK.
 The `default` feature set enables all three native backends plus instrumentation and graphics:
 
 ```toml
-default = ["vulkan", "metal", "dx12", "instrumentation", "graphics"]
+default = ["vulkan", "metal", "dx12", "instrumentation", "graphics", "tensor"]
 ```
 
 To override, use `--no-default-features` and enable only what you need:

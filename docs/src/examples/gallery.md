@@ -1,6 +1,6 @@
 # Examples Gallery
 
-Goldy ships **23 Rust examples**, each a complete runnable program. Every example has a page
+Goldy ships **24 Rust examples**, each a complete runnable program. Every example has a page
 here with a recording of it running, plus its Rust and Slang source inlined straight from the
 repository — so what you watch is what the code does, and what you read is what compiles.
 
@@ -63,6 +63,7 @@ Fundamental Goldy patterns: vertex buffers, surfaces, uniforms, and fragment sha
 | [**`game_of_life`**](./game_of_life.md) | Conway's Game of Life with ping-pong sub-views in one retained mosaic parcel. |
 | [**`compute_to_surface`**](./compute_to_surface.md) | Pure compute rendering — no `RenderPipeline`, writes the drawable directly. |
 | [**`ray_query`**](./ray_query.md) | Triangle BLAS/TLAS with inline `RayQuery` in `[goldy_compute]`. |
+| [**`tensor_algebra`**](./tensor_algebra.md) | Headless dense tensors: fill, broadcast, and GEMV via `TensorRecorder`. |
 
 ## Graphics Pipelines
 

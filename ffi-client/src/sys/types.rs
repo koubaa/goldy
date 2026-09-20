@@ -7,6 +7,8 @@ pub enum GoldyBuffer {}
 pub enum GoldyTexture {}
 pub enum GoldyParcel {}
 pub enum GoldyRuntime {}
+pub enum GoldyTensor {}
+pub enum GoldyTensorContext {}
 pub enum GoldyComputePipeline {}
 pub enum GoldyContext {}
 pub enum GoldyInstance {}
@@ -261,6 +263,21 @@ pub struct GoldyWithdrawBytes {
 #[repr(C)]
 pub struct GoldyDepositTransaction {
     _private: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyTensorDType {
+    GOLDY_TENSOR_D_TYPE_F32 = 0,
+    GOLDY_TENSOR_D_TYPE_U32 = 1,
+    GOLDY_TENSOR_D_TYPE_I32 = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GoldyTensorShape {
+    pub rank: u32,
+    pub dims: [u32; 4],
 }
 
 #[repr(u32)]

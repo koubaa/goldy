@@ -88,6 +88,41 @@ impl PyRuntime {
         Ok(buffer_from_owned(buffer))
     }
 
+    /// Acquire a packed tensor from a 1-D NumPy array or bytes.
+    ///
+    /// Host conversion copies into GPU storage. Read results back with
+    /// `MemoryExchange.bind_withdraw` on `tensor.parcel()`.
+    #[cfg(feature = "tensor")]
+    #[pyo3(signature = (data, shape, dtype=None))]
+    fn acquire_tensor(
+        &self,
+        data: &Bound<'_, PyAny>,
+        shape: Vec<u32>,
+        dtype: Option<crate::tensor::PyTensorDType>,
+    ) -> PyResult<crate::tensor::PyTensor> {
+        crate::tensor::acquire_tensor(
+            &self.inner,
+            data,
+            shape,
+            dtype.unwrap_or(crate::tensor::PyTensorDType::F32),
+        )
+    }
+
+    /// Allocate a packed zero tensor.
+    #[cfg(feature = "tensor")]
+    #[pyo3(signature = (shape, dtype=None))]
+    fn zeros_tensor(
+        &self,
+        shape: Vec<u32>,
+        dtype: Option<crate::tensor::PyTensorDType>,
+    ) -> PyResult<crate::tensor::PyTensor> {
+        crate::tensor::zeros_tensor(
+            &self.inner,
+            shape,
+            dtype.unwrap_or(crate::tensor::PyTensorDType::F32),
+        )
+    }
+
     /// Acquire a retained texture.
     #[pyo3(signature = (width, height, format, kind, *, copy_src = true, copy_dst = false))]
     fn acquire_texture(
