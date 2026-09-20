@@ -48,13 +48,16 @@ GPU-referenced). Prefer [`MemoryExchange`](https://docs.rs/goldy/latest/goldy/st
 
 ## Exchange claims (unchanged)
 
-Surface and memory exchanges still settle occurrences via consume/discard:
+Surface and memory exchanges still settle occurrences via consume/discard.
+Rust surface present sugar is `(&mut submission >> &transaction).take()?`; the
+`&mut` borrow is required by operator semantics and leaves other claims
+untouched.
 
 ```rust
 let mut submission = scheme.submit()?;
 
 // Present
-transaction.claim(&mut submission)?.consume()?;
+(&mut submission >> &transaction).take()?;
 
 // Readback — consume waits for the submission internally
 let bytes = withdraw.claim(&mut submission)?.consume()?;

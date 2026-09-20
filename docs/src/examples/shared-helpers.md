@@ -11,7 +11,8 @@ and `render_pipeline` / `render_pipeline_for_surface`, which rebuild a pipeline 
 current colour-target format.
 
 Present and readback stay in each example (`SurfaceExchange::bind_render_target` /
-`bind_destination` and `Transaction::claim`, or `MemoryExchange::bind_withdraw` when
+`bind_destination` and `(&mut submission >> &present).take()?`, or
+`MemoryExchange::bind_withdraw` when
 `GOLDY_EXAMPLE_CAPTURE` is set). `CaptureDump` is only the packed-RGBA file that
 `scripts/record_example_captures.sh` stitches with ffmpeg. Optional:
 `GOLDY_EXAMPLE_CAPTURE_FRAMES` (default 75), `GOLDY_EXAMPLE_CAPTURE_FPS` (default 15),

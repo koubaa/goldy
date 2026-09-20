@@ -490,7 +490,7 @@ impl WindowState {
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
             let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;

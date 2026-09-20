@@ -4,7 +4,8 @@
 //! scheme and return a reusable transaction. Each successful [`crate::Scheme::submit`] may
 //! produce a claim. Representation and delivery of claims are defined by the exchange:
 //!
-//! - Surface present: [`Transaction::claim`] → erased [`Claim`] → [`Claim::consume`] / discard
+//! - Surface present: [`Transaction::claim`] → erased [`Claim`] → [`Claim::consume`] / discard,
+//!   or `(&mut submission >> &transaction).take()` for the common consume path
 //! - Memory withdraw: [`WithdrawTransaction::claim`] → [`WithdrawClaim`] → [`WithdrawBytes`]
 //! - Memory deposit: [`DepositTransaction::write`] prepares an occurrence; submit claims it
 //!   internally and graph execution consumes it at the copy dispatch.
@@ -31,6 +32,8 @@ use crate::Texture;
 #[cfg(feature = "graphics")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ops::Deref;
+#[cfg(feature = "graphics")]
+use std::ops::Shr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -309,8 +312,53 @@ impl Transaction {
     /// Acquisition already happened inside [`Scheme::submit`].
     /// Fails when the exchange generation no longer matches the published claim
     /// (for example after resize between submit and claim).
+    ///
+    /// The common consume path is [`std::ops::Shr`] sugar: `(&mut submission >> &transaction).take()?`.
+    /// This method remains for explicit multi-step settlement (`consume` / `discard`).
     pub fn claim(&self, submission: &mut Submission) -> Result<Claim, GoldyError> {
         submission.take_present_claim(self.scheme_id, self.key, self.binding_id, self.generation())
+    }
+}
+
+/// Surface claim selected from a [`Submission`] by `submission >> &transaction`.
+///
+/// [`Self::take`] presents. Dropping a successfully selected wrapper discards the
+/// claim (same as dropping a [`Claim`]). Selection does not touch any other claim
+/// on the submission; the mutable borrow is required by operator semantics so the
+/// submission remains available afterward.
+#[cfg(feature = "graphics")]
+#[must_use = "call take() to present, or drop to discard"]
+pub struct PendingClaim {
+    inner: Result<Claim, GoldyError>,
+}
+
+#[cfg(feature = "graphics")]
+impl PendingClaim {
+    /// Present the selected surface claim.
+    ///
+    /// Equivalent to [`Transaction::claim`] followed by [`Claim::consume`].
+    /// Selection errors (wrong scheme, stale generation, already taken) and present
+    /// errors both surface here.
+    pub fn take(self) -> Result<(), GoldyError> {
+        self.inner?.consume()
+    }
+}
+
+#[cfg(feature = "graphics")]
+impl std::fmt::Debug for PendingClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingClaim").field("ok", &self.inner.is_ok()).finish()
+    }
+}
+
+#[cfg(feature = "graphics")]
+impl Shr<&Transaction> for &mut Submission {
+    type Output = PendingClaim;
+
+    fn shr(self, transaction: &Transaction) -> Self::Output {
+        PendingClaim {
+            inner: transaction.claim(self),
+        }
     }
 }
 

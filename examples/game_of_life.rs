@@ -371,7 +371,7 @@ impl RenderState {
         submission: &mut Submission,
     ) -> Result<()> {
         if let Some(present) = present {
-            present.claim(submission)?.consume()?;
+            (submission >> present).take()?;
         } else {
             let pixels = withdraw.expect("capture withdraw").claim(submission)?.consume()?;
             capture.expect("capture dump").write_rgba(&pixels)?;

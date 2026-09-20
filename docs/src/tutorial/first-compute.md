@@ -99,7 +99,7 @@ scheme
 
 ### Rendering a Frame
 
-Each frame: upload new uniform values via a small upload scheme with a bound deposit, submit the main scheme, claim and consume the surface transaction.
+Each frame: upload new uniform values via a small upload scheme with a bound deposit, submit the main scheme, then present with `(&mut submission >> &present).take()?`.
 
 ```rust
 fn render_frame(state: &mut RenderState) -> Result<()> {
@@ -116,7 +116,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;
-    state.present.claim(&mut submission)?.consume()?;
+    (&mut submission >> &state.present).take()?;
     Ok(())
 }
 ```
@@ -137,7 +137,7 @@ let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
 
 **Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 
-**Submit and present** — `scheme.submit()` records and submits GPU work. `present.claim(&mut submission)?.consume()` presents the swapchain image. The compute shader already wrote the pixels — there is no blit or copy step.
+**Submit and present** — `scheme.submit()` records and submits GPU work. `(&mut submission >> &present).take()?` presents the swapchain image. The explicit `&mut` borrow is required by operator semantics and leaves other claims on the submission untouched. The compute shader already wrote the pixels — there is no blit or copy step.
 
 ## Run It
 

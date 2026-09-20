@@ -79,7 +79,7 @@ kernel
 
 // Each frame: submit the recorded graph, then present the claimed drawable.
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 ## Installation

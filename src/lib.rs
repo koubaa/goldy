@@ -79,7 +79,7 @@ pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
-pub use exchange::{Claim, SurfaceExchange};
+pub use exchange::{Claim, PendingClaim, SurfaceExchange};
 pub use exchange::{
     DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
 };

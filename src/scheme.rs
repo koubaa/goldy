@@ -268,6 +268,10 @@ impl fmt::Debug for Transaction {
 /// Owns untaken exchange claims (present and withdraw). Dropping this receipt
 /// discards every claim that has not been taken.
 ///
+/// Surface present sugar: `(&mut submission >> &transaction).take()?`. The
+/// mutable borrow is required by operator semantics and leaves other claims
+/// on this submission untouched. Explicit claim/consume remains available.
+///
 /// GPU completion is observed via [`Self::is_settled`] / [`Self::wait_until_settled`]
 /// — not via raw timeline values.
 pub struct Submission {
@@ -1665,7 +1669,11 @@ impl Scheme {
 
     /// Record a semantic matrix multiply. The backend chooses cuBLAS, MPS, or the
     /// Goldy stdlib kernel on first submit (`GOLDY_MATMUL=fallback` forces stdlib).
-    pub fn matmul<'a>(&'a mut self, label: &'static str, desc: crate::ops::MatMulDesc) -> crate::ops::MatMulBuilder<'a> {
+    pub fn matmul<'a>(
+        &'a mut self,
+        label: &'static str,
+        desc: crate::ops::MatMulDesc,
+    ) -> crate::ops::MatMulBuilder<'a> {
         crate::ops::MatMulBuilder::new(self, label, desc)
     }
 
@@ -1677,11 +1685,7 @@ impl Scheme {
         self.ctx.runtime().backend_type()
     }
 
-    pub(crate) fn register_stamp(
-        &mut self,
-        resource: ResourceId,
-        stamp: std::sync::Arc<crate::parcel::ParcelStamp>,
-    ) {
+    pub(crate) fn register_stamp(&mut self, resource: ResourceId, stamp: std::sync::Arc<crate::parcel::ParcelStamp>) {
         self.submit_state.register_stamp_parts(resource, stamp);
     }
 
@@ -6857,6 +6861,139 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(mock_present_count(&device), before + 1);
         drop(right_claim); // discard must not present
         assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[cfg(feature = "graphics")]
+    fn two_present_transactions(device: &crate::Runtime) -> (Scheme, Transaction, Transaction) {
+        let ctx = device.create_context().unwrap();
+        let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
+        let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
+        let mut scheme = Scheme::new(&ctx);
+        let left_lease = left_pool.lease();
+        let right_lease = right_pool.lease();
+        let rt_a = ctx
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        let rt_b = ctx
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
+        scheme.copy_to_present(&rt_a, &left_lease);
+        let left_tx = scheme.register_present_exchange(&left_lease);
+        scheme.copy_to_present(&rt_b, &right_lease);
+        let right_tx = scheme.register_present_exchange(&right_lease);
+        (scheme, left_tx, right_tx)
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_pipe_take_presents() {
+        let device = mock_runtime();
+        let (mut scheme, present, _) = {
+            let (ctx, spool) = mock_swapchain_pool(&device);
+            let lease = spool.lease();
+            let mut scheme = Scheme::new(&ctx);
+            let present = register_exchange_with_copy(&mut scheme, &lease);
+            (scheme, present, ())
+        };
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        (&mut submission >> &present).take().expect("take presents");
+        assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_pipe_take_isolates_other_claims() {
+        let device = mock_runtime();
+        let (mut scheme, left_tx, right_tx) = two_present_transactions(&device);
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        (&mut submission >> &left_tx).take().expect("left take");
+        assert_eq!(mock_present_count(&device), before + 1);
+        right_tx
+            .claim(&mut submission)
+            .expect("right claim still available")
+            .consume()
+            .expect("right present");
+        assert_eq!(mock_present_count(&device), before + 2);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_pipe_drop_discards_only_selected_claim() {
+        let device = mock_runtime();
+        let (mut scheme, left_tx, right_tx) = two_present_transactions(&device);
+        let before = mock_present_count(&device);
+        let mut submission = scheme.submit().expect("submit");
+        drop(&mut submission >> &left_tx);
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "dropping the selected claim must discard, not present"
+        );
+        (&mut submission >> &right_tx).take().expect("right still presentable");
+        assert_eq!(mock_present_count(&device), before + 1);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_pipe_already_taken_errors_from_take() {
+        let device = mock_runtime();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let mut scheme = Scheme::new(&ctx);
+        let present = register_exchange_with_copy(&mut scheme, &lease);
+        let mut submission = scheme.submit().expect("submit");
+        (&mut submission >> &present).take().expect("first take");
+        let err = (&mut submission >> &present).take().expect_err("second take must fail");
+        assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_pipe_wrong_scheme_errors_from_take() {
+        let device = mock_runtime();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let mut scheme_a = Scheme::new(&ctx);
+        let present_a = scheme_a.register_present_exchange(&lease);
+        let mut scheme_b = Scheme::new(&ctx);
+        register_exchange_with_copy(&mut scheme_b, &lease);
+        let mut submission_b = scheme_b.submit().expect("submit b");
+        let err = (&mut submission_b >> &present_a)
+            .take()
+            .expect_err("cross-scheme take must fail");
+        assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn present_pipe_stale_generation_errors_from_take() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
+            .expect("surface");
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let tx = surface.bind(&mut scheme, &tex).expect("bind");
+        let mut submission = scheme.submit().expect("submit");
+        surface.resize(64, 64).expect("resize");
+        let err = (&mut submission >> &tx)
+            .take()
+            .expect_err("take must be stale after resize");
+        assert!(err.to_string().contains("stale"), "unexpected: {err}");
+        let before = mock_present_count(&device);
+        drop(submission);
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "dropping stale submission must discard, not present"
+        );
     }
 
     #[cfg(feature = "graphics")]

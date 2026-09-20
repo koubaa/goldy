@@ -385,7 +385,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
 
     let mut submission = state.scheme.submit()?;
     if let Some(present) = &state.present {
-        present.claim(&mut submission)?.consume()?;
+        (&mut submission >> present).take()?;
     } else {
         let pixels = state.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
         state.capture.as_mut().unwrap().write_rgba(&pixels)?;

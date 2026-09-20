@@ -121,7 +121,7 @@ let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 
 // Each frame:
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 The graph is recorded once; every frame just resubmits it and settles the present claim. See [`examples/triangle.rs`](../examples/triangle.md) for the full loop, including resize handling (rebuild the scheme and transaction when the surface size changes).
@@ -148,7 +148,7 @@ pass.finish();
 
 let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 Goldy derives the ordering between the compute node and the render pass node from their declared parcel accesses — the simulation's write to `state_buf` is ordered before the pass's read, with no barrier authored by hand.

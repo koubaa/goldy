@@ -40,7 +40,7 @@ That split is a substrate artifact, not a machine requirement.
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | **Shipped** (internal) |
 | Gate | Submission gate, `Context::boundary_crossed` | **Shipped** |
 | Exchange | `SurfaceExchange`, `MemoryExchange` | **Shipped** |
-| Exchange claim | `Transaction` → `Claim` → `consume` / `discard` (deposit claims are Runtime-internal) | **Shipped** |
+| Exchange claim | Present: `(&mut submission >> &transaction).take()?`; canonical `Transaction` → `Claim` → `consume` / `discard` (deposit claims are Runtime-internal) | **Shipped** |
 | Warehouse / budget | `BudgetPolicy`, `VramAllocator` | **Shipped** (partial) |
 | Growable buffers | `Buffer::resize_to`, stable handles | **Shipped** |
 | Retained resubmit | Clean schemes replay with zero re-record | **Shipped** |
@@ -124,12 +124,12 @@ Budget enforcement keys on **committed**. **Resident** enters reactively via OS 
 ```rust
 let transaction = surface_exchange.bind_render_target(&mut scheme, &scene_rt)?;
 let mut submission = scheme.submit()?;
-let claim = transaction.claim(&mut submission)?;
-claim.consume()?; // present
+(&mut submission >> &transaction).take()?; // present
 ```
 
 - Binding does not acquire a drawable; acquire runs at submit when the partition needs it
-- `Claim::consume` is terminal
+- `(&mut submission >> &transaction).take()` is sugar for `transaction.claim(&mut submission)?.consume()`; the `&mut` borrow leaves other claims untouched
+- `Claim::consume` / `Claim::discard` remain the canonical settlement verbs
 - The program never passes raw GPU addresses to the compositor
 
 **Shipped** CPU readback: `MemoryExchange` with `WithdrawTransaction` / `WithdrawClaim`. See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).

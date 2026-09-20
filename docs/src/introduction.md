@@ -70,7 +70,7 @@ scheme
     .dispatch(wg_x, wg_y, 1);
 
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 ## Backends and bindings
