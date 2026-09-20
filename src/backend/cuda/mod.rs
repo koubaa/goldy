@@ -2514,13 +2514,7 @@ impl CudaBackend {
                         anyhow::bail!("CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows");
                     }
                 }
-                GpuCommand::MatMul {
-                    label,
-                    desc,
-                    a,
-                    b,
-                    c,
-                } => {
+                GpuCommand::MatMul { label, desc, a, b, c } => {
                     ops.push(matmul::materialize(self, ctx, stream, *label, *desc, *a, *b, *c)?);
                 }
             }

@@ -198,14 +198,8 @@ pub type FnGoldyParcelByteSize = unsafe extern "C" fn(*const GoldyParcel) -> u64
 pub type FnGoldyParcelDestroy = unsafe extern "C" fn(*mut GoldyParcel);
 
 #[cfg(feature = "tensor")]
-pub type FnGoldyRuntimeAcquireTensor = unsafe extern "C" fn(
-    *mut GoldyRuntime,
-    GoldyTensorDType,
-    u32,
-    *const u32,
-    *const u8,
-    usize,
-) -> *mut GoldyTensor;
+pub type FnGoldyRuntimeAcquireTensor =
+    unsafe extern "C" fn(*mut GoldyRuntime, GoldyTensorDType, u32, *const u32, *const u8, usize) -> *mut GoldyTensor;
 #[cfg(feature = "tensor")]
 pub type FnGoldyTensorDestroy = unsafe extern "C" fn(*mut GoldyTensor);
 #[cfg(feature = "tensor")]

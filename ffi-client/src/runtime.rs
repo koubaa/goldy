@@ -62,13 +62,25 @@ impl Runtime {
 
     /// Acquire a packed dense tensor. Pass `init: None` for zeros.
     #[cfg(feature = "tensor")]
-    pub fn acquire_tensor(&self, dtype: crate::tensor::TensorDType, dims: &[u32], init: Option<&[u8]>) -> Result<crate::tensor::Tensor> {
+    pub fn acquire_tensor(
+        &self,
+        dtype: crate::tensor::TensorDType,
+        dims: &[u32],
+        init: Option<&[u8]>,
+    ) -> Result<crate::tensor::Tensor> {
         let (data, data_size) = match init {
             Some(bytes) => (bytes.as_ptr(), bytes.len()),
             None => (std::ptr::null(), 0),
         };
         crate::tensor::Tensor::from_ptr(unsafe {
-            sys::goldy_runtime_acquire_tensor(self.ptr, dtype.into(), dims.len() as u32, dims.as_ptr(), data, data_size)
+            sys::goldy_runtime_acquire_tensor(
+                self.ptr,
+                dtype.into(),
+                dims.len() as u32,
+                dims.as_ptr(),
+                data,
+                data_size,
+            )
         })
     }
 

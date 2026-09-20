@@ -110,5 +110,6 @@ arbitrary zero-copy host view of GPU storage.
 ## llama3.goldy
 
 [`llama3.goldy`](https://github.com/koubaa/llama3.goldy) is the proving consumer: activations
-and checkpoint weights are tensors, static GEMVs use tensor matmul, and custom RMSNorm / RoPE /
+and checkpoint weights are tensors. Static GEMVs and residuals go through Ammon's
+`TensorKernels` (Goldy semantic matmul / portable add). Custom RMSNorm / RoPE /
 attention / SwiGLU kernels bind tensor views. Dynamic decode state stays a `DecodeStep` deposit.

@@ -171,25 +171,31 @@ impl<'a> TensorRecorder<'a> {
         let idx = self.ctx.push_meta(meta)?;
         let n = out.numel_u32().max(1);
         if out.dtype() == TensorDType::F32 {
-            self.ctx.ops.unary.record(
-                self.scheme,
-                label,
-                out.buffer(),
-                out.buffer(),
-                self.ctx.meta(idx),
-                value.as_f32()?,
-            )
-            .over_1d(n);
+            self.ctx
+                .ops
+                .unary
+                .record(
+                    self.scheme,
+                    label,
+                    out.buffer(),
+                    out.buffer(),
+                    self.ctx.meta(idx),
+                    value.as_f32()?,
+                )
+                .over_1d(n);
         } else {
-            self.ctx.ops.copy.record(
-                self.scheme,
-                label,
-                out.buffer(),
-                out.buffer(),
-                self.ctx.meta(idx),
-                value.bits(),
-            )
-            .over_1d(n);
+            self.ctx
+                .ops
+                .copy
+                .record(
+                    self.scheme,
+                    label,
+                    out.buffer(),
+                    out.buffer(),
+                    self.ctx.meta(idx),
+                    value.bits(),
+                )
+                .over_1d(n);
         }
         Ok(())
     }
@@ -574,9 +580,18 @@ pub(crate) fn encode_meta(
     b: Option<TensorView<'_>>,
     o: Option<TensorView<'_>>,
 ) -> Result<TensorOpMeta, GoldyError> {
-    let a = a.map(|v| v.layout().gpu_coords()).transpose()?.unwrap_or(empty_coords());
-    let b = b.map(|v| v.layout().gpu_coords()).transpose()?.unwrap_or(empty_coords());
-    let o = o.map(|v| v.layout().gpu_coords()).transpose()?.unwrap_or(empty_coords());
+    let a = a
+        .map(|v| v.layout().gpu_coords())
+        .transpose()?
+        .unwrap_or(empty_coords());
+    let b = b
+        .map(|v| v.layout().gpu_coords())
+        .transpose()?
+        .unwrap_or(empty_coords());
+    let o = o
+        .map(|v| v.layout().gpu_coords())
+        .transpose()?
+        .unwrap_or(empty_coords());
     Ok(pack_meta(op, axis, scalar_bits, reduce_len, a, b, o))
 }
 

@@ -244,7 +244,9 @@ pub unsafe extern "C" fn goldy_tensor_add(
         set_last_error("tensor operand is null");
         return ptr::null_mut();
     }
-    map_op(ctx, scheme, label, |rec, label| rec.add(label, (*a).inner.view(), (*b).inner.view()))
+    map_op(ctx, scheme, label, |rec, label| {
+        rec.add(label, (*a).inner.view(), (*b).inner.view())
+    })
 }
 
 #[no_mangle]
@@ -259,7 +261,9 @@ pub unsafe extern "C" fn goldy_tensor_matmul(
         set_last_error("tensor operand is null");
         return ptr::null_mut();
     }
-    map_op(ctx, scheme, label, |rec, label| rec.matmul(label, (*a).inner.view(), (*b).inner.view()))
+    map_op(ctx, scheme, label, |rec, label| {
+        rec.matmul(label, (*a).inner.view(), (*b).inner.view())
+    })
 }
 
 #[no_mangle]

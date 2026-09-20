@@ -87,7 +87,10 @@ fn matmul_gemv_matches_semantic_node() {
     let w = Tensor::from_f32(&device, TensorShape::matrix(2, 2), &[1.0, 0.0, 0.0, 1.0]).unwrap();
     let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let y = tensors.recorder(&mut scheme).matmul("gemv", w.view(), x.view()).unwrap();
+    let y = tensors
+        .recorder(&mut scheme)
+        .matmul("gemv", w.view(), x.view())
+        .unwrap();
     assert_eq!(read_f32(&mut scheme, y.buffer()), vec![3.0, 4.0]);
 }
 
@@ -97,12 +100,7 @@ fn strided_narrow_views_alias_parent() {
     let device = runtime();
     let ctx = submission::submission_context(&device);
     let mut tensors = TensorContext::new(&device).unwrap();
-    let parent = Tensor::from_f32(
-        &device,
-        TensorShape::matrix(2, 3),
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-    )
-    .unwrap();
+    let parent = Tensor::from_f32(&device, TensorShape::matrix(2, 3), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
     let row1 = parent.view().narrow(0, 1, 1).unwrap().reshape(&[3]).unwrap();
     let mut scheme = Scheme::new(&ctx);
     let out = tensors.recorder(&mut scheme).mul_scalar("id", row1, 1.0).unwrap();

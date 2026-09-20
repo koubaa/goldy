@@ -92,10 +92,14 @@ impl<'a> TensorRecorder<'a> {
         let ad = ashape.dims();
         let bd = bshape.dims();
         if ad[0] != bd[0] || ad[0] != oshape.dims()[0] {
-            return Err(GoldyError::Validation("tensor matmul: batch dimensions must match".into()));
+            return Err(GoldyError::Validation(
+                "tensor matmul: batch dimensions must match".into(),
+            ));
         }
         if ad[2] != bd[1] {
-            return Err(GoldyError::Validation("tensor matmul: inner dimensions must match".into()));
+            return Err(GoldyError::Validation(
+                "tensor matmul: inner dimensions must match".into(),
+            ));
         }
         let batch = ad[0];
         // Prefer looping semantic GEMM for packed slices so cuBLAS/MPS still run.
@@ -161,7 +165,9 @@ fn matmul_out_shape(a: TensorShape, b: TensorShape) -> Result<TensorShape, Goldy
         }
         (1, 2) => {
             if a.dims()[0] != b.dims()[0] {
-                return Err(GoldyError::Validation("tensor matmul: vec-mat inner dims mismatch".into()));
+                return Err(GoldyError::Validation(
+                    "tensor matmul: vec-mat inner dims mismatch".into(),
+                ));
             }
             Ok(TensorShape::vector(b.dims()[1]))
         }
@@ -173,7 +179,9 @@ fn matmul_out_shape(a: TensorShape, b: TensorShape) -> Result<TensorShape, Goldy
         }
         (3, 3) => {
             if a.dims()[0] != b.dims()[0] || a.dims()[2] != b.dims()[1] {
-                return Err(GoldyError::Validation("tensor matmul: batched GEMM dims mismatch".into()));
+                return Err(GoldyError::Validation(
+                    "tensor matmul: batched GEMM dims mismatch".into(),
+                ));
             }
             TensorShape::from_dims(&[a.dims()[0], a.dims()[1], b.dims()[2]])
         }
@@ -190,7 +198,9 @@ fn gemm_views(
     let (m, k, a_view, ta) = matrix_operand(a, true)?;
     let (k2, n, b_view, tb) = matrix_operand(b, false)?;
     if k != k2 {
-        return Err(GoldyError::Validation("tensor matmul: inner dimensions must match".into()));
+        return Err(GoldyError::Validation(
+            "tensor matmul: inner dimensions must match".into(),
+        ));
     }
     Ok((m, n, k, a_view, b_view, ta, tb))
 }

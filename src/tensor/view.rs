@@ -151,7 +151,12 @@ impl<'a> TensorView<'a> {
     }
 
     /// Packed window of `shape` starting at element `storage_offset` in `buffer`.
-    pub fn packed_at(buffer: &'a Buffer, dtype: TensorDType, storage_offset: u64, shape: TensorShape) -> Result<Self, GoldyError> {
+    pub fn packed_at(
+        buffer: &'a Buffer,
+        dtype: TensorDType,
+        storage_offset: u64,
+        shape: TensorShape,
+    ) -> Result<Self, GoldyError> {
         Self::new(buffer, TensorLayout::packed(dtype, shape, storage_offset)?)
     }
 
@@ -180,7 +185,11 @@ impl<'a> TensorView<'a> {
     }
 
     pub fn numel_u32(self) -> u32 {
-        self.layout.numel().ok().and_then(|n| u32::try_from(n).ok()).unwrap_or(0)
+        self.layout
+            .numel()
+            .ok()
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0)
     }
 
     pub fn is_contiguous(self) -> bool {
@@ -288,9 +297,7 @@ impl<'a> TensorView<'a> {
     pub fn broadcast_to(self, target: TensorShape) -> Result<Self, GoldyError> {
         let src = self.shape();
         if target.rank() < src.rank() {
-            return Err(GoldyError::Validation(
-                "tensor broadcast_to: cannot reduce rank".into(),
-            ));
+            return Err(GoldyError::Validation("tensor broadcast_to: cannot reduce rank".into()));
         }
         let pad = target.rank() - src.rank();
         let mut dims = Vec::with_capacity(target.rank());

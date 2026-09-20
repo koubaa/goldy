@@ -13,7 +13,9 @@ impl SchemeBindable for TensorView<'_> {
         let stamp = parcel.stamp_handle();
         let parent = parcel.buffer_handle().expect("tensor view parent is a buffer");
         let resource = match self.byte_envelope() {
-            Ok((offset, len)) if len == 0 || (offset == 0 && offset.saturating_add(len) >= self.buffer().byte_size()) => {
+            Ok((offset, len))
+                if len == 0 || (offset == 0 && offset.saturating_add(len) >= self.buffer().byte_size()) =>
+            {
                 ResourceId::Buffer(parent)
             }
             Ok((offset, len)) => ResourceId::BufferRange { parent, offset, len },

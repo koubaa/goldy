@@ -1,7 +1,6 @@
 //! Portable `#[goldy::compute]` kernels for the dense tensor op set.
 
 #![allow(clippy::too_many_arguments)]
-
 #![allow(dead_code)]
 
 pub const OP_COPY: u32 = 0;

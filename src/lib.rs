@@ -24,11 +24,11 @@ pub mod frame_orchestrator;
 pub(crate) mod frame_table;
 pub(crate) mod handles;
 pub mod kernel;
+pub mod ops;
 #[cfg(feature = "graphics")]
 pub mod pipeline;
 #[cfg(feature = "graphics")]
 pub(crate) mod render_target;
-pub mod ops;
 pub mod runtime;
 pub mod sampler;
 pub mod shader;
@@ -126,11 +126,6 @@ pub use kernel::{
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
 };
 pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
-#[cfg(feature = "tensor")]
-pub use tensor::{
-    ScatterMode, Tensor, TensorContext, TensorDType, TensorLayout, TensorRecorder, TensorScalar, TensorShape,
-    TensorView, MAX_TENSOR_RANK,
-};
 #[cfg(feature = "graphics")]
 pub use pipeline::{
     MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc,
@@ -146,6 +141,11 @@ pub use slang::{
     StageIoField, StructFieldLayout, StructLayout,
 };
 pub use task_graph::NodeAccess;
+#[cfg(feature = "tensor")]
+pub use tensor::{
+    ScatterMode, Tensor, TensorContext, TensorDType, TensorLayout, TensorRecorder, TensorScalar, TensorShape,
+    TensorView, MAX_TENSOR_RANK,
+};
 pub use texture::TextureCopyFootprint;
 
 pub use handles::{SamplerHandle, TextureHandle};

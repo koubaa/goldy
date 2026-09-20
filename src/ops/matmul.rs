@@ -180,10 +180,7 @@ pub(crate) struct MatMulOperand {
 /// `GOLDY_MATMUL=native|fallback`. Unset means native when the backend has one.
 pub(crate) fn env_prefers_fallback() -> bool {
     match std::env::var("GOLDY_MATMUL") {
-        Ok(v) => matches!(
-            v.to_ascii_lowercase().as_str(),
-            "fallback" | "stdlib" | "goldy"
-        ),
+        Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "fallback" | "stdlib" | "goldy"),
         Err(_) => false,
     }
 }
@@ -201,11 +198,14 @@ pub(crate) fn fallback_workgroups(desc: &MatMulDesc) -> (u32, u32, u32) {
     (threads.div_ceil(256).max(1), 1, 1)
 }
 
-pub(crate) fn fallback_user_slots(desc: &MatMulDesc, a: &MatMulOperand, b: &MatMulOperand, c: &MatMulOperand) -> Result<[u32; 7], GoldyError> {
+pub(crate) fn fallback_user_slots(
+    desc: &MatMulDesc,
+    a: &MatMulOperand,
+    b: &MatMulOperand,
+    c: &MatMulOperand,
+) -> Result<[u32; 7], GoldyError> {
     let fit = |name: &str, v: u64| -> Result<u32, GoldyError> {
-        u32::try_from(v).map_err(|_| {
-            GoldyError::Validation(format!("matmul: {name} offset {v} does not fit in u32"))
-        })
+        u32::try_from(v).map_err(|_| GoldyError::Validation(format!("matmul: {name} offset {v} does not fit in u32")))
     };
     Ok([
         desc.m,
@@ -264,7 +264,13 @@ impl<'a> MatMulBuilder<'a> {
     /// Left-hand matrix `A`.
     #[allow(private_bounds)]
     pub fn a(mut self, buf: &impl SchemeBindable, view: MatMulView) -> Self {
-        match bind_operand(self.scheme, buf, NodeAccess::Read, view, packed_leading_dim(&self.desc, OperandKind::A)) {
+        match bind_operand(
+            self.scheme,
+            buf,
+            NodeAccess::Read,
+            view,
+            packed_leading_dim(&self.desc, OperandKind::A),
+        ) {
             Ok(bound) => self.a = Some(bound),
             Err(msg) => self.scheme.push_record_error(msg),
         }
@@ -274,7 +280,13 @@ impl<'a> MatMulBuilder<'a> {
     /// Right-hand matrix or vector `B`.
     #[allow(private_bounds)]
     pub fn b(mut self, buf: &impl SchemeBindable, view: MatMulView) -> Self {
-        match bind_operand(self.scheme, buf, NodeAccess::Read, view, packed_leading_dim(&self.desc, OperandKind::B)) {
+        match bind_operand(
+            self.scheme,
+            buf,
+            NodeAccess::Read,
+            view,
+            packed_leading_dim(&self.desc, OperandKind::B),
+        ) {
             Ok(bound) => self.b = Some(bound),
             Err(msg) => self.scheme.push_record_error(msg),
         }
@@ -289,7 +301,13 @@ impl<'a> MatMulBuilder<'a> {
         } else {
             NodeAccess::ReadWrite
         };
-        match bind_operand(self.scheme, buf, access, view, packed_leading_dim(&self.desc, OperandKind::C)) {
+        match bind_operand(
+            self.scheme,
+            buf,
+            access,
+            view,
+            packed_leading_dim(&self.desc, OperandKind::C),
+        ) {
             Ok(bound) => self.c = Some(bound),
             Err(msg) => self.scheme.push_record_error(msg),
         }
@@ -303,15 +321,18 @@ impl<'a> MatMulBuilder<'a> {
             return;
         }
         let Some(a) = self.a else {
-            self.scheme.push_record_error(format!("matmul `{}`: missing .a()", self.label));
+            self.scheme
+                .push_record_error(format!("matmul `{}`: missing .a()", self.label));
             return;
         };
         let Some(b) = self.b else {
-            self.scheme.push_record_error(format!("matmul `{}`: missing .b()", self.label));
+            self.scheme
+                .push_record_error(format!("matmul `{}`: missing .b()", self.label));
             return;
         };
         let Some(c) = self.c else {
-            self.scheme.push_record_error(format!("matmul `{}`: missing .out()", self.label));
+            self.scheme
+                .push_record_error(format!("matmul `{}`: missing .out()", self.label));
             return;
         };
         let native = use_native(self.scheme.backend_type());
@@ -342,15 +363,8 @@ impl<'a> MatMulBuilder<'a> {
         } else {
             NodeAccess::ReadWrite
         };
-        self.scheme.push_matmul_node(
-            self.label,
-            self.desc,
-            a,
-            b,
-            c,
-            c_access,
-            native,
-        );
+        self.scheme
+            .push_matmul_node(self.label, self.desc, a, b, c, c_access, native);
     }
 }
 
@@ -367,10 +381,9 @@ fn bind_operand(
         NodeAccess::ReadWrite => crate::types::ResourceAccess::ReadWrite,
     };
     let (resource_identity, slot) = bindable.resolve(scheme, descriptor_access);
-    let slot = slot.ok_or_else(|| {
-        format!("matmul: resource has no descriptor for {access:?} access")
-    })?;
-    let (resource, maybe_stamp) = resource_identity.ok_or_else(|| "matmul: bindable has no resource identity".to_string())?;
+    let slot = slot.ok_or_else(|| format!("matmul: resource has no descriptor for {access:?} access"))?;
+    let (resource, maybe_stamp) =
+        resource_identity.ok_or_else(|| "matmul: bindable has no resource identity".to_string())?;
     if let Some(stamp) = maybe_stamp {
         scheme.register_stamp(resource, stamp);
     }

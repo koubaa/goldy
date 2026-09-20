@@ -2,8 +2,8 @@
 
 use super::pending_submit::{bake_device_ptr, CudaOp};
 use super::CudaBackend;
-use crate::ops::MatMulDesc;
 use crate::ops::matmul::MatMulOperand;
+use crate::ops::MatMulDesc;
 use anyhow::{Context, Result};
 use cudarc::cublas::{result as cublas, sys as cublas_sys};
 use cudarc::driver::{CudaSlice, CudaStream};
@@ -23,9 +23,8 @@ impl CublasHandle {
         let ctx = stream.context();
         ctx.record_err(ctx.bind_to_thread());
         let handle = cublas::create_handle().context("CUDA: cublasCreate failed")?;
-        unsafe { cublas::set_stream(handle, stream.cu_stream() as _) }
-            .context("CUDA: cublasSetStream failed")?;
-        Ok(Self { handle }) 
+        unsafe { cublas::set_stream(handle, stream.cu_stream() as _) }.context("CUDA: cublasSetStream failed")?;
+        Ok(Self { handle })
     }
 }
 
@@ -156,14 +155,17 @@ fn run_f32(
     if n == 1 && !desc.transpose_b {
         let trans = if desc.transpose_a { n_op } else { t_op };
         let (cm, cn) = if desc.transpose_a { (m, k) } else { (k, m) };
-        unsafe { cublas::sgemv(handle, trans, cm, cn, &alpha, ap, lda, bp, 1, &beta, cp, 1) }
-            .context("cublasSgemv")?;
+        unsafe { cublas::sgemv(handle, trans, cm, cn, &alpha, ap, lda, bp, 1, &beta, cp, 1) }.context("cublasSgemv")?;
         return Ok(());
     }
 
     let trans_a = if desc.transpose_a { t_op } else { n_op };
     let trans_b = if desc.transpose_b { t_op } else { n_op };
-    unsafe { cublas::sgemm(handle, trans_b, trans_a, n, m, k, &alpha, bp, ldb, ap, lda, &beta, cp, ldc) }
-        .context("cublasSgemm")?;
+    unsafe {
+        cublas::sgemm(
+            handle, trans_b, trans_a, n, m, k, &alpha, bp, ldb, ap, lda, &beta, cp, ldc,
+        )
+    }
+    .context("cublasSgemm")?;
     Ok(())
 }

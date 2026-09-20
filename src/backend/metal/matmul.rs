@@ -3,8 +3,8 @@
 #![allow(deprecated)]
 
 use super::types::MetalState;
-use crate::ops::MatMulDesc;
 use crate::ops::matmul::MatMulOperand;
+use crate::ops::MatMulDesc;
 use anyhow::{Context, Result};
 use cocoa::base::{id, nil};
 use objc::{class, msg_send, sel, sel_impl};

@@ -116,11 +116,7 @@ impl PyRuntime {
         shape: Vec<u32>,
         dtype: Option<crate::tensor::PyTensorDType>,
     ) -> PyResult<crate::tensor::PyTensor> {
-        crate::tensor::zeros_tensor(
-            &self.inner,
-            shape,
-            dtype.unwrap_or(crate::tensor::PyTensorDType::F32),
-        )
+        crate::tensor::zeros_tensor(&self.inner, shape, dtype.unwrap_or(crate::tensor::PyTensorDType::F32))
     }
 
     /// Acquire a retained texture.
