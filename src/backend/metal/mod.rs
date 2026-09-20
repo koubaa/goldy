@@ -1253,7 +1253,7 @@ mod tests {
     /// matches the per-slot size implied by `ARGUMENT_BUFFER_SIZE`.
     #[test]
     fn test_sampler_encoder_stride() {
-        use super::runtime::create_argument_encoders;
+        use super::device::create_argument_encoders;
         use super::types::ARGUMENT_BUFFER_SIZE;
         use ::metal::Device as MTLDevice;
 

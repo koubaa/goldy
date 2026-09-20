@@ -577,7 +577,7 @@ mod heap_tests {
         crate::Runtime,
         crate::Buffer,
     ) {
-        use crate::{BufferFlags, BufferKind, Runtime, Scheme};
+        use crate::{BufferFlags, BufferKind, Scheme};
 
         let pool = ctx.runtime().clone();
         let buf = pool

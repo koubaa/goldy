@@ -1464,7 +1464,6 @@ impl GpuBackend for CpuBackend {
 mod tests {
     use super::*;
     use crate::{BufferKind, MemoryExchange, NodeAccess, Runtime, Scheme, ShaderModule};
-    use std::sync::Arc;
 
     fn run_double(device: &Runtime) {
         let ctx = device.create_context().expect("ctx");

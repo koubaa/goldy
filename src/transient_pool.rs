@@ -597,7 +597,7 @@ mod tests {
     fn adopt_from_retained_pool_and_reuse() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut retained = device.clone();
+        let retained = device.clone();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = retained.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         let handle_before = p.texture_handle().unwrap();
@@ -616,7 +616,7 @@ mod tests {
     fn adopted_buffer_bins_and_reissues_via_acquire_buffer() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut retained = device.clone();
+        let retained = device.clone();
         let b = retained
             .acquire_buffer(
                 64,

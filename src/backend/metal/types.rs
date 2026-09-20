@@ -25,7 +25,7 @@ use ::metal as mtl;
 use mtl::{
     ArgumentEncoder, Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
     DepthStencilState as MTLDepthStencilState, Heap, Library, MTLPrimitiveType, MTLResourceOptions,
-    RenderPipelineState, Runtime as MTLDevice, SamplerState, SharedEvent, Texture as MTLTexture,
+    RenderPipelineState, Device as MTLDevice, SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer.

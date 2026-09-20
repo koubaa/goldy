@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 const INITIAL_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 use mtl::{
     HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType, MTLResourceOptions, MTLStorageMode,
-    Runtime as MTLDevice,
+    Device as MTLDevice,
 };
 
 /// Enumerate available Metal devices/adapters.
