@@ -40,8 +40,8 @@ let cells = device.acquire_record([
 ```rust
 let memory = MemoryExchange::new(&ctx);
 let mut upload = Scheme::new(&ctx);
-let deposit = memory.bind_deposit(&mut upload, goldy::DepositTarget::buffer(&*uniform, std::mem::size_of::<MyUniforms>() as u64))?;
-deposit.write(0, bytemuck::bytes_of(&data))?;
+let deposit = memory.bind_deposit(&mut upload, goldy::DepositTarget::buffer_elements::<MyUniforms>(&*uniform, 1))?;
+deposit.write_data(0, &[data])?;
 upload.submit()?;
 
 let mut pass = scheme.render_pass("draw", &rt);

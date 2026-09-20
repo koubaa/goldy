@@ -368,6 +368,12 @@ fn layout_from_kernel_def(def: &KernelDef) -> Result<Vec<CpuParamSlot>> {
                     p.name
                 );
             }
+            ParamCategory::StorageImage => {
+                anyhow::bail!(
+                    "CPU host-callable: storage image param `{}` does not lower yet",
+                    p.name
+                );
+            }
         }
     }
     Ok(layout)

@@ -15,7 +15,7 @@ cargo run --features examples --example compute_to_surface
 
 - `SurfaceExchange::bind_destination` — present-on-scheme
 - `Transaction::claim` and `Claim::consume` settlement
-- `DirectSpatial<T>` storage-texture writes to a drawable
+- `gpu::Image<gpu::Float4>` storage-texture writes to a drawable
 
 ## Notes
 
@@ -33,4 +33,4 @@ to a copy or blit path automatically. See
 
 The example pulls in `examples/common.rs` — see [Shared Helpers](./shared-helpers.md).
 
-The Slang source is inline in the example above.
+The compute kernel is authored in Rust (`#[goldy::compute]`) in the example above.

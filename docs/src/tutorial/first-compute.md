@@ -15,7 +15,6 @@ struct Uniforms {
     uint width;
     uint height;
     float time;
-    float _padding;
 };
 
 [goldy_compute]
@@ -61,14 +60,12 @@ Define the uniform struct on the Rust side with matching layout:
 
 ```rust
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
 struct Uniforms {
     width: u32,
     height: u32,
     time: f32,
-    _padding: f32,
 }
-impl goldy::StructuredBufferElement for Uniforms {}
 ```
 
 Create the buffer with `BufferKind::Scattered` so it gets a bindless descriptor:
@@ -76,7 +73,7 @@ Create the buffer with `BufferKind::Scattered` so it gets a bindless descriptor:
 ```rust
 let mut retained_pool = RetainedPool::new(device.clone());
 let uniform_buffer = retained_pool.acquire_buffer_with_data(
-    &[Uniforms { width, height, time: 0.0, _padding: 0.0 }],
+    &[Uniforms { width, height, time: 0.0 }],
     BufferKind::Scattered,
 )?;
 ```
@@ -115,13 +112,9 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         width,
         height,
         time: elapsed,
-        _padding: 0.0,
     };
 
-    state.uniform_deposit.write(
-        0,
-        bytemuck::bytes_of(&uniforms),
-    )?;
+    state.uniform_deposit.write_data(0, &[uniforms])?;
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;
@@ -136,13 +129,13 @@ At init, bind the deposit once on a retained upload scheme:
 let mut upload_scheme = Scheme::new(&ctx);
 let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload_scheme,
-    goldy::DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
+    goldy::DepositTarget::buffer_elements::<Uniforms>(&uniform_buffer, 1),
 )?;
 ```
 
 ### Step by Step
 
-**Update uniforms** — `MemoryExchange::bind_deposit` records the upload topology once; each frame call `deposit.write` before the main submit.
+**Update uniforms** — `MemoryExchange::bind_deposit` records the upload topology once; each frame call `deposit.write_data` before the main submit.
 
 **Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 

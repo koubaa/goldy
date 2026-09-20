@@ -67,7 +67,6 @@ struct Uniforms {
     uint width;
     uint height;
     float time;
-    float _padding;
 };
 
 [goldy_compute]
@@ -124,7 +123,7 @@ let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
 let mut retained_pool = RetainedPool::new(device.clone());
 let uniform_buffer = retained_pool.acquire_buffer_with_data(
-    &[Uniforms { width, height, time: 0.0, _padding: 0.0 }],
+    &[Uniforms { width, height, time: 0.0 }],
     BufferKind::Scattered,
 )?;
 
@@ -140,11 +139,11 @@ scheme
 let mut upload = Scheme::new(&ctx);
 let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload,
-    goldy::DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
+    goldy::DepositTarget::buffer_elements::<Uniforms>(&uniform_buffer, 1),
 )?;
-uniform_deposit.write(
+uniform_deposit.write_data(
     0,
-    bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }),
+    &[Uniforms { width, height, time: elapsed }],
 )?;
 upload.submit()?;
 

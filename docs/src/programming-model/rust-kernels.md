@@ -47,6 +47,7 @@ topology — it does not launch into a stream. Use `use goldy::gpu;` (or
 | `&mut [T]` | `Scattered<T>`, `NodeAccess::ReadWrite` |
 | `gpu::Out<T>` | `Scattered<T>`, `NodeAccess::Write` |
 | `gpu::Uniform<T>` | broadcast resource, `NodeAccess::Read` |
+| `gpu::Image<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
 | `u32` / `i32` / `f32` / `bool` | typed scalar push words (no manual `to_bits`) |
 
 Hidden builtins (appended to the Slang signature when used):
@@ -90,14 +91,19 @@ PushLayout lowering.
 
 Allowed: scalar arithmetic/comparisons, `let` / `let mut`, assignment,
 field/index access, `if`/`else`, `while`, `for i in 0..n`, casts, selected math
-intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`), buffer `.len()`, `return`,
+intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`length`), vector
+constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, `return`,
 and the ID builtins above.
+
+`#[derive(GpuType)]` structs may be passed as `&[T]` uniforms; `prepare` prepends
+the generated Slang struct.
 
 Rejected with span diagnostics: allocation, iterators/closures, traits/dyn,
 recursion, async, panics, arbitrary std calls, `usize`/`isize`, references
 except resource parameters, and unsupported patterns.
 
-Element types for buffer slices are currently `u32` / `i32` / `f32` / `bool`.
+Element types for buffer slices are currently `u32` / `i32` / `f32` / `bool`, or
+a `#[derive(GpuType)]` struct for read-only `&[T]`.
 
 ## Diagnostics and dumps
 

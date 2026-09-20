@@ -43,6 +43,17 @@ macro_rules! impl_kernel_bindable {
 
 impl_kernel_bindable!(crate::parcel::Parcel, crate::Buffer, crate::Sampler, crate::Texture,);
 
+#[cfg(feature = "graphics")]
+impl KernelBindable for crate::PresentLease {
+    fn __goldy_bind_kernel<'a>(
+        &self,
+        start: SchemeNodeStart<'a>,
+        access: crate::task_graph::NodeAccess,
+    ) -> SchemeNodeStart<'a> {
+        start.bind_present(self, access)
+    }
+}
+
 impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseTexture> {
     fn __goldy_bind_kernel<'a>(
         &self,
@@ -81,6 +92,36 @@ pub mod gpu {
         _marker: core::marker::PhantomData<T>,
     }
 
+    /// Write-only storage image (`DirectSpatial<T>`).
+    #[derive(Debug, Clone, Copy)]
+    pub struct Image<T = Float4> {
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    /// `float2` in generated Slang.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Float2 {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    /// `float3` in generated Slang.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Float3 {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+    }
+
+    /// `float4` in generated Slang.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Float4 {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub w: f32,
+    }
+
     /// 3-component thread index (maps to `ThreadId` / `SV_DispatchThreadID`).
     #[derive(Debug, Clone, Copy)]
     pub struct UVec3 {
@@ -102,5 +143,29 @@ pub mod gpu {
     /// Workgroup id (`gpu::workgroup_id()`).
     pub fn workgroup_id() -> UVec3 {
         unimplemented!("gpu::workgroup_id is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn float2(_x: f32, _y: f32) -> Float2 {
+        unimplemented!("gpu::float2 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn float3(_x: f32, _y: f32, _z: f32) -> Float3 {
+        unimplemented!("gpu::float3 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn float4(_x: f32, _y: f32, _z: f32, _w: f32) -> Float4 {
+        unimplemented!("gpu::float4 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn uint2(_x: u32, _y: u32) -> UVec3 {
+        unimplemented!("gpu::uint2 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn sin(_x: f32) -> f32 {
+        unimplemented!("gpu::sin is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn length(_v: Float2) -> f32 {
+        unimplemented!("gpu::length is only valid inside #[goldy::compute] bodies")
     }
 }

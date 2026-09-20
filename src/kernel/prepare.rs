@@ -56,6 +56,19 @@ pub struct SchemeNodeStart<'a> {
 impl<'a> SchemeNodeStart<'a> {
     #[allow(private_bounds)]
     pub fn bind_resource(mut self, bindable: &impl SchemeBindable, access: NodeAccess) -> Self {
+        self.note_resource_access(access);
+        self.builder = self.builder.with_parcel(bindable, access);
+        self
+    }
+
+    #[cfg(feature = "graphics")]
+    pub fn bind_present(mut self, lease: &crate::PresentLease, access: NodeAccess) -> Self {
+        self.note_resource_access(access);
+        self.builder = self.builder.with_present_access(lease, access);
+        self
+    }
+
+    fn note_resource_access(&mut self, access: NodeAccess) {
         let expected = self
             .def
             .params
@@ -70,8 +83,6 @@ impl<'a> SchemeNodeStart<'a> {
             }
         }
         self.resource_i += 1;
-        self.builder = self.builder.with_parcel(bindable, access);
-        self
     }
 
     pub fn bind_u32(mut self, value: u32) -> Self {
