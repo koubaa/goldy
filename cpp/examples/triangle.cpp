@@ -45,8 +45,7 @@ struct Vertex {
 
 struct GpuState {
     goldy::Context ctx;
-    goldy::Device device;
-    goldy::RetainedPool pool;
+    goldy::Runtime device;
     goldy::Buffer vertex_buffer;
     goldy::ShaderModule shader;
     goldy::RenderPipeline pipeline;
@@ -82,7 +81,7 @@ goldy::SurfaceExchange create_surface_exchange(const goldy::Context& ctx, GLFWwi
     void* surface = glfwGetWaylandWindow(window);
     if (!display || !surface) {
         throw std::runtime_error(
-            "Wayland handles unavailable ó run under a Wayland session (Vulkan backend requires Wayland on Linux)");
+            "Wayland handles unavailable ù run under a Wayland session (Vulkan backend requires Wayland on Linux)");
     }
     return goldy::SurfaceExchange(ctx, display, surface);
 #endif
@@ -105,7 +104,7 @@ goldy::Transaction record_scheme(
     return exchange.bind_render_target(scheme, scene_rt);
 }
 
-GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
+GpuState init_gpu(goldy::Runtime device, GLFWwindow* window) {
     const Vertex vertices[] = {
         {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
         {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},
@@ -113,8 +112,7 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     };
 
     goldy::Context ctx(device);
-    goldy::RetainedPool pool(device);
-    goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
+    goldy::Buffer vertex_buffer = device.acquire_buffer_with_data(
         std::span<const Vertex>(vertices),
         goldy::BufferKind::Scattered);
 
@@ -150,7 +148,6 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     return GpuState{
         std::move(ctx),
         std::move(device),
-        std::move(pool),
         std::move(vertex_buffer),
         std::move(shader),
         std::move(pipeline),
@@ -238,7 +235,7 @@ int main() {
         }
 
         goldy::Instance instance;
-        goldy::Device device = instance.request_adapter().request_device();
+        goldy::Runtime device = instance.request_adapter().request_runtime();
         GpuState gpu = init_gpu(std::move(device), window);
 
         while (!glfwWindowShouldClose(window)) {

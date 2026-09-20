@@ -53,7 +53,7 @@ def main() -> int:
         return 1
 
     instance = goldy.Instance()
-    device = instance.request_adapter().request_device()
+    device = instance.request_adapter().request_runtime()
     ctx = device.create_context()
     surface = goldy.SurfaceExchange.from_glfw(ctx, window)
 
@@ -91,8 +91,7 @@ def main() -> int:
         ],
         dtype=np.float32,
     )
-    retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+    vertex_parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
     scheme = goldy.Scheme(ctx)
     scene_rt = ctx.lease_render_target(

@@ -9,7 +9,7 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    ComputePipeline, DeviceDescriptor, Instance, PresentMode, RequestAdapterOptions, Scheme, ShaderModule,
+    ComputePipeline, Instance, PresentMode, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule,
     SurfaceConfig, SurfaceExchange,
 };
 use raw_window_handle::{
@@ -109,7 +109,7 @@ fn cuda_device_attaches_dx12_companion_or_skips() {
         .expect("CUDA adapter must be available when CUDA backends enumerate");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach under cuda+graphics+dx12 on a matching NVIDIA adapter"),
     );
     assert_eq!(device.backend_type(), BackendType::Cuda);
@@ -128,7 +128,7 @@ fn cuda_compute_to_present_multi_frame() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach under cuda+graphics+dx12"),
     );
     assert_eq!(device.backend_type(), BackendType::Cuda);

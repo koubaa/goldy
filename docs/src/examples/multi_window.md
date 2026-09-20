@@ -1,6 +1,6 @@
 # multi_window
 
-Three windows — plasma, tunnel, and starfield — sharing one `Device`. Each window owns its
+Three windows — plasma, tunnel, and starfield — sharing one `Runtime`. Each window owns its
 own `SurfaceExchange`, `Context`, and `Scheme`, which is the pattern for any multi-surface
 application.
 

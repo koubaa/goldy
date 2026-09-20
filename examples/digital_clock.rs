@@ -8,8 +8,8 @@ mod digital_clock_shared;
 
 use digital_clock_shared::{generate_clock_vertices, ClockState, ClockVertex, TimeData};
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
     VertexFormat, WithdrawTransaction,
 };
@@ -60,7 +60,7 @@ fn clock_vertex_layout() -> VertexBufferLayout {
 struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     vertex_parcel: Option<Buffer>,
@@ -114,7 +114,7 @@ impl App {
     }
 
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
@@ -203,7 +203,7 @@ impl App {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

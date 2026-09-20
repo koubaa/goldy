@@ -115,7 +115,7 @@ let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
 
 ## Shader Libraries
 
-Shader libraries are reusable Slang modules registered with a `Device`. Once registered, any shader compiled on that device can `import` the library.
+Shader libraries are reusable Slang modules registered with a `Runtime`. Once registered, any shader compiled on that device can `import` the library.
 
 ### The Built-in `goldy_exp` Library
 

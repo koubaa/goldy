@@ -9,7 +9,7 @@
 //!
 //! let instance = Instance::new().unwrap();
 //! let adapter = instance.request_adapter(&Default::default()).unwrap();
-//! let device = adapter.request_device(&Default::default()).unwrap();
+//! let runtime = adapter.request_runtime(&Default::default()).unwrap();
 //! ```
 
 extern crate self as goldy;
@@ -19,7 +19,6 @@ pub(crate) mod backend;
 pub mod buffer;
 pub mod compute;
 pub mod context;
-pub mod device;
 pub mod error;
 pub mod frame_orchestrator;
 pub(crate) mod frame_table;
@@ -29,6 +28,7 @@ pub mod kernel;
 pub mod pipeline;
 #[cfg(feature = "graphics")]
 pub(crate) mod render_target;
+pub mod runtime;
 pub mod sampler;
 pub mod shader;
 pub mod shader_library;
@@ -63,7 +63,7 @@ pub mod exchange;
 mod heap_tests;
 pub mod parcel;
 pub mod petition;
-pub mod retained_pool;
+pub(crate) mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
 pub mod signal;
@@ -83,7 +83,6 @@ pub use exchange::{
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
-pub use retained_pool::RetainedPool;
 pub use scheme::{
     Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission,
 };
@@ -104,14 +103,20 @@ pub use compute::ComputePipeline;
 pub use context::Context;
 pub use cpu_dispatch::{CpuArg, CpuMain};
 pub use cpu_shaders::{CpuBinding, CpuComputeKernel};
-pub use device::{
-    Adapter, AdapterInfo, BufferHeapStats, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
-    RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
-};
 pub use goldy_derive::compute;
+pub use goldy_derive::gpu;
 pub use goldy_derive::GpuType;
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
+pub use runtime::{
+    Adapter, AdapterInfo, BufferHeapStats, Instance, PowerPreference, RequestAdapterOptions, Runtime,
+    RuntimeCapabilities, RuntimeDescriptor, TextureHeapStats, VideoMemoryInfo,
+};
+
+#[doc(hidden)]
+pub mod __private {
+    pub use bytemuck::{Pod, Zeroable};
+}
 pub use kernel::gpu;
 pub use kernel::{
     prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
@@ -169,8 +174,8 @@ pub mod cuda_test_stats {
 
 /// Test helpers for `--lib` and integration tests.
 ///
-/// - [`test_support::mock_device`] / [`test_support::with_mock`]: pure software; safe to run in parallel.
-/// - [`test_support::SerialGpuDevice`]: real GPU device for unit tests.
+/// - [`test_support::mock_runtime`] / [`test_support::with_mock`]: pure software; safe to run in parallel.
+/// - [`test_support::SerialGpuRuntime`]: real GPU device for unit tests.
 ///   - DX12 WARP: process-wide mutex for the device lifetime (WARP is not parallel-safe).
 ///   - CUDA + `graphics+dx12`: process-wide **shared** device (companion attached once);
 ///     each test uses its own [`crate::Context`]. An RwLock gate lets shared-device tests
@@ -178,27 +183,27 @@ pub mod cuda_test_stats {
 #[doc(hidden)]
 pub mod test_support {
     use crate::backend::mock::MockBackend;
-    use crate::device::{Adapter, DeviceDescriptor, Instance, RequestAdapterOptions};
-    use crate::{BackendType, Device, DeviceType};
+    use crate::runtime::{Adapter, Instance, RequestAdapterOptions, RuntimeDescriptor};
+    use crate::{BackendType, DeviceType, Runtime};
     use std::ops::Deref;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
     use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-    pub fn mock_device() -> Arc<Device> {
-        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    pub fn mock_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
     #[allow(private_bounds)]
-    pub fn with_mock<R>(device: &Device, f: impl FnOnce(&mut MockBackend) -> R) -> R {
+    pub fn with_mock<R>(device: &Runtime, f: impl FnOnce(&mut MockBackend) -> R) -> R {
         device.with_mock_backend(f)
     }
 
-    pub fn mock_reset_tracking(device: &Device) {
+    pub fn mock_reset_tracking(device: &Runtime) {
         with_mock(device, |m| m.reset_tracking());
     }
 
-    pub fn mock_recorded_waits(device: &Device) -> Vec<Vec<(u64, u64)>> {
+    pub fn mock_recorded_waits(device: &Runtime) -> Vec<Vec<(u64, u64)>> {
         with_mock(device, |m| {
             m.recorded_waits
                 .iter()
@@ -207,29 +212,29 @@ pub mod test_support {
         })
     }
 
-    pub fn mock_retained_resubmit_count(device: &Device) -> usize {
+    pub fn mock_retained_resubmit_count(device: &Runtime) -> usize {
         with_mock(device, |m| m.retained_resubmit_count)
     }
 
-    pub fn mock_compute_dispatch_count(device: &Device) -> usize {
+    pub fn mock_compute_dispatch_count(device: &Runtime) -> usize {
         with_mock(device, |m| m.compute_dispatch_count)
     }
 
-    pub fn mock_all_graph_syncs_some(device: &Device) -> bool {
+    pub fn mock_all_graph_syncs_some(device: &Runtime) -> bool {
         with_mock(device, |m| m.recorded_graph_syncs.iter().all(|&s| s))
     }
 
-    pub fn mock_recorded_graph_syncs(device: &Device) -> Vec<bool> {
+    pub fn mock_recorded_graph_syncs(device: &Runtime) -> Vec<bool> {
         with_mock(device, |m| m.recorded_graph_syncs.clone())
     }
 
-    pub fn mock_has_nonempty_host_observed_waits(device: &Device) -> bool {
+    pub fn mock_has_nonempty_host_observed_waits(device: &Runtime) -> bool {
         with_mock(device, |m| {
             m.recorded_host_observed_waits.iter().any(|batch| !batch.is_empty())
         })
     }
 
-    pub fn mock_has_nonempty_deferred_host_writes(device: &Device) -> bool {
+    pub fn mock_has_nonempty_deferred_host_writes(device: &Runtime) -> bool {
         with_mock(device, |m| {
             m.recorded_deferred_host_writes.iter().any(|batch| !batch.is_empty())
         })
@@ -237,13 +242,13 @@ pub mod test_support {
 
     /// CUDA late-physicalization kind for a buffer parcel (`deferred`/`native`/`shared`/`native_and_twin`).
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
-    pub fn cuda_buffer_phys_kind(device: &Device, parcel: &crate::Parcel) -> Option<&'static str> {
+    pub fn cuda_buffer_phys_kind(device: &Runtime, parcel: &crate::Parcel) -> Option<&'static str> {
         let handle = parcel.buffer_handle()?;
         device.cuda_buffer_phys_kind_for_test(handle)
     }
 
     /// Count buffer entries in the first recorded `ResourceBarrier` on the mock backend.
-    pub fn mock_barrier_buffer_count(device: &Device) -> usize {
+    pub fn mock_barrier_buffer_count(device: &Runtime) -> usize {
         use crate::backend::GpuCommand;
         with_mock(device, |m| {
             m.recorded_compute_commands
@@ -259,7 +264,7 @@ pub mod test_support {
 
     /// Headless surface exchange backed by mock window handles (mock backend only).
     #[cfg(feature = "graphics")]
-    pub fn mock_surface_exchange(device: &Arc<Device>) -> (crate::Context, crate::SurfaceExchange) {
+    pub fn mock_surface_exchange(device: &Arc<Runtime>) -> (crate::Context, crate::SurfaceExchange) {
         struct MockWindow;
 
         impl raw_window_handle::HasWindowHandle for MockWindow {
@@ -297,9 +302,9 @@ pub mod test_support {
     ///
     /// Returns the crate-internal clearing epoch as `u64` for characterization tests.
     pub fn scheme_advance_timeline(ctx: &crate::Context) -> u64 {
-        use crate::{BufferFlags, BufferKind, RetainedPool, Scheme};
-        let device = Arc::new(ctx.device().clone());
-        let pool = RetainedPool::new(device);
+        use crate::{BufferFlags, BufferKind, Scheme};
+        let device = Arc::new(ctx.runtime().clone());
+        let pool = device;
         let buf = pool
             .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buf");
@@ -337,7 +342,7 @@ pub mod test_support {
 
     /// Shared CUDA device for the lib-test process (companion attached once).
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
-    static SHARED_CUDA_LIB_DEVICE: OnceLock<Option<Arc<Device>>> = OnceLock::new();
+    static SHARED_CUDA_LIB_DEVICE: OnceLock<Option<Arc<Runtime>>> = OnceLock::new();
 
     /// Readers = shared-device tests (parallel contexts). Writer = exclusive raw backend / stats.
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -352,7 +357,7 @@ pub mod test_support {
     ///
     /// Returns `None` when the active backend is not CUDA or device creation fails.
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
-    pub fn shared_cuda_lib_device() -> Option<Arc<Device>> {
+    pub fn shared_cuda_lib_runtime() -> Option<Arc<Runtime>> {
         SHARED_CUDA_LIB_DEVICE
             .get_or_init(|| {
                 let instance = Instance::new().ok()?;
@@ -360,7 +365,7 @@ pub mod test_support {
                     return None;
                 }
                 let adapter = instance.request_adapter(&RequestAdapterOptions::default()).ok()?;
-                let device = adapter.request_device(&DeviceDescriptor::default()).ok()?;
+                let device = adapter.request_runtime(&RuntimeDescriptor::default()).ok()?;
                 Some(Arc::new(device))
             })
             .clone()
@@ -414,22 +419,22 @@ pub mod test_support {
         CudaExclusive(RwLockWriteGuard<'static, ()>),
     }
 
-    /// Real GPU [`Device`] for `--lib` tests.
+    /// Real GPU [`Runtime`] for `--lib` tests.
     ///
     /// Drop order releases the device borrow before optional guards so the next
     /// fixture can proceed safely.
-    pub struct SerialGpuDevice {
-        device: Device,
+    pub struct SerialGpuRuntime {
+        device: Runtime,
         _guard: SerialGuard,
     }
 
-    impl Default for SerialGpuDevice {
+    impl Default for SerialGpuRuntime {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl SerialGpuDevice {
+    impl SerialGpuRuntime {
         /// Default adapter (`RequestAdapterOptions::default`, honors `GOLDY_DX12_FORCE_WARP`).
         pub fn new() -> Self {
             Self::from_adapter_factory(false, |instance| {
@@ -482,7 +487,7 @@ pub mod test_support {
             #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
             if instance.backend_type() == BackendType::Cuda {
                 drop(instance);
-                let shared = shared_cuda_lib_device().expect("shared CUDA lib-test device");
+                let shared = shared_cuda_lib_runtime().expect("shared CUDA lib-test device");
                 let device = (*shared).clone();
                 let _guard = if exclusive {
                     let gate = cuda_lib_exclusive_gate();
@@ -494,24 +499,24 @@ pub mod test_support {
                 return Self { device, _guard };
             }
 
-            // WARP: lock before `request_device` — adapter selection is cheap/non-racy.
+            // WARP: lock before `request_runtime` — adapter selection is cheap/non-racy.
             let _guard = if is_dx12_warp_adapter(&instance, &adapter) {
                 SerialGuard::Warp(warp_lib_test_serial().lock().unwrap_or_else(|e| e.into_inner()))
             } else {
                 SerialGuard::None
             };
 
-            let device = adapter.request_device(&DeviceDescriptor::default()).expect("device");
+            let device = adapter.request_runtime(&RuntimeDescriptor::default()).expect("device");
             drop(instance);
 
             Self { device, _guard }
         }
     }
 
-    impl Deref for SerialGpuDevice {
-        type Target = Device;
+    impl Deref for SerialGpuRuntime {
+        type Target = Runtime;
 
-        fn deref(&self) -> &Device {
+        fn deref(&self) -> &Runtime {
             &self.device
         }
     }

@@ -1,6 +1,6 @@
 use crate::adapter::Adapter;
-use crate::device::Device;
 use crate::error::{non_null, Result};
+use crate::runtime::Runtime;
 use crate::sys::{self, GoldyAdapterInfo, GoldyInstance};
 use crate::types::{DeviceType, PowerPreference, RequestAdapterOptions};
 use std::ffi::CStr;
@@ -77,9 +77,9 @@ impl Instance {
         Ok(Adapter::new(self, selected.clone()))
     }
 
-    pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
-        let ptr = non_null(unsafe { sys::goldy_instance_create_device_for_adapter(self.ptr, adapter_id) })?;
-        Ok(Device::from_ptr(ptr))
+    pub fn create_runtime_for_adapter(&self, adapter_id: u32) -> Result<Runtime> {
+        let ptr = non_null(unsafe { sys::goldy_instance_create_runtime_for_adapter(self.ptr, adapter_id) })?;
+        Ok(Runtime::from_ptr(ptr))
     }
 }
 

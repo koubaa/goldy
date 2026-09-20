@@ -1,7 +1,7 @@
 //! FFI bindings for Sampler.
 
-use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
+use crate::runtime::GoldyRuntime;
 use crate::types::GoldySamplerDesc;
 use std::ptr;
 
@@ -20,11 +20,11 @@ pub struct GoldySampler {
 /// All pointers must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn goldy_sampler_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     desc: *const GoldySamplerDesc,
 ) -> *mut GoldySampler {
     if device.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
+        set_last_error_from_anyhow(&anyhow::anyhow!("Runtime is null"));
         return ptr::null_mut();
     }
 
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn goldy_sampler_create(
 /// # Safety
 /// The device pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_sampler_create_default(device: *const GoldyDevice) -> *mut GoldySampler {
+pub unsafe extern "C" fn goldy_sampler_create_default(device: *const GoldyRuntime) -> *mut GoldySampler {
     goldy_sampler_create(device, ptr::null())
 }
 

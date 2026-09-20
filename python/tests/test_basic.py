@@ -13,10 +13,10 @@ def test_import():
     
     # Verify core exports exist
     assert hasattr(goldy, 'Instance')
-    assert hasattr(goldy, 'Device')
+    assert hasattr(goldy, 'Runtime')
     assert hasattr(goldy, 'Buffer')
     assert hasattr(goldy, 'Parcel')
-    assert hasattr(goldy, 'RetainedPool')
+    assert hasattr(goldy, 'Runtime')
     assert hasattr(goldy, 'RecordBuilder')
     assert hasattr(goldy, 'SchemeRenderTargetLease')
     assert hasattr(goldy, 'SurfaceExchange')

@@ -17,14 +17,14 @@ mod tests {
 
     use crate::backend::mock::MockBackend;
     use crate::context::Context;
-    use crate::device::Device;
+    use crate::runtime::Runtime;
     use crate::test_support::scheme_advance_timeline;
 
-    fn test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
-    fn test_ctx(device: &Device) -> Context {
+    fn test_ctx(device: &Runtime) -> Context {
         device.create_context().unwrap()
     }
 

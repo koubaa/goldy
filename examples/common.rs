@@ -9,7 +9,7 @@
 //! [`SurfaceExchange`] / [`MemoryExchange`] in each example.
 
 use goldy::{
-    Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SurfaceExchange, Texture, TextureFlags, TextureFormat,
+    RenderPipeline, RenderPipelineDesc, Runtime, ShaderModule, SurfaceExchange, Texture, TextureFlags, TextureFormat,
     TextureKind,
 };
 use std::fs::File;
@@ -80,7 +80,7 @@ impl FpsWindow {
 /// Build or rebuild a render pipeline for a colour-target format.
 #[allow(dead_code)]
 pub fn render_pipeline(
-    device: &Device,
+    device: &Runtime,
     shader: &ShaderModule,
     format: TextureFormat,
     desc: RenderPipelineDesc,
@@ -99,7 +99,7 @@ pub fn render_pipeline(
 /// Build or rebuild a render pipeline using the surface's current format.
 #[allow(dead_code)]
 pub fn render_pipeline_for_surface(
-    device: &Device,
+    device: &Runtime,
     shader: &ShaderModule,
     surface: &SurfaceExchange,
     desc: RenderPipelineDesc,
@@ -259,7 +259,7 @@ impl CaptureDump {
 
 /// Retained RGBA8 texture for `copy_to_texture` + [`goldy::MemoryExchange::bind_withdraw`].
 #[allow(dead_code)]
-pub fn capture_readback(device: &Device, width: u32, height: u32) -> anyhow::Result<Texture> {
+pub fn capture_readback(device: &Runtime, width: u32, height: u32) -> anyhow::Result<Texture> {
     device.acquire_texture(
         width,
         height,

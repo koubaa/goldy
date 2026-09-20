@@ -161,7 +161,7 @@ impl WithdrawStagingPool {
                 .push(StampedStagingBuffer { handle, ready_after });
         } else {
             let _ = self.ctx.wait_until(ready_after);
-            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+            let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
             backend.free_readback_buffer(handle);
         }
     }
@@ -172,7 +172,7 @@ impl WithdrawStagingPool {
         if let Some(max_ready) = pool.iter().map(|entry| entry.ready_after).max() {
             let _ = self.ctx.wait_until(max_ready);
         }
-        let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+        let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
         for entry in pool.drain(..) {
             backend.free_readback_buffer(entry.handle);
         }
@@ -813,7 +813,7 @@ impl Lease<LeaseRenderTarget> {
         format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<Self, GoldyError> {
-        let rt = RenderTarget::new_with_depth(ctx.device(), width, height, format, depth_format)
+        let rt = RenderTarget::new_with_depth(ctx.runtime(), width, height, format, depth_format)
             .map_err(|e| ctx.classify(e))?;
         Ok(Self {
             inner: Arc::new(LeaseInner {
@@ -1415,7 +1415,7 @@ impl Scheme {
     ///
     /// `src_row_pitch`: pass `0` when the source is tightly packed (`width * height * bpp`);
     /// the backend will repack into an intermediate footprint-aligned buffer at submit time.
-    /// Pass the actual footprint row pitch (from [`crate::Device::texture_copy_footprint`]) when
+    /// Pass the actual footprint row pitch (from [`crate::Runtime::texture_copy_footprint`]) when
     /// the source was allocated and written with that pitch — the backend will then copy directly,
     /// skipping the intermediate buffer.
     #[allow(clippy::too_many_arguments)]
@@ -1923,7 +1923,7 @@ impl Scheme {
     /// `ready_after` retire on the CPU.
     ///
     /// Applied by the DX12, Vulkan, and Metal submission workers when
-    /// [`crate::DeviceCapabilities::host_sidecar_on_submit_worker`] is true.
+    /// [`crate::RuntimeCapabilities::host_sidecar_on_submit_worker`] is true.
     pub fn defer_host_write(
         &mut self,
         ready_after: &crate::Buffer,
@@ -1949,7 +1949,7 @@ impl Scheme {
             // this same submit records.
             let _tz = crate::tracy_zone!("scheme.submit.specialization");
             let was_clean = self.dirty == SchemeDirty::Clean && !topo_dirty;
-            let device = self.ctx.device().clone();
+            let device = self.ctx.runtime().clone();
             if self
                 .specialization
                 .begin_submit(&device, &mut self.ir, was_clean, topo_dirty)
@@ -2479,13 +2479,13 @@ impl Scheme {
             });
         }
 
-        let device = self.ctx.device().inner.handle;
+        let device = self.ctx.runtime().inner.handle;
         let mut copy_cmds = Vec::with_capacity(self.withdraws.len());
         let mut withdraw_claims = Vec::with_capacity(self.withdraws.len());
         let mut staging_handles = Vec::with_capacity(self.withdraws.len());
 
         {
-            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+            let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
             for withdraw in &self.withdraws {
                 let staging = withdraw.staging_pool.take_or_alloc(&mut **backend, device)?;
                 if validation_env::scheme_validation_enabled() {
@@ -2532,7 +2532,7 @@ impl Scheme {
 
         let tv_copy = {
             let submit_result = {
-                let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+                let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
                 backend.submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
             };
             submit_result.map_err(|e| self.ctx.classify(e))?
@@ -3119,8 +3119,8 @@ impl Scheme {
             }
             let layout = {
                 let query_result = {
-                    let backend = self.ctx.device().inner.backend.lock().unwrap();
-                    backend.query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
+                    let backend = self.ctx.runtime().inner.backend.lock().unwrap();
+                    backend.query_texture_copy_footprint(self.ctx.runtime().inner.handle, width, height, format)
                 };
                 query_result.map_err(|e| self.ctx.classify(e))?
             };
@@ -3832,7 +3832,7 @@ impl SchemeCpuNodeBuilder<'_> {
         crate::cpu_dispatch::validate_signature(label, &F::signature(), &shapes, params.len())?;
 
         let ctx = &scheme.ctx;
-        let device = ctx.device();
+        let device = ctx.runtime();
 
         // Allocate all staging first so a failure part-way leaves nothing recorded.
         type Staging = (Option<BufferHandle>, Option<Parcel>);
@@ -4262,8 +4262,7 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
     use crate::compute::ComputePipeline;
-    use crate::device::Device;
-    use crate::retained_pool::RetainedPool;
+    use crate::runtime::Runtime;
     use crate::shader::ShaderModule;
     use crate::task_graph::NodeAccess;
     use crate::task_graph::NodeKind;
@@ -4273,16 +4272,16 @@ mod tests {
     use crate::{DepositTarget, MemoryExchange};
     use std::sync::Arc;
 
-    fn mock_device() -> Arc<Device> {
-        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    fn mock_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
-    fn mock_readback_counts(device: &Device) -> (usize, usize) {
+    fn mock_readback_counts(device: &Runtime) -> (usize, usize) {
         let backend = device.inner.backend.lock().unwrap();
         (backend.test_readback_alloc_count(), backend.test_readback_free_count())
     }
 
-    fn mock_shader(device: &Device) -> ShaderModule {
+    fn mock_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(
             device,
             r#"
@@ -4295,7 +4294,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
         .expect("compile shader")
     }
 
-    fn mock_texture_shader(device: &Device) -> ShaderModule {
+    fn mock_texture_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(
             device,
             r#"
@@ -4312,17 +4311,17 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("compile texture shader")
     }
 
-    fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
+    fn mock_pipeline(device: &Runtime, shader: &ShaderModule) -> ComputePipeline {
         ComputePipeline::new(device, shader).expect("create pipeline")
     }
 
     #[cfg(feature = "graphics")]
-    fn mock_render_shader(device: &Device) -> ShaderModule {
+    fn mock_render_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(device, "void main() {}").expect("compile render shader")
     }
 
     #[cfg(feature = "graphics")]
-    fn mock_render_pipeline(device: &Device, shader: &ShaderModule) -> crate::RenderPipeline {
+    fn mock_render_pipeline(device: &Runtime, shader: &ShaderModule) -> crate::RenderPipeline {
         crate::RenderPipeline::new(
             device,
             shader,
@@ -4335,7 +4334,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("create render pipeline")
     }
 
-    fn retained_buffer(pool: &mut RetainedPool) -> crate::Buffer {
+    fn retained_buffer(pool: &Runtime) -> crate::Buffer {
         pool.acquire_buffer(
             32,
             crate::types::BufferKind::Scattered,
@@ -4346,11 +4345,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("alloc buffer")
     }
 
-    fn recording_scheme_with_parcel(
-        device: &Arc<Device>,
-        pool: &mut RetainedPool,
-        ctx: &Context,
-    ) -> (Scheme, crate::Buffer) {
+    fn recording_scheme_with_parcel(device: &Arc<Runtime>, pool: &Runtime, ctx: &Context) -> (Scheme, crate::Buffer) {
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
         let buffer = retained_buffer(pool);
@@ -4363,13 +4358,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         (scheme, buffer)
     }
 
-    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> (Scheme, crate::Buffer) {
+    fn recording_scheme(device: &Arc<Runtime>, pool: &Runtime, ctx: &Context) -> (Scheme, crate::Buffer) {
         recording_scheme_with_parcel(device, pool, ctx)
     }
 
     fn clean_scheme(
-        device: &Arc<Device>,
-        pool: &mut RetainedPool,
+        device: &Arc<Runtime>,
+        pool: &Runtime,
     ) -> (Scheme, NodeId, crate::Buffer, crate::test_support::CbReuseOverride) {
         let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
@@ -4395,7 +4390,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     fn leased_texture_scheme(
-        device: &Arc<Device>,
+        device: &Arc<Runtime>,
     ) -> (Scheme, Lease<LeaseTexture>, crate::test_support::CbReuseOverride) {
         let cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
@@ -4423,10 +4418,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn clear_and_full_deposit_buffer_bind_as_overwrite() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let buffer = retained_buffer(&mut pool);
+        let buffer = retained_buffer(&pool);
         let parcel = &*buffer;
         let memory = MemoryExchange::new(&ctx);
 
@@ -4453,9 +4448,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn clean_submits_resubmit_without_rerecord() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -4477,9 +4472,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn params_dirty_submit_is_not_a_clean_submit() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &pool);
         scheme.submit().unwrap();
         assert_eq!(scheme.replay_stats().clean_submits, 1);
 
@@ -4504,9 +4499,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     #[cfg(not(feature = "metal"))]
     fn clean_resubmit_performs_no_cpu_wait() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &pool);
 
         scheme.submit().unwrap();
         scheme.submit().unwrap();
@@ -4525,9 +4520,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn mutation_marks_dirty_and_rerecords_once() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let (mut scheme, _node0, _buf, _cb) = clean_scheme(&device, &pool);
         scheme.submit().unwrap();
 
         #[cfg(not(feature = "metal"))]
@@ -4548,7 +4543,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel2 = retained_buffer(&mut pool);
+        let parcel2 = retained_buffer(&pool);
         scheme
             .node("b", &pipeline)
             .with_parcel(&parcel2, NodeAccess::Write)
@@ -4577,9 +4572,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn set_node_pipeline_rerecords_once_then_resubmits() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let (mut scheme, node0, _buf, _cb) = clean_scheme(&device, &pool);
         scheme.submit().unwrap();
 
         let shader = mock_shader(&device);
@@ -4610,10 +4605,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn node_id_from_another_scheme_is_rejected() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme_a, node_a, _buf_a, _cb) = clean_scheme(&device, &mut pool);
-        let (scheme_b, _node_b, _buf_b, _cb_b) = clean_scheme(&device, &mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let (mut scheme_a, node_a, _buf_a, _cb) = clean_scheme(&device, &pool);
+        let (scheme_b, _node_b, _buf_b, _cb_b) = clean_scheme(&device, &pool);
 
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -4633,16 +4628,16 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn set_node_pipeline_keeps_other_partition_retained() {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p_a = mock_pipeline(&device, &shader);
         let p_a2 = mock_pipeline(&device, &shader);
         let p_b = mock_pipeline(&device, &shader);
         let p_c = mock_pipeline(&device, &shader);
-        let buf0 = retained_buffer(&mut pool);
-        let buf1 = retained_buffer(&mut pool);
+        let buf0 = retained_buffer(&pool);
+        let buf1 = retained_buffer(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let node_a = scheme
@@ -4696,9 +4691,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn is_settled_true_before_first_reference() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let parcel = retained_buffer(&mut pool);
+        let device = mock_runtime();
+        let pool = &device;
+        let parcel = retained_buffer(&pool);
         assert!(parcel.is_settled(), "never-referenced parcel is settled");
     }
 
@@ -4706,10 +4701,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn frame_timeline_value_round_trip() {
         use crate::timeline::TimelineValue;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
+        let pool = &device;
+        let (mut scheme, _buf) = recording_scheme(&device, &pool, &ctx);
         let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
@@ -4719,10 +4714,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn frame_wait_completes_submission() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
+        let pool = &device;
+        let (mut scheme, _buf) = recording_scheme(&device, &pool, &ctx);
         let frame = scheme.submit().unwrap();
         frame.wait(&ctx).unwrap();
         assert!(ctx.gpu_progress() >= frame.timeline_value());
@@ -4730,10 +4725,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn submit_returns_frame_without_calling_wait() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(device.clone());
-        let (mut scheme, _buf) = recording_scheme(&device, &mut pool, &ctx);
+        let pool = &device;
+        let (mut scheme, _buf) = recording_scheme(&device, &pool, &ctx);
         let frame = scheme.submit().unwrap();
         assert!(frame.timeline_value() > 0, "submit must return a frame token");
         // Non-blocking: a second submit must succeed without waiting on the first frame.
@@ -4744,12 +4739,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn submit_stamps_parcel_references() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel = retained_buffer(&mut pool);
+        let parcel = retained_buffer(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -4777,7 +4772,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn lease_texture_records_once_resubmits_clean() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (mut scheme, _lease, _cb) = leased_texture_scheme(&device);
 
         scheme.submit().expect("first submit records");
@@ -4795,7 +4790,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn lease_backing_stamped_per_submit() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (mut scheme, lease, _cb) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
@@ -4816,7 +4811,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn lease_backing_recycled_on_scheme_drop() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let outstanding_before = ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture);
 
@@ -4853,7 +4848,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn lease_reusable_across_schemes() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -4876,7 +4871,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn interned_lease_survives_handle_drop() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_texture_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -4917,7 +4912,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn pool_return_waits_for_last_lease_clone() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -4953,7 +4948,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     // ---- CPU dispatch nodes -------------------------------------------------
 
-    fn u32_buffer(pool: &mut RetainedPool, data: &[u32]) -> crate::Buffer {
+    fn u32_buffer(pool: &Runtime, data: &[u32]) -> crate::Buffer {
         pool.acquire_buffer_with_data(data, BufferKind::Scattered)
             .expect("alloc buffer")
     }
@@ -4965,10 +4960,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn cpu_node_appends_ir_node_and_allocates_staging() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let buf = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+        let buf = u32_buffer(&pool, &[1, 2, 3, 4]);
         let (allocs_before, _) = mock_readback_counts(&device);
 
         let mut scheme = Scheme::new(&ctx);
@@ -5009,12 +5004,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn cpu_node_staging_follows_access() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let a = u32_buffer(&mut pool, &[1, 2]);
-        let b = u32_buffer(&mut pool, &[3, 4]);
-        let c = u32_buffer(&mut pool, &[5, 6]);
+        let a = u32_buffer(&pool, &[1, 2]);
+        let b = u32_buffer(&pool, &[3, 4]);
+        let c = u32_buffer(&pool, &[5, 6]);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -5038,10 +5033,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn cpu_node_rejects_mismatched_virtual_main() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let buf = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+        let buf = u32_buffer(&pool, &[1, 2, 3, 4]);
         let (allocs_before, frees_before) = mock_readback_counts(&device);
 
         let mut scheme = Scheme::new(&ctx);
@@ -5087,8 +5082,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn cpu_node_rejects_texture_parcel() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let tex = pool
             .acquire_texture(
@@ -5113,14 +5108,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn cpu_node_is_isolated_in_its_own_wave_and_partition() {
         use crate::task_graph::analysis;
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let a = u32_buffer(&mut pool, &[0; 8]);
-        let b = u32_buffer(&mut pool, &[0; 8]);
-        let c = u32_buffer(&mut pool, &[0; 8]);
+        let a = u32_buffer(&pool, &[0; 8]);
+        let b = u32_buffer(&pool, &[0; 8]);
+        let c = u32_buffer(&pool, &[0; 8]);
 
         let mut scheme = Scheme::new(&ctx);
         // wave 0: gpu writes A         | independent gpu writes C
@@ -5169,11 +5164,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn cpu_node_runs_on_mock_and_resubmits() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let data = u32_buffer(&mut pool, &[1, 2, 3, 4]);
-        let out = u32_buffer(&mut pool, &[0; 4]);
+        let data = u32_buffer(&pool, &[1, 2, 3, 4]);
+        let out = u32_buffer(&pool, &[0; 4]);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -5212,12 +5207,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn cpu_node_download_and_upload_are_separate_transfer_submits() {
         use crate::backend::GpuCommand;
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let data = u32_buffer(&mut pool, &[1, 2, 3, 4]);
+        let data = u32_buffer(&pool, &[1, 2, 3, 4]);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -5283,10 +5278,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_appends_ir_node() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
         assert_eq!(scheme.ir_node_count(), 1);
 
         let _grant = MemoryExchange::new(scheme.context())
@@ -5305,10 +5300,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn withdraw_orders_after_writer() {
         use crate::task_graph::analysis;
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
         let _grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &parcel)
             .expect("withdraw");
@@ -5323,10 +5318,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn scheme_with_grant_retains() {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
         let _grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &parcel)
             .expect("withdraw");
@@ -5346,10 +5341,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_survives_parcel_drop() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
         let grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &parcel)
             .expect("withdraw");
@@ -5367,10 +5362,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_resubmit_after_parcel_drop() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
         let grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &parcel)
             .expect("withdraw");
@@ -5397,7 +5392,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     /// `tests/scheme_compute_integration.rs` (Vulkan/DX12 need a machine with those backends).
     #[test]
     fn return_transient_texture_invalidates_bound_scheme() {
-        let device = mock_device();
+        let device = mock_runtime();
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_texture_shader(&device);
@@ -5431,7 +5426,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     /// After stamp retirement, a re-acquired transient is a new deed and can bind a new scheme.
     #[test]
     fn return_transient_texture_reacquire_binds_fresh_scheme() {
-        let device = mock_device();
+        let device = mock_runtime();
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_texture_shader(&device);
@@ -5486,7 +5481,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn return_transient_buffer_invalidates_bound_scheme() {
-        let device = mock_device();
+        let device = mock_runtime();
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
@@ -5513,8 +5508,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_concurrent_frames_succeed() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let parcel = pool
             .acquire_buffer_with_data(&[7u32; 8], BufferKind::Scattered)
@@ -5539,10 +5534,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_double_read_same_frame_errors() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
         let grant = MemoryExchange::new(scheme.context())
             .bind_withdraw(&mut scheme, &parcel)
             .expect("withdraw");
@@ -5554,8 +5549,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn grant_staging_pool_recycled_on_loan_drop() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let parcel = pool
             .acquire_buffer_with_data(&[3u32; 8], BufferKind::Scattered)
@@ -5583,12 +5578,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_rejects_foreign_device_parcel() {
-        let device_a = mock_device();
-        let device_b = mock_device();
-        let mut pool = RetainedPool::new(device_a.clone());
+        let device_a = mock_runtime();
+        let device_b = mock_runtime();
+        let pool = &device_a;
         let ctx_a = device_a.create_context().unwrap();
         let ctx_b = device_b.create_context().unwrap();
-        let parcel = retained_buffer(&mut pool);
+        let parcel = retained_buffer(&pool);
         let mut scheme = Scheme::new(&ctx_b);
         let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &parcel) {
             Ok(_) => panic!("cross-device grant must fail"),
@@ -5600,10 +5595,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_rejects_cross_scheme_frame() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let parcel = retained_buffer(&mut pool);
+        let parcel = retained_buffer(&pool);
 
         let mut scheme_a = Scheme::new(&ctx);
         let grant_a = MemoryExchange::new(scheme_a.context())
@@ -5622,8 +5617,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_drop_scheme_with_outstanding_frame_frees_staging() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let parcel = pool
             .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
@@ -5644,8 +5639,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_rejects_zero_byte_buffer() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let parcel = pool.acquire_buffer(0, BufferKind::Scattered, None, crate::types::BufferFlags::empty(), None);
         if parcel.is_err() {
@@ -5665,7 +5660,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     // Texture grant tests
     // ------------------------------------------------------------------
 
-    fn texture_parcel(pool: &mut RetainedPool) -> crate::Texture {
+    fn texture_parcel(pool: &Runtime) -> crate::Texture {
         pool.acquire_texture(
             4,
             4,
@@ -5679,10 +5674,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_basic_succeeds() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let grant = MemoryExchange::new(scheme.context())
@@ -5700,10 +5695,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_appends_ir_node() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let _grant = MemoryExchange::new(scheme.context())
@@ -5720,10 +5715,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_staging_alloc_and_free() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let grant = MemoryExchange::new(scheme.context())
@@ -5759,10 +5754,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_double_read_same_frame_errors() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let grant = MemoryExchange::new(scheme.context())
@@ -5777,10 +5772,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_concurrent_frames() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let grant = MemoryExchange::new(scheme.context())
@@ -5799,8 +5794,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_rejects_sampled_only_texture() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
 
         let texture = pool
@@ -5826,8 +5821,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_rejects_missing_copy_src_flag() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
 
         let texture = pool
@@ -5850,12 +5845,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_rejects_cross_scheme_frame() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx_a = device.create_context().unwrap();
         let ctx_b = device.create_context().unwrap();
 
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme_a = Scheme::new(&ctx_a);
         let grant_a = MemoryExchange::new(scheme_a.context())
@@ -5875,10 +5870,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn withdraw_texture_survives_parcel_drop() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&mut pool);
+        let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         let grant = MemoryExchange::new(scheme.context())
@@ -5926,14 +5921,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[cfg(feature = "graphics")]
-    fn mock_swapchain_pool(device: &Arc<Device>) -> (Context, crate::swapchain_pool::SwapchainPool) {
+    fn mock_swapchain_pool(device: &Arc<Runtime>) -> (Context, crate::swapchain_pool::SwapchainPool) {
         let ctx = device.create_context().unwrap();
         let pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("swapchain pool");
         (ctx, pool)
     }
 
     #[cfg(feature = "graphics")]
-    fn mock_present_count(device: &Arc<Device>) -> usize {
+    fn mock_present_count(device: &Arc<Runtime>) -> usize {
         let backend = device.inner.backend.lock().unwrap();
         backend.test_surface_present_count()
     }
@@ -5956,7 +5951,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_dispatch_mesh_without_pipeline() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let mut scheme = Scheme::new(&ctx);
         let rt = ctx
@@ -5974,7 +5969,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn submit_rejects_blas_as_shader_accel() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let blas = crate::AccelerationStructure::blas_triangles(&device, 1, 3, 12).expect("BLAS");
         let pipeline = mock_pipeline(&device, &mock_shader(&device));
@@ -5990,9 +5985,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn build_blas_rejects_vertex_range_past_parcel() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let verts = pool
             .acquire_buffer(12, BufferKind::Scattered, None, BufferFlags::ACCEL_INPUT, None)
             .expect("verts");
@@ -6007,9 +6002,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn build_blas_rejects_index_count_not_multiple_of_three() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let verts = pool
             .acquire_buffer(36, BufferKind::Scattered, None, BufferFlags::ACCEL_INPUT, None)
             .expect("verts");
@@ -6027,7 +6022,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn tlas_retains_blas_after_caller_drop() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let blas = crate::AccelerationStructure::blas_triangles(&device, 1, 3, 12).expect("BLAS");
         let tlas = crate::AccelerationStructure::tlas(&device, 1).expect("TLAS");
@@ -6058,7 +6053,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn register_present_exchange_is_metadata_only() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, pool) = mock_swapchain_pool(&device);
         let lease = pool.lease();
 
@@ -6079,7 +6074,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn register_present_exchange_marks_dirty() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, pool) = mock_swapchain_pool(&device);
         let lease = pool.lease();
 
@@ -6098,13 +6093,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn bind_before_write_leaves_coarse_in_non_present_partition() {
         use crate::task_graph::analysis;
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel = retained_buffer(&mut pool);
+        let parcel = retained_buffer(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         scheme.register_present_exchange(&lease);
@@ -6135,7 +6130,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_unused_present_transaction() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -6149,13 +6144,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_unregistered_present_lease_access() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let mut pool = RetainedPool::new(device.clone());
-        let parcel = retained_buffer(&mut pool);
+        let pool = &device;
+        let parcel = retained_buffer(&pool);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -6174,7 +6169,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn submit_rejects_first_present_access_that_reads() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_texture_shader(&device);
@@ -6198,7 +6193,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn copy_to_present_appends_ir_node() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -6226,9 +6221,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn copy_to_texture_appends_ir_node() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().expect("context");
-        let mut pool = crate::RetainedPool::new(device.clone());
+        let pool = &device;
         let tex = pool
             .acquire_texture(
                 4,
@@ -6265,8 +6260,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn copy_to_texture_rejects_buffer_parcel() {
         use crate::types::{BufferKind, TextureFormat};
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().expect("context");
         let buffer = pool
             .acquire_buffer_sized::<u32>(4, BufferKind::Scattered, crate::types::BufferFlags::empty())
@@ -6288,8 +6283,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn copy_to_texture_rejects_missing_copy_dst_flag() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().expect("context");
         let texture = pool
             .acquire_texture(
@@ -6318,8 +6313,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn copy_to_texture_rejects_dimension_mismatch() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().expect("context");
         let texture = pool
             .acquire_texture(
@@ -6351,8 +6346,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn copy_to_texture_rejects_format_mismatch() {
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().expect("context");
         let texture = pool
             .acquire_texture(
@@ -6384,7 +6379,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn with_present_placeholder_in_resource_slots_when_last() {
         // Correct ordering: with_views first, then with_present.
         // The placeholder must end up appended to the existing resource_slots.
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_shader(&device);
@@ -6427,7 +6422,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     fn with_present_placeholder_preserved_when_with_views_follows() {
         // Regression test: with_views called AFTER with_present must preserve
         // the PRESENT_LEASE_SLOT_PLACEHOLDER that with_present appended.
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_texture_shader(&device);
@@ -6469,7 +6464,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[cfg(feature = "graphics")]
-    fn mock_buf_then_present_shader(device: &Device) -> ShaderModule {
+    fn mock_buf_then_present_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(
             device,
             r#"
@@ -6490,12 +6485,12 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn with_present_placeholder_at_middle_shader_slot() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_buf_then_present_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let mut pool = RetainedPool::new(device.clone());
+        let pool = &device;
         let buf = pool
             .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buffer");
@@ -6520,7 +6515,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn with_present_access_records_readwrite_binding() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_texture_shader(&device);
@@ -6541,7 +6536,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[cfg(feature = "graphics")]
-    fn mock_sampler_then_present_shader(device: &Device) -> ShaderModule {
+    fn mock_sampler_then_present_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(
             device,
             r#"
@@ -6563,7 +6558,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     fn with_present_after_sampler_submits_and_presents() {
         // Sampler contributes a resource slot without a hazard binding, so the
         // PresentLease binding index is 0 while the placeholder is at slot 1.
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_sampler_then_present_shader(&device);
@@ -6614,12 +6609,12 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     fn with_present_after_buffer_dependency_submits_and_presents() {
         // Dependency-only bindings omit shader slots, so PresentLease is binding
         // index 1 while the placeholder is the only (index 0) resource slot.
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_texture_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let mut pool = RetainedPool::new(device.clone());
+        let pool = &device;
         let buf = pool
             .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("buffer");
@@ -6662,9 +6657,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[cfg(feature = "graphics")]
-    fn scheme_lease_texture_for_test(device: &Arc<Device>, _ctx: &Context) -> crate::types::ResourceHandle {
+    fn scheme_lease_texture_for_test(device: &Arc<Runtime>, _ctx: &Context) -> crate::types::ResourceHandle {
         // Minimal helper: creates a retained texture parcel and returns a write handle.
-        let mut pool = RetainedPool::new(device.clone());
+        let pool = &device;
         let parcel = pool
             .acquire_texture(
                 4,
@@ -6683,7 +6678,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_submit_increments_present_count() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -6700,7 +6695,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn transaction_claim_consume_presents_once() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -6722,7 +6717,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn dropping_submission_discards_untaken_claim() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -6737,7 +6732,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn two_pools_receive_distinct_present_bindings() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
         let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
@@ -6787,7 +6782,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn same_lease_reuses_present_binding_and_grant() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -6811,7 +6806,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn two_present_claims_consume_independently() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
         let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
@@ -6844,7 +6839,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn eager_acquire_rejects_wrong_pool_with_matching_local_id() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
         let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
@@ -6872,7 +6867,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         // First claim is valid; second is from the wrong pool. Validation must reject
         // before converting either AcquiredPresent into Frame, otherwise Drop would
         // implicitly present the already-converted frame.
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let left_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("left pool");
         let right_pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("right pool");
@@ -6911,7 +6906,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn surface_exchange_bind_rejects_duplicate_for_same_lease() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
             .expect("surface exchange");
@@ -6939,7 +6934,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn two_surfaces_bind_copy_resolve_and_claim_independently() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
             .expect("left surface");
@@ -7004,7 +6999,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     fn surface_claim_impl_drop_cancels_without_presenting() {
         // Raw SurfaceClaimImpl may be dropped on finish_submit_frame failure before
         // wrapping in Claim/Submission. Drop must cancel, not present via Frame::drop.
-        let device = mock_device();
+        let device = mock_runtime();
         let (_ctx, spool) = mock_swapchain_pool(&device);
         let acquired = spool.acquire_present(&spool.lease()).expect("acquire");
         let (_lease, _pool, _slot, _gen, _handle, _uav, frame) = acquired.into_parts();
@@ -7023,8 +7018,8 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         let ctx = device.create_context().unwrap();
         let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
             .expect("left");
@@ -7032,7 +7027,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .expect("right");
         let left_tex = mock_direct_texture(&device);
         let right_tex = mock_direct_texture(&device);
-        let buf = retained_buffer(&mut pool);
+        let buf = retained_buffer(&pool);
         let pipeline = mock_pipeline(&device, &mock_shader(&device));
 
         let mut scheme = Scheme::new(&ctx);
@@ -7089,7 +7084,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn resize_advances_generation_and_stales_prior_claim() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let surface = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
             .expect("surface");
@@ -7130,7 +7125,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn resize_one_surface_does_not_stale_other_transaction() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let left = crate::exchange::SurfaceExchange::new(&ctx, &MockWindow, crate::types::SurfaceConfig::default())
             .expect("left");
@@ -7169,7 +7164,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_stamps_frame_with_present_partition_timeline() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -7200,7 +7195,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn present_exchange_second_present_errors() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -7216,7 +7211,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn present_grant_rejects_cross_scheme_submission() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -7237,7 +7232,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn present_exchange_submit_twice_presents_independently() {
         // Each submit acquires a fresh swapchain frame; both must be presentable.
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -7262,7 +7257,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         // Because the mock backend cycles through slots, the N-th submit may
         // record a new slot; we only assert that at least one resubmit occurs.
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -7292,7 +7287,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn dropped_frame_without_present_cancels_swapchain() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
 
@@ -7316,7 +7311,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     fn copy_to_present_and_render_pass_partition_on_present_boundary() {
         use crate::task_graph::analysis;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_render_shader(&device);
@@ -7354,9 +7349,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     #[should_panic(expected = "with_parcel: resource has no descriptor")]
     fn with_parcel_panics_on_incompatible_access() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().expect("context");
-        let mut pool = RetainedPool::new(device.clone());
+        let pool = &device;
         let texture = pool
             .acquire_texture(
                 4,
@@ -7376,8 +7371,8 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
     }
 
-    fn mock_direct_texture(device: &Arc<Device>) -> crate::Texture {
-        let mut pool = RetainedPool::new(device.clone());
+    fn mock_direct_texture(device: &Arc<Runtime>) -> crate::Texture {
+        let pool = &device;
         pool.acquire_texture(
             4,
             4,
@@ -7410,7 +7405,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7449,7 +7444,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let shader = mock_render_shader(&device);
@@ -7496,7 +7491,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7538,7 +7533,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7575,7 +7570,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[cfg(feature = "graphics")]
     #[test]
     fn submit_gate_does_not_block_on_unconsumed_claim() {
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7595,7 +7590,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::PromiseState;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7637,7 +7632,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         };
         use crate::task_graph::ResourceId;
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7760,7 +7755,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::{Epoch, PromiseState};
 
-        let device = mock_device();
+        let device = mock_runtime();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);
@@ -7814,9 +7809,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn deposit_allocates_instead_of_waiting_while_in_flight() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let dst = pool
             .acquire_buffer(64, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
@@ -7846,9 +7841,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn deposit_reuses_settled_parcel() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let dst = pool
             .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
@@ -7870,9 +7865,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn deposit_rejects_submit_without_stage() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let dst = pool
             .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
@@ -7889,9 +7884,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     #[test]
     fn deposit_warms_slot_variants_per_physical_parcel() {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let dst = pool
             .acquire_buffer(32, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
@@ -7930,9 +7925,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn deposit_to_texture_resolves_at_submit() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let tex = pool
             .acquire_texture(
                 1,
@@ -7955,9 +7950,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn deposit_scheme_drop_returns_parcels() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let dst = pool
             .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
@@ -7977,9 +7972,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
     fn deposit_disable_cb_reuse_skips_replay_ledger() {
         let _cb = crate::test_support::CbReuseOverride::force_disabled();
 
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
-        let mut pool = RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let dst = pool
             .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
             .unwrap();
@@ -8014,18 +8009,17 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 mod specialization_tests {
     use super::*;
     use crate::compute::ComputePipeline;
-    use crate::device::Device;
-    use crate::retained_pool::RetainedPool;
+    use crate::runtime::Runtime;
     use crate::shader::ShaderModule;
     use crate::specialization::SpecializationPolicy;
     use crate::task_graph::{NodeAccess, NodeKind};
-    use crate::test_support::{mock_device, with_mock, SpecializationOverride};
+    use crate::test_support::{mock_runtime, with_mock, SpecializationOverride};
     use std::sync::Arc;
 
     const WARM: u32 = SpecializationPolicy::DEFAULT_WARM_AFTER;
     const PROMOTE: u32 = SpecializationPolicy::DEFAULT_PROMOTE_AFTER;
 
-    fn scalar_shader(device: &Device) -> ShaderModule {
+    fn scalar_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(
             device,
             r#"
@@ -8038,7 +8032,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         .expect("compile shader")
     }
 
-    fn buffer(pool: &mut RetainedPool) -> crate::Buffer {
+    fn buffer(pool: &Runtime) -> crate::Buffer {
         pool.acquire_buffer(
             32,
             crate::types::BufferKind::Scattered,
@@ -8059,7 +8053,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     }
 
     /// A scheme with one dispatch carrying `params`, recorded once (first submit done).
-    fn fixture(device: &Arc<Device>, pool: &mut RetainedPool, params: &[u32]) -> Fixture {
+    fn fixture(device: &Arc<Runtime>, pool: &Runtime, params: &[u32]) -> Fixture {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let _spec = SpecializationOverride::force_enabled();
         let ctx = device.create_context().unwrap();
@@ -8102,15 +8096,15 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         }
     }
 
-    fn variant_compiles(device: &Device) -> usize {
+    fn variant_compiles(device: &Runtime) -> usize {
         with_mock(device, |m| m.specialized_shader_creates)
     }
 
     #[test]
     fn promotes_after_the_streak_and_rebinds_the_node() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7, 9]);
         let node = f.node;
         let universal = f.universal.handle;
 
@@ -8147,9 +8141,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn demotes_in_set_node_param_when_a_baked_word_changes() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7, 9]);
         let node = f.node;
         let universal = f.universal.handle;
         frames(&mut f.scheme, PROMOTE + 1);
@@ -8170,9 +8164,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn a_changed_slot_needs_a_longer_streak_before_it_is_baked_again() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7, 9]);
         let node = f.node;
         frames(&mut f.scheme, PROMOTE + 1);
         assert!(f.scheme.node_is_specialized(node));
@@ -8196,9 +8190,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn a_word_that_flips_every_frame_never_warms() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[0]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[0]);
         let node = f.node;
         for i in 1..=30u32 {
             f.scheme.set_node_param(node, 0, i % 2).unwrap();
@@ -8212,9 +8206,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn a_word_that_flips_every_few_frames_is_burned_and_left_dynamic() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7, 0]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7, 0]);
         let node = f.node;
         // Slot 1 changes every 4th frame: enough to pass WARM once, never PROMOTE.
         for i in 1..=60u32 {
@@ -8234,9 +8228,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn a_cached_variant_is_promoted_without_recompiling() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7]);
         let node = f.node;
         frames(&mut f.scheme, PROMOTE + 1);
         assert_eq!(variant_compiles(&device), 1);
@@ -8258,10 +8252,10 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn repeated_compile_failures_pin_the_site() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
+        let device = mock_runtime();
+        let pool = &device;
         with_mock(&device, |m| m.fail_specialized_shader_creates = true);
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let mut f = fixture(&device, &pool, &[7]);
         let node = f.node;
         let universal = f.universal.handle;
         frames(&mut f.scheme, 3 * PROMOTE);
@@ -8279,9 +8273,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn nodes_without_scalar_params_are_not_tracked() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[]);
         frames(&mut f.scheme, 2 * PROMOTE);
         assert_eq!(f.scheme.replay_stats().specialization_warms, 0);
         assert_eq!(variant_compiles(&device), 0);
@@ -8290,9 +8284,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn off_switch_keeps_every_node_on_the_callers_pipeline() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7]);
         let _off = SpecializationOverride::force_disabled();
         frames(&mut f.scheme, 2 * PROMOTE);
         let stats = f.scheme.replay_stats();
@@ -8303,9 +8297,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn turning_specialization_off_at_runtime_demotes_promoted_sites() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7]);
         let node = f.node;
         let universal = f.universal.handle;
         frames(&mut f.scheme, PROMOTE + 1);
@@ -8321,9 +8315,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn caller_set_node_pipeline_replaces_the_universal_and_restarts_history() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7]);
         let node = f.node;
         frames(&mut f.scheme, PROMOTE + 1);
         assert!(f.scheme.node_is_specialized(node));
@@ -8347,9 +8341,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn topology_dirtiness_resets_streaks() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7, 9]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7, 9]);
         let node = f.node;
         frames(&mut f.scheme, 1);
         assert_eq!(
@@ -8366,9 +8360,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn a_job_is_cancelled_when_its_baked_word_moves_before_it_lands() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7]);
         let node = f.node;
         // Do not wait for the compile: the job is in flight (or done) when the word changes.
         for _ in 0..WARM {
@@ -8388,9 +8382,9 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
 
     #[test]
     fn variants_are_scheme_owned_and_bounded() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let mut f = fixture(&device, &mut pool, &[7]);
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = fixture(&device, &pool, &[7]);
         let node = f.node;
         frames(&mut f.scheme, PROMOTE + 1);
         assert_eq!(f.scheme.specialization().cached_variants(), 1);

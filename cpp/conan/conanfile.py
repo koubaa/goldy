@@ -6,7 +6,7 @@ import os
 
 class GoldyConan(ConanFile):
     name = "goldy"
-    version = "0.2.0"
+    version = "0.3.0"
     license = "MIT"
     author = "Goldy Contributors"
     url = "https://github.com/koubaa/goldy"

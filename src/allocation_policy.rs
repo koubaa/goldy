@@ -79,7 +79,7 @@ pub(crate) trait AllocationPolicy: Send + Sync {
     /// `true` when this is the default no-op policy ([`NoPolicy`]).
     ///
     /// Used by [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator) to
-    /// reject a second [`Device::set_allocation_policy`](crate::device::Device::set_allocation_policy).
+    /// reject a second [`Runtime::set_allocation_policy`](crate::runtime::Runtime::set_allocation_policy).
     fn is_noop(&self) -> bool {
         false
     }
@@ -245,10 +245,10 @@ mod tests {
         use std::sync::Arc;
 
         use crate::backend::mock::MockBackend;
-        use crate::device::Device;
+        use crate::runtime::Runtime;
         use crate::types::{BufferFlags, BufferKind, TextureFlags, TextureFormat, TextureKind};
 
-        let device = Device::from_backend(Box::new(MockBackend::new())).unwrap();
+        let device = Runtime::from_backend(Box::new(MockBackend::new())).unwrap();
         let policy = Arc::new(RecordingPolicy::new());
         device.set_allocation_policy(policy.clone()).unwrap();
 

@@ -38,11 +38,10 @@ int main() {
         std::cout << "====================================\n";
 
         goldy::Instance instance;
-        goldy::Device device = instance.request_adapter().request_device();
+        goldy::Runtime device = instance.request_adapter().request_runtime();
 
         std::array<float, 64> data{};
-        goldy::RetainedPool pool(device);
-        goldy::Buffer buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer buffer = device.acquire_buffer_with_data(
             std::span<const float>(data),
             goldy::BufferKind::Scattered);
 

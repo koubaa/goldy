@@ -3,10 +3,8 @@
 //! Covers A/B/A recycling, in-flight isolation, best-fit reuse, claim/consume
 //! failure paths, and destination-ledger isolation of staging backings.
 
-use goldy::test_support::{mock_barrier_buffer_count, mock_device, mock_reset_tracking, CbReuseOverride};
-use goldy::{
-    BufferKind, ComputePipeline, DepositTarget, MemoryExchange, NodeAccess, RetainedPool, Scheme, ShaderModule,
-};
+use goldy::test_support::{mock_barrier_buffer_count, mock_reset_tracking, mock_runtime, CbReuseOverride};
+use goldy::{BufferKind, ComputePipeline, DepositTarget, MemoryExchange, NodeAccess, Runtime, Scheme, ShaderModule};
 
 const READ_SHADER: &str = r#"
 import goldy_exp;
@@ -35,9 +33,9 @@ fn bind_and_write(
 #[test]
 fn aba_settled_deposits_share_one_backing_and_replay() {
     let _cb = CbReuseOverride::force_enabled();
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = device.create_context().unwrap();
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let dest_a = pool
         .acquire_buffer(
             64,
@@ -113,9 +111,9 @@ fn aba_settled_deposits_share_one_backing_and_replay() {
 
 #[test]
 fn inflight_backing_forces_extra_alloc_then_reuses() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = device.create_context().unwrap();
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let dest_a = pool
         .acquire_buffer(
             32,
@@ -177,9 +175,9 @@ fn inflight_backing_forces_extra_alloc_then_reuses() {
 
 #[test]
 fn best_fit_reuses_larger_backing_and_rejects_undersized() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = device.create_context().unwrap();
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let large = pool
         .acquire_buffer(
             64,
@@ -220,7 +218,7 @@ fn best_fit_reuses_larger_backing_and_rejects_undersized() {
     scheme_small.submit().unwrap();
 
     let ctx2 = device.create_context().unwrap();
-    let mut pool2 = RetainedPool::new(device.clone());
+    let pool2 = &device;
     let tiny = pool2
         .acquire_buffer(
             16,
@@ -262,9 +260,9 @@ fn best_fit_reuses_larger_backing_and_rejects_undersized() {
 
 #[test]
 fn claim_paths_write_drop_and_repeat() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = device.create_context().unwrap();
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let dst = pool
         .acquire_buffer(
             16,
@@ -315,11 +313,11 @@ fn claim_paths_write_drop_and_repeat() {
 
 #[test]
 fn staging_absent_from_ledger_destination_raw_enforced() {
-    let device = mock_device();
+    let device = mock_runtime();
     let ctx = device.create_context().unwrap();
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
-    let mut pool = RetainedPool::new(device.clone());
+    let pool = &device;
     let dest_a = pool
         .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
         .expect("dest_a");

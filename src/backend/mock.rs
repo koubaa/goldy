@@ -92,7 +92,7 @@ pub(crate) struct MockBackend {
     /// When true, fresh/replay planners fuse upload partitions with the following compute
     /// partition (Metal Scheme path tests).
     pub fuse_upload_with_compute_partitions: bool,
-    /// Device-global submission sequence (shared value space across contexts on one queue).
+    /// Runtime-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     #[cfg(feature = "graphics")]
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
@@ -336,7 +336,7 @@ impl MockBackend {
         floor.max(max_ctx)
     }
 
-    /// Device-scoped idle: advance every context on `device` to the scheduled horizon.
+    /// Runtime-scoped idle: advance every context on `device` to the scheduled horizon.
     fn complete_device_seq_on_all_contexts(&mut self, device: DeviceHandle, seq: u64) {
         for ctx in self.contexts.values() {
             let mut state = ctx.lock().unwrap();
@@ -658,15 +658,15 @@ impl GpuBackend for MockBackend {
         self.adapters.clone()
     }
 
-    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
-        crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
+        crate::runtime::RuntimeCapabilities {
             host_sidecar_on_submit_worker: true,
             fuse_upload_with_compute_partitions: self.fuse_upload_with_compute_partitions,
             mesh_shaders: true,
             amplification_shaders: true,
             ray_query: true,
             ray_tracing_pipelines: true,
-            ..crate::device::DeviceCapabilities::default()
+            ..crate::runtime::RuntimeCapabilities::default()
         }
     }
 

@@ -1,4 +1,4 @@
-# Device Timeline (internal)
+# Runtime Timeline (internal)
 
 > **Prefer [Settlement](./settlement.md).** Goldy's public completion API is
 > `is_settled` / `wait_until_settled` on submissions and parcels. Raw timeline

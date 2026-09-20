@@ -43,6 +43,17 @@ macro_rules! impl_kernel_bindable {
 
 impl_kernel_bindable!(crate::parcel::Parcel, crate::Buffer, crate::Sampler, crate::Texture,);
 
+#[cfg(feature = "graphics")]
+impl KernelBindable for crate::PresentLease {
+    fn __goldy_bind_kernel<'a>(
+        &self,
+        start: SchemeNodeStart<'a>,
+        access: crate::task_graph::NodeAccess,
+    ) -> SchemeNodeStart<'a> {
+        start.bind_present(self, access)
+    }
+}
+
 impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseTexture> {
     fn __goldy_bind_kernel<'a>(
         &self,
@@ -66,41 +77,151 @@ impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseBuffer> {
 /// Marker module for GPU-dialect types and builtins referenced inside
 /// `#[goldy::compute]` function signatures and bodies.
 ///
+/// Names follow `shaders/goldy_exp/access.slang` (Scattered, BufRO, DirectSpatial,
+/// Interpolated, ByteAddress, Filter, Accel, ThreadId, GroupThreadId, GroupId).
 /// These items exist so host code and docs can name the dialect; the compute
 /// proc-macro consumes the AST and does not execute these functions on the CPU.
 pub mod gpu {
-    /// Write-only buffer parameter (`Scattered<T>` + [`crate::NodeAccess::Write`]).
+    /// Read/write storage buffer (`Scattered<T>` in access.slang).
+    ///
+    /// As a kernel parameter this is write-only Scheme access (`NodeAccess::Write`);
+    /// `&mut [T]` is the read-write form of the same Slang type.
     #[derive(Debug, Clone, Copy)]
-    pub struct Out<T> {
+    pub struct Scattered<T> {
         _marker: core::marker::PhantomData<T>,
     }
 
-    /// Explicit broadcast / uniform buffer parameter.
+    /// Read-only storage buffer (`BufRO<T>` in access.slang). `&[T]` is the slice form.
+    #[derive(Debug, Clone, Copy)]
+    pub struct BufRO<T> {
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    /// Broadcast / constant-buffer parameter. access.slang has no alias: declare the
+    /// struct type directly on the Slang entry point.
     #[derive(Debug, Clone, Copy)]
     pub struct Uniform<T> {
         _marker: core::marker::PhantomData<T>,
     }
 
-    /// 3-component thread index (maps to `ThreadId` / `SV_DispatchThreadID`).
+    /// Write-only storage image (`DirectSpatial<T>` in access.slang).
     #[derive(Debug, Clone, Copy)]
-    pub struct UVec3 {
+    pub struct DirectSpatial<T = Float4> {
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    /// Hardware-filtered 2D texture (`Interpolated<T>` in access.slang). Not yet
+    /// accepted as a `#[goldy::compute]` parameter.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Interpolated<T> {
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    /// Byte-address buffer (`ByteAddress` in access.slang). Not yet accepted as a
+    /// `#[goldy::compute]` parameter.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ByteAddress {
+        _private: (),
+    }
+
+    /// Sampler state (`Filter` in access.slang). Not yet accepted as a
+    /// `#[goldy::compute]` parameter.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Filter {
+        _private: (),
+    }
+
+    /// Raytracing acceleration structure (`Accel` in access.slang). Not yet
+    /// accepted as a `#[goldy::compute]` parameter.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Accel {
+        _private: (),
+    }
+
+    /// `float2` in generated Slang (vector, not an access.slang resource alias).
+    #[derive(Debug, Clone, Copy)]
+    pub struct Float2 {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    /// `float3` in generated Slang (vector, not an access.slang resource alias).
+    #[derive(Debug, Clone, Copy)]
+    pub struct Float3 {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+    }
+
+    /// `float4` in generated Slang (vector, not an access.slang resource alias).
+    #[derive(Debug, Clone, Copy)]
+    pub struct Float4 {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub w: f32,
+    }
+
+    /// SV_DispatchThreadID (`ThreadId` in access.slang).
+    #[derive(Debug, Clone, Copy)]
+    pub struct ThreadId {
         pub x: u32,
         pub y: u32,
         pub z: u32,
     }
 
-    /// Global dispatch thread id (`gpu::global_id()`).
-    pub fn global_id() -> UVec3 {
+    /// SV_GroupThreadID (`GroupThreadId` in access.slang).
+    #[derive(Debug, Clone, Copy)]
+    pub struct GroupThreadId {
+        pub x: u32,
+        pub y: u32,
+        pub z: u32,
+    }
+
+    /// SV_GroupID (`GroupId` in access.slang).
+    #[derive(Debug, Clone, Copy)]
+    pub struct GroupId {
+        pub x: u32,
+        pub y: u32,
+        pub z: u32,
+    }
+
+    /// Global dispatch thread id (`ThreadId` / `SV_DispatchThreadID`).
+    pub fn global_id() -> ThreadId {
         unimplemented!("gpu::global_id is only valid inside #[goldy::compute] bodies")
     }
 
-    /// Workgroup-local thread id (`gpu::local_id()`).
-    pub fn local_id() -> UVec3 {
+    /// Workgroup-local thread id (`GroupThreadId` / `SV_GroupThreadID`).
+    pub fn local_id() -> GroupThreadId {
         unimplemented!("gpu::local_id is only valid inside #[goldy::compute] bodies")
     }
 
-    /// Workgroup id (`gpu::workgroup_id()`).
-    pub fn workgroup_id() -> UVec3 {
+    /// Workgroup id (`GroupId` / `SV_GroupID`).
+    pub fn workgroup_id() -> GroupId {
         unimplemented!("gpu::workgroup_id is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn float2(_x: f32, _y: f32) -> Float2 {
+        unimplemented!("gpu::float2 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn float3(_x: f32, _y: f32, _z: f32) -> Float3 {
+        unimplemented!("gpu::float3 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn float4(_x: f32, _y: f32, _z: f32, _w: f32) -> Float4 {
+        unimplemented!("gpu::float4 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn uint2(_x: u32, _y: u32) -> ThreadId {
+        unimplemented!("gpu::uint2 is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn sin(_x: f32) -> f32 {
+        unimplemented!("gpu::sin is only valid inside #[goldy::compute] bodies")
+    }
+
+    pub fn length(_v: Float2) -> f32 {
+        unimplemented!("gpu::length is only valid inside #[goldy::compute] bodies")
     }
 }

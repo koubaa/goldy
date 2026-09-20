@@ -1,4 +1,8 @@
-//! GPU device management.
+//! GPU runtime — the public machine root.
+//!
+//! [`Runtime`] is the cloneable, device-scoped agent: it owns retained parcels,
+//! warehouse policy, shader and pipeline creation, capabilities, and diagnostics.
+//! [`crate::Context`] is a per-submission timeline with transient/deposit pools.
 //!
 //! # Thread Safety
 //!
@@ -44,13 +48,13 @@ static REGISTRY_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct AdapterInfo {
     /// Adapter index.
     pub id: u32,
-    /// Device name.
+    /// Runtime name.
     pub name: String,
     /// Vendor name.
     pub vendor: String,
     /// Backend type.
     pub backend: BackendType,
-    /// Device type (discrete, integrated, etc.).
+    /// Runtime type (discrete, integrated, etc.).
     pub device_type: DeviceType,
 }
 
@@ -197,16 +201,16 @@ impl Instance {
     /// registers the WARP adapter). Ignored for non-DX12 backends.
     #[deprecated(
         since = "0.2.0",
-        note = "use Instance::request_adapter(...).request_device(...) instead"
+        note = "use Instance::request_adapter(...).request_runtime(...) instead"
     )]
-    pub fn create_device(&self, preferred_type: DeviceType) -> Result<Device> {
+    pub fn create_runtime(&self, preferred_type: DeviceType) -> Result<Runtime> {
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
             if self.backend_type() == BackendType::Dx12 && crate::backend::dx12::env_force_warp() {
                 tracing::info!("GOLDY_DX12_FORCE_WARP=1 — using WARP adapter");
                 return self
                     .adapter_for_id(crate::backend::dx12::WARP_ADAPTER_ID)?
-                    .request_device(&DeviceDescriptor::default());
+                    .request_runtime(&RuntimeDescriptor::default());
             }
         }
 
@@ -226,21 +230,21 @@ impl Instance {
             "Selected GPU adapter"
         );
 
-        adapter.request_device(&DeviceDescriptor::default())
+        adapter.request_runtime(&RuntimeDescriptor::default())
     }
 
     /// Create a device on a specific adapter by ID.
     ///
     /// The device is automatically configured with the built-in `goldy_exp`
     /// (experimental) shader library registered. You can register additional
-    /// libraries using [`Device::register_library`].
+    /// libraries using [`Runtime::register_library`].
     #[deprecated(
         since = "0.2.0",
-        note = "use Adapter::request_device(...) after enumerate_adapters or request_adapter"
+        note = "use Adapter::request_runtime(...) after enumerate_adapters or request_adapter"
     )]
-    pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
+    pub fn create_runtime_for_adapter(&self, adapter_id: u32) -> Result<Runtime> {
         self.adapter_for_id(adapter_id)?
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
     }
 
     /// Get the backend type (Vulkan, Metal, DX12).
@@ -282,9 +286,9 @@ pub enum PowerPreference {
     HighPerformance,
 }
 
-/// Descriptor for [`Adapter::request_device`].
+/// Descriptor for [`Adapter::request_runtime`].
 #[derive(Debug, Clone, Default)]
-pub struct DeviceDescriptor {
+pub struct RuntimeDescriptor {
     /// Optional debug label for the logical device.
     pub label: Option<String>,
 }
@@ -292,7 +296,7 @@ pub struct DeviceDescriptor {
 pub(crate) struct AdapterInner {
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     info: AdapterInfo,
-    caps: DeviceCapabilities,
+    caps: RuntimeCapabilities,
 }
 
 /// A physical GPU adapter with immutable capabilities.
@@ -316,12 +320,12 @@ impl Adapter {
     }
 
     /// Immutable capability snapshot for this adapter.
-    pub fn capabilities(&self) -> DeviceCapabilities {
+    pub fn capabilities(&self) -> RuntimeCapabilities {
         self.inner.caps.clone()
     }
 
-    /// Create a logical [`Device`] on this adapter.
-    pub fn request_device(&self, desc: &DeviceDescriptor) -> Result<Device> {
+    /// Create a logical [`Runtime`] on this adapter.
+    pub fn request_runtime(&self, desc: &RuntimeDescriptor) -> Result<Runtime> {
         let _ = desc;
         tracing::debug!(adapter_id = self.inner.info.id, "Creating device for adapter");
         let mut backend = self.inner.backend.lock().unwrap();
@@ -347,7 +351,7 @@ impl Adapter {
             "GPU device created"
         );
 
-        Ok(Device {
+        Ok(Runtime {
             inner: Arc::new(DeviceInner {
                 backend: Arc::clone(&self.inner.backend),
                 handle,
@@ -382,11 +386,11 @@ impl Adapter {
     }
 }
 
-/// Device capabilities and format preferences.
+/// Runtime capabilities and format preferences.
 ///
 /// Use this to query the optimal formats and limits for your use case.
 #[derive(Debug, Clone)]
-pub struct DeviceCapabilities {
+pub struct RuntimeCapabilities {
     /// Preferred format for window surfaces (swapchains).
     /// For windowed apps, use this for `RenderPipelineDesc::target_format`.
     pub preferred_surface_format: TextureFormat,
@@ -468,7 +472,7 @@ pub struct DeviceCapabilities {
     pub amplification_shaders: bool,
 }
 
-impl Default for DeviceCapabilities {
+impl Default for RuntimeCapabilities {
     fn default() -> Self {
         Self {
             preferred_surface_format: TextureFormat::Bgra8UnormSrgb,
@@ -499,14 +503,14 @@ impl Default for DeviceCapabilities {
 
 /// A GPU device - used to create resources and render.
 ///
-/// `Device` is a lightweight, cloneable handle (internally reference-counted).
-/// Cloning a `Device` is cheap (`Arc` bump) and gives you another handle to the
+/// `Runtime` is a lightweight, cloneable handle (internally reference-counted).
+/// Cloning a `Runtime` is cheap (`Arc` bump) and gives you another handle to the
 /// same underlying GPU device. The physical device is only torn down once every
-/// `Device` handle **and** every resource created from it have been dropped.
+/// `Runtime` handle **and** every resource created from it have been dropped.
 ///
 /// # Thread Safety
 ///
-/// Internally, `Device` uses a `Mutex` to serialize backend operations. This means:
+/// Internally, `Runtime` uses a `Mutex` to serialize backend operations. This means:
 /// - Resource creation is thread-safe but serializes internally
 /// - Scheme recording via [`crate::Scheme`] is lock-free on the CPU side
 /// - Scheme submission acquires the lock
@@ -523,12 +527,12 @@ impl Default for DeviceCapabilities {
 /// use goldy::ShaderLibrary;
 ///
 /// // Register a custom library
-/// device.register_library(ShaderLibrary::from_source("mylib", "module mylib;"))?;
+/// runtime.register_library(ShaderLibrary::from_source("mylib", "module mylib;"))?;
 ///
 /// // Check if a library is registered
-/// assert!(device.has_library("goldy"));
+/// assert!(runtime.has_library("goldy"));
 /// ```
-pub struct Device {
+pub struct Runtime {
     pub(crate) inner: Arc<DeviceInner>,
 }
 
@@ -538,16 +542,16 @@ pub(crate) struct DeviceInner {
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocatorAlloc>,
-    /// Byte ledger for parcels acquired through [`Device::acquire_buffer`] / `acquire_texture`.
+    /// Byte ledger for parcels acquired through [`Runtime::acquire_buffer`] / `acquire_texture`.
     pub(crate) bookkeeping: Arc<crate::parcel::PoolBookkeeping>,
-    /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
+    /// When `false`, this [`Runtime`] is a logical alias (e.g. [`Runtime::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
 }
 
-impl Clone for Device {
+impl Clone for Runtime {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -653,7 +657,7 @@ impl Drop for ShaderLibraryRegistry {
     }
 }
 
-impl Device {
+impl Runtime {
     // =======================================================================
     // VramAllocator
     // =======================================================================
@@ -677,7 +681,7 @@ impl Device {
         Arc::clone(&self.inner.vram_allocator)
     }
 
-    /// Create a new `Device` handle sharing the same GPU device but using
+    /// Create a new `Runtime` handle sharing the same GPU device but using
     /// a different [`VramAllocator`].
     ///
     /// All resources created through the returned handle will go through the
@@ -740,7 +744,7 @@ impl Device {
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
     ///
     /// Crate-internal entry point for runtime allocators and pools. Application code should
-    /// use [`Device::acquire_buffer`](crate::Device::acquire_buffer) instead.
+    /// use [`Runtime::acquire_buffer`](crate::Runtime::acquire_buffer) instead.
     /// Allocations receive an accounting deed and honor the installed allocator's budget
     /// and telemetry.
     ///
@@ -838,7 +842,7 @@ impl Device {
     }
 
     // =======================================================================
-    // Device metadata
+    // Runtime metadata
     // =======================================================================
 
     /// Physical adapter this device was created from.
@@ -915,7 +919,7 @@ impl Device {
 
     /// Wait for all GPU work, then drop deferred VRAM payloads (test fixture reset).
     ///
-    /// Used by [`crate::test_support::SerialGpuDevice::exclusive`] after taking exclusive
+    /// Used by [`crate::test_support::SerialGpuRuntime::exclusive`] after taking exclusive
     /// ownership of the shared CUDA lib-test device. Not `cfg(test)`-only because
     /// `test_support` is linked into integration tests as well.
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -1013,11 +1017,11 @@ impl Device {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
+    /// use goldy::{RuntimeDescriptor, Instance, RequestAdapterOptions};
     ///
     /// let instance = Instance::new()?;
     /// let adapter = instance.request_adapter(&RequestAdapterOptions::default())?;
-    /// let device = adapter.request_device(&DeviceDescriptor::default())?;
+    /// let device = adapter.request_runtime(&RuntimeDescriptor::default())?;
     /// let caps = device.capabilities();
     ///
     /// println!("Surface format: {:?}", caps.preferred_surface_format);
@@ -1025,7 +1029,7 @@ impl Device {
     /// println!("Zero-copy CPU storage readback: {}", caps.has_zero_copy_storage_readback);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
-    pub fn capabilities(&self) -> DeviceCapabilities {
+    pub fn capabilities(&self) -> RuntimeCapabilities {
         self.inner.adapter.capabilities()
     }
 
@@ -1260,7 +1264,7 @@ impl Device {
             .as_mut()
             .as_any_mut()
             .downcast_mut::<crate::backend::mock::MockBackend>()
-            .expect("Device::with_mock_backend: backend is not MockBackend");
+            .expect("Runtime::with_mock_backend: backend is not MockBackend");
         f(mock)
     }
 
@@ -1302,7 +1306,7 @@ impl Device {
 
     /// Access the inner [`MockBackend`] for test introspection.
     ///
-    /// Panics if the device was not created with `Device::from_backend(Box::new(MockBackend::new()))`.
+    /// Panics if the device was not created with `Runtime::from_backend(Box::new(MockBackend::new()))`.
     #[cfg(test)]
     pub(crate) fn with_mock<R>(&self, f: impl FnOnce(&mut crate::backend::mock::MockBackend) -> R) -> R {
         self.with_mock_backend(f)
@@ -1329,7 +1333,7 @@ impl Drop for DeviceInner {
         // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
         // The placement heap is owned per-`Context` and dropped in `ContextInner::drop`,
-        // which runs before this (contexts hold a `Device` clone, so they outlive nothing
+        // which runs before this (contexts hold a `Runtime` clone, so they outlive nothing
         // but are dropped first by users tearing down renderers before devices).
         if self.owns_backend_device {
             let mut backend = self.backend.lock().unwrap();
@@ -1343,8 +1347,8 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
 
-    fn test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
     #[test]

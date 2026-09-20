@@ -1,6 +1,6 @@
 [package]
 name = "goldy-ffi"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "C FFI bindings for the Goldy GPU library"
@@ -15,7 +15,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 # Core goldy library - default-features = false allows feature passthrough
-goldy = { version = "0.2.0", path = "..", default-features = false }
+goldy = { version = "0.3.0", path = "..", default-features = false }
 
 # Error handling
 anyhow = "1.0"

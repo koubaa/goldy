@@ -9,7 +9,6 @@ mod adapter;
 mod buffer;
 mod compute;
 mod context;
-mod device;
 mod error;
 mod exchange;
 mod instance;
@@ -17,6 +16,7 @@ mod memory_exchange;
 mod parcel;
 mod pipeline;
 mod retained_pool;
+mod runtime;
 mod scheme;
 mod shader_module;
 mod surface_exchange;
@@ -28,7 +28,6 @@ pub use adapter::Adapter;
 pub use buffer::Buffer;
 pub use compute::ComputePipeline;
 pub use context::Context;
-pub use device::Device;
 pub use error::{GoldyError, Result};
 pub use exchange::{Claim, Transaction};
 pub use instance::{AdapterInfo, Instance};
@@ -38,6 +37,7 @@ pub use memory_exchange::{
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use retained_pool::{RecordBuilder, RecordField};
+pub use runtime::Runtime;
 pub use scheme::{
     ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentLease, ReplayStats, Scheme, SchemeRenderPassBuilder,
     SchemeRenderTargetLease, SchemeSubmission,
@@ -46,8 +46,8 @@ pub use shader_module::ShaderModule;
 pub use surface_exchange::SurfaceExchange;
 pub use texture::Texture;
 pub use types::{
-    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
-    NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
+    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceType, IndexFormat, NodeAccess,
+    PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, RuntimeDescriptor,
     TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 

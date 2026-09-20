@@ -420,7 +420,7 @@ pub(super) fn prepare_present_work(
     let logical_device = state
         .devices
         .get(&device_handle)
-        .context("Device no longer valid")?
+        .context("Runtime no longer valid")?
         .clone();
     let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
     let (timeline_event, waiter, signal_queue_present, return_pending) = {
@@ -628,7 +628,7 @@ pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32,
         let logical_device = state
             .devices
             .get(&surface_state.device_handle)
-            .context("Device no longer valid")?;
+            .context("Runtime no longer valid")?;
 
         let w = width.max(1);
         let h = height.max(1);
@@ -724,7 +724,7 @@ fn register_surface_texture(
     let texture_owned = unsafe { mtl::Texture::from_ptr(raw) };
 
     let global_idx = {
-        let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
+        let logical_device = state.devices.get(&device_handle).context("Runtime no longer valid")?;
 
         logical_device
             .descriptors

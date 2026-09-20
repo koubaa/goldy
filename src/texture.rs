@@ -1,11 +1,11 @@
 //! Internal GPU texture backing for [`crate::Texture`] parcels.
 //!
 //! Public callers acquire [`crate::Texture`] (a parcel wrapper) from
-//! [`crate::Device::acquire_texture`] or [`crate::Context::acquire_transient_texture`].
+//! [`crate::Runtime::acquire_texture`] or [`crate::Context::acquire_transient_texture`].
 
 use crate::backend::GpuBackend;
-use crate::device::Device;
 use crate::handles::TextureHandle;
+use crate::runtime::Runtime;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
@@ -39,7 +39,7 @@ impl TextureCopyFootprint {
 /// [`Clone`] is intentionally a non-owning [`Self::borrow`]: bitwise-cloning an
 /// owning backing would make two drops call `destroy_texture` on the same handle.
 pub(crate) struct TextureBacking {
-    _device: Option<Device>,
+    _device: Option<Runtime>,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: TextureHandle,
     width: u32,
@@ -61,7 +61,7 @@ impl Clone for TextureBacking {
 }
 
 impl TextureBacking {
-    /// Attach the accounting deed (called from [`Device::alloc_texture`] only).
+    /// Attach the accounting deed (called from [`Runtime::alloc_texture`] only).
     pub(crate) fn set_deed(&mut self, deed: ParcelDeed) {
         self.deed = Some(deed);
     }
@@ -92,7 +92,7 @@ impl TextureBacking {
     ///
     /// Returns an error if GPU resource allocation fails.
     pub(crate) fn new(
-        device: &Device,
+        device: &Runtime,
         width: u32,
         height: u32,
         format: TextureFormat,
@@ -129,7 +129,7 @@ impl TextureBacking {
     /// The data must be in the correct format for the texture's pixel format.
     /// For RGBA8 textures, this is 4 bytes per pixel in RGBA order.
     ///
-    /// See `Device::alloc_texture` for access pattern documentation.
+    /// See `Runtime::alloc_texture` for access pattern documentation.
     ///
     /// # Arguments
     ///
@@ -147,7 +147,7 @@ impl TextureBacking {
     /// - GPU resource allocation fails
     /// - Data size doesn't match expected size
     pub(crate) fn with_data(
-        device: &Device,
+        device: &Runtime,
         data: &[u8],
         width: u32,
         height: u32,
@@ -425,8 +425,8 @@ mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
 
-    fn create_test_device() -> Device {
-        Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    fn create_test_device() -> Runtime {
+        Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
     #[test]

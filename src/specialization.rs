@@ -18,7 +18,7 @@
 
 use crate::backend::ComputePipelineHandle;
 use crate::compute::ComputePipeline;
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::shader::{ShaderModule, ShaderProvenance};
 use crate::slang::virtual_main::scalar_specialization_macro;
 use crate::task_graph::{GraphIR, NodeKind};
@@ -390,7 +390,13 @@ impl SchemePredictor {
     ///
     /// `ir_clean` is whether the scheme was clean coming into this submit. Returns `true`
     /// when a node's pipeline was rebound (the scheme must mark itself params-dirty).
-    pub(crate) fn begin_submit(&mut self, device: &Device, ir: &mut GraphIR, ir_clean: bool, topo_dirty: bool) -> bool {
+    pub(crate) fn begin_submit(
+        &mut self,
+        device: &Runtime,
+        ir: &mut GraphIR,
+        ir_clean: bool,
+        topo_dirty: bool,
+    ) -> bool {
         if self.sites.is_empty() {
             return false;
         }
@@ -475,7 +481,7 @@ impl SchemePredictor {
         self.sites.get(&node).is_some_and(|s| s.job.is_some())
     }
 
-    fn enabled(&mut self, device: &Device) -> bool {
+    fn enabled(&mut self, device: &Runtime) -> bool {
         if !crate::validation_env::specialization_enabled() {
             return false;
         }
@@ -526,7 +532,7 @@ impl SchemePredictor {
     fn step_site(
         site: &mut SitePredictor,
         slots: &[u32],
-        device: &Device,
+        device: &Runtime,
         variants: &Arc<Mutex<VariantCache>>,
         retiring: &mut VecDeque<Vec<Arc<ComputePipeline>>>,
         events: &mut SpecializationEvents,
@@ -651,7 +657,7 @@ impl Drop for SchemePredictor {
 
 /// Compile `baked` for `site` on a worker thread; the result lands in `variants`.
 fn spawn_compile(
-    device: &Device,
+    device: &Runtime,
     site: &SitePredictor,
     baked: BakedSlots,
     variants: &Arc<Mutex<VariantCache>>,
@@ -705,7 +711,7 @@ fn spawn_compile(
 
 /// `Ok(None)` when `cancel` was raised before the compile started.
 fn compile_variant(
-    device: &Device,
+    device: &Runtime,
     provenance: &ShaderProvenance,
     entry: &str,
     label: &'static str,
@@ -733,7 +739,7 @@ mod tests {
 
     #[test]
     fn cache_is_lru_and_bounded() {
-        let dev = crate::test_support::mock_device();
+        let dev = crate::test_support::mock_runtime();
         let shader = ShaderModule::from_slang(
             &dev,
             "[goldy_compute]\n[numthreads(1,1,1)]\nvoid k(Scattered<uint> d, ThreadId id, uint a) { d[id.x] = a; }",
@@ -757,7 +763,7 @@ mod tests {
 
     #[test]
     fn bake_target_follows_per_slot_thresholds() {
-        let dev = crate::test_support::mock_device();
+        let dev = crate::test_support::mock_runtime();
         let shader = ShaderModule::from_slang(
             &dev,
             "[goldy_compute]\n[numthreads(1,1,1)]\nvoid k(Scattered<uint> d, ThreadId id, uint a, uint b) { d[id.x] = a + b; }",

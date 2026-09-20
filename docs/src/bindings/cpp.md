@@ -21,7 +21,7 @@ vcpkg install goldy
 ```bash
 # conanfile.txt
 [requires]
-goldy/0.2.0
+goldy/0.3.0
 ```
 
 ### Building from Source
@@ -67,7 +67,7 @@ struct Vertex {
 int main() {
     try {
         goldy::Instance instance;
-        goldy::Device device = instance.request_adapter().request_device();
+        goldy::Runtime device = instance.request_adapter().request_runtime();
         goldy::Context ctx(device);
 
         const Vertex vertices[] = {
@@ -76,8 +76,7 @@ int main() {
             {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
         };
 
-        goldy::RetainedPool pool(device);
-        goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer vertex_buffer = device.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -99,7 +98,7 @@ int main() {
 
         GoldyTextureFlags readback_flags{};
         readback_flags._0 = goldy::TextureFlags::CopySrc | goldy::TextureFlags::CopyDst;
-        goldy::Texture readback = pool.acquire_texture(
+        goldy::Texture readback = device.acquire_texture(
             800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM,
             GOLDY_TEXTURE_KIND_DIRECT, readback_flags);
 
@@ -174,8 +173,8 @@ try {
 |--------|------|-----|
 | Instance creation | `Instance::new()?` | `goldy::Instance instance` |
 | Error handling | `Result<T, GoldyError>` | `goldy::Exception` |
-| Device lifetime | `Arc<Device>` | RAII destructor |
-| Retained buffer | `pool.acquire_buffer_with_data(&data, access)` | `pool.acquire_buffer_with_data(span, access)` |
+| Runtime lifetime | `Runtime` (cheap `Clone`) | RAII destructor |
+| Retained buffer | `runtime.acquire_buffer_with_data(&data, access)` | `runtime.acquire_buffer_with_data(span, access)` |
 | Render pass | `scheme.render_pass(...)` | `scheme.render_pass(...)` (RAII scope) |
 | Readback | `claim.consume(&submission)` | `withdraw.claim(submission).consume()` |
 
@@ -186,8 +185,7 @@ try {
 | Class | Description |
 |-------|-------------|
 | `goldy::Instance` | Entry point, adapter enumeration |
-| `goldy::Device` / `goldy::Context` | GPU device and execution context |
-| `goldy::RetainedPool` | Retained buffer/texture acquisition |
+| `goldy::Runtime` / `goldy::Context` | Machine root and submission timeline |
 | `goldy::RecordBuilder` | Partitioned buffer records (ping-pong fields) |
 | `goldy::Scheme` | Retained dependency graph |
 | `goldy::MemoryExchange` | CPU↔GPU withdraw/deposit |
@@ -246,10 +244,10 @@ if (!instance) {
 
 GoldyAdapterInfo info = {};
 goldy_instance_get_adapter(instance, 0, &info);
-GoldyDevice* device = goldy_instance_create_device_for_adapter(instance, info.id);
+GoldyRuntime* device = goldy_instance_create_runtime_for_adapter(instance, info.id);
 // ...
 
-goldy_device_destroy(device);
+goldy_runtime_destroy(device);
 goldy_instance_destroy(instance);
 ```
 

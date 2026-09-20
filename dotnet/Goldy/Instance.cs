@@ -6,7 +6,7 @@ namespace Goldy;
 
 /// <summary>
 /// GPU instance - entry point for Goldy.
-/// Create an instance to enumerate adapters and create devices.
+/// Create an instance to enumerate adapters and request runtimes.
 /// </summary>
 public sealed class Instance : IDisposable
 {
@@ -69,17 +69,17 @@ public sealed class Instance : IDisposable
     }
 
     /// <summary>
-    /// Create a device on a specific adapter by ID.
+    /// Create a runtime on a specific adapter by ID.
     /// </summary>
-    public Device CreateDeviceForAdapter(uint adapterId)
+    public Runtime CreateRuntimeForAdapter(uint adapterId)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         
-        var handle = NativeMethods.InstanceCreateDeviceForAdapter(_handle, adapterId);
+        var handle = NativeMethods.InstanceCreateRuntimeForAdapter(_handle, adapterId);
         if (handle == nint.Zero)
-            throw GoldyException.FromLastError("Device creation");
+            throw GoldyException.FromLastError("Runtime creation");
         
-        return new Device(handle);
+        return new Runtime(handle);
     }
 
     public void Dispose()
@@ -98,7 +98,7 @@ public sealed class Instance : IDisposable
 public readonly record struct AdapterInfo(uint Id, DeviceType DeviceType, string Name, string Vendor);
 
 /// <summary>
-/// A selected GPU adapter used to create devices.
+/// A selected GPU adapter used to request a runtime.
 /// </summary>
 public sealed class Adapter
 {
@@ -116,6 +116,6 @@ public sealed class Adapter
     public string Name => _info.Name;
     public string Vendor => _info.Vendor;
 
-    public Device RequestDevice() => _instance.CreateDeviceForAdapter(_info.Id);
+    public Runtime RequestRuntime() => _instance.CreateRuntimeForAdapter(_info.Id);
 }
 

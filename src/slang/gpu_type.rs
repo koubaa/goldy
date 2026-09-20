@@ -481,6 +481,63 @@ mod tests {
     }
 
     #[test]
+    fn scalar_triple_needs_no_author_padding() {
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy_derive::GpuType)]
+        #[repr(C)]
+        struct Uniforms {
+            width: u32,
+            height: u32,
+            time: f32,
+        }
+
+        assert_eq!(std::mem::size_of::<Uniforms>(), 12);
+        assert_eq!(Uniforms::GPU_TYPE.storage_stride().unwrap(), 12);
+        assert!(Uniforms::GPU_TYPE.storage_matches_host().unwrap());
+        let generated = Uniforms::GPU_TYPE.generate().unwrap();
+        assert!(
+            !generated.source.contains("__goldy_pad"),
+            "scalar triple must not inject pad fields:\n{}",
+            generated.source
+        );
+        assert!(
+            !generated.source.contains("_padding"),
+            "author padding must not appear:\n{}",
+            generated.source
+        );
+        let host = Uniforms {
+            width: 8,
+            height: 4,
+            time: 1.5,
+        };
+        let bytes = Uniforms::GPU_TYPE.encode_pod_slice(&[host]).unwrap();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(&bytes[..], bytemuck::bytes_of(&host));
+    }
+
+    #[test]
+    fn gpu_attr_supplies_pod_without_direct_bytemuck_derive() {
+        #[goldy::gpu]
+        struct Uniforms {
+            width: u32,
+            height: u32,
+            time: f32,
+        }
+
+        fn assert_pod<T: crate::__private::Pod>() {}
+        assert_pod::<Uniforms>();
+        assert_eq!(std::mem::size_of::<Uniforms>(), 12);
+        assert_eq!(Uniforms::GPU_TYPE.storage_stride().unwrap(), 12);
+        let host = Uniforms {
+            width: 8,
+            height: 4,
+            time: 1.5,
+        };
+        let bytes = Uniforms::GPU_TYPE.encode_pod_slice(&[host]).unwrap();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(&bytes[..], bytemuck::bytes_of(&host));
+    }
+
+    #[test]
     fn encode_copies_logical_fields_into_storage_gaps() {
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy_derive::GpuType)]
         #[repr(C)]

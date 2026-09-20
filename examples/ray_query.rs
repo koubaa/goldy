@@ -1,6 +1,6 @@
 //! Compute ray query — a TLAS of one triangle, primary rays into the swapchain.
 //!
-//! Skips (exit 0) when `DeviceCapabilities::ray_query` is false, or on WebGPU
+//! Skips (exit 0) when `RuntimeCapabilities::ray_query` is false, or on WebGPU
 //! (Slang WGSL has no `TraceRayInline`).
 //!
 //! Run with: cargo run --example ray_query --features examples
@@ -9,8 +9,8 @@ use anyhow::Result;
 use goldy::{
     types::{BackendType, BufferFlags},
     AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTarget, DepositTransaction,
-    DeviceDescriptor, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, Texture, Transaction, WithdrawTransaction,
+    Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule,
+    SurfaceConfig, SurfaceExchange, Texture, Transaction, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -118,7 +118,7 @@ fn main() -> Result<()> {
 struct GpuWarmup {
     ctx: goldy::Context,
     compute_pipeline: ComputePipeline,
-    device: Arc<goldy::Device>,
+    device: Arc<goldy::Runtime>,
     verts: Buffer,
     blas: AccelerationStructure,
     tlas: AccelerationStructure,
@@ -129,10 +129,10 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let device = Arc::new(
         instance
             .request_adapter(&RequestAdapterOptions::default())?
-            .request_device(&DeviceDescriptor::default())?,
+            .request_runtime(&RuntimeDescriptor::default())?,
     );
     if !device.capabilities().ray_query {
-        println!("skip: DeviceCapabilities::ray_query is false on this adapter");
+        println!("skip: RuntimeCapabilities::ray_query is false on this adapter");
         std::process::exit(0);
     }
     if device.backend_type() == BackendType::WebGpu {

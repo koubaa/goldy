@@ -456,7 +456,7 @@ pub(crate) struct CpuBindingExec {
     pub offset: u64,
     pub byte_size: u64,
     pub access: NodeAccess,
-    /// Device→host staging; `None` for `Overwrite` (nothing to read).
+    /// Runtime→host staging; `None` for `Overwrite` (nothing to read).
     pub readback: Option<BufferHandle>,
     /// Host→device staging (`CPU_WRITABLE` transient parcel); `None` for `Read`.
     pub upload: Option<Parcel>,
@@ -677,7 +677,7 @@ impl CpuDispatchExec {
         let _tz = crate::tracy_zone!("goldy.cpu_dispatch.run_host");
         let mut storage: Vec<AlignedBytes> = Vec::with_capacity(self.bindings.len());
         {
-            let backend = context.device().inner.backend.lock().unwrap();
+            let backend = context.runtime().inner.backend.lock().unwrap();
             for b in &self.bindings {
                 let mut bytes = AlignedBytes::zeroed(b.byte_size as usize);
                 if let Some(staging) = b.readback {
@@ -716,7 +716,7 @@ impl CpuDispatchExec {
             let _ = context.wait_until(ready_after);
         }
         {
-            let mut backend = context.device().inner.backend.lock().unwrap();
+            let mut backend = context.runtime().inner.backend.lock().unwrap();
             for b in &self.bindings {
                 if let Some(staging) = b.readback {
                     backend.free_readback_buffer(staging);

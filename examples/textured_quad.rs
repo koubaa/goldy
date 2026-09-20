@@ -7,8 +7,8 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
-    Parcel, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Sampler, Scheme, ShaderBinding, ShaderModule,
+    Buffer, BufferKind, Color, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Sampler, Scheme, ShaderBinding, ShaderModule,
     SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -88,7 +88,7 @@ const QUAD_VERTICES: [Vertex2DUv; 6] = [
 struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -131,7 +131,7 @@ impl App {
     }
 
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
@@ -199,7 +199,7 @@ impl App {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

@@ -1,8 +1,8 @@
 # VRAM Allocator
 
-All GPU buffer and texture allocations route through the device's internal
-allocator (pools call `Device::alloc_*`). Clients obtain bytes via
-[`RetainedPool`](./retained-pool.md) / [`TransientPool`](./transient-allocation.md);
+All GPU buffer and texture allocations route through the runtime's internal
+allocator (pools call `Runtime::alloc_*`). Clients obtain bytes via
+[`Runtime`](./runtime-owned-memory.md) / [`TransientPool`](./transient-allocation.md);
 the allocator itself is not a public customization point.
 
 ## Allocation Policy (Tracking and Budget)
@@ -24,9 +24,9 @@ Use `BudgetPolicy::new()` when you only need telemetry without a hard budget.
 
 ## Relationship to pools
 
-- **`RetainedPool` / `TransientPool`** — recycling policy (when deeds and leases
+- **`Runtime` retained acquire / `TransientPool`** — recycling policy (when deeds and leases
   may be reissued after GPU retirement).
-- **Device allocator + `BudgetPolicy`** — provenance and optional byte budget.
+- **Runtime allocator + `BudgetPolicy`** — provenance and optional byte budget.
 
-Both pools allocate through the device, so an installed `BudgetPolicy` covers
+Both doors allocate through the runtime, so an installed `BudgetPolicy` covers
 retained and transient parcels automatically.

@@ -8,11 +8,11 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, CompareFunction, ComputePipeline, DepositTarget, DepthFormat, DepthStencilState,
-    DeviceDescriptor, IndexFormat, Instance, MemoryExchange, NodeAccess, PresentMode, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, SamplerDesc, Scheme,
-    ShaderModule, ShaderResourceSlot, SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat,
-    TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepositTarget, DepthFormat, DepthStencilState, IndexFormat,
+    Instance, MemoryExchange, NodeAccess, PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, Runtime, RuntimeDescriptor, Sampler, SamplerDesc, Scheme, ShaderModule, ShaderResourceSlot,
+    SurfaceConfig, SurfaceExchange, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -132,7 +132,7 @@ fn cuda_raster_rejects_bgra_format() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
@@ -169,7 +169,7 @@ fn cuda_raster_rgba8_triangle_readback() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     assert_eq!(device.backend_type(), BackendType::Cuda);
@@ -189,7 +189,7 @@ fn cuda_raster_rgba8_triangle_readback() {
     )
     .expect("rgba8 graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -253,7 +253,7 @@ fn cuda_raster_triangle_readback() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     assert_eq!(device.backend_type(), BackendType::Cuda);
@@ -273,7 +273,7 @@ fn cuda_raster_triangle_readback() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -366,7 +366,7 @@ fn cuda_raster_depth_occlusion_readback() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     assert_eq!(device.backend_type(), BackendType::Cuda);
@@ -409,7 +409,7 @@ fn cuda_raster_depth_occlusion_readback() {
     let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let red_vb = pool
         .acquire_buffer_with_data(&red_verts, BufferKind::Scattered)
         .expect("red vb");
@@ -477,7 +477,7 @@ fn cuda_raster_indexed_triangle_readback() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     assert_eq!(device.backend_type(), BackendType::Cuda);
@@ -497,7 +497,7 @@ fn cuda_raster_indexed_triangle_readback() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -569,7 +569,7 @@ fn cuda_raster_to_present_multi_frame() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -603,7 +603,7 @@ fn cuda_raster_to_present_multi_frame() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -677,7 +677,7 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -699,7 +699,7 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
     let cs = ShaderModule::from_slang(&device, FILL_VERTS_SHADER).expect("compute shader");
     let compute = ComputePipeline::new(&device, &cs).expect("compute pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     // Empty shared VB — compute fills it each frame.
     let vertex_buffer = pool
         .acquire_buffer_sized::<f32>(18, BufferKind::Scattered, goldy::BufferFlags::empty())
@@ -788,7 +788,7 @@ fn cuda_compute_generated_indices_raster() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -810,7 +810,7 @@ fn cuda_compute_generated_indices_raster() {
     let cs = ShaderModule::from_slang(&device, FILL_INDICES_SHADER).expect("compute shader");
     let compute = ComputePipeline::new(&device, &cs).expect("compute pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -895,7 +895,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -914,7 +914,7 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_sized::<Vertex2D>(3, BufferKind::Scattered, goldy::BufferFlags::empty())
         .expect("vertex buffer");
@@ -1041,7 +1041,7 @@ fn cuda_raster_goldy_vertex_color_2d() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -1060,7 +1060,7 @@ fn cuda_raster_goldy_vertex_color_2d() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
@@ -1178,7 +1178,7 @@ fn cuda_raster_bindless_buffer_tint() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -1197,7 +1197,7 @@ fn cuda_raster_bindless_buffer_tint() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     // White vertices × green tint → green. (Component-wise red×green is black.)
     let vertices = [
         Vertex2D::new(0.0, 0.5, Color::WHITE),
@@ -1276,7 +1276,7 @@ fn cuda_raster_bindless_tint_change_rerecords() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -1295,7 +1295,7 @@ fn cuda_raster_bindless_tint_change_rerecords() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = [
         Vertex2D::new(0.0, 0.5, Color::WHITE),
         Vertex2D::new(-0.5, -0.5, Color::WHITE),
@@ -1410,7 +1410,7 @@ fn cuda_raster_bindless_sampled_texture() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("DX12 companion must attach"),
     );
     let ctx = device.create_context().expect("context");
@@ -1429,7 +1429,7 @@ fn cuda_raster_bindless_sampled_texture() {
     )
     .expect("graphics pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = red_triangle_vertices();
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)

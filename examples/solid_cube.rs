@@ -5,10 +5,10 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, IndexFormat, Instance,
-    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, Vertex2D, WithdrawTransaction,
+    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, IndexFormat, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
+    Texture, TextureFormat, Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -126,7 +126,7 @@ const MAX_CUBE_INDICES: usize = 36;
 struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     vertex_parcel: Option<Buffer>,
@@ -175,7 +175,7 @@ impl App {
     }
 
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
@@ -239,7 +239,7 @@ impl App {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

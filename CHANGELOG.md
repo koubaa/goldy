@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-19
+
+### Changed
+
+- **Breaking: `Runtime` replaces public `Device` and `RetainedPool`.** Construction is
+  `Instance → Adapter::request_runtime(&RuntimeDescriptor) → Runtime::create_context()`.
+  Retained parcels are acquired on `Runtime` (`acquire_buffer`, `acquire_texture`,
+  `acquire_record`). `Context` remains a submission timeline and exposes `runtime()`.
+  The C ABI uses `GoldyRuntime` / `goldy_runtime_*`; Python, C++, .NET, and
+  `goldy-ffi-client` follow. There are no aliases or deprecation shims. Backend
+  `DeviceHandle` types stay private.
+
 ### Changed
 
 - **Examples present through Goldy types** — windowed examples bind
@@ -173,9 +185,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipelines on Vulkan (`VK_EXT_mesh_shader`), DX12 (mesh tier 1), and Metal
   (`MTLMeshRenderPipelineDescriptor` / `drawMeshThreadgroups`). Record with
   `SchemeRenderPassBuilder::set_mesh_pipeline` and `dispatch_mesh`. Skip when
-  `DeviceCapabilities::mesh_shaders` is false. WebGPU / CUDA are not wired.
+  `RuntimeCapabilities::mesh_shaders` is false. WebGPU / CUDA are not wired.
 
-- **`DeviceCapabilities` RT / mesh bits** — `ray_query`, `ray_tracing_pipelines`,
+- **`RuntimeCapabilities` RT / mesh bits** — `ray_query`, `ray_tracing_pipelines`,
   `mesh_shaders`, and `amplification_shaders` report adapter hardware (Vulkan
   extensions + features, DXR / mesh tiers, Metal `supportsRaytracing` / GPU
   family). Slang compile plumbing accepts RT and mesh stages (`rgen_main`,
@@ -186,7 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closest-hit group with a backend-owned shader-binding table. Vulkan
   `vkCmdTraceRaysKHR` and DX12 `DispatchRays` (DIRECT queue). Bind raygen
   resources like compute (`Accel`, `Scattered`, `DispatchRaysIndex`). Skip when
-  `DeviceCapabilities::ray_tracing_pipelines` is false. Metal exposes
+  `RuntimeCapabilities::ray_tracing_pipelines` is false. Metal exposes
   `ray_query` only (no SBT / `TraceRays`).
 
 - **Graph validation (`GoldyError::Validation`)** — `Scheme::submit` always checks

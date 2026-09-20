@@ -5,9 +5,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example triangle_headless`
 
 use goldy_ffi_client::{
-    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad, TextureFlags, TextureFormat,
-    TextureKind, Vertex2D,
+    shader::builtins, BufferKind, Color, Context, DepthFormat, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, TargetLoad, TextureFlags,
+    TextureFormat, TextureKind, Vertex2D,
 };
 
 fn main() -> goldy_ffi_client::Result<()> {
@@ -16,7 +16,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let instance = Instance::new()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?;
+        .request_runtime(&RuntimeDescriptor::default())?;
     let ctx = Context::new(&device)?;
 
     let vertices = [

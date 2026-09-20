@@ -7,7 +7,7 @@ Example:
     >>> import numpy as np
     >>>
     >>> instance = goldy.Instance()
-    >>> device = instance.request_adapter().request_device()
+    >>> device = instance.request_adapter().request_runtime()
     >>>
     >>> # Graphics via Scheme (headless)
     >>> ctx = goldy.Context(device)
@@ -62,11 +62,10 @@ from goldy._goldy import (
     # Core classes
     Instance,
     Adapter,
-    Device,
+    Runtime,
     Context,
     Buffer,
     Parcel,
-    RetainedPool,
     RecordBuilder,
     ShaderModule,
     RenderPipeline,
@@ -111,11 +110,10 @@ __all__ = [
     # Core classes
     "Instance",
     "Adapter",
-    "Device",
+    "Runtime",
     "Context",
     "Buffer",
     "Parcel",
-    "RetainedPool",
     "RecordBuilder",
     "ShaderModule",
     "RenderPipeline",
@@ -137,4 +135,4 @@ __all__ = [
     "ComputePipeline",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

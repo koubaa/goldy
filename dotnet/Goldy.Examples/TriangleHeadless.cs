@@ -19,7 +19,7 @@ static class TriangleHeadless
         Console.WriteLine(new string('=', 40));
 
         using var instance = new Instance();
-        using var device = instance.RequestAdapter().RequestDevice();
+        using var device = instance.RequestAdapter().RequestRuntime();
         using var ctx = device.CreateContext();
         Console.WriteLine($"Backend: {instance.BackendType}");
 
@@ -41,10 +41,9 @@ static class TriangleHeadless
             new() { Px = -0.5f, Py = 0.5f, R = 0, G = 1, B = 0, A = 1 },
             new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
         ];
-        using var retainedPool = new RetainedPool(device);
-        using var vertexBuffer = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+        using var vertexBuffer = device.AcquireBuffer(vertices, BufferKind.Scattered);
         using var vertexParcel = vertexBuffer.Field(0);
-        using var readback = retainedPool.AcquireTexture(
+        using var readback = device.AcquireTexture(
             100,
             100,
             TextureFormat.Rgba8Unorm,

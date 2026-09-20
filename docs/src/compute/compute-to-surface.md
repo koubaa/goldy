@@ -67,7 +67,6 @@ struct Uniforms {
     uint width;
     uint height;
     float time;
-    float _padding;
 };
 
 [goldy_compute]
@@ -100,14 +99,14 @@ Guard against out-of-bounds writes in the shader when the resolution isn't a mul
 
 ```rust
 use goldy::{
-    BufferKind, ComputePipeline, DeviceDescriptor, Instance, MemoryExchange, NodeAccess, PresentMode,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    BufferKind, ComputePipeline, RuntimeDescriptor, Instance, MemoryExchange, NodeAccess, PresentMode,
+    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
 };
 
 let instance = Instance::new()?;
 let device = instance
     .request_adapter(&RequestAdapterOptions::default())?
-    .request_device(&DeviceDescriptor::default())?;
+    .request_runtime(&RuntimeDescriptor::default())?;
 let ctx = device.create_context()?;
 
 let surface = SurfaceExchange::new_with_config(
@@ -122,9 +121,8 @@ let surface = SurfaceExchange::new_with_config(
 let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
-let mut retained_pool = RetainedPool::new(device.clone());
-let uniform_buffer = retained_pool.acquire_buffer_with_data(
-    &[Uniforms { width, height, time: 0.0, _padding: 0.0 }],
+let uniform_buffer = device.acquire_buffer_with_data(
+    &[Uniforms { width, height, time: 0.0 }],
     BufferKind::Scattered,
 )?;
 
@@ -140,11 +138,11 @@ scheme
 let mut upload = Scheme::new(&ctx);
 let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload,
-    goldy::DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
+    goldy::DepositTarget::buffer_elements::<Uniforms>(&uniform_buffer, 1),
 )?;
-uniform_deposit.write(
+uniform_deposit.write_data(
     0,
-    bytemuck::bytes_of(&Uniforms { width, height, time: elapsed, _padding: 0.0 }),
+    &[Uniforms { width, height, time: elapsed }],
 )?;
 upload.submit()?;
 

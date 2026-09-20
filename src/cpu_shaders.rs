@@ -38,7 +38,7 @@ use goldy_shader_ir::ParamCategory;
 
 /// True when `GOLDY_CPU_SHADERS` is `1` / `true` / `yes`.
 ///
-/// Reserved for a future Device debug option. The compile APIs in this module
+/// Reserved for a future Runtime debug option. The compile APIs in this module
 /// do not require the variable; GPU backends ignore it.
 pub fn enabled() -> bool {
     std::env::var("GOLDY_CPU_SHADERS")
@@ -367,6 +367,9 @@ fn layout_from_kernel_def(def: &KernelDef) -> Result<Vec<CpuParamSlot>> {
                     "CPU host-callable: uniform/broadcast param `{}` does not lower yet",
                     p.name
                 );
+            }
+            ParamCategory::StorageImage => {
+                anyhow::bail!("CPU host-callable: storage image param `{}` does not lower yet", p.name);
             }
         }
     }

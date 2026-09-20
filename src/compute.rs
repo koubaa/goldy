@@ -1,7 +1,7 @@
 //! Compute pipeline management.
 
 use crate::backend::{ComputePipelineHandle, GpuBackend};
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::shader::ShaderModule;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex};
 /// # Example
 ///
 /// ```rust,no_run
-/// use goldy::{ComputePipeline, Context, DeviceDescriptor, Instance, RequestAdapterOptions, Scheme, ShaderModule};
+/// use goldy::{ComputePipeline, Context, RuntimeDescriptor, Instance, RequestAdapterOptions, Scheme, ShaderModule};
 ///
 /// let instance = Instance::new()?;
 /// let device = instance
 ///     .request_adapter(&RequestAdapterOptions::default())?
-///     .request_device(&DeviceDescriptor::default())?;
+///     .request_runtime(&RuntimeDescriptor::default())?;
 /// let ctx = device.create_context()?;
 ///
 /// let shader = ShaderModule::from_slang(&device, r#"
@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct ComputePipeline {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ComputePipelineHandle,
     /// Per push-constant resource slot (shader-signature order), the descriptor
@@ -56,7 +56,7 @@ pub struct ComputePipeline {
 
 impl ComputePipeline {
     /// Create a new compute pipeline.
-    pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self> {
+    pub fn new(device: &Runtime, compute_shader: &ShaderModule) -> Result<Self> {
         Self::new_with_label(device, compute_shader, None)
     }
 
@@ -66,7 +66,7 @@ impl ComputePipeline {
     /// Instruments / Xcode Metal Debugger can distinguish shaders (e.g. `"fine_area"`
     /// instead of a generic `cs_main`). Other backends store it for CPU-side
     /// diagnostics.
-    pub fn new_with_label(device: &Device, compute_shader: &ShaderModule, label: Option<&str>) -> Result<Self> {
+    pub fn new_with_label(device: &Runtime, compute_shader: &ShaderModule, label: Option<&str>) -> Result<Self> {
         tracing::debug!(?label, "Creating compute pipeline");
 
         let seeded = {
@@ -134,7 +134,7 @@ impl ComputePipeline {
 /// until those implement [`GpuBackend::seed_compute_stage`]) or when a frontend Slang session
 /// cannot be created; PSO creation then compiles under the lock as before.
 fn compile_compute_stage_unlocked(
-    device: &Device,
+    device: &Runtime,
     shader: &ShaderModule,
 ) -> Result<Option<(Vec<u8>, crate::slang::ShaderReflection)>> {
     let target = {

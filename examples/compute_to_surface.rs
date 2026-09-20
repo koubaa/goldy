@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, ComputePipeline, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, MemoryExchange,
-    NodeAccess, PresentMode, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Texture,
-    Transaction, WithdrawTransaction,
+    Buffer, BufferKind, DepositTarget, DepositTransaction, Instance, MemoryExchange, PresentMode,
+    RequestAdapterOptions, RuntimeDescriptor, Scheme, SurfaceConfig, SurfaceExchange, Texture, Transaction,
+    WithdrawTransaction,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,53 +24,39 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Uniforms {
     width: u32,
     height: u32,
     time: f32,
-    _padding: f32,
 }
-impl goldy::StructuredBufferElement for Uniforms {}
 
-const COMPUTE_SHADER: &str = r#"
-import goldy_exp;
-
-struct Uniforms {
-    uint width;
-    uint height;
-    float time;
-    float _padding;
-};
-
-[goldy_compute]
-[numthreads(8, 8, 1)]
-void cs_main(BufRO<Uniforms> uniforms_buf, DirectSpatial<float4> output, ThreadId tid) {
-    Uniforms u = uniforms_buf[0];
-
-    if (tid.x >= u.width || tid.y >= u.height)
+#[goldy::compute(workgroup_size = [8, 8, 1])]
+fn plasma(uniforms: &[Uniforms], output: goldy::gpu::DirectSpatial<goldy::gpu::Float4>) {
+    let tid = goldy::gpu::global_id();
+    let u: Uniforms = uniforms[0];
+    if tid.x >= u.width || tid.y >= u.height {
         return;
+    }
 
-    float2 uv = float2(float(tid.x) / float(u.width),
-                       float(tid.y) / float(u.height));
-    float2 p = uv * 2.0 - 1.0;
-    p.x *= float(u.width) / float(u.height);
+    let uv = goldy::gpu::float2(tid.x as f32 / u.width as f32, tid.y as f32 / u.height as f32);
+    let mut p = uv * 2.0 - 1.0;
+    p.x *= u.width as f32 / u.height as f32;
 
-    float t = u.time;
-    float v = 0.0;
-    v += sin(p.x * 6.0 + t);
-    v += sin(p.y * 6.0 + t * 1.3);
-    v += sin((p.x + p.y) * 4.0 + t * 0.7);
-    v += sin(length(p) * 8.0 - t * 2.0);
+    let mut v = 0.0;
+    v += goldy::gpu::sin(p.x * 6.0 + u.time);
+    v += goldy::gpu::sin(p.y * 6.0 + u.time * 1.3);
+    v += goldy::gpu::sin((p.x + p.y) * 4.0 + u.time * 0.7);
+    v += goldy::gpu::sin(goldy::gpu::length(p) * 8.0 - u.time * 2.0);
     v *= 0.25;
 
-    float3 col = float3(0.5 + 0.5 * sin(v * 3.14159 + 0.0),
-                        0.5 + 0.5 * sin(v * 3.14159 + 2.094),
-                        0.5 + 0.5 * sin(v * 3.14159 + 4.188));
-    output[tid.xy] = float4(col, 1.0);
+    let col = goldy::gpu::float3(
+        0.5 + 0.5 * goldy::gpu::sin(v * 3.14159 + 0.0),
+        0.5 + 0.5 * goldy::gpu::sin(v * 3.14159 + 2.094),
+        0.5 + 0.5 * goldy::gpu::sin(v * 3.14159 + 4.188),
+    );
+    output[tid.xy] = goldy::gpu::float4(col.x, col.y, col.z, 1.0);
 }
-"#;
 
 const INITIAL_WIDTH: u32 = 800;
 const INITIAL_HEIGHT: u32 = 600;
@@ -117,11 +103,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Device, context, and compiled compute pipeline — everything except the window/surface.
+/// Runtime, context, and compiled compute pipeline — everything except the window/surface.
 struct GpuWarmup {
     ctx: goldy::Context,
-    compute_pipeline: ComputePipeline,
-    device: Arc<goldy::Device>,
+    kernel: plasma::Kernel,
+    device: Arc<goldy::Runtime>,
 }
 
 fn warm_gpu() -> Result<GpuWarmup> {
@@ -129,16 +115,11 @@ fn warm_gpu() -> Result<GpuWarmup> {
     let device = Arc::new(
         instance
             .request_adapter(&RequestAdapterOptions::default())?
-            .request_device(&DeviceDescriptor::default())?,
+            .request_runtime(&RuntimeDescriptor::default())?,
     );
     let ctx = device.create_context()?;
-    let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
-    let compute_pipeline = ComputePipeline::new(&device, &shader)?;
-    Ok(GpuWarmup {
-        ctx,
-        compute_pipeline,
-        device,
-    })
+    let kernel = plasma::Kernel::prepare(&device)?;
+    Ok(GpuWarmup { ctx, kernel, device })
 }
 
 #[derive(Default)]
@@ -156,7 +137,7 @@ struct RenderState {
     readback: Option<Texture>,
     withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
-    compute_pipeline: ComputePipeline,
+    compute_pipeline: plasma::Kernel,
     uniform_buffer: Buffer,
     upload_scheme: Scheme,
     uniform_deposit: DepositTransaction,
@@ -167,30 +148,20 @@ struct RenderState {
 
 fn record_scheme(
     scheme: &mut Scheme,
-    pipeline: &ComputePipeline,
+    kernel: &plasma::Kernel,
     uniform: &Buffer,
     width: u32,
     height: u32,
     surface: Option<&SurfaceExchange>,
     readback: Option<&Texture>,
 ) -> Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
-    let wg_x = width.div_ceil(8);
-    let wg_y = height.div_ceil(8);
     if let Some(surface) = surface {
         let (lease, present) = surface.bind_destination(scheme)?;
-        scheme
-            .node("compute", pipeline)
-            .with_parcel(uniform, NodeAccess::Read)
-            .with_present(&lease)
-            .dispatch(wg_x, wg_y, 1);
+        kernel.record(scheme, "compute", uniform, &lease).over_2d(width, height);
         Ok((Some(present), None))
     } else {
         let target = readback.expect("capture readback");
-        scheme
-            .node("compute", pipeline)
-            .with_parcel(uniform, NodeAccess::Read)
-            .with_parcel(target, NodeAccess::Write)
-            .dispatch(wg_x, wg_y, 1);
+        kernel.record(scheme, "compute", uniform, target).over_2d(width, height);
         let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, target)?;
         Ok((None, Some(withdraw)))
     }
@@ -229,7 +200,7 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("GPU warmup state missing"))?;
         let GpuWarmup {
             ctx,
-            compute_pipeline,
+            kernel: compute_pipeline,
             device,
             ..
         } = warmup;
@@ -250,7 +221,6 @@ impl App {
                 width,
                 height,
                 time: 0.0,
-                _padding: 0.0,
             }],
             BufferKind::Scattered,
         )?;
@@ -269,7 +239,7 @@ impl App {
         let mut upload_scheme = Scheme::new(&ctx);
         let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&uniform_buffer, std::mem::size_of::<Uniforms>() as u64),
+            DepositTarget::buffer_elements::<Uniforms>(&uniform_buffer, 1),
         )?;
 
         self.state = Some(RenderState {
@@ -408,10 +378,9 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         width,
         height,
         time: elapsed,
-        _padding: 0.0,
     };
 
-    state.uniform_deposit.write(0, bytemuck::bytes_of(&uniforms))?;
+    state.uniform_deposit.write_data(0, &[uniforms])?;
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;

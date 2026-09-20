@@ -4,9 +4,8 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
-    goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
+    goldy_context_create, goldy_context_destroy, goldy_instance_destroy, goldy_memory_exchange_bind_withdraw_texture,
+    goldy_memory_exchange_create, goldy_memory_exchange_destroy, goldy_runtime_acquire_texture, goldy_runtime_destroy,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_lease_render_target,
     goldy_scheme_render_pass_begin, goldy_scheme_render_pass_finish, goldy_scheme_render_target_lease_destroy,
     goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_texture_destroy, goldy_withdraw_transaction_byte_size,
@@ -26,10 +25,8 @@ fn scheme_clear_render_target_readback_is_red() {
         let ctx = goldy_context_create(device);
         assert!(!ctx.is_null(), "{}", last_ffi_message());
 
-        let pool = goldy_retained_pool_create(device);
-        assert!(!pool.is_null(), "{}", last_ffi_message());
-        let readback = goldy_retained_pool_acquire_texture(
-            pool,
+        let readback = goldy_runtime_acquire_texture(
+            device,
             W,
             H,
             GoldyTextureFormat::Rgba8Unorm,
@@ -110,9 +107,8 @@ fn scheme_clear_render_target_readback_is_red() {
         goldy_scheme_render_target_lease_destroy(rt);
         goldy_scheme_destroy(scheme);
         goldy_texture_destroy(readback);
-        goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);
-        goldy_device_destroy(device);
+        goldy_runtime_destroy(device);
         goldy_instance_destroy(instance);
     }
 }

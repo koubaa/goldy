@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
-use crate::device::Device;
 use crate::error::{non_null, Result};
+use crate::runtime::Runtime;
 use crate::sys::{self, GoldyRecordBuilder};
 use bytemuck::Pod;
 use std::ffi::CString;
@@ -57,8 +57,8 @@ impl RecordBuilder {
         Ok(slot)
     }
 
-    pub fn build(self, device: &Device) -> Result<Buffer> {
-        let ptr = unsafe { sys::goldy_record_builder_build(self.ptr, device.retained_pool_ptr()?) };
+    pub fn build(self, runtime: &Runtime) -> Result<Buffer> {
+        let ptr = unsafe { sys::goldy_record_builder_build(self.ptr, runtime.ptr) };
         std::mem::forget(self);
         Buffer::from_ptr(non_null(ptr)?)
     }
@@ -73,7 +73,7 @@ impl Drop for RecordBuilder {
     }
 }
 
-/// One field for [`crate::Device::acquire_record`].
+/// One field for [`crate::Runtime::acquire_record`].
 pub struct RecordField<'a> {
     pub name: Option<&'a str>,
     pub data: &'a [u8],

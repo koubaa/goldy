@@ -45,26 +45,26 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_instance_get_adapter")]
     internal static partial GoldyResult InstanceGetAdapter(nint instance, uint index, out AdapterInfoNative info);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_instance_create_device_for_adapter")]
-    internal static partial nint InstanceCreateDeviceForAdapter(nint instance, uint adapterId);
+    [LibraryImport(LibName, EntryPoint = "goldy_instance_create_runtime_for_adapter")]
+    internal static partial nint InstanceCreateRuntimeForAdapter(nint instance, uint adapterId);
 
     // ========================================================================
-    // Device
+    // Runtime
     // ========================================================================
 
-    [LibraryImport(LibName, EntryPoint = "goldy_device_destroy")]
-    internal static partial void DeviceDestroy(nint device);
+    [LibraryImport(LibName, EntryPoint = "goldy_runtime_destroy")]
+    internal static partial void RuntimeDestroy(nint runtime);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_device_adapter_id")]
-    internal static partial uint DeviceAdapterId(nint device);
+    [LibraryImport(LibName, EntryPoint = "goldy_runtime_adapter_id")]
+    internal static partial uint RuntimeAdapterId(nint runtime);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_device_is_valid")]
+    [LibraryImport(LibName, EntryPoint = "goldy_runtime_is_valid")]
     [return: MarshalAs(UnmanagedType.U1)]
-    internal static partial bool DeviceIsValid(nint device);
+    internal static partial bool RuntimeIsValid(nint runtime);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_device_has_library", StringMarshalling = StringMarshalling.Utf8)]
+    [LibraryImport(LibName, EntryPoint = "goldy_runtime_has_library", StringMarshalling = StringMarshalling.Utf8)]
     [return: MarshalAs(UnmanagedType.U1)]
-    internal static partial bool DeviceHasLibrary(nint device, string name);
+    internal static partial bool RuntimeHasLibrary(nint runtime, string name);
 
     // ========================================================================
     // Shader
@@ -282,18 +282,12 @@ internal static partial class NativeMethods
         nint transaction, ulong offset, nint data, nuint dataSize);
 
     // ========================================================================
-    // RetainedPool / Parcel
+    // Runtime acquire / Parcel
     // ========================================================================
 
-    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_create")]
-    internal static partial nint RetainedPoolCreate(nint device);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_destroy")]
-    internal static partial void RetainedPoolDestroy(nint pool);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_acquire_buffer")]
-    internal static partial nint RetainedPoolAcquireBuffer(
-        nint pool, ulong size, BufferKind access, uint elementStride, nint data, nuint dataSize);
+    [LibraryImport(LibName, EntryPoint = "goldy_runtime_acquire_buffer")]
+    internal static partial nint RuntimeAcquireBuffer(
+        nint runtime, ulong size, BufferKind access, uint elementStride, nint data, nuint dataSize);
 
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_destroy")]
     internal static partial void BufferDestroy(nint buffer);
@@ -332,8 +326,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_record_builder_build")]
     internal static partial nint RecordBuilderBuild(nint builder, nint pool);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_acquire_texture")]
-    internal static partial nint RetainedPoolAcquireTexture(
+    [LibraryImport(LibName, EntryPoint = "goldy_runtime_acquire_texture")]
+    internal static partial nint RuntimeAcquireTexture(
         nint pool,
         uint width,
         uint height,

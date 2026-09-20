@@ -14,7 +14,7 @@ public sealed class ShaderModule : IDisposable
     /// <summary>
     /// Create a shader module from Slang source.
     /// </summary>
-    public ShaderModule(Device device, string source)
+    public ShaderModule(Runtime device, string source)
     {
         device.ThrowIfDisposed();
         

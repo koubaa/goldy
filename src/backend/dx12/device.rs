@@ -1,4 +1,4 @@
-//! Device management logic.
+//! Runtime management logic.
 
 use super::pso_cache;
 use super::types::{self, DxgiAdapterInfo, LogicalDevice};
@@ -123,8 +123,11 @@ pub(super) fn query_adapter_gpu_features(adapter: &IDXGIAdapter1) -> AdapterGpuF
 }
 
 /// Build the public capability snapshot for a physical adapter.
-pub(super) fn adapter_capabilities(adapters: &[DxgiAdapterInfo], adapter_id: u32) -> crate::device::DeviceCapabilities {
-    let mut caps = crate::device::DeviceCapabilities {
+pub(super) fn adapter_capabilities(
+    adapters: &[DxgiAdapterInfo],
+    adapter_id: u32,
+) -> crate::runtime::RuntimeCapabilities {
+    let mut caps = crate::runtime::RuntimeCapabilities {
         has_zero_copy_storage_readback: false,
         host_sidecar_on_submit_worker: true,
         ..Default::default()

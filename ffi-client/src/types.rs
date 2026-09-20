@@ -268,9 +268,9 @@ pub struct RequestAdapterOptions {
     pub force_fallback_adapter: bool,
 }
 
-/// Descriptor for [`crate::Adapter::request_device`].
+/// Descriptor for [`crate::Adapter::request_runtime`].
 #[derive(Debug, Clone, Default)]
-pub struct DeviceDescriptor {
+pub struct RuntimeDescriptor {
     pub label: Option<String>,
 }
 

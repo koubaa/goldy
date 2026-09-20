@@ -15,7 +15,7 @@ public sealed class RenderPipeline : IDisposable
     /// Create a new render pipeline.
     /// </summary>
     public RenderPipeline(
-        Device device,
+        Runtime device,
         ShaderModule vertexShader,
         ShaderModule fragmentShader,
         RenderPipelineDesc desc)

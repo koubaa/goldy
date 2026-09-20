@@ -4,8 +4,8 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, PresentMode, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
+    BufferKind, Color, ComputePipeline, Instance, PresentMode, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
     TargetLoad, TextureFormat, Vertex2D,
 };
 use raw_window_handle::{
@@ -104,7 +104,7 @@ fn cuda_raster_direct_retained_steady_state() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("CUDA/DX12 companion"),
     );
     let ctx = device.create_context().expect("context");
@@ -135,7 +135,7 @@ fn cuda_raster_direct_retained_steady_state() {
         },
     )
     .expect("pipeline");
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertices = [
         Vertex2D::new(0.0, 0.5, Color::RED),
         Vertex2D::new(-0.5, -0.5, Color::RED),
@@ -225,7 +225,7 @@ fn cuda_compute_to_present_retained_steady_state() {
         .expect("CUDA adapter");
     let device = Arc::new(
         adapter
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("CUDA/DX12 companion"),
     );
     let ctx = device.create_context().expect("context");

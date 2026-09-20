@@ -7,20 +7,19 @@ Goldy is a GPU runtime for the [Fondaco Machine](../../docs/src/fondaco/specific
 ```csharp
 using Goldy;
 
-// Create instance and device
+// Create instance and runtime
 using var instance = new Instance();
-using var device = instance.RequestAdapter().RequestDevice();
-using var ctx = device.CreateContext();
+using var runtime = instance.RequestAdapter().RequestRuntime();
+using var ctx = runtime.CreateContext();
 
 // Headless triangle via Scheme
-using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
-using var pipeline = new RenderPipeline(device, shader, shader, new RenderPipelineDesc
+using var shader = new ShaderModule(runtime, ShaderModule.BuiltinVertexColor2D);
+using var pipeline = new RenderPipeline(runtime, shader, shader, new RenderPipelineDesc
 {
     VertexAttributes = VertexLayouts.Vertex2D,
     TargetFormat = TextureFormat.Rgba8Unorm,
 });
-using var retainedPool = new RetainedPool(device);
-using var readback = retainedPool.AcquireTexture(
+using var readback = runtime.AcquireTexture(
     100, 100, TextureFormat.Rgba8Unorm, TextureKind.Direct,
     TextureFlags.CopySrc | TextureFlags.CopyDst);
 

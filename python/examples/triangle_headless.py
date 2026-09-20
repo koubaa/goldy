@@ -14,7 +14,7 @@ def main():
     print("=" * 40)
 
     instance = goldy.Instance()
-    device = instance.request_adapter().request_device()
+    device = instance.request_adapter().request_runtime()
     ctx = device.create_context()
     print(f"Backend: {instance.backend_type}")
 
@@ -52,9 +52,8 @@ def main():
         ],
         dtype=np.float32,
     )
-    retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
-    readback = retained_pool.acquire_texture(
+    vertex_parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+    readback = device.acquire_texture(
         100,
         100,
         goldy.TextureFormat.RGBA8_UNORM,

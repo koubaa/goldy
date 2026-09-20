@@ -7,10 +7,9 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
-    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_backend_type,
-    goldy_instance_destroy, goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_create,
-    goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_retained_pool_acquire_buffer,
-    goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
+    goldy_context_create, goldy_context_destroy, goldy_instance_backend_type, goldy_instance_destroy,
+    goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
+    goldy_parcel_destroy, goldy_runtime_acquire_buffer, goldy_runtime_destroy, goldy_scheme_compute_node_begin,
     goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_param, goldy_scheme_compute_node_with_parcel,
     goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len, goldy_scheme_replay_stats,
     goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
@@ -37,10 +36,7 @@ fn scheme_compute_node_fills_buffer_with_42() {
         let ctx = goldy_context_create(device);
         assert!(!ctx.is_null(), "{}", last_ffi_message());
 
-        let pool = goldy_retained_pool_create(device);
-        assert!(!pool.is_null(), "{}", last_ffi_message());
-        let buffer =
-            goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
+        let buffer = goldy_runtime_acquire_buffer(device, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!buffer.is_null(), "{}", last_ffi_message());
         let parcel = goldy_buffer_field(buffer, 0);
         assert!(!parcel.is_null(), "{}", last_ffi_message());
@@ -130,9 +126,8 @@ fn scheme_compute_node_fills_buffer_with_42() {
         goldy_shader_destroy(shader);
         goldy_parcel_destroy(parcel);
         goldy_buffer_destroy(buffer);
-        goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);
-        goldy_device_destroy(device);
+        goldy_runtime_destroy(device);
         goldy_instance_destroy(instance);
     }
 }
@@ -154,9 +149,7 @@ fn scheme_compute_node_with_param_uint_roundtrip() {
         let ctx = goldy_context_create(device);
         assert!(!ctx.is_null(), "{}", last_ffi_message());
 
-        let pool = goldy_retained_pool_create(device);
-        assert!(!pool.is_null(), "{}", last_ffi_message());
-        let buffer = goldy_retained_pool_acquire_buffer(pool, 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
+        let buffer = goldy_runtime_acquire_buffer(device, 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!buffer.is_null(), "{}", last_ffi_message());
         let parcel = goldy_buffer_field(buffer, 0);
         assert!(!parcel.is_null(), "{}", last_ffi_message());
@@ -225,9 +218,8 @@ fn scheme_compute_node_with_param_uint_roundtrip() {
         goldy_shader_destroy(shader);
         goldy_parcel_destroy(parcel);
         goldy_buffer_destroy(buffer);
-        goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);
-        goldy_device_destroy(device);
+        goldy_runtime_destroy(device);
         goldy_instance_destroy(instance);
     }
 }

@@ -175,16 +175,15 @@ def main() -> int:
     render_src = (SHADERS_DIR / "game_of_life_render.slang").read_text(encoding="utf-8")
 
     instance = goldy.Instance()
-    device = instance.request_adapter().request_device()
+    device = instance.request_adapter().request_runtime()
     ctx = device.create_context()
     surface = goldy.SurfaceExchange.from_glfw(ctx, window)
 
     initial = create_initial_state()
-    retained_pool = goldy.RetainedPool(device)
-    record = retained_pool.acquire_record()
+    record = device.acquire_record()
     record.emplace_field("a", initial)
     record.emplace_field("b", initial)
-    cells = record.build(retained_pool)
+    cells = record.build(device)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
     render_shader = goldy.ShaderModule.from_slang(device, render_src)

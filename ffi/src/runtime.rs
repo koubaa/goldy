@@ -1,10 +1,10 @@
-//! FFI bindings for Device.
+//! FFI bindings for Runtime.
 
 use std::ffi::{c_char, CStr};
 
-/// Opaque handle to a Goldy Device.
-pub struct GoldyDevice {
-    pub(crate) inner: goldy::Device,
+/// Opaque handle to a Goldy Runtime.
+pub struct GoldyRuntime {
+    pub(crate) inner: goldy::Runtime,
 }
 
 /// Destroy a device.
@@ -12,7 +12,7 @@ pub struct GoldyDevice {
 /// # Safety
 /// The pointer must be valid and not used after this call.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_device_destroy(device: *mut GoldyDevice) {
+pub unsafe extern "C" fn goldy_runtime_destroy(device: *mut GoldyRuntime) {
     if !device.is_null() {
         drop(Box::from_raw(device));
     }
@@ -23,7 +23,7 @@ pub unsafe extern "C" fn goldy_device_destroy(device: *mut GoldyDevice) {
 /// # Safety
 /// The device pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_device_adapter_id(device: *const GoldyDevice) -> u32 {
+pub unsafe extern "C" fn goldy_runtime_adapter_id(device: *const GoldyRuntime) -> u32 {
     if device.is_null() {
         return 0;
     }
@@ -35,7 +35,7 @@ pub unsafe extern "C" fn goldy_device_adapter_id(device: *const GoldyDevice) -> 
 /// # Safety
 /// The device pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_device_is_valid(device: *const GoldyDevice) -> bool {
+pub unsafe extern "C" fn goldy_runtime_is_valid(device: *const GoldyRuntime) -> bool {
     if device.is_null() {
         return false;
     }
@@ -47,7 +47,7 @@ pub unsafe extern "C" fn goldy_device_is_valid(device: *const GoldyDevice) -> bo
 /// # Safety
 /// The device pointer and name must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_device_has_library(device: *const GoldyDevice, name: *const c_char) -> bool {
+pub unsafe extern "C" fn goldy_runtime_has_library(device: *const GoldyRuntime, name: *const c_char) -> bool {
     if device.is_null() || name.is_null() {
         return false;
     }

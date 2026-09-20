@@ -541,7 +541,7 @@ pub(super) fn memcpy_htod_array(
     )
 }
 
-/// Device buffer → CUDA array copy.
+/// Runtime buffer → CUDA array copy.
 pub(super) fn memcpy_dtod_array(
     stream: &CudaStream,
     src_device_ptr: u64,

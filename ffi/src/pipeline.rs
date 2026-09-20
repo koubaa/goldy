@@ -1,7 +1,7 @@
 //! FFI bindings for RenderPipeline.
 
-use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
+use crate::runtime::GoldyRuntime;
 use crate::shader::GoldyShaderModule;
 use crate::types::{
     GoldyCompareFunction, GoldyDepthFormat, GoldyPrimitiveTopology, GoldyTextureFormat, GoldyVertexAttribute,
@@ -62,7 +62,7 @@ impl Default for GoldyRenderPipelineDesc {
 /// All pointers must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn goldy_render_pipeline_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     vertex_shader: *const GoldyShaderModule,
     fragment_shader: *const GoldyShaderModule,
     desc: *const GoldyRenderPipelineDesc,

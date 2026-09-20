@@ -5,7 +5,7 @@
 //! registry keys and packed into one fixed bind group in shader-parameter order.
 //!
 //! Submit is non-blocking: the timeline advances from `Queue::on_submitted_work_done`
-//! (pumped by `Device::poll`). Host waits use a stored [`wgpu::SubmissionIndex`].
+//! (pumped by `Runtime::poll`). Host waits use a stored [`wgpu::SubmissionIndex`].
 //!
 //! Surfaces (`graphics` feature): `begin_frame` acquires the wgpu drawable.
 //! Presentation picks the cheapest path that actually works:
@@ -4151,9 +4151,9 @@ impl GpuBackend for WebGpuBackend {
         self.adapter_info.clone()
     }
 
-    fn adapter_capabilities(&self, adapter_id: u32) -> crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
         let _ = adapter_id;
-        crate::device::DeviceCapabilities {
+        crate::runtime::RuntimeCapabilities {
             preferred_surface_format: TextureFormat::Bgra8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
             supported_surface_formats: vec![
@@ -4180,7 +4180,7 @@ impl GpuBackend for WebGpuBackend {
             fuse_upload_with_compute_partitions: true,
             // Slang WGSL has no TraceRayInline; do not advertise ray_query until shaders work.
             ray_query: false,
-            ..crate::device::DeviceCapabilities::default()
+            ..crate::runtime::RuntimeCapabilities::default()
         }
     }
 
@@ -6646,9 +6646,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                 return Ok(());
             }
         };
-        let device = Arc::new(crate::Device::from_backend(Box::new(backend))?);
+        let device = Arc::new(crate::Runtime::from_backend(Box::new(backend))?);
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, shader_source)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -6684,9 +6684,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                 return Ok(());
             }
         };
-        let device = Arc::new(crate::Device::from_backend(Box::new(backend))?);
+        let device = Arc::new(crate::Runtime::from_backend(Box::new(backend))?);
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(Arc::clone(&device));
+        let pool = &device;
         let input = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let output = pool.acquire_buffer_sized::<u32>(4, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_TWO_BUFFER_SLANG)?;
@@ -6705,9 +6705,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         Ok(())
     }
 
-    fn scheme_device() -> Result<Option<std::sync::Arc<crate::Device>>> {
+    fn scheme_device() -> Result<Option<std::sync::Arc<crate::Runtime>>> {
         match WebGpuBackend::new() {
-            Ok(backend) => Ok(Some(std::sync::Arc::new(crate::Device::from_backend(Box::new(
+            Ok(backend) => Ok(Some(std::sync::Arc::new(crate::Runtime::from_backend(Box::new(
                 backend,
             ))?))),
             Err(error) => {
@@ -6731,7 +6731,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let out = pool.acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
         let shader = crate::ShaderModule::from_slang(&device, SHADER)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -6762,7 +6762,7 @@ void cs_main(BufRO<float> input, Scattered<float> output, float scale, ThreadId 
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let input = pool.acquire_buffer_with_data(&[1.0f32, 2.0, 3.0, 4.0], BufferKind::Scattered)?;
         let output = pool.acquire_buffer_sized::<f32>(4, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, SHADER)?;
@@ -6796,7 +6796,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let a = pool.acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
         let b = pool.acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
         let shader = crate::ShaderModule::from_slang(&device, SHADER)?;
@@ -6863,7 +6863,7 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let cfg = pool.acquire_buffer_with_data(&[3u32], BufferKind::Broadcast)?;
         let values = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, SHADER)?;
@@ -6887,7 +6887,7 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?;
@@ -6929,7 +6929,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let texture = pool.acquire_texture(
             16,
             16,
@@ -6971,7 +6971,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let texture = pool.acquire_texture(
             16,
             16,
@@ -7012,7 +7012,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let texture = match pool.acquire_texture(
             16,
             16,
@@ -7060,7 +7060,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let pixels = vec![64u8, 128, 192, 255].repeat(4 * 4);
         let texture = pool.acquire_texture(
             4,
@@ -7114,7 +7114,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 }
 "#;
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(std::sync::Arc::clone(&device));
+        let pool = &device;
         let tex = pool.acquire_texture(
             4,
             4,

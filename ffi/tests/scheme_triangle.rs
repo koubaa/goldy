@@ -4,13 +4,12 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_buffer_destroy, goldy_buffer_field, goldy_context_create, goldy_context_destroy, goldy_device_destroy,
-    goldy_instance_destroy, goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create,
-    goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
-    goldy_retained_pool_acquire_buffer, goldy_retained_pool_acquire_texture, goldy_retained_pool_create,
-    goldy_retained_pool_destroy, goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy,
-    goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_draw,
-    goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
+    goldy_buffer_destroy, goldy_buffer_field, goldy_context_create, goldy_context_destroy, goldy_instance_destroy,
+    goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
+    goldy_parcel_destroy, goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_runtime_acquire_buffer,
+    goldy_runtime_acquire_texture, goldy_runtime_destroy, goldy_scheme_copy_to_texture, goldy_scheme_create,
+    goldy_scheme_destroy, goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin,
+    goldy_scheme_render_pass_draw, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
     goldy_scheme_render_pass_set_vertex_buffer_parcel, goldy_scheme_render_pass_with_parcel,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
     goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy,
@@ -62,10 +61,8 @@ fn scheme_triangle_readback_center_pixel_lit() {
         let vertex_bytes =
             std::slice::from_raw_parts(vertices.as_ptr() as *const u8, vertices.len() * size_of::<Vertex2D>());
 
-        let pool = goldy_retained_pool_create(device);
-        assert!(!pool.is_null(), "{}", last_ffi_message());
-        let vertex_buffer = goldy_retained_pool_acquire_buffer(
-            pool,
+        let vertex_buffer = goldy_runtime_acquire_buffer(
+            device,
             vertex_bytes.len() as u64,
             GoldyBufferKind::Scattered,
             0,
@@ -76,8 +73,8 @@ fn scheme_triangle_readback_center_pixel_lit() {
         let vertex_parcel = goldy_buffer_field(vertex_buffer, 0);
         assert!(!vertex_parcel.is_null(), "{}", last_ffi_message());
 
-        let readback = goldy_retained_pool_acquire_texture(
-            pool,
+        let readback = goldy_runtime_acquire_texture(
+            device,
             W,
             H,
             GoldyTextureFormat::Rgba8Unorm,
@@ -221,9 +218,8 @@ fn scheme_triangle_readback_center_pixel_lit() {
         goldy_parcel_destroy(vertex_parcel);
         goldy_texture_destroy(readback);
         goldy_buffer_destroy(vertex_buffer);
-        goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);
-        goldy_device_destroy(device);
+        goldy_runtime_destroy(device);
         goldy_instance_destroy(instance);
     }
 }

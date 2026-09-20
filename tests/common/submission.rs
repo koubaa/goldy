@@ -1,15 +1,15 @@
 //! Submission/timeline context for integration tests (`gpu_progress` / `wait_until`).
 
-use goldy::{types::BackendType, Context, Device};
+use goldy::{types::BackendType, Context, Runtime};
 
-pub fn submission_context(device: &Device) -> Context {
+pub fn submission_context(device: &Runtime) -> Context {
     device.create_context().expect("context")
 }
 
 /// DX12 WARP advertises DXR tiers but BuildRaytracingAccelerationStructure
 /// access-violates (0xC0000005) in Goldy CI and on local WARP. Skip GPU RT tests.
 #[allow(dead_code)]
-pub fn skip_dx12_warp_ray_tracing(device: &Device) -> bool {
+pub fn skip_dx12_warp_ray_tracing(device: &Runtime) -> bool {
     if device.backend_type() != BackendType::Dx12 {
         return false;
     }
@@ -28,7 +28,7 @@ pub fn skip_dx12_warp_ray_tracing(device: &Device) -> bool {
 }
 
 /// Clamp libtest parallelism so concurrent trials cannot exhaust Vulkan's fixed
-/// per-device compute-queue pool (shared `Device` across trials).
+/// per-device compute-queue pool (shared `Runtime` across trials).
 ///
 /// Several integration tests hold two live [`Context`]s at once (`two_contexts_*`).
 /// Worst-case concurrent demand is `2 * test_threads`, so cap threads at `pool / 2`.
@@ -36,7 +36,7 @@ pub fn skip_dx12_warp_ray_tracing(device: &Device) -> bool {
 ///
 /// Included via `#[path]` into multiple test crates; not every crate calls this.
 #[allow(dead_code)]
-pub fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Device) {
+pub fn clamp_test_threads(args: &mut libtest_mimic::Arguments, device: &Runtime) {
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
         args.test_threads = Some(1);

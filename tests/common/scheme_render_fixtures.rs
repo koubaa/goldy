@@ -1,26 +1,26 @@
 //! Scheme render fixtures for FLIP screenshot tests and scheme render integration.
 
 use goldy::{
-    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, TargetLoad,
-    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Runtime, Scheme, ShaderModule,
+    TargetLoad, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 
 use super::scheme_render::{acquire_readback_texture, scheme_render_and_readback};
 use crate::gol_state::{create_gol_initial_state, GOL_GRID_HEIGHT, GOL_GRID_WIDTH};
 
-pub fn create_device() -> Option<Device> {
+pub fn create_device() -> Option<Runtime> {
     let instance = Instance::new().ok()?;
     instance
         .request_adapter(&RequestAdapterOptions::default())
         .ok()?
-        .request_device(&goldy::DeviceDescriptor::default())
+        .request_runtime(&goldy::RuntimeDescriptor::default())
         .ok()
 }
 
 /// Prefer the device's advertised render-target format (CUDA: `Rgba8Unorm`).
-fn color_target_format(device: &Device) -> TextureFormat {
+fn color_target_format(device: &Runtime) -> TextureFormat {
     device.capabilities().preferred_render_target_format
 }
 
@@ -43,11 +43,11 @@ fn pixels_as_rgba8(raw: Vec<u8>, format: TextureFormat, width: u32, height: u32)
     }
 }
 
-pub fn scheme_render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {
+pub fn scheme_render_clear(device: &Runtime, width: u32, height: u32, color: Color) -> Vec<u8> {
     let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
-    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
-    let readback = acquire_readback_texture(&mut pool, width, height, format);
+    let pool = &device;
+    let readback = acquire_readback_texture(&pool, width, height, format);
     let raw = scheme_render_and_readback(
         &ctx,
         width,
@@ -63,7 +63,7 @@ pub fn scheme_render_clear(device: &Device, width: u32, height: u32, color: Colo
 }
 
 pub fn scheme_render_triangle(
-    device: &Device,
+    device: &Runtime,
     width: u32,
     height: u32,
     clear_color: Color,
@@ -111,11 +111,11 @@ pub fn scheme_render_triangle(
     )
     .expect("Failed to create pipeline");
 
-    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("vertex buffer");
-    let readback = acquire_readback_texture(&mut pool, width, height, format);
+    let readback = acquire_readback_texture(&pool, width, height, format);
 
     let raw = scheme_render_and_readback(
         &ctx,
@@ -163,7 +163,7 @@ pub fn depth_vertex_layout() -> VertexBufferLayout {
 }
 
 /// Near red (z=0.2) occludes far green (z=0.6) under Less depth compare.
-pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
+pub fn scheme_render_depth_occlusion(device: &Runtime, width: u32, height: u32) -> Vec<u8> {
     let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
 
@@ -207,14 +207,14 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
     let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
-    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let red_vb = pool
         .acquire_buffer_with_data(&red_verts, BufferKind::Scattered)
         .expect("red vb");
     let green_vb = pool
         .acquire_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("green vb");
-    let readback = acquire_readback_texture(&mut pool, width, height, format);
+    let readback = acquire_readback_texture(&pool, width, height, format);
 
     let raw = scheme_render_and_readback(
         &ctx,
@@ -239,7 +239,7 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
     pixels_as_rgba8(raw, format, width, height)
 }
 
-pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
+pub fn scheme_render_game_of_life(device: &Runtime, updates: u32) -> Vec<u8> {
     let format = color_target_format(device);
     let ctx = device.create_context().expect("context");
     const RENDER_WIDTH: u32 = 512;
@@ -251,7 +251,7 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
-    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let buffer_a = pool
         .acquire_buffer_with_data(&initial_state, BufferKind::Scattered)
         .expect("buffer_a");
@@ -296,7 +296,7 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         use_buffer_a = !use_buffer_a;
     }
 
-    let readback = acquire_readback_texture(&mut pool, RENDER_WIDTH, RENDER_HEIGHT, format);
+    let readback = acquire_readback_texture(&pool, RENDER_WIDTH, RENDER_HEIGHT, format);
 
     let raw = scheme_render_and_readback(
         &ctx,

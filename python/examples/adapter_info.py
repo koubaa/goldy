@@ -41,9 +41,9 @@ def main():
             (a for a in adapters if a.device_type == goldy.DeviceType.DISCRETE_GPU),
             None,
         )
-        device = (discrete or adapters[0]).request_device()
+        device = (discrete or adapters[0]).request_runtime()
         print(f"Created device on adapter {device.adapter_id}")
-        print(f"Device valid: {device.is_valid()}")
+        print(f"Runtime valid: {device.is_valid()}")
         print(f"Shader libraries: {device.list_libraries()}")
     except goldy.GoldyError as e:
         print(f"Failed to create device: {e}")

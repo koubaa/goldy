@@ -6,8 +6,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
 use goldy_ffi_client::{
-    ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, TargetLoad, TextureFlags, TextureFormat, TextureKind,
+    ComputePipeline, Context, DepthFormat, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, TargetLoad, TextureFlags, TextureFormat,
+    TextureKind,
 };
 
 const GRID_WIDTH: u32 = 128;
@@ -37,7 +38,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let instance = Instance::new()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?;
+        .request_runtime(&RuntimeDescriptor::default())?;
     let ctx = Context::new(&device)?;
 
     let initial = initial_cells();

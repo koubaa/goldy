@@ -5,8 +5,8 @@
 //! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange,
-    NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig,
+    shader::builtins, Buffer, BufferKind, Color, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig,
     SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use common::{CaptureDump, FpsWindow};
 struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -76,7 +76,7 @@ impl App {
     }
 
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
@@ -127,7 +127,7 @@ impl App {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

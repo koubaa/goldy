@@ -1,5 +1,5 @@
-use crate::device::Device;
 use crate::error::{non_null, Result};
+use crate::runtime::Runtime;
 use crate::shader_module::ShaderModule;
 use crate::sys::{self, GoldyRenderPipeline};
 use crate::types::{render_pipeline_desc_to_ffi, RenderPipelineDesc};
@@ -11,7 +11,7 @@ pub struct RenderPipeline {
 
 impl RenderPipeline {
     pub fn new(
-        device: &Device,
+        device: &Runtime,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
         desc: &RenderPipelineDesc,

@@ -8,8 +8,8 @@
 
 use goldy::types::BackendType;
 use goldy::{
-    test_support, BufferKind, Color, ComputePipeline, DepositTarget, DeviceDescriptor, Instance, MemoryExchange,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    test_support, BufferKind, Color, ComputePipeline, DepositTarget, Instance, MemoryExchange, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule,
     TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use std::sync::Arc;
@@ -104,7 +104,7 @@ fn sample_centroid(pixels: &[u8]) -> (f32, f32, f32) {
 
 fn draw_and_readback(
     ctx: &goldy::Context,
-    device: &Arc<goldy::Device>,
+    device: &Arc<goldy::Runtime>,
     pipeline: &RenderPipeline,
     vertex_buffer: &goldy::Parcel,
     readback: &goldy::Parcel,
@@ -144,7 +144,7 @@ fn acquire_with_data_raster_lands_shared() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
+    let device = Arc::new(adapter.request_runtime(&RuntimeDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -160,7 +160,7 @@ fn acquire_with_data_raster_lands_shared() {
     )
     .expect("pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_with_data(&red_triangle(), BufferKind::Scattered)
         .expect("vb");
@@ -207,7 +207,7 @@ fn separate_deposit_then_draw_promotes_to_shared() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
+    let device = Arc::new(adapter.request_runtime(&RuntimeDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -223,7 +223,7 @@ fn separate_deposit_then_draw_promotes_to_shared() {
     )
     .expect("pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_sized::<Vertex2D>(3, BufferKind::Scattered, goldy::BufferFlags::empty())
         .expect("vb");
@@ -280,7 +280,7 @@ fn compute_then_raster_lands_native_and_twin() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
+    let device = Arc::new(adapter.request_runtime(&RuntimeDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let vs_fs = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("gfx");
     let pipeline = RenderPipeline::new(
@@ -298,7 +298,7 @@ fn compute_then_raster_lands_native_and_twin() {
     let cs = ShaderModule::from_slang(&device, FILL_VERTS_SHADER).expect("cs");
     let compute = ComputePipeline::new(&device, &cs).expect("compute");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_sized::<f32>(18, BufferKind::Scattered, goldy::BufferFlags::empty())
         .expect("vb");
@@ -352,7 +352,7 @@ fn shared_then_kernel_promotes_without_invalidating_schemes() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
+    let device = Arc::new(adapter.request_runtime(&RuntimeDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let vs_fs = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("gfx");
     let pipeline = RenderPipeline::new(
@@ -370,7 +370,7 @@ fn shared_then_kernel_promotes_without_invalidating_schemes() {
     let cs = ShaderModule::from_slang(&device, RECOLOR_VERTS_SHADER).expect("cs");
     let recolor = ComputePipeline::new(&device, &cs).expect("compute");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_with_data(&red_triangle(), BufferKind::Scattered)
         .expect("vb");
@@ -448,7 +448,7 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter");
-    let device = Arc::new(adapter.request_device(&DeviceDescriptor::default()).expect("device"));
+    let device = Arc::new(adapter.request_runtime(&RuntimeDescriptor::default()).expect("device"));
     let ctx = device.create_context().expect("context");
     let shader = ShaderModule::from_slang(&device, TRIANGLE_SHADER).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -464,7 +464,7 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
     )
     .expect("pipeline");
 
-    let mut pool = RetainedPool::new(Arc::clone(&device));
+    let pool = &device;
     let vertex_buffer = pool
         .acquire_buffer_sized::<Vertex2D>(3, BufferKind::Scattered, goldy::BufferFlags::empty())
         .expect("vb");

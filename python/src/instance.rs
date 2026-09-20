@@ -1,7 +1,7 @@
 //! Python wrappers for Instance and Adapter.
 
-use crate::device::PyDevice;
 use crate::error::IntoPyResult;
+use crate::runtime::PyRuntime;
 use crate::types::{PyBackendType, PyDeviceType};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -93,16 +93,16 @@ impl PyAdapter {
     /// Create a device on this adapter.
     ///
     /// Returns:
-    ///     A new Device instance.
+    ///     A new Runtime instance.
     ///
     /// Raises:
     ///     GoldyError: If device creation fails.
-    fn request_device(&self) -> PyResult<PyDevice> {
+    fn request_runtime(&self) -> PyResult<PyRuntime> {
         let device = self
             .inner
-            .request_device(&goldy::DeviceDescriptor::default())
+            .request_runtime(&goldy::RuntimeDescriptor::default())
             .into_py_result()?;
-        Ok(PyDevice {
+        Ok(PyRuntime {
             inner: Arc::new(device),
         })
     }

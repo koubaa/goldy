@@ -13,7 +13,7 @@ DEVICE_PATTERNS = [
     r"let device = make_device\(\);",
     r"let device = make_device_for_stride_tests\(\);",
     r"let device = request_default_device\([^)]+\);",
-    r"let device = request_device_preferring\([^)]+\);",
+    r"let device = request_runtime_preferring\([^)]+\);",
 ]
 
 

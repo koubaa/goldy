@@ -1,16 +1,16 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
     use crate::parcel::Parcel;
-    use crate::test_support::SerialGpuDevice;
+    use crate::test_support::SerialGpuRuntime;
     use crate::types::{BufferFlags, ResourceAccess};
     use crate::{BufferKind, Context, MemoryExchange, Scheme};
     use std::sync::Arc;
 
-    fn make_device() -> SerialGpuDevice {
-        SerialGpuDevice::new()
+    fn make_device() -> SerialGpuRuntime {
+        SerialGpuRuntime::new()
     }
 
-    fn withdraw_bytes(ctx: &Context, device: &crate::Device, arc: &Arc<crate::buffer::Allocation>) -> Vec<u8> {
+    fn withdraw_bytes(ctx: &Context, device: &crate::Runtime, arc: &Arc<crate::buffer::Allocation>) -> Vec<u8> {
         let parcel = Parcel::from_whole_buffer(Arc::clone(arc), Arc::downgrade(&device.inner));
         let mut scheme = Scheme::new(ctx);
         let tx = MemoryExchange::new(ctx)
@@ -146,7 +146,7 @@ mod buffer_alloc_tests {
     #[test]
     fn device_capabilities_metal_reports_constant_resize() {
         use crate::{types::BufferResizeCost, BackendType};
-        let device = SerialGpuDevice::preferring(crate::DeviceType::IntegratedGpu);
+        let device = SerialGpuRuntime::preferring(crate::DeviceType::IntegratedGpu);
         let _ctx = device.create_context().expect("context");
         assert_eq!(device.backend_type(), BackendType::Metal);
         let caps = device.capabilities();
@@ -158,7 +158,7 @@ mod buffer_alloc_tests {
     #[test]
     fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
         use crate::{types::BufferResizeCost, BackendType};
-        let device = SerialGpuDevice::preferring(crate::DeviceType::DiscreteGpu);
+        let device = SerialGpuRuntime::preferring(crate::DeviceType::DiscreteGpu);
         if device.backend_type() != BackendType::Vulkan {
             return;
         }
@@ -174,7 +174,7 @@ mod buffer_alloc_tests {
     fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
         use crate::{types::BufferResizeCost, BackendType};
         // With multiple backends enabled, `GOLDY_BACKEND` may select a non-DX12 API; skip in that case.
-        let device = SerialGpuDevice::preferring(crate::DeviceType::DiscreteGpu);
+        let device = SerialGpuRuntime::preferring(crate::DeviceType::DiscreteGpu);
         if device.backend_type() != BackendType::Dx12 {
             return;
         }
@@ -189,7 +189,7 @@ mod buffer_alloc_tests {
     #[test]
     fn sparse_backend_oversize_resize_and_hint_within_capacity() {
         use crate::types::BufferResizeCost;
-        let device = SerialGpuDevice::preferring(crate::DeviceType::DiscreteGpu);
+        let device = SerialGpuRuntime::preferring(crate::DeviceType::DiscreteGpu);
         if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
             return;
         }
@@ -225,7 +225,7 @@ mod buffer_alloc_tests {
         data[id.x] = data[id.x] * 2;
     }
     "#;
-        let device = SerialGpuDevice::preferring(DeviceType::DiscreteGpu);
+        let device = SerialGpuRuntime::preferring(DeviceType::DiscreteGpu);
         let ctx = device.create_context().expect("context");
         if device.backend_type() != BackendType::Dx12 {
             return;

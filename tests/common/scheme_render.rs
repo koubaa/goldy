@@ -4,18 +4,13 @@
 #![allow(dead_code)]
 
 use goldy::{
-    Context, DepthFormat, Device, MemoryExchange, Parcel, Scheme, Submission, Texture, TextureFlags, TextureFormat,
+    Context, DepthFormat, MemoryExchange, Parcel, Runtime, Scheme, Submission, Texture, TextureFlags, TextureFormat,
     TextureKind, WithdrawTransaction,
 };
 use std::sync::Arc;
 
 /// Acquire a texture parcel suitable as a copy destination and withdraw source.
-pub fn acquire_readback_texture(
-    pool: &mut goldy::RetainedPool,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-) -> Texture {
+pub fn acquire_readback_texture(pool: &goldy::Runtime, width: u32, height: u32, format: TextureFormat) -> Texture {
     pool.acquire_texture(
         width,
         height,
@@ -91,16 +86,16 @@ pub fn scheme_render_and_readback(
     read_grant_texture(&grant, &mut frame)
 }
 
-pub fn make_device() -> Option<Device> {
+pub fn make_device() -> Option<Runtime> {
     let instance = goldy::Instance::new().ok()?;
     instance
         .request_adapter(&goldy::RequestAdapterOptions::default())
         .ok()?
-        .request_device(&goldy::DeviceDescriptor::default())
+        .request_runtime(&goldy::RuntimeDescriptor::default())
         .ok()
 }
 
-pub fn device_and_pool() -> Option<(Device, goldy::RetainedPool)> {
+pub fn device_and_pool() -> Option<(Runtime, Runtime)> {
     let device = make_device()?;
-    Some((device.clone(), goldy::RetainedPool::new(Arc::new(device))))
+    Some((device.clone(), device))
 }

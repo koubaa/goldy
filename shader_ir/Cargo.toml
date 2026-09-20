@@ -1,6 +1,6 @@
 [package]
 name = "goldy_shader_ir"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Language-independent shader IR and KernelAbi for Goldy Rust→Slang frontends"

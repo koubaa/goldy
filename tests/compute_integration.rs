@@ -14,41 +14,41 @@ mod imp {
     use crate::submission::submission_context;
     use goldy::{
         types::{BackendType, BufferFlags},
-        Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, MemoryExchange, NodeAccess,
-        RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+        Buffer, BufferKind, ComputePipeline, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Runtime,
+        RuntimeDescriptor, Scheme, ShaderModule,
     };
     use std::sync::Arc;
 
-    fn request_default_device(instance: &Instance) -> Device {
+    fn request_default_device(instance: &Instance) -> Runtime {
         instance
             .request_adapter(&RequestAdapterOptions::default())
             .expect("Failed to request adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("Failed to create device")
     }
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         request_default_device(&Instance::new().expect("Failed to create instance"))
     }
 
     fn test_alloc_buffer(
-        device: &Device,
+        device: &Runtime,
         size: u64,
         kind: BufferKind,
         stride: Option<u32>,
         flags: BufferFlags,
     ) -> Buffer {
-        RetainedPool::new(Arc::new(device.clone()))
+        Arc::new(device.clone())
             .acquire_buffer(size, kind, stride, flags, None)
             .expect("acquire_buffer")
     }
 
     fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
-        device: &Device,
+        device: &Runtime,
         data: &[T],
         kind: BufferKind,
     ) -> Buffer {
-        RetainedPool::new(Arc::new(device.clone()))
+        Arc::new(device.clone())
             .acquire_buffer_with_data(data, kind)
             .expect("acquire_buffer_with_data")
     }
@@ -59,7 +59,7 @@ mod imp {
         goldy::test_support::submission_epoch(&scheme.submit().expect("submit empty"))
     }
 
-    fn test_compute_pipeline_creation(device: &Device) {
+    fn test_compute_pipeline_creation(device: &Runtime) {
         const DOUBLE_SHADER: &str = r#"
     import goldy_exp;
 
@@ -79,7 +79,7 @@ mod imp {
         );
     }
 
-    fn test_compute_pipeline_no_bindings(device: &Device) {
+    fn test_compute_pipeline_no_bindings(device: &Runtime) {
         const MINIMAL_SHADER: &str = r#"
     [shader("compute")]
     [numthreads(1, 1, 1)]
@@ -169,7 +169,7 @@ mod imp {
             return;
         }
 
-        let submit_minimal = |device: &Device| {
+        let submit_minimal = |device: &Runtime| {
             let ctx = submission_context(device);
             let shader = ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
             let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
@@ -182,7 +182,7 @@ mod imp {
         let d1 = i1
             .request_adapter(&RequestAdapterOptions::default())
             .expect("adapter d1")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("d1");
         let _b1 = test_alloc_buffer(&d1, 256, BufferKind::Scattered, None, BufferFlags::empty());
         submit_minimal(&d1);
@@ -191,7 +191,7 @@ mod imp {
         let d2 = i2
             .request_adapter(&RequestAdapterOptions::default())
             .expect("adapter d2")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("d2");
         let _b2 = test_alloc_buffer(&d2, 256, BufferKind::Scattered, None, BufferFlags::empty());
         submit_minimal(&d2);
@@ -202,7 +202,7 @@ mod imp {
         drop(i2);
     }
 
-    fn test_positive_mod_correctness(device: &Device) {
+    fn test_positive_mod_correctness(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
 
@@ -262,7 +262,7 @@ mod imp {
         }
     }
 
-    fn test_billboard_math(device: &Device) {
+    fn test_billboard_math(device: &Runtime) {
         const SHADER: &str = r#"
     import goldy_exp;
 
@@ -346,7 +346,7 @@ mod imp {
         }
     }
 
-    fn test_heap_overflow_allocation(device: &Device) {
+    fn test_heap_overflow_allocation(device: &Runtime) {
         const LARGE_COPY_SHADER: &str = r#"
     import goldy_exp;
 
@@ -403,7 +403,7 @@ mod imp {
         }
     }
 
-    fn flush_deferred_deletions_reclaims_slots_after_gpu_idle(device: &Device) {
+    fn flush_deferred_deletions_reclaims_slots_after_gpu_idle(device: &Runtime) {
         let ctx = submission_context(device);
         let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
         let tv = scheme_submit_empty(&ctx);
@@ -419,7 +419,7 @@ mod imp {
         );
     }
 
-    fn flush_deferred_deletions_respects_gpu_progress(device: &Device) {
+    fn flush_deferred_deletions_respects_gpu_progress(device: &Runtime) {
         let ctx = submission_context(device);
         let tv = scheme_submit_empty(&ctx);
 
@@ -437,7 +437,7 @@ mod imp {
         );
     }
 
-    fn flush_deferred_deletions_noop_on_idle_device(device: &Device) {
+    fn flush_deferred_deletions_noop_on_idle_device(device: &Runtime) {
         let ctx = submission_context(device);
         ctx.flush_deferred_deletions();
         assert_eq!(ctx.deferred_deletion_pending_count(), 0);

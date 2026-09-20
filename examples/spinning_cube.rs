@@ -5,9 +5,9 @@
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, DeviceDescriptor, Instance, Lease,
-    LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
+    Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease, LeaseRenderTarget,
+    MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, Vertex2D, WithdrawTransaction,
 };
 use std::sync::Arc;
@@ -85,7 +85,7 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     start_time: Instant,
     frame_count: u32,
 }
@@ -115,7 +115,7 @@ impl App {
     }
 
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<RenderPipeline> {
@@ -176,7 +176,7 @@ impl App {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         let ctx = device.create_context()?;
 

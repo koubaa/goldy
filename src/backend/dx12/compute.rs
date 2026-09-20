@@ -2231,7 +2231,7 @@ fn execute_signal_and_finish_device(
         super::frame_table::record_submission(scope.frame_table(), row, fence_value);
     }
 
-    // Device-queue render submits share the device timeline counter but must also publish
+    // Runtime-queue render submits share the device timeline counter but must also publish
     // the value on the submitting context's fence — `Context::wait_until` blocks there.
     let ctx_fence = &scope.ctx_fence;
     if super::api_log::com_identity(ctx_fence) != super::api_log::com_identity(&logical_device.fence) {

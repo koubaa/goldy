@@ -1,5 +1,5 @@
-use crate::device::Device;
 use crate::error::{non_null_expect, Result};
+use crate::runtime::Runtime;
 use crate::scheme::SchemeRenderTargetLease;
 use crate::sys::{self, GoldyContext};
 use crate::types::{DepthFormat, TextureFormat};
@@ -10,7 +10,7 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(device: &Device) -> Result<Self> {
+    pub fn new(device: &Runtime) -> Result<Self> {
         let ptr = non_null_expect(unsafe { sys::goldy_context_create(device.as_ptr()) });
         Ok(Self { ptr })
     }

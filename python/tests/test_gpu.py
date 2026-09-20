@@ -13,7 +13,7 @@ def skip_if_no_gpu():
     import goldy
     try:
         instance = goldy.Instance()
-        device = instance.request_adapter().request_device()
+        device = instance.request_adapter().request_runtime()
         return device
     except goldy.GoldyError:
         pytest.skip("No GPU available")
@@ -46,8 +46,8 @@ class TestInstance:
         assert isinstance(adapters, list)
 
 
-class TestDevice:
-    """Test Device class."""
+class TestRuntime:
+    """Test Runtime class."""
 
     def test_create(self, device):
         assert device.is_valid()
@@ -70,15 +70,14 @@ class TestDevice:
         assert not device.has_library('test_lib')
 
 
-class TestRetainedPool:
-    """Test RetainedPool and Parcel."""
+class TestAcquire:
+    """Test Runtime acquire and Parcel."""
 
     def test_acquire_from_float32(self, device):
         import goldy
 
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        pool = goldy.RetainedPool(device)
-        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        buffer = device.acquire_buffer(data, goldy.BufferKind.SCATTERED)
         assert buffer.byte_size == 16
         assert buffer[0].byte_size == 16
 
@@ -86,8 +85,7 @@ class TestRetainedPool:
         import goldy
 
         data = np.array([1, 2, 3], dtype=np.int32)
-        pool = goldy.RetainedPool(device)
-        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        buffer = device.acquire_buffer(data, goldy.BufferKind.SCATTERED)
         assert buffer.byte_size == 12
         assert buffer[0].byte_size == 12
 
@@ -95,16 +93,14 @@ class TestRetainedPool:
         import goldy
 
         data = np.array([0, 1, 2, 3, 4, 5], dtype=np.uint16)
-        pool = goldy.RetainedPool(device)
-        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        buffer = device.acquire_buffer(data, goldy.BufferKind.SCATTERED)
         assert buffer.byte_size == 12
         assert buffer[0].byte_size == 12
 
     def test_deposit_buffer(self, device):
         import goldy
 
-        pool = goldy.RetainedPool(device)
-        buffer = pool.acquire_buffer(
+        buffer = device.acquire_buffer(
             np.zeros(64, dtype=np.uint32),
             goldy.BufferKind.SCATTERED,
         )
@@ -168,8 +164,7 @@ class TestComputePipeline:
             data[id.x] = 42;
         }
         '''
-        pool = goldy.RetainedPool(device)
-        buffer = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
+        buffer = device.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
         shader = goldy.ShaderModule.from_slang(device, source)
         pipeline = goldy.ComputePipeline(device, shader)
 
@@ -199,8 +194,7 @@ class TestComputePipeline:
         }
         '''
         width = height = 16
-        pool = goldy.RetainedPool(device)
-        texture = pool.acquire_texture(
+        texture = device.acquire_texture(
             width,
             height,
             goldy.TextureFormat.RGBA8_UNORM,

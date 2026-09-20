@@ -51,7 +51,7 @@ fn slot_requirements_met(
         .all(|(ctx_id, required_seq)| completed_values.get(ctx_id).is_none_or(|&v| v >= *required_seq))
 }
 
-/// Device-shared descriptor registry.
+/// Runtime-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
 /// `ResourceRegistry` (descriptor slot allocator), the per-context
@@ -869,7 +869,7 @@ pub(crate) struct SubmissionContext {
     pub retained_compute_cbs: HashMap<u64, RetainedVkCb>,
     /// Command buffers to free once this context's timeline reaches the key.
     pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
-    /// Device-queue render CBs (from [`LogicalDevice::command_pool`]) keyed by timeline value.
+    /// Runtime-queue render CBs (from [`LogicalDevice::command_pool`]) keyed by timeline value.
     pub graphics_timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
     /// Per-context staging belt for DEVICE_LOCAL WriteBuffer uploads.
     /// Pools HOST_VISIBLE chunks across submits so no staging memory is reused
@@ -974,7 +974,7 @@ pub(crate) struct LogicalDevice {
     pub deletion_queue: Mutex<DeviceDeletionQueue>,
     /// Deferred Vk buffer frees after fence requirements and retained-graph pins clear.
     pub pending_buffer_gpu_releases: Mutex<Vec<PendingBufferGpuRelease>>,
-    /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
+    /// Runtime-global submission sequence (shared value space; contexts signal their own semaphores).
     /// `Arc` allows submit paths to clone the counter out before dropping device/state borrows
     /// (required for Phase 5 lock-free submit).
     pub timeline_next: Arc<AtomicU64>,
@@ -1459,7 +1459,7 @@ pub(crate) struct FrameSync {
     /// presentation uses the scratch-texture copy path in `present` instead (see
     /// `surface::present`).
     pub render_pass_submitted: bool,
-    /// Device timeline value signaled for this frame slot's final frame work.
+    /// Runtime timeline value signaled for this frame slot's final frame work.
     /// Consumed when presenting.
     pub frame_timeline_value: Option<u64>,
     /// Persistent cache of the last compute timeline value signaled for this frame slot.
@@ -1666,7 +1666,7 @@ impl DeletionQueue {
     }
 }
 
-/// Device-level deferred deletion queue for resources whose destroy could touch more than
+/// Runtime-level deferred deletion queue for resources whose destroy could touch more than
 /// one context (bindless-registry-tracked buffers/textures/views).
 pub(crate) struct DeviceDeletionQueue {
     inner: super::super::shared::DeferredQueue<Vec<(super::ContextHandle, u64)>, PendingDeletion>,

@@ -2014,7 +2014,7 @@ pub(super) fn clear(
 
         let removed_reason = unsafe { device.device.GetDeviceRemovedReason() };
         if removed_reason.is_err() {
-            anyhow::bail!("Device removed during buffer clear: {:?}", removed_reason);
+            anyhow::bail!("Runtime removed during buffer clear: {:?}", removed_reason);
         }
     } else {
         // UPLOAD heap: CPU-accessible, just memset

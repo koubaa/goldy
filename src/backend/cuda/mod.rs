@@ -306,7 +306,7 @@ impl ContextGpuProgress for CudaProgress {
         self.context.poll_retire_events();
         let completed = self.context.completed.load(Ordering::Acquire);
         let retired = self.context.device_retired.load(Ordering::Acquire);
-        // Device-contiguous retirement covers pruned entries this context may have
+        // Runtime-contiguous retirement covers pruned entries this context may have
         // already lost from `completed` due to a racing poller snapshot.
         completed.max(retired)
     }
@@ -3515,7 +3515,7 @@ impl GpuBackendTimelineWait for CudaBackend {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let context = Arc::clone(self.context(ctx)?);
         let device_handle = context.device;
-        // Device-contiguous retirement is authoritative once prune has dropped ledger
+        // Runtime-contiguous retirement is authoritative once prune has dropped ledger
         // entries: a wait target at or below `device_retired` is already complete even
         // if a racing poller briefly lagged `context.completed`.
         if value > 0 && value <= context.device_retired.load(Ordering::Acquire) {
@@ -3599,8 +3599,8 @@ impl GpuBackend for CudaBackend {
         self.adapter_info.clone()
     }
 
-    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
-        crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
+        crate::runtime::RuntimeCapabilities {
             // Surfaces expose shared Rgba8Unorm scratch (DirectSpatial<float4> packs);
             // swapchain is matching R8G8B8A8 for a single CopyResource present.
             preferred_surface_format: TextureFormat::Rgba8Unorm,
@@ -3613,7 +3613,7 @@ impl GpuBackend for CudaBackend {
             host_sidecar_on_submit_worker: true,
             split_compute_partitions_on_barrier_cost: false,
             fuse_upload_with_compute_partitions: true,
-            ..crate::device::DeviceCapabilities::default()
+            ..crate::runtime::RuntimeCapabilities::default()
         }
     }
 
@@ -5411,20 +5411,20 @@ mod tests {
     }
 
     struct CudaTestDevice {
-        device: Arc<crate::Device>,
+        device: Arc<crate::Runtime>,
         _gate: CudaTestGate,
     }
 
     impl CudaTestDevice {
-        fn arc(&self) -> Arc<crate::Device> {
+        fn arc(&self) -> Arc<crate::Runtime> {
             Arc::clone(&self.device)
         }
     }
 
     impl std::ops::Deref for CudaTestDevice {
-        type Target = crate::Device;
+        type Target = crate::Runtime;
 
-        fn deref(&self) -> &crate::Device {
+        fn deref(&self) -> &crate::Runtime {
             &self.device
         }
     }
@@ -5561,7 +5561,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, shader_source)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -5589,7 +5589,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let input = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let output = pool.acquire_buffer_sized::<u32>(4, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_TWO_BUFFER_SLANG)?;
@@ -5611,7 +5611,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     fn try_cuda_device() -> Result<Option<CudaTestDevice>> {
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
-            let Some(device) = crate::test_support::shared_cuda_lib_device() else {
+            let Some(device) = crate::test_support::shared_cuda_lib_runtime() else {
                 eprintln!("skipping CUDA scheme test: no shared CUDA device");
                 return Ok(None);
             };
@@ -5624,7 +5624,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         {
             match CudaBackend::new() {
                 Ok(backend) => Ok(Some(CudaTestDevice {
-                    device: Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                    device: Arc::new(crate::Runtime::from_backend(Box::new(backend))?),
                     _gate: CudaTestGate::None,
                 })),
                 Err(error) => {
@@ -5640,7 +5640,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
         let gate = cuda_exclusive_guard();
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
-            let Some(device) = crate::test_support::shared_cuda_lib_device() else {
+            let Some(device) = crate::test_support::shared_cuda_lib_runtime() else {
                 eprintln!("skipping CUDA scheme test: no shared CUDA device");
                 return Ok(None);
             };
@@ -5659,7 +5659,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                     stats.reset();
                     Ok(Some((
                         CudaTestDevice {
-                            device: Arc::new(crate::Device::from_backend(Box::new(backend))?),
+                            device: Arc::new(crate::Runtime::from_backend(Box::new(backend))?),
                             _gate: CudaTestGate::None,
                         },
                         stats,
@@ -5688,7 +5688,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -5713,7 +5713,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let out = pool.acquire_buffer_with_data(&[0xDEAD_BEEFu32], BufferKind::Scattered)?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -5737,7 +5737,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, WITH_PARAM_UINT_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
@@ -5761,7 +5761,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(
             &device,
@@ -5799,7 +5799,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let out = pool.acquire_buffer_sized::<u32>(2, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(
             &device,
@@ -5837,7 +5837,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         const N: usize = 64;
         let input: Vec<u32> = (0..N as u32).collect();
         let inp = pool.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
@@ -5877,7 +5877,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct Params {
@@ -6029,7 +6029,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let shader = crate::ShaderModule::from_slang(&device, M2_FILL_SHADER)?;
@@ -6062,7 +6062,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
         let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let double_pipe =
@@ -6095,7 +6095,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let a = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let b = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         // Distinct pipeline objects so analysis emits two Dispatch commands, not DispatchBatch.
@@ -6135,7 +6135,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let src = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let y = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let z = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
@@ -6184,7 +6184,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let buf = pool.acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)?;
         let pipe = crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, M2_ADD_TEN_SHADER)?)?;
 
@@ -6207,7 +6207,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let src = pool.acquire_buffer_with_data(&(0..64u32).collect::<Vec<_>>(), BufferKind::Scattered)?;
         let mid = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
         let dst = pool.acquire_buffer_sized::<u32>(64, BufferKind::Scattered, BufferFlags::empty())?;
@@ -6235,7 +6235,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         const N: usize = 64;
         let src: Vec<u32> = (1..=N as u32).collect();
         let dst = vec![0u32; N];
@@ -6487,7 +6487,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         let ctx_b = device.create_context()?;
         let shader = crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?;
         let pipeline = crate::ComputePipeline::new(&device, &shader)?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let buf_a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let buf_b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
 
@@ -6531,7 +6531,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 init.push(0xCCCC_CCCCu32);
             }
         }
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let buf = pool.acquire_buffer_with_data(&init, BufferKind::Scattered)?;
         let mut scheme = crate::Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 16 * 4, 32 * 4)?;
@@ -6608,7 +6608,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let buffer = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let pipeline =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
@@ -6664,7 +6664,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             return Ok(());
         };
         let ctx = device.create_context()?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let out = pool.acquire_buffer_sized::<u32>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let pipeline = crate::ComputePipeline::new(
             &device,
@@ -7137,7 +7137,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
         let work_pipe =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let shape =
             pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
@@ -7207,7 +7207,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, write_shape_slang)?)?;
         let work_pipe =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let shape =
             pool.acquire_buffer_sized::<crate::types::DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())?;
         let work = pool.acquire_buffer_with_data(&[5u32, 6, 7, 8], BufferKind::Scattered)?;
@@ -7261,7 +7261,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let ctx = device.create_context()?;
         let pipeline =
             crate::ComputePipeline::new(&device, &crate::ShaderModule::from_slang(&device, DOUBLE_GOLDY_SLANG)?)?;
-        let mut pool = crate::RetainedPool::new(device.arc());
+        let pool = &device;
         let a = pool.acquire_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)?;
         let b = pool.acquire_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)?;
 

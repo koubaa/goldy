@@ -1,6 +1,6 @@
 # Goldy Runtime Mapping
 
-**Status**: Implementation note for Goldy 0.2.x. Claims use the labels in [Terminology](./terminology.md).
+**Status**: Implementation note for Goldy 0.3.x. Claims use the labels in [Terminology](./terminology.md).
 
 How Goldy realizes the Fondaco machine from [Machine Specification](./specification.md). Goldy is *a* runtime, not the machine. Where this chapter disagrees with the spec, the spec governs.
 
@@ -14,10 +14,16 @@ For *why* Goldy looks this way, see [Design Thesis](./design-thesis.md). For day
 
 It targets 2020-era heterogeneous compute: a host processor plus one or more GPUs via Vulkan 1.4+, DX12, or native Metal (macOS).
 
-The spec's runtime is a single agent. Goldy splits it into:
+The spec's runtime is a single agent. Goldy exposes that agent as a cloneable
+[`Runtime`](../../src/runtime.rs): warehouse owner for retained parcels, shader
+and pipeline factory, capabilities, and diagnostics. [`Context`](../../src/context.rs)
+is a submission timeline (transient/deposit pools, scheme recording). Backend
+device handles stay private.
+
+Goldy still splits execution across:
 
 - **Host** (Rust): parcel identity, schemes, ledger analysis, gates, exchanges
-- **Device** (GPU queue): executes admitted dispatches
+- **GPU queue**: executes admitted dispatches
 
 That split is a substrate artifact, not a machine requirement.
 
@@ -95,7 +101,7 @@ This follows DX12 / Vulkan / Metal descriptor versioning. See [Buffers](../resou
 
 ## 5. Warehouse and memory
 
-**Shipped (partial).** Physical medium is managed by `VramAllocator`, `RetainedPool`, and `TransientPool`. See [RetainedPool and Parcel](../resources/retained-pool.md) and [Transient Allocation](../resources/transient-allocation.md).
+**Shipped (partial).** Physical medium is managed by `Runtime` (retained warehouse), `VramAllocator`, and `TransientPool`. See [Runtime-Owned Memory](../resources/runtime-owned-memory.md) and [Transient Allocation](../resources/transient-allocation.md).
 
 Goldy distinguishes three quantities:
 

@@ -189,6 +189,12 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask) -> String {
         BuiltinFn::Floor => format!("floor({})", join_args(args, builtins)),
         BuiltinFn::Ceil => format!("ceil({})", join_args(args, builtins)),
         BuiltinFn::Sqrt => format!("sqrt({})", join_args(args, builtins)),
+        BuiltinFn::Sin => format!("sin({})", join_args(args, builtins)),
+        BuiltinFn::Length => format!("length({})", join_args(args, builtins)),
+        BuiltinFn::Float2 => format!("float2({})", join_args(args, builtins)),
+        BuiltinFn::Float3 => format!("float3({})", join_args(args, builtins)),
+        BuiltinFn::Float4 => format!("float4({})", join_args(args, builtins)),
+        BuiltinFn::Uint2 => format!("uint2({})", join_args(args, builtins)),
     }
 }
 

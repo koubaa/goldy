@@ -875,7 +875,7 @@ fn compute_partition_fps(
 fn texture_copy_layout_tag(context: &crate::Context) -> impl Fn(crate::backend::TextureHandle) -> u64 + '_ {
     move |texture| {
         context
-            .device()
+            .runtime()
             .inner
             .backend
             .lock()
@@ -1534,7 +1534,7 @@ fn submit_resolved_ir_partitions_fresh(
     }
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.fresh_plan");
-        let caps = context.device().capabilities();
+        let caps = context.runtime().capabilities();
         get_or_build_fresh_plan(
             cache,
             ir,
@@ -1740,7 +1740,10 @@ fn submit_resolved_ir_partitions_replay(
         get_or_build_schedule(cache, ir, fp);
     }
 
-    let split_on_barrier_cost = context.device().capabilities().split_compute_partitions_on_barrier_cost;
+    let split_on_barrier_cost = context
+        .runtime()
+        .capabilities()
+        .split_compute_partitions_on_barrier_cost;
     let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
 
     let partition_fps: Vec<u64> = {
@@ -1787,7 +1790,7 @@ fn submit_resolved_ir_partitions_replay(
     let ctx = context.backend_handle();
     let separate = session.separate_graphics_queue();
     let device_owner = session.device_queue_owner(ctx);
-    let fuse_upload = context.device().capabilities().fuse_upload_with_compute_partitions;
+    let fuse_upload = context.runtime().capabilities().fuse_upload_with_compute_partitions;
     let mut last_tv = context.gpu_progress();
     *partial_tv = last_tv;
     let mut result = PartitionSubmitResult::default();
@@ -2579,35 +2582,35 @@ mod slice_retention_tests {
     use crate::backend::{BufferHandle, ComputePipelineHandle};
     use crate::buffer::Allocation;
     use crate::compute::ComputePipeline;
-    use crate::device::Device;
+    use crate::runtime::Runtime;
     use crate::shader::ShaderModule;
     use crate::task_graph::ResolvedDeposit;
     use crate::task_graph::{IrSubmitState, NodeAccess, ResourceBinding, TaskNode};
     use std::sync::Arc;
 
-    fn mock_device() -> Arc<Device> {
-        Arc::new(Device::from_backend(Box::new(MockBackend::new())).unwrap())
+    fn mock_runtime() -> Arc<Runtime> {
+        Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).unwrap())
     }
 
-    fn mock_shader(device: &Device) -> ShaderModule {
+    fn mock_shader(device: &Runtime) -> ShaderModule {
         ShaderModule::from_slang(device, "void main() {}").unwrap()
     }
 
-    fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
+    fn mock_pipeline(device: &Runtime, shader: &ShaderModule) -> ComputePipeline {
         ComputePipeline::new(device, shader).unwrap()
     }
 
-    fn mock_buf(device: &Device) -> Allocation {
+    fn mock_buf(device: &Runtime) -> Allocation {
         Allocation::new(device, 256, crate::BufferKind::Scattered).unwrap()
     }
 
     /// Read `retained_resubmit_count` from the mock backend.
-    fn resubmit_count(device: &Device) -> usize {
+    fn resubmit_count(device: &Runtime) -> usize {
         device.with_mock(|m| m.retained_resubmit_count)
     }
 
     /// Read the number of live retained graph entries.
-    fn retained_count(device: &Device) -> usize {
+    fn retained_count(device: &Runtime) -> usize {
         device.with_mock(|m| m.retained_graphs.len())
     }
 
@@ -2643,7 +2646,7 @@ mod slice_retention_tests {
 
     #[test]
     fn single_partition_retains_and_resubmits() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -2681,7 +2684,7 @@ mod slice_retention_tests {
     /// CB storage, no resubmit hits, no retention-record counters.
     #[test]
     fn replay_none_never_stores_or_resubmits_cbs() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -2746,7 +2749,7 @@ mod slice_retention_tests {
     /// acquire runs only after the early partition has already been submitted.
     #[test]
     fn fresh_compute_then_present_defers_acquire_between_submits() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -2909,7 +2912,7 @@ mod slice_retention_tests {
     /// at each partition; the second acquire can fail after the first was submitted.
     #[test]
     fn fresh_two_presents_acquire_per_binding_and_partial_failure() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -3105,7 +3108,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn fresh_render_segment_uses_graph_submit() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
 
         // Create a real mock render target so submit_graph's render path succeeds.
@@ -3246,7 +3249,7 @@ mod slice_retention_tests {
     fn fresh_upload_compute_fuses_with_metal_capability() {
         let mut backend = MockBackend::new();
         backend.fuse_upload_with_compute_partitions = true;
-        let device = Arc::new(Device::from_backend(Box::new(backend)).unwrap());
+        let device = Arc::new(Runtime::from_backend(Box::new(backend)).unwrap());
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -3314,7 +3317,7 @@ mod slice_retention_tests {
     fn replay_upload_compute_fuses_with_metal_capability() {
         let mut backend = MockBackend::new();
         backend.fuse_upload_with_compute_partitions = true;
-        let device = Arc::new(Device::from_backend(Box::new(backend)).unwrap());
+        let device = Arc::new(Runtime::from_backend(Box::new(backend)).unwrap());
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -3657,7 +3660,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn fresh_deposit_then_render_stays_split_and_resolves() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let rt = crate::render_target::RenderTarget::new_with_depth(
             &device,
@@ -3721,7 +3724,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn fresh_same_wave_deposit_and_render_resolves_without_panic() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let rt = crate::render_target::RenderTarget::new_with_depth(
             &device,
@@ -3785,7 +3788,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn replay_compute_then_render_still_merges_into_one_retained_cb() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -3830,7 +3833,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn replay_deposit_then_render_retains_slot_keyed_copy_separate_from_render() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let buf = mock_buf(&device);
         let rt = crate::render_target::RenderTarget::new_with_depth(
@@ -3882,7 +3885,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn replay_deposit_then_render_records_new_slot_variant_on_parcel_change() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let buf_a = mock_buf(&device);
         let buf_b = mock_buf(&device);
@@ -3918,7 +3921,7 @@ mod slice_retention_tests {
     #[cfg(feature = "graphics")]
     #[test]
     fn replay_compute_then_deposit_render_does_not_merge() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p = mock_pipeline(&device, &shader);
@@ -4030,7 +4033,7 @@ mod slice_retention_tests {
 
     #[test]
     fn two_partition_ir_retains_both_slices() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p_a = mock_pipeline(&device, &shader);
@@ -4064,7 +4067,7 @@ mod slice_retention_tests {
 
     #[test]
     fn changing_second_partition_only_rerecords_second_partition() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p_a = mock_pipeline(&device, &shader);
@@ -4105,7 +4108,7 @@ mod slice_retention_tests {
 
     #[test]
     fn changing_first_partition_only_rerecords_first_partition() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p_a = mock_pipeline(&device, &shader);
@@ -4155,7 +4158,7 @@ mod slice_retention_tests {
 
     #[test]
     fn upload_in_one_partition_does_not_prevent_other_partition_retention() {
-        let device = mock_device();
+        let device = mock_runtime();
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let p_b = mock_pipeline(&device, &shader);

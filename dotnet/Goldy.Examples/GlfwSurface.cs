@@ -9,7 +9,7 @@ namespace Goldy.Examples;
 /// </summary>
 internal static class GlfwSurface
 {
-    public static unsafe Surface Create(Device device, WindowHandle* window)
+    public static unsafe Surface Create(Runtime device, WindowHandle* window)
     {
         var handle = (nint)window;
 

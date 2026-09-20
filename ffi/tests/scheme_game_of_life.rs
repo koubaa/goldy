@@ -5,11 +5,10 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
-    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create,
-    goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_record_builder_build, goldy_record_builder_create,
-    goldy_record_builder_emplace, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
-    goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
+    goldy_context_create, goldy_context_destroy, goldy_instance_destroy, goldy_memory_exchange_bind_withdraw,
+    goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
+    goldy_parcel_destroy, goldy_record_builder_build, goldy_record_builder_create, goldy_record_builder_emplace,
+    goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_runtime_acquire_texture, goldy_runtime_destroy,
     goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_field,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_lease_render_target,
     goldy_scheme_render_pass_begin, goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish,
@@ -55,9 +54,6 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         let initial = initial_cells();
         let cell_bytes = std::mem::size_of::<u32>();
 
-        let pool = goldy_retained_pool_create(device);
-        assert!(!pool.is_null(), "{}", last_ffi_message());
-
         let builder = goldy_record_builder_create();
         assert!(!builder.is_null(), "{}", last_ffi_message());
 
@@ -90,7 +86,7 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let cells = goldy_record_builder_build(builder, pool);
+        let cells = goldy_record_builder_build(builder, device);
         assert!(!cells.is_null(), "{}", last_ffi_message());
 
         let compute_src = CString::new(COMPUTE_SHADER).unwrap();
@@ -112,8 +108,8 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         let render_pipeline = goldy_render_pipeline_create(device, render_shader, render_shader, &render_desc);
         assert!(!render_pipeline.is_null(), "{}", last_ffi_message());
 
-        let readback = goldy_retained_pool_acquire_texture(
-            pool,
+        let readback = goldy_runtime_acquire_texture(
+            device,
             GRID_WIDTH,
             GRID_HEIGHT,
             GoldyTextureFormat::Rgba8Unorm,
@@ -264,9 +260,8 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         goldy_shader_destroy(compute_shader);
         goldy_texture_destroy(readback);
         goldy_buffer_destroy(cells);
-        goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);
-        goldy_device_destroy(device);
+        goldy_runtime_destroy(device);
         goldy_instance_destroy(instance);
     }
 }

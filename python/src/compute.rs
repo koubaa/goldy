@@ -1,7 +1,7 @@
 //! Python wrappers for ComputePipeline.
 
-use crate::device::PyDevice;
 use crate::error::IntoPyResult;
+use crate::runtime::PyRuntime;
 use crate::shader::PyShaderModule;
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ pub struct PyComputePipeline {
 #[pymethods]
 impl PyComputePipeline {
     #[new]
-    fn new(device: &PyDevice, compute_shader: &PyShaderModule) -> PyResult<Self> {
+    fn new(device: &PyRuntime, compute_shader: &PyShaderModule) -> PyResult<Self> {
         let pipeline = goldy::ComputePipeline::new(&device.inner, &compute_shader.inner).into_py_result()?;
 
         Ok(PyComputePipeline {

@@ -43,21 +43,20 @@ import goldy
 import numpy as np
 
 instance = goldy.Instance()
-device = instance.request_adapter().request_device()
+device = instance.request_adapter().request_runtime()
 ctx = device.create_context()
 
-retained_pool = goldy.RetainedPool(device)
 vertices = np.array([
     0.0, -0.5, 1.0, 0.0, 0.0, 1.0,
     -0.5,  0.5, 0.0, 1.0, 0.0, 1.0,
      0.5,  0.5, 0.0, 0.0, 1.0, 1.0,
 ], dtype=np.float32)
-vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+vertex_parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
 pipeline = goldy.RenderPipeline(device, shader, shader, goldy.RenderPipelineDesc())
 
-readback = retained_pool.acquire_texture(
+readback = device.acquire_texture(
     100, 100, goldy.TextureFormat.RGBA8_UNORM,
     goldy.TextureKind.DIRECT, copy_src=True, copy_dst=True,
 )
@@ -89,8 +88,7 @@ vertices = np.array([
    -0.5,  0.5, 0.0, 0.0, 1.0, 1.0,
 ], dtype=np.float32)
 
-retained_pool = goldy.RetainedPool(device)
-parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 ```
 
 ### Supported dtypes
@@ -132,12 +130,11 @@ import goldy
 import numpy as np
 
 instance = goldy.Instance()
-device = instance.request_adapter().request_device()
+device = instance.request_adapter().request_runtime()
 ctx = device.create_context()
 
 data = np.arange(256, dtype=np.float32)
-retained_pool = goldy.RetainedPool(device)
-parcel = retained_pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)[0]
+parcel = device.acquire_buffer(data, goldy.BufferKind.SCATTERED)[0]
 
 SHADER = """
 import goldy_exp;
@@ -176,11 +173,11 @@ Hybrid compute + render workflows use a single `Scheme` with both compute nodes 
 |--------|------|--------|
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
-| Retained buffer | `retained_pool.acquire_buffer_with_data(&data, access)` | `retained_pool.acquire_buffer(numpy_array, access)` → `Parcel` |
+| Retained buffer | `runtime.acquire_buffer_with_data(&data, access)` | `device.acquire_buffer(numpy_array, access)` → `Parcel` |
 | Render pass | `scheme.render_pass(...)` | `with scheme.render_pass(...) as rp:` |
 | Compute node | `scheme.node(...).dispatch(...)` | `scheme.node(...).with_parcel(...).dispatch(...)` |
 | Readback | `grant.consume(&submission)` | `grant.consume(submission)` |
-| Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |
+| Resource lifetime | Explicit `Arc<Runtime>` ownership | Managed by Python GC via PyO3 |
 
 ## Backend Selection
 
@@ -207,18 +204,12 @@ instance.enumerate_adapters()    # list of AdapterInfo
 instance.request_adapter()       # Adapter
 ```
 
-#### `Device` / `Context`
+#### `Runtime` acquire and `Parcel`
 
 ```python
-device = instance.request_adapter().request_device()
+device = instance.request_adapter().request_runtime()
 ctx = device.create_context()
-```
-
-#### `RetainedPool` and `Parcel`
-
-```python
-pool = goldy.RetainedPool(device)
-parcel = pool.acquire_buffer(data, access)  # data: numpy array or bytes
+parcel = device.acquire_buffer(data, access)  # data: numpy array or bytes
 parcel.byte_size                            # int (bytes)
 ```
 
@@ -262,7 +253,7 @@ All errors are raised as `goldy.GoldyError`:
 
 ```python
 try:
-    device = instance.request_adapter().request_device()
+    device = instance.request_adapter().request_runtime()
 except goldy.GoldyError as e:
     print(f"GPU error: {e}")
 ```

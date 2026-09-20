@@ -2,12 +2,12 @@
 //!
 //! `MeshOutput` and `FsIn` use different struct names; Goldy links them by `SV_Position` / `COLOR`.
 //!
-//! Skips (exit 0) when `DeviceCapabilities::mesh_shaders` is false.
+//! Skips (exit 0) when `RuntimeCapabilities::mesh_shaders` is false.
 //!
 //! Run with: cargo run --example mesh_triangle --features examples
 
 use goldy::{
-    Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget, MemoryExchange, MeshPipeline, RequestAdapterOptions,
+    Color, Instance, Lease, LeaseRenderTarget, MemoryExchange, MeshPipeline, RequestAdapterOptions, RuntimeDescriptor,
     Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
     WithdrawTransaction,
 };
@@ -56,7 +56,7 @@ float4 fs_main(FsIn input) : SV_Target {
 struct App {
     instance: Instance,
     ctx: Option<goldy::Context>,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy::Runtime>>,
     pipeline: Option<MeshPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -103,7 +103,7 @@ impl App {
     }
 
     fn create_pipeline(
-        device: &goldy::Device,
+        device: &goldy::Runtime,
         shader: &ShaderModule,
         format: TextureFormat,
     ) -> anyhow::Result<MeshPipeline> {
@@ -142,10 +142,10 @@ impl App {
         let device = Arc::new(
             self.instance
                 .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
+                .request_runtime(&RuntimeDescriptor::default())?,
         );
         if !device.capabilities().mesh_shaders {
-            println!("skip: DeviceCapabilities::mesh_shaders is false on this adapter");
+            println!("skip: RuntimeCapabilities::mesh_shaders is false on this adapter");
             std::process::exit(0);
         }
         let ctx = device.create_context()?;

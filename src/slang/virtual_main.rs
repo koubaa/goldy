@@ -64,6 +64,7 @@ pub fn entry_def_from_kernel_def(def: &KernelDef) -> EntryDef {
                     (ParamKind::Resource, p.slang_param_type())
                 }
                 ParamCategory::Uniform => (ParamKind::Broadcast, p.slang_type.clone()),
+                ParamCategory::StorageImage => (ParamKind::Resource, p.slang_param_type()),
                 ParamCategory::Scalar => (ParamKind::Scalar, p.slang_type.clone()),
             };
             ParamItem::Single(Param {
@@ -179,6 +180,8 @@ fn params_from_entry(entry: &EntryDef) -> Option<(Vec<KernelParam>, BuiltinMask)
                         slang_type: inner.to_string(),
                         stride_bytes: element_stride(inner),
                     });
+                } else if let Some(inner) = strip_wrapper(ty, "DirectSpatial<") {
+                    params.push(KernelParam::storage_image(p.name.clone(), inner));
                 } else {
                     let inner = strip_wrapper(ty, "Scattered<")?;
                     params.push(KernelParam {

@@ -48,6 +48,12 @@ pub enum BuiltinFn {
     Floor,
     Ceil,
     Sqrt,
+    Sin,
+    Length,
+    Float2,
+    Float3,
+    Float4,
+    Uint2,
 }
 
 /// Expression nodes.

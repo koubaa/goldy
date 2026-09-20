@@ -1,7 +1,7 @@
 //! FFI bindings for ComputePipeline.
 
-use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
+use crate::runtime::GoldyRuntime;
 use crate::shader::GoldyShaderModule;
 use std::ptr;
 
@@ -18,11 +18,11 @@ pub struct GoldyComputePipeline {
 /// All pointers must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn goldy_compute_pipeline_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     compute_shader: *const GoldyShaderModule,
 ) -> *mut GoldyComputePipeline {
     if device.is_null() || compute_shader.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("Device or shader is null"));
+        set_last_error_from_anyhow(&anyhow::anyhow!("Runtime or shader is null"));
         return ptr::null_mut();
     }
 

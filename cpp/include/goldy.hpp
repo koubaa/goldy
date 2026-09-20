@@ -11,8 +11,8 @@
  *
  *   goldy::Instance instance;
  *   auto adapters = instance.enumerate_adapters();
- *   goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
- *   goldy::Context ctx(device);
+ *   goldy::Runtime runtime = instance.create_runtime_for_adapter(adapters[0].id);
+ *   goldy::Context ctx(runtime);
  *   goldy::Scheme scheme(ctx);
  *   auto rt = ctx.lease_render_target(800, 600);
  *   // ...
@@ -63,10 +63,9 @@ public:
 // =============================================================================
 
 class Instance;
-class Device;
+class Runtime;
 class Context;
 class Adapter;
-class RetainedPool;
 class Buffer;
 class Texture;
 class Parcel;
@@ -144,9 +143,9 @@ struct RequestAdapterOptions {
 };
 
 /**
- * @brief Descriptor for Adapter::request_device().
+ * @brief Descriptor for Adapter::request_runtime().
  */
-struct DeviceDescriptor {
+struct RuntimeDescriptor {
     std::optional<std::string> label;
 };
 
@@ -247,16 +246,12 @@ struct InstanceDeleter {
     void operator()(GoldyInstance* p) const { if (p) goldy_instance_destroy(p); }
 };
 
-struct DeviceDeleter {
-    void operator()(GoldyDevice* p) const { if (p) goldy_device_destroy(p); }
+struct RuntimeDeleter {
+    void operator()(GoldyRuntime* p) const { if (p) goldy_runtime_destroy(p); }
 };
 
 struct ContextDeleter {
     void operator()(GoldyContext* p) const { if (p) goldy_context_destroy(p); }
-};
-
-struct RetainedPoolDeleter {
-    void operator()(GoldyRetainedPool* p) const { if (p) goldy_retained_pool_destroy(p); }
 };
 
 struct BufferDeleter {
@@ -421,7 +416,7 @@ public:
      * @param adapter_id The adapter ID from enumerate_adapters().
      * @throws Exception if device creation fails.
      */
-    Device create_device_for_adapter(uint32_t adapter_id);
+    Runtime create_runtime_for_adapter(uint32_t adapter_id);
 
     /**
      * @brief Get raw pointer (for advanced use).
@@ -433,35 +428,35 @@ private:
 };
 
 // =============================================================================
-// Device
+// Runtime
 // =============================================================================
 
 /**
- * @brief A GPU device handle.
+ * @brief Cloneable device-scoped machine root.
  *
- * Represents a connection to a GPU. Used to create resources.
+ * Owns retained parcels, shaders, pipelines, capabilities, and diagnostics.
  */
-class Device {
+class Runtime {
 public:
-    Device() = default;
+    Runtime() = default;
 
-    Device(const Device&) = delete;
-    Device& operator=(const Device&) = delete;
-    Device(Device&&) = default;
-    Device& operator=(Device&&) = default;
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
+    Runtime(Runtime&&) = default;
+    Runtime& operator=(Runtime&&) = default;
 
     /**
      * @brief Check if the device is valid.
      */
     bool is_valid() const {
-        return ptr_ && goldy_device_is_valid(ptr_.get());
+        return ptr_ && goldy_runtime_is_valid(ptr_.get());
     }
 
     /**
      * @brief Get the adapter ID this device was created on.
      */
     uint32_t adapter_id() const {
-        return goldy_device_adapter_id(ptr_.get());
+        return goldy_runtime_adapter_id(ptr_.get());
     }
 
     /**
@@ -469,28 +464,54 @@ public:
      */
     bool has_library(std::string_view name) const {
         std::string name_str(name);
-        return goldy_device_has_library(ptr_.get(), name_str.c_str());
+        return goldy_runtime_has_library(ptr_.get(), name_str.c_str());
     }
 
     /**
      * @brief Get raw pointer (for advanced use).
      */
-    GoldyDevice* get() const { return ptr_.get(); }
+    GoldyRuntime* get() const { return ptr_.get(); }
+
+    [[nodiscard]] RecordBuilder record();
+
+    /**
+     * @brief Acquire an uninitialized retained buffer.
+     */
+    [[nodiscard]] Buffer acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride = 1);
+
+    /**
+     * @brief Acquire a retained buffer initialized with typed data.
+     */
+    template<typename T>
+    [[nodiscard]] Buffer acquire_buffer_with_data(std::span<const T> data, BufferKind access);
+
+    template<typename T, typename Allocator>
+    [[nodiscard]] Buffer acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access);
+
+    /**
+     * @brief Acquire a retained buffer initialized with raw bytes and an explicit element stride.
+     */
+    [[nodiscard]] Buffer acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
+                                              uint32_t element_stride = 1);
+
+    [[nodiscard]] Texture acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
+                                          GoldyTextureKind kind, GoldyTextureFlags flags,
+                                          std::span<const uint8_t> init = {});
 
 private:
     friend class Instance;
     friend class Adapter;
-    explicit Device(GoldyDevice* ptr) : ptr_(ptr) {}
-    std::unique_ptr<GoldyDevice, detail::DeviceDeleter> ptr_;
+    explicit Runtime(GoldyRuntime* ptr) : ptr_(ptr) {}
+    std::unique_ptr<GoldyRuntime, detail::RuntimeDeleter> ptr_;
 };
 
-// Instance methods that return Device
-inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
-    GoldyDevice* ptr = goldy_instance_create_device_for_adapter(ptr_.get(), adapter_id);
+// Instance methods that return Runtime
+inline Runtime Instance::create_runtime_for_adapter(uint32_t adapter_id) {
+    GoldyRuntime* ptr = goldy_instance_create_runtime_for_adapter(ptr_.get(), adapter_id);
     if (!ptr) {
         throw Exception::from_last_error();
     }
-    return Device(ptr);
+    return Runtime(ptr);
 }
 
 // =============================================================================
@@ -502,7 +523,7 @@ inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
  */
 class Context {
 public:
-    explicit Context(const Device& device) {
+    explicit Context(const Runtime& device) {
         GoldyContext* ptr = goldy_context_create(device.get());
         if (!ptr) {
             throw Exception::from_last_error();
@@ -542,15 +563,15 @@ public:
     const AdapterInfo& get_info() const { return info_; }
 
     /**
-     * @brief Create a logical Device on this adapter.
+     * @brief Create a logical Runtime on this adapter.
      */
-    Device request_device(const DeviceDescriptor& desc = {}) const {
+    Runtime request_runtime(const RuntimeDescriptor& desc = {}) const {
         (void)desc;
-        GoldyDevice* ptr = goldy_instance_create_device_for_adapter(instance_, info_.id);
+        GoldyRuntime* ptr = goldy_instance_create_runtime_for_adapter(instance_, info_.id);
         if (!ptr) {
             throw Exception::from_last_error();
         }
-        return Device(ptr);
+        return Runtime(ptr);
     }
 
 private:
@@ -626,59 +647,8 @@ inline Adapter Instance::request_adapter(const RequestAdapterOptions& opts) {
 }
 
 // =============================================================================
-// RetainedPool / Buffer / Parcel / RecordBuilder
+// Buffer / Parcel / RecordBuilder
 // =============================================================================
-
-/**
- * @brief Deed-governed pool for retained GPU buffers and texture parcels.
- */
-class RetainedPool {
-public:
-    explicit RetainedPool(const Device& device) {
-        GoldyRetainedPool* ptr = goldy_retained_pool_create(device.get());
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    RetainedPool(const RetainedPool&) = delete;
-    RetainedPool& operator=(const RetainedPool&) = delete;
-    RetainedPool(RetainedPool&&) = default;
-    RetainedPool& operator=(RetainedPool&&) = default;
-
-    [[nodiscard]] RecordBuilder record();
-
-    /**
-     * @brief Acquire an uninitialized retained buffer.
-     */
-    [[nodiscard]] Buffer acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride = 1);
-
-    /**
-     * @brief Acquire a retained buffer initialized with typed data.
-     */
-    template<typename T>
-    [[nodiscard]] Buffer acquire_buffer_with_data(std::span<const T> data, BufferKind access);
-
-    template<typename T, typename Allocator>
-    [[nodiscard]] Buffer acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access);
-
-    /**
-     * @brief Acquire a retained buffer initialized with raw bytes and an explicit element stride.
-     */
-    [[nodiscard]] Buffer acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
-                                              uint32_t element_stride = 1);
-
-    [[nodiscard]] Texture acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
-                                          GoldyTextureKind kind, GoldyTextureFlags flags,
-                                          std::span<const uint8_t> init = {});
-
-    GoldyRetainedPool* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyRetainedPool, detail::RetainedPoolDeleter> ptr_;
-};
-
 /**
  * @brief Opaque retained GPU texture.
  */
@@ -821,7 +791,7 @@ public:
         return slot;
     }
 
-    [[nodiscard]] Buffer build(RetainedPool& pool);
+    [[nodiscard]] Buffer build(Runtime& runtime);
 
 private:
     std::unique_ptr<GoldyRecordBuilder, detail::RecordBuilderDeleter> ptr_;
@@ -836,8 +806,8 @@ inline Parcel Buffer::field(uint32_t unit) const {
 }
 
 template<typename T>
-inline Buffer RetainedPool::acquire_buffer_with_data(std::span<const T> data, BufferKind access) {
-    GoldyBuffer* ptr = goldy_retained_pool_acquire_buffer(
+inline Buffer Runtime::acquire_buffer_with_data(std::span<const T> data, BufferKind access) {
+    GoldyBuffer* ptr = goldy_runtime_acquire_buffer(
         ptr_.get(),
         data.size_bytes(),
         static_cast<GoldyBufferKind>(access),
@@ -851,13 +821,13 @@ inline Buffer RetainedPool::acquire_buffer_with_data(std::span<const T> data, Bu
 }
 
 template<typename T, typename Allocator>
-inline Buffer RetainedPool::acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
+inline Buffer Runtime::acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
     return acquire_buffer_with_data(std::span<const T>(data.data(), data.size()), access);
 }
 
-inline Buffer RetainedPool::acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
-                                                  uint32_t element_stride) {
-    GoldyBuffer* ptr = goldy_retained_pool_acquire_buffer(
+inline Buffer Runtime::acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
+                                            uint32_t element_stride) {
+    GoldyBuffer* ptr = goldy_runtime_acquire_buffer(
         ptr_.get(),
         data.size(),
         static_cast<GoldyBufferKind>(access),
@@ -870,12 +840,12 @@ inline Buffer RetainedPool::acquire_buffer_bytes(std::span<const uint8_t> data, 
     return Buffer(ptr);
 }
 
-inline RecordBuilder RetainedPool::record() {
+inline RecordBuilder Runtime::record() {
     return RecordBuilder{};
 }
 
-inline Buffer RetainedPool::acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride) {
-    GoldyBuffer* ptr = goldy_retained_pool_acquire_buffer(
+inline Buffer Runtime::acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride) {
+    GoldyBuffer* ptr = goldy_runtime_acquire_buffer(
         ptr_.get(), size, static_cast<GoldyBufferKind>(access), element_stride, nullptr, 0);
     if (!ptr) {
         throw Exception::from_last_error();
@@ -883,10 +853,10 @@ inline Buffer RetainedPool::acquire_buffer(uint64_t size, BufferKind access, uin
     return Buffer(ptr);
 }
 
-inline Texture RetainedPool::acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
-                                             GoldyTextureKind kind, GoldyTextureFlags flags,
-                                             std::span<const uint8_t> init) {
-    GoldyTexture* ptr = goldy_retained_pool_acquire_texture(
+inline Texture Runtime::acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
+                                        GoldyTextureKind kind, GoldyTextureFlags flags,
+                                        std::span<const uint8_t> init) {
+    GoldyTexture* ptr = goldy_runtime_acquire_texture(
         ptr_.get(), width, height, format, kind, flags,
         init.empty() ? nullptr : init.data(), init.size());
     if (!ptr) {
@@ -895,8 +865,8 @@ inline Texture RetainedPool::acquire_texture(uint32_t width, uint32_t height, Go
     return Texture(ptr);
 }
 
-inline Buffer RecordBuilder::build(RetainedPool& pool) {
-    GoldyBuffer* buffer = goldy_record_builder_build(ptr_.release(), pool.get());
+inline Buffer RecordBuilder::build(Runtime& runtime) {
+    GoldyBuffer* buffer = goldy_record_builder_build(ptr_.release(), runtime.get());
     if (!buffer) {
         throw Exception::from_last_error();
     }
@@ -918,7 +888,7 @@ public:
      * @param source Slang shader source code.
      * @throws Exception if compilation fails.
      */
-    ShaderModule(const Device& device, std::string_view source) {
+    ShaderModule(const Runtime& device, std::string_view source) {
         std::string source_str(source);
         GoldyShaderModule* ptr = goldy_shader_create(device.get(), source_str.c_str());
         if (!ptr) {
@@ -965,7 +935,7 @@ public:
      * @param desc Pipeline descriptor.
      * @throws Exception if creation fails.
      */
-    RenderPipeline(const Device& device,
+    RenderPipeline(const Runtime& device,
                    const ShaderModule& vertex_shader,
                    const ShaderModule& fragment_shader,
                    const GoldyRenderPipelineDesc& desc) {
@@ -1006,7 +976,7 @@ public:
      * @param shader The compute shader.
      * @throws Exception if creation fails.
      */
-    ComputePipeline(const Device& device, const ShaderModule& shader) {
+    ComputePipeline(const Runtime& device, const ShaderModule& shader) {
         GoldyComputePipeline* ptr = goldy_compute_pipeline_create(device.get(), shader.get());
         if (!ptr) {
             throw Exception::from_last_error();
@@ -1721,7 +1691,7 @@ public:
      * @param device The device.
      * @throws Exception if creation fails.
      */
-    explicit Sampler(const Device& device) {
+    explicit Sampler(const Runtime& device) {
         GoldySampler* ptr = goldy_sampler_create_default(device.get());
         if (!ptr) {
             throw Exception::from_last_error();
@@ -1735,7 +1705,7 @@ public:
      * @param desc Sampler descriptor.
      * @throws Exception if creation fails.
      */
-    Sampler(const Device& device, const GoldySamplerDesc& desc) {
+    Sampler(const Runtime& device, const GoldySamplerDesc& desc) {
         GoldySampler* ptr = goldy_sampler_create(device.get(), &desc);
         if (!ptr) {
             throw Exception::from_last_error();

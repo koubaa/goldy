@@ -12,7 +12,6 @@
 mod buffer;
 mod bytes_util;
 mod compute;
-mod device;
 mod error;
 mod exchange;
 mod instance;
@@ -21,6 +20,7 @@ mod parcel;
 mod pipeline;
 mod pyutil;
 mod retained_pool;
+mod runtime;
 mod scheme;
 mod shader;
 mod surface_exchange;
@@ -58,7 +58,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register core classes
     m.add_class::<instance::PyInstance>()?;
     m.add_class::<instance::PyAdapter>()?;
-    m.add_class::<device::PyDevice>()?;
+    m.add_class::<runtime::PyRuntime>()?;
     m.add_class::<scheme::PyContext>()?;
     m.add_class::<scheme::PyScheme>()?;
     m.add_class::<scheme::PySchemeSubmission>()?;
@@ -77,7 +77,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<texture::PyTexture>()?;
-    m.add_class::<retained_pool::PyRetainedPool>()?;
     m.add_class::<retained_pool::PyRecordBuilder>()?;
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;

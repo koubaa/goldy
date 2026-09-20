@@ -30,7 +30,7 @@ def main():
     
     # Create device
     instance = goldy.Instance()
-    device = instance.request_adapter().request_device()
+    device = instance.request_adapter().request_runtime()
     
     print(f"Backend: {instance.backend_type}")
     print()
@@ -39,8 +39,7 @@ def main():
     input_data = np.arange(256, dtype=np.float32)
     print(f"Input data (first 10): {input_data[:10]}")
     
-    retained_pool = goldy.RetainedPool(device)
-    buffer = retained_pool.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
+    buffer = device.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
     parcel = buffer[0]
     print(f"Created parcel: {parcel.byte_size} bytes")
     

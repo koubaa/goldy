@@ -1,7 +1,7 @@
 //! FFI bindings for ShaderModule.
 
-use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
+use crate::runtime::GoldyRuntime;
 use std::ffi::{c_char, CStr};
 use std::ptr;
 
@@ -19,11 +19,11 @@ pub struct GoldyShaderModule {
 /// The source must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn goldy_shader_create(
-    device: *const GoldyDevice,
+    device: *const GoldyRuntime,
     source: *const c_char,
 ) -> *mut GoldyShaderModule {
     if device.is_null() {
-        set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
+        set_last_error_from_anyhow(&anyhow::anyhow!("Runtime is null"));
         return ptr::null_mut();
     }
     if source.is_null() {

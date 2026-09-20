@@ -5,8 +5,8 @@
 //! [`crate::scheme::SchemeNodeBuilder::with_parcel`] as an `Accel` shader parameter.
 
 use crate::backend::{GpuAccelCreate, GpuBackend};
-use crate::device::Device;
 use crate::handles::AccelerationStructureHandle;
+use crate::runtime::Runtime;
 use crate::task_graph::ResourceId;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle};
 use anyhow::Result;
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct AccelerationStructureInner {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     handle: AccelerationStructureHandle,
     bindless: Option<u32>,
@@ -71,11 +71,11 @@ pub struct AccelInstance<'a> {
 
 impl AccelerationStructure {
     /// Allocate an empty triangle BLAS sized for `max_triangles` (indexed or not).
-    pub fn blas_triangles(device: &Device, max_triangles: u32, max_vertices: u32, vertex_stride: u32) -> Result<Self> {
+    pub fn blas_triangles(device: &Runtime, max_triangles: u32, max_vertices: u32, vertex_stride: u32) -> Result<Self> {
         anyhow::ensure!(
             device.capabilities().ray_query || device.capabilities().ray_tracing_pipelines,
             "this adapter does not support acceleration structures \
-             (DeviceCapabilities::ray_query and ray_tracing_pipelines are both false). \
+             (RuntimeCapabilities::ray_query and ray_tracing_pipelines are both false). \
              hint: skip AccelerationStructure::blas_triangles / tlas on this device, or pick an \
              adapter with RT (Vulkan VK_KHR_acceleration_structure, DXR, Metal supportsRaytracing). \
              Query device.capabilities().ray_query."
@@ -112,11 +112,11 @@ impl AccelerationStructure {
     }
 
     /// Allocate an empty TLAS that can hold up to `max_instances` BLAS instances.
-    pub fn tlas(device: &Device, max_instances: u32) -> Result<Self> {
+    pub fn tlas(device: &Runtime, max_instances: u32) -> Result<Self> {
         anyhow::ensure!(
             device.capabilities().ray_query || device.capabilities().ray_tracing_pipelines,
             "this adapter does not support acceleration structures \
-             (DeviceCapabilities::ray_query and ray_tracing_pipelines are both false). \
+             (RuntimeCapabilities::ray_query and ray_tracing_pipelines are both false). \
              hint: skip AccelerationStructure::blas_triangles / tlas on this device, or pick an \
              adapter with RT (Vulkan VK_KHR_acceleration_structure, DXR, Metal supportsRaytracing). \
              Query device.capabilities().ray_query."

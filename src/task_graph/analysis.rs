@@ -1445,7 +1445,7 @@ fn push_partition_with_barrier_heuristic(
 /// - an optional barrier-cost heuristic (`split_on_barrier_cost`): large pure-compute
 ///   logical partitions (≥ 3 waves, nonzero barrier cost) are subdivided at their
 ///   heaviest wave boundary to expose GPU-pipeline overlap between submissions.
-///   Disabled on Metal (see [`crate::device::DeviceCapabilities::split_compute_partitions_on_barrier_cost`]).
+///   Disabled on Metal (see [`crate::runtime::RuntimeCapabilities::split_compute_partitions_on_barrier_cost`]).
 ///
 /// The present-boundary and render-kind splits from the logical layer are always
 /// respected; the heuristics are applied only *within* pure-compute non-present partitions.

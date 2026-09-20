@@ -83,6 +83,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
     let mut params = Vec::new();
     let mut record_args = Vec::new();
     let mut bind_stmts = Vec::new();
+    let mut gpu_type_idents: Vec<syn::Ident> = Vec::new();
+    let mut type_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for input in &func.sig.inputs {
         let FnArg::Typed(PatType { pat, ty, .. }) = input else {
@@ -96,6 +98,23 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
         match classify_param_type(ty)? {
             ClassifiedParam::BufferRead(elem) => {
                 params.push(KernelParam::buffer_read(&pname, elem));
+                type_env.insert(pname.clone(), format!("BufRO<{}>", elem.slang_name()));
+                record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                bind_stmts.push(quote! {
+                    start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
+                        #pident,
+                        start,
+                        ::goldy::NodeAccess::Read,
+                    );
+                });
+            }
+            ClassifiedParam::BufferReadNamed(type_name) => {
+                let ty_ident = syn::Ident::new(&type_name, pident.span());
+                if !gpu_type_idents.iter().any(|id| id == &ty_ident) {
+                    gpu_type_idents.push(ty_ident);
+                }
+                params.push(KernelParam::buffer_read_named(&pname, &type_name));
+                type_env.insert(pname.clone(), format!("BufRO<{type_name}>"));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
@@ -107,6 +126,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             }
             ClassifiedParam::BufferReadWrite(elem) => {
                 params.push(KernelParam::buffer_read_write(&pname, elem));
+                type_env.insert(pname.clone(), format!("Scattered<{}>", elem.slang_name()));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
@@ -118,6 +138,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             }
             ClassifiedParam::BufferWrite(elem) => {
                 params.push(KernelParam::buffer_write(&pname, elem));
+                type_env.insert(pname.clone(), format!("Scattered<{}>", elem.slang_name()));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
@@ -128,14 +149,19 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 });
             }
             ClassifiedParam::Uniform(type_name) => {
+                let ty_ident = syn::Ident::new(&type_name, pident.span());
+                if !gpu_type_idents.iter().any(|id| id == &ty_ident) {
+                    gpu_type_idents.push(ty_ident);
+                }
                 params.push(KernelParam {
-                    name: pname,
+                    name: pname.clone(),
                     category: ParamCategory::Uniform,
                     access: Some(goldy_shader_ir::AccessKind::Read),
                     scalar: None,
-                    slang_type: type_name,
+                    slang_type: type_name.clone(),
                     stride_bytes: None,
                 });
+                type_env.insert(pname, type_name);
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
@@ -147,6 +173,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             }
             ClassifiedParam::Scalar(st) => {
                 params.push(KernelParam::scalar_param(&pname, st));
+                type_env.insert(pname.clone(), st.slang_name().to_string());
                 match st {
                     ScalarType::U32 => {
                         bind_stmts.push(quote! { start = start.bind_u32(#pident); });
@@ -166,10 +193,22 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     }
                 }
             }
+            ClassifiedParam::StorageImage(elem) => {
+                params.push(KernelParam::storage_image(&pname, &elem));
+                type_env.insert(pname.clone(), format!("DirectSpatial<{elem}>"));
+                record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                bind_stmts.push(quote! {
+                    start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
+                        #pident,
+                        start,
+                        ::goldy::NodeAccess::Write,
+                    );
+                });
+            }
         }
     }
 
-    let body_stmts = lower_block(&func.block.stmts, &mut builtins)?;
+    let body_stmts = lower_block(&func.block.stmts, &mut builtins, &mut type_env)?;
 
     let kernel = ShaderKernel {
         name: fn_name.to_string(),
@@ -204,6 +243,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 }
                 ParamCategory::BufferWrite => quote! { ::goldy::kernel::ParamCategory::BufferWrite },
                 ParamCategory::Uniform => quote! { ::goldy::kernel::ParamCategory::Uniform },
+                ParamCategory::StorageImage => quote! { ::goldy::kernel::ParamCategory::StorageImage },
                 ParamCategory::Scalar => quote! { ::goldy::kernel::ParamCategory::Scalar },
             };
             let access = match p.access {
@@ -280,10 +320,16 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
 
             impl #kernel_struct {
                 /// Compile (or hit the shader cache) and create a device-scoped pipeline.
-                pub fn prepare(device: &::goldy::Device) -> ::core::result::Result<Self, ::goldy::GoldyError> {
+                pub fn prepare(device: &::goldy::Runtime) -> ::core::result::Result<Self, ::goldy::GoldyError> {
+                    let mut canonical_slang = ::std::string::String::new();
+                    #(
+                        canonical_slang.push_str(&#gpu_type_idents::GPU_TYPE.to_slang_source()?);
+                        canonical_slang.push('\n');
+                    )*
+                    canonical_slang.push_str(CANONICAL_SOURCE);
                     let def = ::goldy::kernel::KernelDef {
                         source: ::goldy::kernel::KernelSource {
-                            canonical_slang: CANONICAL_SOURCE.to_string(),
+                            canonical_slang,
                         },
                         entry: #entry.to_string(),
                         workgroup_size: [#wx, #wy, #wz],
@@ -331,36 +377,82 @@ fn is_compute_attr(attr: &Attribute) -> bool {
 
 enum ClassifiedParam {
     BufferRead(ElementType),
+    BufferReadNamed(String),
     BufferReadWrite(ElementType),
     BufferWrite(ElementType),
     Uniform(String),
+    StorageImage(String),
     Scalar(ScalarType),
 }
 
 fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
-    // gpu::Out<T> / goldy::gpu::Out<T>
-    if let Some(inner) =
-        match_path_generic(ty, &["gpu", "Out"]).or_else(|| match_path_generic(ty, &["goldy", "gpu", "Out"]))
-    {
+    // Resource names match shaders/goldy_exp/access.slang.
+    if let Some(inner) = match_gpu_generic(ty, "Scattered") {
         let elem = element_from_type(inner)?;
         return Ok(ClassifiedParam::BufferWrite(elem));
     }
-    if let Some(inner) =
-        match_path_generic(ty, &["gpu", "Uniform"]).or_else(|| match_path_generic(ty, &["goldy", "gpu", "Uniform"]))
-    {
+    if let Some(inner) = match_gpu_generic(ty, "BufRO") {
+        return match buffer_element(inner)? {
+            BufferElem::Primitive(elem) => Ok(ClassifiedParam::BufferRead(elem)),
+            BufferElem::Named(name) => Ok(ClassifiedParam::BufferReadNamed(name)),
+        };
+    }
+    if let Some(inner) = match_gpu_generic(ty, "Uniform") {
         let name = type_to_slang_name(inner)?;
         return Ok(ClassifiedParam::Uniform(name));
     }
+    if match_gpu(ty, "DirectSpatial") {
+        let elem = match match_gpu_generic(ty, "DirectSpatial") {
+            Some(inner) => texel_element_slang(inner)?,
+            None => "float4".into(),
+        };
+        return Ok(ClassifiedParam::StorageImage(elem));
+    }
+    if match_gpu(ty, "Interpolated") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Interpolated is not yet supported in #[compute] kernels",
+        ));
+    }
+    if match_gpu(ty, "ByteAddress") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::ByteAddress is not yet supported in #[compute] kernels",
+        ));
+    }
+    if match_gpu(ty, "Filter") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Filter is not yet supported in #[compute] kernels",
+        ));
+    }
+    if match_gpu(ty, "Accel") {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Accel is not yet supported in #[compute] kernels",
+        ));
+    }
 
     match ty {
-        Type::Reference(r) => {
-            let elem = element_from_type(&r.elem)?;
-            if r.mutability.is_some() {
-                Ok(ClassifiedParam::BufferReadWrite(elem))
-            } else {
-                Ok(ClassifiedParam::BufferRead(elem))
+        Type::Reference(r) => match buffer_element(&r.elem)? {
+            BufferElem::Primitive(elem) => {
+                if r.mutability.is_some() {
+                    Ok(ClassifiedParam::BufferReadWrite(elem))
+                } else {
+                    Ok(ClassifiedParam::BufferRead(elem))
+                }
             }
-        }
+            BufferElem::Named(name) => {
+                if r.mutability.is_some() {
+                    Err(Error::new(
+                        ty.span(),
+                        "named struct buffers are read-only in the MVP (`&[T]` / gpu::BufRO); use gpu::DirectSpatial for surfaces",
+                    ))
+                } else {
+                    Ok(ClassifiedParam::BufferReadNamed(name))
+                }
+            }
+        },
         Type::Path(p) if p.qself.is_none() => {
             let name = p
                 .path
@@ -385,9 +477,31 @@ fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
         }
         _ => Err(Error::new(
             ty.span(),
-            "unsupported kernel parameter type; expected &[T], &mut [T], gpu::Out<T>, gpu::Uniform<T>, or u32/i32/f32/bool",
+            "unsupported kernel parameter type; expected &[T], &mut [T], gpu::BufRO<T>, gpu::Scattered<T>, gpu::Uniform<T>, gpu::DirectSpatial<T>, or u32/i32/f32/bool",
         )),
     }
+}
+
+fn path_matches(ty: &Type, segs: &[&str]) -> bool {
+    let Type::Path(p) = ty else {
+        return false;
+    };
+    if p.qself.is_some() || p.path.segments.len() != segs.len() {
+        return false;
+    }
+    p.path
+        .segments
+        .iter()
+        .zip(segs.iter())
+        .all(|(seg, expect)| seg.ident == expect)
+}
+
+fn match_gpu(ty: &Type, name: &str) -> bool {
+    path_matches(ty, &["gpu", name]) || path_matches(ty, &["goldy", "gpu", name])
+}
+
+fn match_gpu_generic<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
+    match_path_generic(ty, &["gpu", name]).or_else(|| match_path_generic(ty, &["goldy", "gpu", name]))
 }
 
 fn match_path_generic<'a>(ty: &'a Type, segs: &[&str]) -> Option<&'a Type> {
@@ -410,6 +524,50 @@ fn match_path_generic<'a>(ty: &'a Type, segs: &[&str]) -> Option<&'a Type> {
         },
         _ => None,
     }
+}
+
+fn buffer_element(ty: &Type) -> Result<BufferElem, Error> {
+    match ty {
+        Type::Slice(s) => buffer_element(&s.elem),
+        Type::Path(p) if p.qself.is_none() => {
+            let name = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            match name.as_str() {
+                "u32" => Ok(BufferElem::Primitive(ElementType::U32)),
+                "i32" => Ok(BufferElem::Primitive(ElementType::I32)),
+                "f32" => Ok(BufferElem::Primitive(ElementType::F32)),
+                "bool" => Ok(BufferElem::Primitive(ElementType::Bool)),
+                other => Ok(BufferElem::Named(other.to_string())),
+            }
+        }
+        _ => Err(Error::new(
+            ty.span(),
+            "unsupported buffer element type; use u32/i32/f32/bool or a #[goldy::gpu] struct",
+        )),
+    }
+}
+
+enum BufferElem {
+    Primitive(ElementType),
+    Named(String),
+}
+
+fn texel_element_slang(ty: &Type) -> Result<String, Error> {
+    let Type::Path(p) = ty else {
+        return Err(Error::new(ty.span(), "gpu::DirectSpatial element must be a path type"));
+    };
+    let name = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+    Ok(match name.as_str() {
+        "Float4" | "float4" => "float4".into(),
+        "Float3" | "float3" => "float3".into(),
+        "Float2" | "float2" => "float2".into(),
+        "f32" => "float".into(),
+        other => {
+            return Err(Error::new(
+                ty.span(),
+                format!("unsupported gpu::DirectSpatial element `{other}`; use gpu::Float4"),
+            ))
+        }
+    })
 }
 
 fn element_from_type(ty: &Type) -> Result<ElementType, Error> {
@@ -437,39 +595,74 @@ fn element_from_type(ty: &Type) -> Result<ElementType, Error> {
 
 fn type_to_slang_name(ty: &Type) -> Result<String, Error> {
     match ty {
-        Type::Path(p) if p.qself.is_none() => Ok(p
-            .path
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_else(|| "Unknown".into())),
-        _ => Err(Error::new(ty.span(), "unsupported Uniform type")),
+        Type::Path(p) if p.qself.is_none() => {
+            let name = p
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_else(|| "Unknown".into());
+            Ok(match name.as_str() {
+                "f32" => "float".into(),
+                "u32" => "uint".into(),
+                "i32" => "int".into(),
+                "bool" => "bool".into(),
+                "Float2" | "float2" => "float2".into(),
+                "Float3" | "float3" => "float3".into(),
+                "Float4" | "float4" => "float4".into(),
+                other => other.to_string(),
+            })
+        }
+        _ => Err(Error::new(ty.span(), "unsupported type in #[compute] kernel")),
     }
 }
 
-fn lower_block(stmts: &[SynStmt], builtins: &mut BuiltinMask) -> Result<Vec<Stmt>, Error> {
+fn lower_block(
+    stmts: &[SynStmt],
+    builtins: &mut BuiltinMask,
+    env: &mut std::collections::HashMap<String, String>,
+) -> Result<Vec<Stmt>, Error> {
     let mut out = Vec::new();
     for s in stmts {
-        out.push(lower_stmt(s, builtins)?);
+        out.push(lower_stmt(s, builtins, env)?);
     }
     Ok(out)
 }
 
-fn lower_stmt(stmt: &SynStmt, builtins: &mut BuiltinMask) -> Result<Stmt, Error> {
+fn lower_stmt(
+    stmt: &SynStmt,
+    builtins: &mut BuiltinMask,
+    env: &mut std::collections::HashMap<String, String>,
+) -> Result<Stmt, Error> {
     match stmt {
         SynStmt::Local(local) => {
-            let Pat::Ident(name) = &local.pat else {
-                return Err(Error::new(
-                    local.pat.span(),
-                    "only simple `let` bindings are supported in #[compute] kernels",
-                ));
+            let (name, ascribed) = match &local.pat {
+                Pat::Ident(name) => (name, None),
+                Pat::Type(pt) => {
+                    let Pat::Ident(name) = pt.pat.as_ref() else {
+                        return Err(Error::new(
+                            local.pat.span(),
+                            "only simple `let` bindings are supported in #[compute] kernels",
+                        ));
+                    };
+                    (name, Some(type_to_slang_name(&pt.ty)?))
+                }
+                _ => {
+                    return Err(Error::new(
+                        local.pat.span(),
+                        "only simple `let` bindings are supported in #[compute] kernels",
+                    ))
+                }
             };
             let init = local
                 .init
                 .as_ref()
                 .ok_or_else(|| Error::new(local.span(), "let without initializer is unsupported"))?;
             let expr = lower_expr(&init.expr, builtins)?;
-            let ty = infer_slang_ty(&expr);
+            let ty = ascribed.or_else(|| infer_slang_ty(&expr, env));
+            if let Some(ref ty) = ty {
+                env.insert(name.ident.to_string(), ty.clone());
+            }
             Ok(Stmt::Let {
                 name: name.ident.to_string(),
                 mutable: name.mutability.is_some(),
@@ -486,19 +679,28 @@ fn lower_stmt(stmt: &SynStmt, builtins: &mut BuiltinMask) -> Result<Stmt, Error>
                     target: lower_expr(&a.left, builtins)?,
                     value: lower_expr(&a.right, builtins)?,
                 }),
+                SynExpr::Binary(ExprBinary { left, op, right, .. }) if assign_arith(op).is_some() => {
+                    let arith = assign_arith(op).unwrap();
+                    Ok(Stmt::Assign {
+                        target: lower_expr(left, builtins)?,
+                        value: Expr::Binary {
+                            op: arith,
+                            left: Box::new(lower_expr(left, builtins)?),
+                            right: Box::new(lower_expr(right, builtins)?),
+                        },
+                    })
+                }
                 SynExpr::If(i) => {
                     let cond = lower_expr(&i.cond, builtins)?;
-                    let then_body = lower_block_from_expr_block(&i.then_branch, builtins)?;
+                    let then_body = lower_block_from_expr_block(&i.then_branch, builtins, env)?;
                     let else_body = match &i.else_branch {
                         Some((_, else_e)) => match else_e.as_ref() {
-                            SynExpr::Block(b) => Some(lower_block(&b.block.stmts, builtins)?),
-                            SynExpr::If(_) => {
-                                // else if → wrap as single-stmt else body
-                                Some(vec![lower_stmt(
-                                    &SynStmt::Expr(else_e.as_ref().clone(), None),
-                                    builtins,
-                                )?])
-                            }
+                            SynExpr::Block(b) => Some(lower_block(&b.block.stmts, builtins, env)?),
+                            SynExpr::If(_) => Some(vec![lower_stmt(
+                                &SynStmt::Expr(else_e.as_ref().clone(), None),
+                                builtins,
+                                env,
+                            )?]),
                             other => return Err(Error::new(other.span(), "unsupported else branch in #[compute]")),
                         },
                         None => None,
@@ -511,7 +713,7 @@ fn lower_stmt(stmt: &SynStmt, builtins: &mut BuiltinMask) -> Result<Stmt, Error>
                 }
                 SynExpr::While(w) => Ok(Stmt::While {
                     cond: lower_expr(&w.cond, builtins)?,
-                    body: lower_block_from_expr_block(&w.body, builtins)?,
+                    body: lower_block_from_expr_block(&w.body, builtins, env)?,
                 }),
                 SynExpr::ForLoop(f) => {
                     let Pat::Ident(var) = f.pat.as_ref() else {
@@ -537,11 +739,12 @@ fn lower_stmt(stmt: &SynStmt, builtins: &mut BuiltinMask) -> Result<Stmt, Error>
                         .end
                         .as_ref()
                         .ok_or_else(|| Error::new(f.expr.span(), "range end required"))?;
+                    env.insert(var.ident.to_string(), "uint".into());
                     Ok(Stmt::ForRange {
                         var: var.ident.to_string(),
                         start: lower_expr(start, builtins)?,
                         end: lower_expr(end, builtins)?,
-                        body: lower_block_from_expr_block(&f.body, builtins)?,
+                        body: lower_block_from_expr_block(&f.body, builtins, env)?,
                     })
                 }
                 SynExpr::Return(r) => Ok(Stmt::Return {
@@ -561,8 +764,12 @@ fn lower_stmt(stmt: &SynStmt, builtins: &mut BuiltinMask) -> Result<Stmt, Error>
     }
 }
 
-fn lower_block_from_expr_block(block: &syn::Block, builtins: &mut BuiltinMask) -> Result<Vec<Stmt>, Error> {
-    lower_block(&block.stmts, builtins)
+fn lower_block_from_expr_block(
+    block: &syn::Block,
+    builtins: &mut BuiltinMask,
+    env: &mut std::collections::HashMap<String, String>,
+) -> Result<Vec<Stmt>, Error> {
+    lower_block(&block.stmts, builtins, env)
 }
 
 fn lower_expr(expr: &SynExpr, builtins: &mut BuiltinMask) -> Result<Expr, Error> {
@@ -676,12 +883,18 @@ fn lower_call(
             BuiltinFn::WorkgroupId
         }
         ["gpu", "workgroup_size"] | ["goldy", "gpu", "workgroup_size"] => BuiltinFn::WorkgroupSize,
-        ["abs"] | ["gpu", "abs"] => BuiltinFn::Abs,
-        ["min"] | ["gpu", "min"] => BuiltinFn::Min,
-        ["max"] | ["gpu", "max"] => BuiltinFn::Max,
-        ["floor"] | ["gpu", "floor"] => BuiltinFn::Floor,
-        ["ceil"] | ["gpu", "ceil"] => BuiltinFn::Ceil,
-        ["sqrt"] | ["gpu", "sqrt"] => BuiltinFn::Sqrt,
+        ["abs"] | ["gpu", "abs"] | ["goldy", "gpu", "abs"] => BuiltinFn::Abs,
+        ["min"] | ["gpu", "min"] | ["goldy", "gpu", "min"] => BuiltinFn::Min,
+        ["max"] | ["gpu", "max"] | ["goldy", "gpu", "max"] => BuiltinFn::Max,
+        ["floor"] | ["gpu", "floor"] | ["goldy", "gpu", "floor"] => BuiltinFn::Floor,
+        ["ceil"] | ["gpu", "ceil"] | ["goldy", "gpu", "ceil"] => BuiltinFn::Ceil,
+        ["sqrt"] | ["gpu", "sqrt"] | ["goldy", "gpu", "sqrt"] => BuiltinFn::Sqrt,
+        ["sin"] | ["gpu", "sin"] | ["goldy", "gpu", "sin"] => BuiltinFn::Sin,
+        ["length"] | ["gpu", "length"] | ["goldy", "gpu", "length"] => BuiltinFn::Length,
+        ["float2"] | ["gpu", "float2"] | ["goldy", "gpu", "float2"] => BuiltinFn::Float2,
+        ["float3"] | ["gpu", "float3"] | ["goldy", "gpu", "float3"] => BuiltinFn::Float3,
+        ["float4"] | ["gpu", "float4"] | ["goldy", "gpu", "float4"] => BuiltinFn::Float4,
+        ["uint2"] | ["gpu", "uint2"] | ["goldy", "gpu", "uint2"] => BuiltinFn::Uint2,
         other => {
             return Err(Error::new(
                 path.span(),
@@ -700,6 +913,17 @@ fn lower_call(
         func: builtin,
         args: lowered_args,
     })
+}
+
+fn assign_arith(op: &SynBinOp) -> Option<BinOp> {
+    match op {
+        SynBinOp::AddAssign(_) => Some(BinOp::Add),
+        SynBinOp::SubAssign(_) => Some(BinOp::Sub),
+        SynBinOp::MulAssign(_) => Some(BinOp::Mul),
+        SynBinOp::DivAssign(_) => Some(BinOp::Div),
+        SynBinOp::RemAssign(_) => Some(BinOp::Rem),
+        _ => None,
+    }
 }
 
 fn map_binop(op: &SynBinOp) -> Result<BinOp, Error> {
@@ -744,7 +968,7 @@ fn map_unary(op: &UnOp) -> Result<UnaryOp, Error> {
     })
 }
 
-fn infer_slang_ty(expr: &Expr) -> Option<String> {
+fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) -> Option<String> {
     match expr {
         Expr::Field { base, field }
             if (field == "x" || field == "y" || field == "z")
@@ -758,15 +982,110 @@ fn infer_slang_ty(expr: &Expr) -> Option<String> {
         {
             Some("uint".into())
         }
+        Expr::Field { base, field } if field == "xy" || field == "zw" => {
+            let base_ty = infer_slang_ty(base, env)?;
+            if base_ty == "uint3"
+                || base_ty == "uint4"
+                || base_ty == "ThreadId"
+                || base_ty == "GroupThreadId"
+                || base_ty == "GroupId"
+            {
+                Some("uint2".into())
+            } else if base_ty.starts_with("float") {
+                Some("float2".into())
+            } else {
+                None
+            }
+        }
+        Expr::Field { base, field } if field == "x" || field == "y" || field == "z" || field == "w" => {
+            let base_ty = infer_slang_ty(base, env)?;
+            if base_ty.starts_with("uint")
+                || base_ty == "ThreadId"
+                || base_ty == "GroupThreadId"
+                || base_ty == "GroupId"
+            {
+                Some("uint".into())
+            } else if base_ty.starts_with("float") {
+                Some("float".into())
+            } else {
+                None
+            }
+        }
         Expr::Call {
-            func: BuiltinFn::GlobalId | BuiltinFn::LocalId | BuiltinFn::WorkgroupId,
+            func: BuiltinFn::GlobalId,
             ..
-        } => Some("uint3".into()),
+        } => Some("ThreadId".into()),
+        Expr::Call {
+            func: BuiltinFn::LocalId,
+            ..
+        } => Some("GroupThreadId".into()),
+        Expr::Call {
+            func: BuiltinFn::WorkgroupId,
+            ..
+        } => Some("GroupId".into()),
+        Expr::Call {
+            func: BuiltinFn::Float2,
+            ..
+        } => Some("float2".into()),
+        Expr::Call {
+            func: BuiltinFn::Float3,
+            ..
+        } => Some("float3".into()),
+        Expr::Call {
+            func: BuiltinFn::Float4,
+            ..
+        } => Some("float4".into()),
+        Expr::Call {
+            func: BuiltinFn::Uint2, ..
+        } => Some("uint2".into()),
+        Expr::Call {
+            func:
+                BuiltinFn::Sin | BuiltinFn::Length | BuiltinFn::Abs | BuiltinFn::Floor | BuiltinFn::Ceil | BuiltinFn::Sqrt,
+            ..
+        } => Some("float".into()),
         Expr::LitU32(_) => Some("uint".into()),
         Expr::LitI32(_) => Some("int".into()),
         Expr::LitF32(_) => Some("float".into()),
         Expr::LitBool(_) => Some("bool".into()),
         Expr::Len { .. } => Some("uint".into()),
+        Expr::Var(name) => env.get(name).cloned(),
+        Expr::Index { base, .. } => {
+            let base_ty = infer_slang_ty(base, env)?;
+            unwrap_generic(&base_ty, "BufRO<")
+                .or_else(|| unwrap_generic(&base_ty, "Scattered<"))
+                .or_else(|| unwrap_generic(&base_ty, "DirectSpatial<"))
+                .map(str::to_string)
+        }
+        Expr::Cast { ty, .. } => Some(ty.clone()),
+        Expr::Binary { left, right, .. } => {
+            let l = infer_slang_ty(left, env);
+            let r = infer_slang_ty(right, env);
+            match (l.as_deref(), r.as_deref()) {
+                (Some(a), _) if is_vector_ty(a) => Some(a.to_string()),
+                (_, Some(b)) if is_vector_ty(b) => Some(b.to_string()),
+                (Some("float"), _) | (_, Some("float")) => Some("float".into()),
+                (Some("uint"), Some("uint")) => Some("uint".into()),
+                (Some(a), _) => Some(a.to_string()),
+                (_, Some(b)) => Some(b.to_string()),
+                _ => None,
+            }
+        }
+        Expr::Unary { expr, .. } => infer_slang_ty(expr, env),
         _ => None,
+    }
+}
+
+fn is_vector_ty(ty: &str) -> bool {
+    matches!(
+        ty,
+        "float2" | "float3" | "float4" | "uint2" | "uint3" | "uint4" | "int2" | "int3" | "int4"
+    )
+}
+
+fn unwrap_generic<'a>(ty: &'a str, prefix: &str) -> Option<&'a str> {
+    if ty.starts_with(prefix) && ty.ends_with('>') {
+        Some(&ty[prefix.len()..ty.len() - 1])
+    } else {
+        None
     }
 }

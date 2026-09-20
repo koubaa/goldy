@@ -26,7 +26,7 @@ struct Vertex {
 int main() {
     try {
         goldy::Instance instance;
-        goldy::Device device = instance.request_adapter().request_device();
+        goldy::Runtime device = instance.request_adapter().request_runtime();
         goldy::Context ctx(device);
 
         const Vertex vertices[] = {
@@ -35,8 +35,7 @@ int main() {
             {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
         };
 
-        goldy::RetainedPool pool(device);
-        goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer vertex_buffer = device.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -58,7 +57,7 @@ int main() {
 
         GoldyTextureFlags readback_flags{};
         readback_flags._0 = goldy::TextureFlags::CopySrc | goldy::TextureFlags::CopyDst;
-        goldy::Texture readback = pool.acquire_texture(
+        goldy::Texture readback = device.acquire_texture(
             800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM,
             GOLDY_TEXTURE_KIND_DIRECT, readback_flags);
 
@@ -108,11 +107,11 @@ vcpkg install goldy
 ```bash
 # Add to your conanfile.txt
 [requires]
-goldy/0.2.0
+goldy/0.3.0
 
 # Or conanfile.py
 def requirements(self):
-    self.requires("goldy/0.2.0")
+    self.requires("goldy/0.3.0")
 ```
 
 ### Manual Build
@@ -156,9 +155,8 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 
 | Class | Description |
 |-------|-------------|
-| `goldy::Instance` | Entry point, creates devices |
-| `goldy::Device` | GPU device handle |
-| `goldy::RetainedPool` | Deed-governed pool for retained GPU parcels |
+| `goldy::Instance` | Entry point, enumerates adapters and requests runtimes |
+| `goldy::Runtime` | Device-scoped machine root: parcels, shaders, pipelines |
 | `goldy::Parcel` | Retained buffer or texture parcel |
 | `goldy::RecordBuilder` | Build partitioned buffer records (multiple field parcels) |
 | `goldy::ShaderModule` | Compiled Slang shader |
@@ -198,10 +196,10 @@ if (!instance) {
 
 GoldyAdapterInfo info = {};
 goldy_instance_get_adapter(instance, 0, &info);
-GoldyDevice* device = goldy_instance_create_device_for_adapter(instance, info.id);
+GoldyRuntime* device = goldy_instance_create_runtime_for_adapter(instance, info.id);
 // ...
 
-goldy_device_destroy(device);
+goldy_runtime_destroy(device);
 goldy_instance_destroy(instance);
 ```
 

@@ -16,7 +16,7 @@ cargo run --features examples --example mesh_triangle
 
 - `MeshPipeline` and `dispatch_mesh`
 - Automatic payload linking between mesh and fragment stages
-- Capability probing — the example exits 0 when `DeviceCapabilities::mesh_shaders` is false
+- Capability probing — the example exits 0 when `RuntimeCapabilities::mesh_shaders` is false
 
 ## Notes
 

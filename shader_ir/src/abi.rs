@@ -5,7 +5,7 @@
 //! does not need to re-parse generated Slang to bind Scheme parameters.
 
 /// Bump when the wire layout or parameter classification changes.
-pub const KERNEL_ABI_VERSION: u32 = 1;
+pub const KERNEL_ABI_VERSION: u32 = 2;
 
 /// Bitflags for hidden builtins injected into the generated Slang signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -101,10 +101,12 @@ pub enum ParamCategory {
     BufferRead,
     /// `Scattered<T>` with read+write access (from `&mut [T]`).
     BufferReadWrite,
-    /// `Scattered<T>` write-only (`gpu::Out<T>`).
+    /// `Scattered<T>` write-only (`gpu::Scattered<T>`).
     BufferWrite,
     /// Explicit `gpu::Uniform<T>` broadcast resource.
     Uniform,
+    /// `DirectSpatial<T>` (`gpu::DirectSpatial<T>`).
+    StorageImage,
     /// Typed scalar push word.
     Scalar,
 }
@@ -120,6 +122,7 @@ impl ParamCategory {
             Self::BufferRead => format!("BufRO<{element_slang}>"),
             Self::BufferReadWrite | Self::BufferWrite => format!("Scattered<{element_slang}>"),
             Self::Uniform => element_slang.to_string(),
+            Self::StorageImage => format!("DirectSpatial<{element_slang}>"),
             Self::Scalar => unreachable!("scalar params are not resource wrappers"),
         }
     }
@@ -137,7 +140,7 @@ impl AccessKind {
     pub fn for_category(category: ParamCategory) -> Option<Self> {
         match category {
             ParamCategory::BufferRead | ParamCategory::Uniform => Some(Self::Read),
-            ParamCategory::BufferWrite => Some(Self::Write),
+            ParamCategory::BufferWrite | ParamCategory::StorageImage => Some(Self::Write),
             ParamCategory::BufferReadWrite => Some(Self::ReadWrite),
             ParamCategory::Scalar => None,
         }
@@ -177,6 +180,28 @@ impl KernelParam {
             scalar: None,
             slang_type: element.slang_name().to_string(),
             stride_bytes: Some(element.stride_bytes()),
+        }
+    }
+
+    pub fn buffer_read_named(name: impl Into<String>, slang_type: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            category: ParamCategory::BufferRead,
+            access: Some(AccessKind::Read),
+            scalar: None,
+            slang_type: slang_type.into(),
+            stride_bytes: None,
+        }
+    }
+
+    pub fn storage_image(name: impl Into<String>, slang_element: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            category: ParamCategory::StorageImage,
+            access: Some(AccessKind::Write),
+            scalar: None,
+            slang_type: slang_element.into(),
+            stride_bytes: None,
         }
     }
 

@@ -1,8 +1,8 @@
 //! Yielding-script scenarios shared by the CPU and GPU backend test crates.
 
 use goldy::{
-    Backpressure, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, GoldyError, Instance, MemoryExchange,
-    NodeAccess, Parcel, Petition, Promised, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, YieldPoint,
+    Backpressure, BufferKind, ComputePipeline, Context, GoldyError, Instance, MemoryExchange, NodeAccess, Parcel,
+    Petition, Promised, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, YieldPoint,
 };
 use std::sync::{Arc, Mutex};
 
@@ -29,12 +29,12 @@ impl Petition for Step {
     type Result = u32;
 }
 
-pub fn make_device() -> Device {
+pub fn make_device() -> Runtime {
     let instance = Instance::new().expect("instance");
     instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
+        .request_runtime(&RuntimeDescriptor::default())
         .expect("device")
 }
 
@@ -76,9 +76,9 @@ void cs_resume(Scattered<uint> data, Resolved<uint> r, St s, ThreadId tid) {
 }
 "#;
 
-fn fetch_setup(device: &Device, n: u32) -> (Context, RetainedPool, goldy::Buffer, ComputePipeline) {
+fn fetch_setup(device: &Runtime, n: u32) -> (Context, Runtime, goldy::Buffer, ComputePipeline) {
     let ctx = device.create_context().expect("ctx");
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = device.clone();
     let input: Vec<u32> = (0..n).collect();
     let data = pool
         .acquire_buffer_with_data(&input, BufferKind::Scattered)
@@ -90,7 +90,7 @@ fn fetch_setup(device: &Device, n: u32) -> (Context, RetainedPool, goldy::Buffer
 }
 
 /// Basic yield → CPU handler → resume, with rejections, resubmitted twice.
-pub fn fetch_and_resume(device: &Device) {
+pub fn fetch_and_resume(device: &Runtime) {
     let n = 200u32;
     let (ctx, _pool, data, pipeline) = fetch_setup(device, n);
     let calls = Arc::new(Mutex::new(Vec::<u32>::new()));
@@ -157,7 +157,7 @@ pub fn fetch_and_resume(device: &Device) {
 }
 
 /// `Backpressure::Stall` splits the prologue into chunks no larger than the capacity.
-pub fn stall_chunks_the_prologue(device: &Device) {
+pub fn stall_chunks_the_prologue(device: &Runtime) {
     let n = 1024u32;
     let (ctx, _pool, data, pipeline) = fetch_setup(device, n);
     let mut scheme = Scheme::new(&ctx);
@@ -186,7 +186,7 @@ pub fn stall_chunks_the_prologue(device: &Device) {
 }
 
 /// `Backpressure::Drop` launches once and loses lanes beyond the capacity.
-pub fn drop_loses_excess_lanes(device: &Device) {
+pub fn drop_loses_excess_lanes(device: &Runtime) {
     let n = 512u32;
     let (ctx, _pool, data, pipeline) = fetch_setup(device, n);
     let mut scheme = Scheme::new(&ctx);
@@ -256,10 +256,10 @@ void step(Scattered<uint> out, Resolved<uint> r, Walk w) {
 }
 "#;
 
-pub fn continuation_yields_to_itself(device: &Device) {
+pub fn continuation_yields_to_itself(device: &Runtime) {
     let n = 96u32;
     let ctx = device.create_context().expect("ctx");
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let steps_in: Vec<u32> = (0..n).map(|i| i % 5).collect();
     let steps = pool
         .acquire_buffer_with_data(&steps_in, BufferKind::Scattered)
@@ -346,10 +346,10 @@ impl Petition for Scale {
     type Result = f32;
 }
 
-pub fn chained_continuations_with_multi_element_results(device: &Device) {
+pub fn chained_continuations_with_multi_element_results(device: &Runtime) {
     let n = 130u32;
     let ctx = device.create_context().expect("ctx");
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let out = pool
         .acquire_buffer_with_data(&vec![u32::MAX; n as usize], BufferKind::Scattered)
         .expect("buffer");
@@ -404,7 +404,7 @@ pub fn chained_continuations_with_multi_element_results(device: &Device) {
 }
 
 /// Fulfilments past the arena capacity become rejections the continuation can see.
-pub fn arena_overflow_rejects(device: &Device) {
+pub fn arena_overflow_rejects(device: &Runtime) {
     let n = 200u32;
     let (ctx, _pool, data, pipeline) = fetch_setup(device, n);
     let mut scheme = Scheme::new(&ctx);
@@ -452,7 +452,7 @@ void cs_main(BufRO<Fetch> petitions, Scattered<Resolution> resolutions, Scattere
 }
 "#;
 
-pub fn node_handler_resolves_on_gpu(device: &Device) {
+pub fn node_handler_resolves_on_gpu(device: &Runtime) {
     let n = 256u32;
     let (ctx, mut pool, data, pipeline) = fetch_setup(device, n);
     let table_in: Vec<u32> = (0..16u32).map(|i| 1000 + i).collect();
@@ -552,10 +552,10 @@ impl Petition for Ask {
     type Result = Pair;
 }
 
-pub fn struct_result_elements(device: &Device) {
+pub fn struct_result_elements(device: &Runtime) {
     let n = 100u32;
     let ctx = device.create_context().expect("ctx");
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let pool = &device;
     let shader = ShaderModule::from_slang(device, PAIR_SRC).expect("compile");
     let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
     let handler_shader = ShaderModule::from_slang(device, PAIR_HANDLER_SRC).expect("compile handler");
@@ -588,7 +588,7 @@ pub fn struct_result_elements(device: &Device) {
 }
 
 /// Record-time mistakes are reported on submit.
-pub fn validation_errors(device: &Device) {
+pub fn validation_errors(device: &Runtime) {
     let n = 64u32;
     let (ctx, _pool, data, pipeline) = fetch_setup(device, n);
 
@@ -669,7 +669,7 @@ pub fn validation_errors(device: &Device) {
 }
 
 /// A yielding node ordered between ordinary GPU nodes in the same scheme.
-pub fn ordered_with_neighbouring_nodes(device: &Device) {
+pub fn ordered_with_neighbouring_nodes(device: &Runtime) {
     let n = 128u32;
     let (ctx, _pool, data, pipeline) = fetch_setup(device, n);
     let plus_one = ShaderModule::from_slang(

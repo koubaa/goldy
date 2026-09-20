@@ -1,7 +1,7 @@
 //! Ray-tracing pipelines (`TraceRays` / `DispatchRays`) with an internal SBT.
 
 use crate::backend::{GpuBackend, GpuRayTracingPipelineDesc, RayTracingPipelineHandle};
-use crate::device::Device;
+use crate::runtime::Runtime;
 use crate::shader::ShaderModule;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -23,7 +23,7 @@ pub const MAX_RAY_PAYLOAD_BYTES: u32 = 128;
 /// payloads must fit in [`MAX_RAY_PAYLOAD_BYTES`]; Vulkan uses the shader-declared
 /// payload size.
 pub struct RayTracingPipeline {
-    _device: Device,
+    _device: Runtime,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: RayTracingPipelineHandle,
     pub(crate) slot_access: Vec<Option<crate::types::ResourceAccess>>,
@@ -43,17 +43,17 @@ pub struct RayTracingPipelineDesc<'a> {
 }
 
 impl RayTracingPipeline {
-    /// Create an RT pipeline when [`crate::DeviceCapabilities::ray_tracing_pipelines`] is set.
-    pub fn new(device: &Device, desc: &RayTracingPipelineDesc<'_>) -> Result<Self> {
+    /// Create an RT pipeline when [`crate::RuntimeCapabilities::ray_tracing_pipelines`] is set.
+    pub fn new(device: &Runtime, desc: &RayTracingPipelineDesc<'_>) -> Result<Self> {
         Self::new_with_label(device, desc, None)
     }
 
     /// [`Self::new`] with an optional GPU-debugger label.
-    pub fn new_with_label(device: &Device, desc: &RayTracingPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
+    pub fn new_with_label(device: &Runtime, desc: &RayTracingPipelineDesc<'_>, label: Option<&str>) -> Result<Self> {
         anyhow::ensure!(
             device.capabilities().ray_tracing_pipelines,
             "this adapter does not support ray tracing pipelines \
-             (DeviceCapabilities::ray_tracing_pipelines is false). \
+             (RuntimeCapabilities::ray_tracing_pipelines is false). \
              hint: use inline RayQuery in a [goldy_compute] kernel when ray_query is true \
              (all Metal RT, many iGPUs). Full TraceRays needs Vulkan VK_KHR_ray_tracing_pipeline \
              or DXR. Query device.capabilities().ray_tracing_pipelines."

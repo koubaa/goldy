@@ -782,10 +782,10 @@ impl GpuBackend for CpuBackend {
         self.adapters.clone()
     }
 
-    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::device::DeviceCapabilities {
-        crate::device::DeviceCapabilities {
+    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
+        crate::runtime::RuntimeCapabilities {
             host_sidecar_on_submit_worker: true,
-            ..crate::device::DeviceCapabilities::default()
+            ..crate::runtime::RuntimeCapabilities::default()
         }
     }
 
@@ -1463,13 +1463,11 @@ impl GpuBackend for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::Device;
-    use crate::{BufferKind, MemoryExchange, NodeAccess, RetainedPool, Scheme, ShaderModule};
-    use std::sync::Arc;
+    use crate::{BufferKind, MemoryExchange, NodeAccess, Runtime, Scheme, ShaderModule};
 
-    fn run_double(device: &Device) {
+    fn run_double(device: &Runtime) {
         let ctx = device.create_context().expect("ctx");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let n = 64usize;
         let input: Vec<u32> = (0..n as u32).collect();
         let data = pool
@@ -1507,7 +1505,7 @@ mod tests {
 
     #[test]
     fn cpu_backend_scheme_double_u32() {
-        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        let device = Runtime::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
         assert_eq!(device.backend_type(), BackendType::Cpu);
         run_double(&device);
     }
@@ -1515,15 +1513,15 @@ mod tests {
     #[test]
     fn cpu_backend_scheme_double_u32_host_access() {
         let _guard = crate::test_support::HostAccessOverride::force_enabled();
-        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        let device = Runtime::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
         run_double(&device);
     }
 
     #[test]
     fn cpu_backend_scheme_saxpy() {
-        let device = Device::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        let device = Runtime::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
         let ctx = device.create_context().expect("ctx");
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let n = 256usize;
         let a = 2.0f32;
         let x_data: Vec<f32> = (0..n).map(|i| i as f32).collect();

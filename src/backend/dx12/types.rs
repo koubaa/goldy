@@ -754,7 +754,7 @@ fn slot_requirements_met(
     })
 }
 
-/// Device-global deletions with no recorded cross-context bindless requirements may still be
+/// Runtime-global deletions with no recorded cross-context bindless requirements may still be
 /// referenced by retained command lists on other live contexts. Only drain those once every
 /// context fence is gone (teardown / last-context destroy).
 fn device_deletion_requirements_met(
@@ -796,7 +796,7 @@ impl DeletionQueue {
     }
 }
 
-/// Device-level deferred deletion queue for resources whose destroy could touch more than
+/// Runtime-level deferred deletion queue for resources whose destroy could touch more than
 /// one context (bindless-registry-tracked buffers/textures/views).
 ///
 /// Per-context [`DeletionQueue`] entries are drained against that same context's own fence,
@@ -841,7 +841,7 @@ impl DeviceDeletionQueue {
     }
 }
 
-/// Device-shared descriptor registry.
+/// Runtime-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
 /// `ResourceRegistry` (descriptor slot allocator), the per-context
@@ -1138,9 +1138,9 @@ pub(crate) struct LogicalDevice {
     pub cbv_srv_uav_descriptor_size: u32,
     pub sampler_heap: Direct3D12::ID3D12DescriptorHeap,
     pub sampler_descriptor_size: u32,
-    /// Device fence for synchronous Signal+wait paths only (not per-submit timeline).
+    /// Runtime fence for synchronous Signal+wait paths only (not per-submit timeline).
     pub fence: Direct3D12::ID3D12Fence,
-    /// Device-global submission sequence (shared value space; contexts signal their own fences).
+    /// Runtime-global submission sequence (shared value space; contexts signal their own fences).
     pub timeline_next: Arc<AtomicU64>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     pub retired_floor: AtomicU64,
@@ -1157,7 +1157,7 @@ pub(crate) struct LogicalDevice {
     /// Each argument entry contains `[PushLayout (TOTAL_PUSH_BYTES)] [wg_x] [wg_y] [wg_z]`.
     /// Requires the shared `bindless_root_signature` to be non-None.
     pub compute_batch_dispatch_signature: Option<Direct3D12::ID3D12CommandSignature>,
-    /// Device-lifetime zero-filled UPLOAD-heap buffer used as the source for
+    /// Runtime-lifetime zero-filled UPLOAD-heap buffer used as the source for
     /// `CopyBufferRegion` clears. One buffer per device; clears of any size are
     /// handled by chunking `CopyBufferRegion` calls. Using a copy instead of
     /// `ClearUnorderedAccessViewUint` avoids the shared-descriptor aliasing hazard

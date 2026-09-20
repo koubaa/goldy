@@ -13,7 +13,7 @@ This is the same native boundary used by the [C++](./cpp.md) and [.NET](./dotnet
 | Validating the C ABI from Rust | `goldy-ffi-client` |
 | Swapping the native library without recompiling the client | `goldy-ffi-client` |
 
-The ffi-client API mirrors the core Rust crate: `Instance`, `Scheme`, `RetainedPool`, `MemoryExchange`, `SurfaceExchange`, and the rest of the Fondaco programming model are available with the same names and patterns.
+The ffi-client API mirrors the core Rust crate: `Instance`, `Runtime`, `Scheme`, `MemoryExchange`, `SurfaceExchange`, and the rest of the Fondaco programming model are available with the same names and patterns.
 
 ## Installation
 
@@ -64,8 +64,8 @@ GOLDY_FFI_PATH=/path/to/libgoldy_ffi.so cargo run --example triangle_headless
 
 ```rust
 use goldy_ffi_client::{
-    shader::builtins, BufferKind, Color, Context, DeviceDescriptor, Instance, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    shader::builtins, BufferKind, Color, Context, RuntimeDescriptor, Instance, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
     ShaderModule, TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 
@@ -73,7 +73,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let instance = Instance::new()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?;
+        .request_runtime(&RuntimeDescriptor::default())?;
     let ctx = Context::new(&device)?;
 
     let vertices = [
@@ -81,10 +81,9 @@ fn main() -> goldy_ffi_client::Result<()> {
         Vertex2D { position: [-0.5, 0.5], color: [0.0, 1.0, 0.0, 1.0] },
         Vertex2D { position: [0.5, 0.5], color: [0.0, 0.0, 1.0, 1.0] },
     ];
-    let mut pool = RetainedPool::new(&device)?;
-    let vertex_buffer = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+    let vertex_buffer = device.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-    let readback = pool.acquire_texture(
+    let readback = device.acquire_texture(
         64, 64, TextureFormat::Rgba8Unorm, TextureKind::Direct,
         TextureFlags::COPY_SRC.union(TextureFlags::COPY_DST), None,
     )?;

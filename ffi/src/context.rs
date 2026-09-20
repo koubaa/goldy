@@ -1,7 +1,7 @@
 //! FFI bindings for [`goldy::Context`].
 
-use crate::device::GoldyDevice;
 use crate::error::{set_last_error, GoldyResult};
+use crate::runtime::GoldyRuntime;
 
 /// Opaque handle to a Goldy submission context.
 pub struct GoldyContext {
@@ -16,9 +16,9 @@ pub struct GoldyContext {
 /// # Safety
 /// `device` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_context_create(device: *const GoldyDevice) -> *mut GoldyContext {
+pub unsafe extern "C" fn goldy_context_create(device: *const GoldyRuntime) -> *mut GoldyContext {
     if device.is_null() {
-        set_last_error("Device pointer is null");
+        set_last_error("Runtime pointer is null");
         return std::ptr::null_mut();
     }
     match (*device).inner.create_context() {

@@ -133,10 +133,10 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 /// (keyed by `DeviceHandle` without requiring any `sc_arc` mutex acquisition).
 ///
 /// Critical for avoiding cross-test/cross-device lock contention: `state.contexts` is a
-/// single global map shared by every `Device` in the process, so scanning it and locking
+/// single global map shared by every `Runtime` in the process, so scanning it and locking
 /// every `sc_arc` just to filter by device would serialize buffer destroys against
 /// unrelated, concurrently-running tests' in-flight GPU waits (see issue: `cargo test`
-/// runs tests in parallel by default, each with its own `Device`/contexts).
+/// runs tests in parallel by default, each with its own `Runtime`/contexts).
 fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHandle> {
     let result: Vec<ContextHandle> = state
         .context_fences

@@ -1,5 +1,5 @@
 /**
- * Headless triangle ó Scheme render pass + MemoryExchange withdraw (no GLFW).
+ * Headless triangle ù Scheme render pass + MemoryExchange withdraw (no GLFW).
  *
  * Mirrors python/examples/triangle_headless.py and ffi-client triangle_headless.
  * Used on headless Linux CI (lavapipe container has no Wayland display).
@@ -52,7 +52,7 @@ int main() {
         std::cout << "=====================================\n";
 
         goldy::Instance instance;
-        goldy::Device device = instance.request_adapter().request_device();
+        goldy::Runtime device = instance.request_adapter().request_runtime();
         goldy::Context ctx(device);
 
         const Vertex vertices[] = {
@@ -61,8 +61,7 @@ int main() {
             {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
         };
 
-        goldy::RetainedPool pool(device);
-        goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer vertex_buffer = device.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -85,7 +84,7 @@ int main() {
 
         constexpr uint32_t kWidth = 64;
         constexpr uint32_t kHeight = 64;
-        goldy::Texture readback = pool.acquire_texture(
+        goldy::Texture readback = device.acquire_texture(
             kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM,
             GOLDY_TEXTURE_KIND_DIRECT, copy_readback_flags());
 

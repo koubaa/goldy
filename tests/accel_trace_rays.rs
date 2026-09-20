@@ -8,9 +8,8 @@ mod imp {
     use crate::submission::{skip_dx12_warp_ray_tracing, submission_context};
     use goldy::{
         types::{BackendType, BufferFlags},
-        AccelInstance, AccelerationStructure, BufferKind, Device, DeviceDescriptor, Instance, MemoryExchange,
-        NodeAccess, RayTracingPipeline, RayTracingPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-        ShaderModule,
+        AccelInstance, AccelerationStructure, BufferKind, Instance, MemoryExchange, NodeAccess, RayTracingPipeline,
+        RayTracingPipelineDesc, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule,
     };
     use std::sync::{Arc, Mutex};
 
@@ -20,16 +19,16 @@ mod imp {
         GPU.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn make_device() -> Device {
+    fn make_device() -> Runtime {
         Instance::new()
             .expect("instance")
             .request_adapter(&RequestAdapterOptions::default())
             .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
+            .request_runtime(&RuntimeDescriptor::default())
             .expect("device")
     }
 
-    fn skip_on_software_vulkan(device: &Device) -> bool {
+    fn skip_on_software_vulkan(device: &Runtime) -> bool {
         let name = device.adapter().name().to_ascii_lowercase();
         if name.contains("lavapipe") || name.contains("llvmpipe") {
             eprintln!("skip: TraceRays / SBT is unstable on Mesa lavapipe");
@@ -70,7 +69,7 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
             return;
         }
         if !device.capabilities().ray_tracing_pipelines {
-            eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
+            eprintln!("skip: RuntimeCapabilities::ray_tracing_pipelines is false on this adapter");
             return;
         }
         if matches!(device.backend_type(), BackendType::WebGpu | BackendType::Metal) {
@@ -83,7 +82,7 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
         let ctx = submission_context(&device);
 
         let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, -0.5, 0.0]];
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let verts = pool
             .acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)
             .expect("vertex buffer");
@@ -179,7 +178,7 @@ void rchit_main(inout HitPayload p) {
             return;
         }
         if !device.capabilities().ray_tracing_pipelines {
-            eprintln!("skip: DeviceCapabilities::ray_tracing_pipelines is false on this adapter");
+            eprintln!("skip: RuntimeCapabilities::ray_tracing_pipelines is false on this adapter");
             return;
         }
         if matches!(device.backend_type(), BackendType::WebGpu | BackendType::Metal) {
@@ -192,7 +191,7 @@ void rchit_main(inout HitPayload p) {
         let ctx = submission_context(&device);
 
         let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, -0.5, 0.0]];
-        let mut pool = RetainedPool::new(Arc::new(device.clone()));
+        let pool = &device;
         let verts = pool
             .acquire_buffer_with_data_and_flags(&positions, BufferKind::Scattered, BufferFlags::ACCEL_INPUT)
             .expect("vertex buffer");

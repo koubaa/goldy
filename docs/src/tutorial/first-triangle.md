@@ -10,8 +10,8 @@ Once at init (and again on resize), record a retained scheme: offscreen render p
 
 ```rust
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool,
+    shader::builtins, Buffer, BufferKind, Color, RuntimeDescriptor, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, Transaction, Vertex2D,
 };
 
@@ -44,14 +44,14 @@ present.claim(&mut submission)?.consume()?;
 
 ## Walkthrough
 
-### Instance, Device, and Context
+### Instance, Runtime, and Context
 
 ```rust
 let instance = Instance::new()?;
 let device = Arc::new(
     instance
         .request_adapter(&RequestAdapterOptions::default())?
-        .request_device(&DeviceDescriptor::default())?,
+        .request_runtime(&RuntimeDescriptor::default())?,
 );
 let ctx = device.create_context()?;
 ```
@@ -66,11 +66,10 @@ let vertices = [
     Vertex2D::new(-0.5, 0.5, Color::GREEN),
     Vertex2D::new(0.5, 0.5, Color::BLUE),
 ];
-let mut pool = RetainedPool::new(device.clone());
-let vertex_buffer = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+let vertex_buffer = device.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 ```
 
-`Vertex2D` is a built-in vertex type with position and color. Keep the pool alive for the buffer's lifetime.
+`Vertex2D` is a built-in vertex type with position and color. The runtime owns the retained parcel for the buffer's lifetime.
 
 ### Shader and Pipeline
 

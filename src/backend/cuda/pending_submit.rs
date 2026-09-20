@@ -148,7 +148,7 @@ pub(super) enum CudaOp {
         shape_ptr: u64,
         shape_memory: Arc<Mutex<CudaSlice<u8>>>,
         shape_abs_offset: u64,
-        /// Device slot written with `CUgraphDeviceNode` after capture finalize.
+        /// Runtime slot written with `CUgraphDeviceNode` after capture finalize.
         node_slot_ptr: u64,
         node_slot: Arc<Mutex<CudaSlice<u64>>>,
         /// Diagnostic status word (0 = ok, -1 = oversized, else CUDA error).
@@ -167,7 +167,7 @@ pub(super) enum CudaOp {
         memory: Arc<Mutex<CudaSlice<u8>>>,
         abs_offset: u64,
         size: u64,
-        /// Device pointer of the clear range, baked at materialize (capture-safe).
+        /// Runtime pointer of the clear range, baked at materialize (capture-safe).
         device_ptr: u64,
     },
     Write {
@@ -179,7 +179,7 @@ pub(super) enum CudaOp {
     WriteFromHost {
         memory: Arc<Mutex<CudaSlice<u8>>>,
         abs_offset: u64,
-        /// Device pointer of the destination range, baked at materialize (capture-safe).
+        /// Runtime pointer of the destination range, baked at materialize (capture-safe).
         device_ptr: u64,
         host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
         host_offset: usize,
@@ -1422,7 +1422,7 @@ fn prime_submit_waits_for_ops(stream: &Arc<CudaStream>, ops: &[CudaOp]) -> Resul
     Ok(())
 }
 
-/// Device pointer baked on the API thread before capture (no alloc-stream CUDA
+/// Runtime pointer baked on the API thread before capture (no alloc-stream CUDA
 /// calls from the capturing worker).
 pub(super) fn bake_device_ptr(stream: &Arc<CudaStream>, memory: &Arc<Mutex<CudaSlice<u8>>>, abs_offset: u64) -> u64 {
     let _gate = lock_capture_alloc_gate();
