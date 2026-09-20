@@ -23,8 +23,7 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
+#[goldy::gpu]
 struct Uniforms {
     width: u32,
     height: u32,

@@ -3,6 +3,7 @@
 Proc-macro helpers for [`goldy`](https://crates.io/crates/goldy):
 
 - `#[compute]` — Rust GPU-dialect compute kernels → canonical `[goldy_compute]` Slang + typed `Kernel::prepare` / `record`
+- `#[gpu]` — bundled `repr(C)` GPU struct (`Clone`/`Copy`/`Pod`/`Zeroable` + `GpuType`)
 - `LayoutCheckable` — layout introspection for `#[repr(C)]` GPU structs
 - `StructuredBufferElement` — marker for typed buffer uploads
 

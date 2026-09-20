@@ -109,9 +109,15 @@ pub use device::{
     RequestAdapterOptions, TextureHeapStats, VideoMemoryInfo,
 };
 pub use goldy_derive::compute;
+pub use goldy_derive::gpu;
 pub use goldy_derive::GpuType;
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
+
+#[doc(hidden)]
+pub mod __private {
+    pub use bytemuck::{Pod, Zeroable};
+}
 pub use kernel::gpu;
 pub use kernel::{
     prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,

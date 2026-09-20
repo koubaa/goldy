@@ -26,7 +26,7 @@ fn bindless_cache_from_backend(
 /// Types allowed as elements in [`Device::acquire_buffer_with_data`](crate::Device::acquire_buffer_with_data).
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
-/// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
+/// `#[repr(C)]` structs via `#[goldy::gpu]` or `#[derive(goldy_derive::StructuredBufferElement)]`.
 ///
 /// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
 /// set element stride to 1 while shaders usually expect a larger struct stride. Use

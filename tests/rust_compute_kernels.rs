@@ -33,8 +33,7 @@ fn fill_red(output: goldy::gpu::DirectSpatial<goldy::gpu::Float4>) {
     output[tid.xy] = goldy::gpu::float4(1.0, 0.0, 0.0, 1.0);
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
+#[goldy::gpu]
 struct PlasmaUniforms {
     width: u32,
     height: u32,
@@ -52,8 +51,7 @@ fn read_plasma_uniforms(uniforms: &[PlasmaUniforms], out: &mut [f32]) {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
+#[goldy::gpu]
 struct TightVertex {
     position: [f32; 3],
     uv: [f32; 2],

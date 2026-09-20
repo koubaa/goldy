@@ -541,7 +541,7 @@ fn buffer_element(ty: &Type) -> Result<BufferElem, Error> {
         }
         _ => Err(Error::new(
             ty.span(),
-            "unsupported buffer element type; use u32/i32/f32/bool or a #[derive(GpuType)] struct",
+            "unsupported buffer element type; use u32/i32/f32/bool or a #[goldy::gpu] struct",
         )),
     }
 }

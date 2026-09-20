@@ -94,7 +94,7 @@ impl ShaderLibrary {
     /// Create a library after injecting Slang declarations generated from Rust GPU types.
     ///
     /// Use this when a shared module references a type whose ABI is owned by Rust
-    /// (`#[derive(GpuType)]`). The generated structs are prepended before `source`.
+    /// (`#[goldy::gpu]` / `#[derive(GpuType)]`). The generated structs are prepended before `source`.
     pub fn from_source_with_gpu_types(name: &str, source: &str, gpu_types: &[GpuType<'_>]) -> Result<Self> {
         let mut generated = String::new();
         let mut seen = std::collections::HashSet::with_capacity(gpu_types.len());

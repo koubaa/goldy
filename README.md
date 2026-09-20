@@ -19,14 +19,7 @@ GPU memory is completely virtualized, and the runtime may relocate objects betwe
 ## Quick example: compute-to-surface
 
 ```rust
-use goldy::gpu;
-use goldy::{
-    BufferKind, DeviceDescriptor, Instance, RequestAdapterOptions, RetainedPool, Scheme, SurfaceConfig,
-    SurfaceExchange,
-};
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
+#[goldy::gpu]
 struct Uniforms {
     width: u32,
     height: u32,
@@ -65,12 +58,15 @@ let device = instance
     .request_adapter(&RequestAdapterOptions::default())?
     .request_device(&DeviceDescriptor::default())?;
 let ctx = device.create_context()?;
+
 let pool = RetainedPool::new(&device)?;
+let uniforms = pool.alloc_buffer_with_data (&device, &uniforms_data, BufferKind::Scattered)?;
+
 let surface = SurfaceExchange::new(&ctx, &window, SurfaceConfig::default())?;
 
 // Compile the Rust kernel to [goldy_compute] Slang (or hit the shader cache).
 let kernel = plasma::Kernel::prepare(&device)?;
-let uniforms = pool.alloc_buffer_with_data(&device, &uniforms_data, BufferKind::Scattered)?;
+
 
 let mut scheme = Scheme::new(&ctx);
 // Lease is the drawable the kernel writes; transaction is how the frame is presented.

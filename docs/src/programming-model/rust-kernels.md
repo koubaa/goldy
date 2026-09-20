@@ -98,7 +98,7 @@ intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`length`), vector
 constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, `return`,
 and the ID builtins above.
 
-`#[derive(GpuType)]` structs may be passed as `&[T]` uniforms; `prepare` prepends
+`#[goldy::gpu]` structs may be passed as `&[T]` uniforms; `prepare` prepends
 the generated Slang struct.
 
 Rejected with span diagnostics: allocation, iterators/closures, traits/dyn,
@@ -106,7 +106,7 @@ recursion, async, panics, arbitrary std calls, `usize`/`isize`, references
 except resource parameters, and unsupported patterns.
 
 Element types for buffer slices are currently `u32` / `i32` / `f32` / `bool`, or
-a `#[derive(GpuType)]` struct for read-only `&[T]`.
+a `#[goldy::gpu]` struct for read-only `&[T]`.
 
 ## Diagnostics and dumps
 

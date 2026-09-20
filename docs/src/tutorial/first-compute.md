@@ -59,8 +59,7 @@ Key points:
 Define the uniform struct on the Rust side with matching layout:
 
 ```rust
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, goldy::GpuType)]
+#[goldy::gpu]
 struct Uniforms {
     width: u32,
     height: u32,
