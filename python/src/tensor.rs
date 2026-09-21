@@ -69,7 +69,7 @@ impl PyTensor {
         self.inner.shape().rank()
     }
 
-    /// Borrow the backing parcel for [`MemoryExchange.bind_withdraw`] / deposit.
+    /// Borrow the backing parcel for host claims / deposit.
     fn parcel(&self) -> PyParcel {
         parcel_from_cloned(self.inner.buffer().whole().clone())
     }

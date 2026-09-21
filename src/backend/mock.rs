@@ -999,6 +999,17 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
+    fn host_read_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
+        let buf = self.buffers.get(&buffer)?;
+        if !buf.flags.contains(BufferFlags::CPU_READABLE) {
+            return None;
+        }
+        Some(crate::backend::HostMapping {
+            ptr: buf.data.as_ptr(),
+            len: buf.data.len() as u64,
+        })
+    }
+
     fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,
@@ -1702,6 +1713,7 @@ impl GpuBackend for MockBackend {
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     self.execute_copy_texture_to_readback(*src, *dst, *layout)?;
                 }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {}
                 _ => {}
             }
         }

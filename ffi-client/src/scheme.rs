@@ -26,6 +26,22 @@ impl SchemeSubmission {
         check(unsafe { sys::goldy_scheme_submission_wait_until_settled(self.ptr) })
     }
 
+    /// Realize a host read of `parcel` after this submission.
+    pub fn take(&mut self, parcel: &Parcel) -> Result<crate::memory_exchange::HostView> {
+        let ptr = crate::error::non_null_expect(unsafe {
+            sys::goldy_scheme_submission_take(self.ptr, parcel.as_ptr())
+        });
+        Ok(crate::memory_exchange::HostView { ptr })
+    }
+
+    /// Realize a host read of `texture` after this submission.
+    pub fn take_texture(&mut self, texture: &Texture) -> Result<crate::memory_exchange::HostView> {
+        let ptr = crate::error::non_null_expect(unsafe {
+            sys::goldy_scheme_submission_take_texture(self.ptr, texture.as_ptr())
+        });
+        Ok(crate::memory_exchange::HostView { ptr })
+    }
+
     pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldySchemeSubmission {
         self.ptr
     }

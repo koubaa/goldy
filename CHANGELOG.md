@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Host claims** — `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`) realizes a public CPU read of a parcel after the submission gate. Host-coherent media map in place; others copy through a context staging pool. `BufferFlags::CPU_READABLE` is a placement hint that backends may honor with a mapped pointer (`RuntimeCapabilities::has_zero_copy_storage_readback`).
+
 - **Dense tensor layer** (`tensor` feature, default-on, independent of `graphics`) —
   shapes, dtypes (`F32`/`U32`/`I32`), checked views, broadcasting, and a `TensorRecorder`
   that records general tensor algebra into the existing Scheme. Semantic MatMul stays the
@@ -23,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.
+
 - Deprecated `Instance::create_runtime` / `create_runtime_for_adapter`,
   `Runtime::flush_texture_uploads`, `Scheme::lease_*` / `lease_handle` /
   `lease_buffer_handle`, `Texture::write` / `write_region`, and the
@@ -30,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `Context`, construct runtimes with `request_adapter` → `request_runtime`,
   and upload textures with `MemoryExchange::bind_deposit` or
   `Runtime::acquire_texture(..., init)`.
+
+### Changed
+
+- **Breaking:** GPU-to-host reads are host claims via `(&mut submission >> &parcel).take::<T>()`, not an exchange. `MemoryExchange` is deposit-only. `BufferFlags::CPU_READABLE` is a placement hint (identical staged semantics without the flag). C ABI: `goldy_scheme_submission_take` / `take_texture` → `GoldyHostView`. C++ `SchemeSubmission::take`; Python `SchemeSubmission.take` / `>>`; .NET `SchemeSubmission.Take`; ffi-client `SchemeSubmission::take`.
 
 ## [0.3.0] - 2026-09-19
 

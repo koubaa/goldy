@@ -44,7 +44,7 @@ Native backends (`vulkan`, `dx12`, `metal`) imply `graphics`, so enabling any of
 them keeps the full graphics+compute API.
 
 Textures and samplers remain available **without** `graphics` — they are part of
-the GPGPU compute surface (storage images, sampling, copies, deposits/withdrawals).
+the GPGPU compute surface (storage images, sampling, copies, deposits, host claims).
 
 `gpu` is an empty umbrella enabled by `vulkan`, `dx12`, `metal`, `cuda`, and
 `webgpu`. Use `cfg(feature = "gpu")` for tests that need `Instance::new()` rather

@@ -15,7 +15,7 @@
 //!     shader/PSO create and bind groups). For loader-only Vulkan layers, set
 //!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
-//!   - `scheme` / `readback` / `graph` — retained-scheme withdraw staging invariants
+//!   - `scheme` / `readback` / `graph` — retained-scheme host-read staging invariants
 //!     plus graph-level lifetime checks (Accel built in this scheme before TraceRay /
 //!     RayQuery). Cycle detection, mesh/draw mix-ups, and BLAS/TLAS misuse always run.
 //!   - `host_access` — page-protect CPU-visible GPU copies (CPU backend parcels; more backends later)
@@ -131,7 +131,7 @@ pub(crate) fn timeline_validation_enabled() -> bool {
     from_goldy_validation_var().timeline
 }
 
-/// Retained-scheme withdraw staging invariants (frame/grant pairing, staging pool checks).
+/// Retained-scheme host-read staging invariants (staging pool checks, graph-level lifetime).
 #[must_use]
 pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme

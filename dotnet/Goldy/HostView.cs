@@ -3,22 +3,22 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// CPU-readable bytes from a consumed <see cref="WithdrawClaim"/>.
-/// Dropping recycles staging.
+/// Host-claimed parcel bytes after a submission (<c>goldy_scheme_submission_take</c>).
+/// Dropping releases the host claim.
 /// </summary>
-public sealed class WithdrawBytes : IDisposable
+public sealed class HostView : IDisposable
 {
     internal nint Handle;
     private bool _disposed;
 
-    internal WithdrawBytes(nint handle) => Handle = handle;
+    internal HostView(nint handle) => Handle = handle;
 
     public int Length
     {
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return checked((int)NativeMethods.WithdrawBytesLen(Handle));
+            return checked((int)NativeMethods.HostViewLen(Handle));
         }
     }
 
@@ -37,9 +37,9 @@ public sealed class WithdrawBytes : IDisposable
         var len = Length;
         if (len == 0)
             return ReadOnlySpan<byte>.Empty;
-        var data = NativeMethods.WithdrawBytesData(Handle);
+        var data = NativeMethods.HostViewData(Handle);
         if (data == nint.Zero)
-            throw GoldyException.FromLastError("WithdrawBytes data");
+            throw GoldyException.FromLastError("HostView data");
         return new ReadOnlySpan<byte>((void*)data, len);
     }
 
@@ -51,9 +51,9 @@ public sealed class WithdrawBytes : IDisposable
         {
             fixed (byte* p = output)
             {
-                var result = NativeMethods.WithdrawBytesCopy(Handle, (nint)p, (nuint)output.Length);
+                var result = NativeMethods.HostViewCopy(Handle, (nint)p, (nuint)output.Length);
                 if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("WithdrawBytes copy");
+                    throw GoldyException.FromLastError("HostView copy");
             }
         }
         return output;
@@ -63,7 +63,7 @@ public sealed class WithdrawBytes : IDisposable
     {
         if (_disposed)
             return;
-        NativeMethods.WithdrawBytesDestroy(Handle);
+        NativeMethods.HostViewDestroy(Handle);
         Handle = nint.Zero;
         _disposed = true;
     }

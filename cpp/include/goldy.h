@@ -211,6 +211,9 @@ typedef struct GoldyContext GoldyContext;
 // Stable deposit relationship recorded in one scheme.
 typedef struct GoldyDepositTransaction GoldyDepositTransaction;
 
+// Typed host view of a parcel (`HostView<u8>`).
+typedef struct GoldyHostView GoldyHostView;
+
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
@@ -263,15 +266,6 @@ typedef struct GoldyTexture GoldyTexture;
 
 // Erased exchange transaction recorded in a scheme.
 typedef struct GoldyTransaction GoldyTransaction;
-
-// CPU-readable bytes from a consumed withdraw claim.
-typedef struct GoldyWithdrawBytes GoldyWithdrawBytes;
-
-// Linear claim for one submission's memory withdrawal.
-typedef struct GoldyWithdrawClaim GoldyWithdrawClaim;
-
-// Stable withdraw relationship recorded in one scheme.
-typedef struct GoldyWithdrawTransaction GoldyWithdrawTransaction;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -497,6 +491,32 @@ enum GoldyResult goldy_deposit_transaction_write(const struct GoldyDepositTransa
 // Returns null if no error has occurred.
 const char *goldy_get_last_error(void);
 
+// Copy host-view bytes into `output` (must be exactly [`goldy_host_view_len`] bytes).
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_host_view_copy(const struct GoldyHostView *view,
+                                      uint8_t *output,
+                                      size_t output_size);
+
+// Pointer to host-view bytes (valid until [`goldy_host_view_destroy`]).
+//
+// # Safety
+// `view` must be valid.
+const uint8_t *goldy_host_view_data(const struct GoldyHostView *view);
+
+// Destroy a host view (releases the host claim).
+//
+// # Safety
+// `view` must be valid and not used after this call.
+void goldy_host_view_destroy(struct GoldyHostView *view);
+
+// Byte length of a host view.
+//
+// # Safety
+// `view` must be valid.
+uint64_t goldy_host_view_len(const struct GoldyHostView *view);
+
 // Get the number of available adapters.
 //
 // # Safety
@@ -546,24 +566,6 @@ enum GoldyResult goldy_instance_get_adapter(const struct GoldyInstance *instance
 struct GoldyDepositTransaction *goldy_memory_exchange_bind_deposit(const struct GoldyMemoryExchange *exchange,
                                                                    struct GoldyScheme *scheme,
                                                                    const struct GoldyDepositTarget *target);
-
-// Bind a withdrawal over a buffer or texture deed parcel.
-//
-// Returns a heap-allocated transaction; destroy with [`goldy_withdraw_transaction_destroy`].
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyWithdrawTransaction *goldy_memory_exchange_bind_withdraw(const struct GoldyMemoryExchange *exchange,
-                                                                     struct GoldyScheme *scheme,
-                                                                     const struct GoldyParcel *parcel);
-
-// Bind a withdrawal over a texture deed (same as parcel withdraw; texture is a parcel).
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyWithdrawTransaction *goldy_memory_exchange_bind_withdraw_texture(const struct GoldyMemoryExchange *exchange,
-                                                                             struct GoldyScheme *scheme,
-                                                                             const struct GoldyTexture *texture);
 
 // Create a memory exchange bound to `ctx`.
 //
@@ -908,9 +910,25 @@ void goldy_scheme_submission_destroy(struct GoldySchemeSubmission *submission);
 // `submission` must be valid.
 bool goldy_scheme_submission_is_settled(const struct GoldySchemeSubmission *submission);
 
+// Realize a host read of `parcel` after `submission`.
+//
+// Returns a heap-allocated view; destroy with [`goldy_host_view_destroy`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyHostView *goldy_scheme_submission_take(struct GoldySchemeSubmission *submission,
+                                                   const struct GoldyParcel *parcel);
+
+// Realize a host read of a texture parcel after `submission`.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyHostView *goldy_scheme_submission_take_texture(struct GoldySchemeSubmission *submission,
+                                                           const struct GoldyTexture *texture);
+
 // Block until the GPU work for `submission` has completed.
 //
-// Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
+// Prefer [`crate::goldy_scheme_submission_take`] when verifying compute output.
 //
 // # Safety
 // `submission` must be valid.
@@ -919,8 +937,8 @@ enum GoldyResult goldy_scheme_submission_wait_until_settled(const struct GoldySc
 // Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 //
 // Does not block. The caller owns `*out_submission` and must call
-// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded withdrawal, use
-// [`crate::goldy_withdraw_transaction_claim`] then [`crate::goldy_withdraw_claim_consume`].
+// [`goldy_scheme_submission_destroy`]. To read parcel bytes, use
+// [`crate::goldy_scheme_submission_take`] then [`crate::goldy_host_view_copy`].
 //
 // # Safety
 // `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
@@ -1103,77 +1121,6 @@ void goldy_transaction_destroy(struct GoldyTransaction *transaction);
 // # Safety
 // `transaction` must be valid.
 uint64_t goldy_transaction_generation(const struct GoldyTransaction *transaction);
-
-// Copy consumed withdraw data into `output` (must be exactly [`goldy_withdraw_bytes_len`] bytes).
-//
-// # Safety
-// All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_withdraw_bytes_copy(const struct GoldyWithdrawBytes *bytes,
-                                           uint8_t *output,
-                                           size_t output_size);
-
-// Pointer to consumed withdraw data (valid until [`goldy_withdraw_bytes_destroy`]).
-//
-// # Safety
-// `bytes` must be valid.
-const uint8_t *goldy_withdraw_bytes_data(const struct GoldyWithdrawBytes *bytes);
-
-// Destroy consumed withdraw bytes (recycles staging).
-//
-// # Safety
-// `bytes` must be valid and not used after this call.
-void goldy_withdraw_bytes_destroy(struct GoldyWithdrawBytes *bytes);
-
-// Byte length of consumed withdraw data.
-//
-// # Safety
-// `bytes` must be valid.
-uint64_t goldy_withdraw_bytes_len(const struct GoldyWithdrawBytes *bytes);
-
-// Wait for the submission, read staging into CPU bytes, and return RAII-managed bytes.
-//
-// Takes ownership of `claim` (do not destroy it afterward). Destroy the result with
-// [`goldy_withdraw_bytes_destroy`].
-//
-// # Safety
-// `claim` must be valid.
-struct GoldyWithdrawBytes *goldy_withdraw_claim_consume(struct GoldyWithdrawClaim *claim);
-
-// Destroy a withdraw claim without consuming or discarding intentionally.
-//
-// Drop recycles staging like discard when the claim is still unsettled.
-//
-// # Safety
-// `claim` must be valid and not used after this call.
-void goldy_withdraw_claim_destroy(struct GoldyWithdrawClaim *claim);
-
-// Settle without reading bytes; recycle staging. Takes ownership of `claim`.
-//
-// # Safety
-// `claim` must be valid.
-enum GoldyResult goldy_withdraw_claim_discard(struct GoldyWithdrawClaim *claim);
-
-// Logical byte size of readable data for this withdrawal.
-//
-// # Safety
-// `transaction` must be valid.
-uint64_t goldy_withdraw_transaction_byte_size(const struct GoldyWithdrawTransaction *transaction);
-
-// Extract this transaction's claim from a successful submission.
-//
-// Returns a heap-allocated claim; settle with [`goldy_withdraw_claim_consume`] or
-// [`goldy_withdraw_claim_discard`], or destroy with [`goldy_withdraw_claim_destroy`].
-//
-// # Safety
-// All pointers must be valid.
-struct GoldyWithdrawClaim *goldy_withdraw_transaction_claim(const struct GoldyWithdrawTransaction *transaction,
-                                                            struct GoldySchemeSubmission *submission);
-
-// Destroy a withdraw transaction.
-//
-// # Safety
-// `transaction` must be valid and not used after this call.
-void goldy_withdraw_transaction_destroy(struct GoldyWithdrawTransaction *transaction);
 
 #ifdef __cplusplus
 }  // extern "C"

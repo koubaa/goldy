@@ -68,7 +68,7 @@ bitflags! {
 
 | Flag | Purpose |
 |------|---------|
-| `COPY_SRC` | Texture can be a copy source (needed for withdraw / GPU copies) |
+| `COPY_SRC` | Texture can be a copy source (needed for host claims / GPU copies) |
 | `COPY_DST` | Texture can be a copy destination (needed for deposits / copies) |
 | `RENDER_TARGET` | Texture can be used as a color attachment |
 
@@ -89,13 +89,11 @@ For a one-shot fill at acquire time, pass `init` to [`Runtime::acquire_texture`]
 
 ## Reading Data
 
-Use a memory exchange withdraw bound into a scheme. The texture must have been created with `TextureFlags::COPY_SRC` and a storage-writable kind:
+Use a host claim after submit. The texture must have been created with `TextureFlags::COPY_SRC`:
 
 ```rust
-let memory = MemoryExchange::new(&ctx);
-let withdraw = memory.bind_withdraw(&mut scheme, &texture)?;
 let mut submission = scheme.submit()?;
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+let bytes = (&mut submission >> &texture).take::<u8>()?.to_vec();
 ```
 
 ## Texture Queries

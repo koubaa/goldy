@@ -591,8 +591,6 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyTextureRegion { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        // WithdrawRead participates in ordering edges but emits no GPU work in the IR.
-        NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
         NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
         // The device-visible footprint of a CPU dispatch is its staging copies.
         NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
@@ -655,14 +653,6 @@ fn compute_barriers(
         if depth[from] < wave_idx && wave_set.contains(&to) {
             let from_node = &ir.nodes[from];
             let to_node = &ir.nodes[to];
-            // WithdrawRead emits no GPU work in this command stream (copy is out-of-band in
-            // `Scheme::finish_submit_frame`).  Skip it for barrier semantics so recording
-            // grant before dispatch does not emit bogus COMMON→UAV global barriers on WARP.
-            if matches!(from_node.kind, NodeKind::WithdrawRead { .. })
-                || matches!(to_node.kind, NodeKind::WithdrawRead { .. })
-            {
-                continue;
-            }
             for bi in &from_node.bindings {
                 for bj in &to_node.bindings {
                     if bindings_conflict(bi, bj) {
@@ -928,7 +918,6 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 | NodeKind::Dispatch { .. }
                 | NodeKind::MatMul(_)
                 | NodeKind::RenderPass { .. }
-                | NodeKind::WithdrawRead { .. }
                 | NodeKind::CpuDispatch { .. } => {}
             }
         }
@@ -1392,7 +1381,6 @@ pub(crate) fn partition_waves_are_accel_build(ir: &GraphIR, waves: &[Wave]) -> b
         for &ni in &wave.node_indices {
             match &ir.nodes[ni].kind {
                 NodeKind::BuildAccelerationStructure(_) => any = true,
-                NodeKind::WithdrawRead { .. } => {}
                 _ => return false,
             }
         }
@@ -1794,7 +1782,6 @@ pub(crate) fn emit_graph_commands_for_waves(
                 | NodeKind::TraceRays { .. }
                 | NodeKind::MatMul(_)
                 | NodeKind::RenderPass { .. }
-                | NodeKind::WithdrawRead { .. }
                 | NodeKind::CpuDispatch { .. } => {}
             }
         }

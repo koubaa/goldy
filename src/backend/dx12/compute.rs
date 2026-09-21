@@ -1809,6 +1809,36 @@ fn record_gpu_command(
             }
             unsafe { cl.CopyBufferRegion(&dst_resource, dst_off, &src_resource, src_off, *size) };
         }
+        GpuCommand::CopyToCpuReadableTwin { src, src_offset, size } => {
+            let _tz = tracy_zone!("dx12.copy_to_cpu_readable_twin");
+            let (src_resource, dst_resource, src_off) = {
+                let buffers_read = scope.buffers().read().unwrap();
+                let src_buf = buffers_read
+                    .entries
+                    .get(src)
+                    .context("CopyToCpuReadableTwin: invalid src")?;
+                if src_offset.saturating_add(*size) > src_buf.size {
+                    anyhow::bail!("CopyToCpuReadableTwin: size exceeds buffer bounds");
+                }
+                let dst = src_buf
+                    .coherent_readback
+                    .clone()
+                    .context("CopyToCpuReadableTwin: buffer has no CPU_READABLE twin")?;
+                (src_buf.resource.clone(), dst, *src_offset)
+            };
+            let mut b_to_copy = [barriers::buffer_barrier_full(
+                &src_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            )];
+            unsafe {
+                barriers::barrier_buffers(cl7, &b_to_copy);
+                barriers::drop_buffer_barriers(&mut b_to_copy);
+            }
+            unsafe { cl.CopyBufferRegion(&dst_resource, src_off, &src_resource, src_off, *size) };
+        }
         GpuCommand::CopyTextureToReadback { src, dst, layout } => {
             let _tz = tracy_zone!("dx12.copy_texture_to_readback");
             super::texture::record_copy_texture_to_readback(

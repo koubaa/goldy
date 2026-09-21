@@ -1617,6 +1617,9 @@ pub(super) fn submit_with_scope(
                             .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
                     }
                 }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {
+                    anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
+                }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");
                     let staging_buffer = {
@@ -2668,6 +2671,9 @@ pub(super) fn submit_graph_with_scope(
                             .device
                             .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
                     }
+                }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {
+                    anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");

@@ -528,6 +528,18 @@ impl GpuBackend for MetalBackend {
         buffer::alloc_readback_buffer(&mut self.state, device, size)
     }
 
+    fn host_read_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
+        let buf = self.state.buffers.get(&buffer)?;
+        if buf.flags.contains(crate::types::BufferFlags::GPU_ONLY) {
+            return None;
+        }
+        let ptr = buf.buffer.contents() as *const u8;
+        if ptr.is_null() {
+            return None;
+        }
+        Some(crate::backend::HostMapping { ptr, len: buf.size })
+    }
+
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
         buffer::read_readback_buffer(&self.state, buffer, output)
     }

@@ -73,21 +73,15 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
     pub goldy_scheme_submission_is_settled: FnGoldySchemeSubmissionIsSettled,
     pub goldy_scheme_submission_wait_until_settled: FnGoldySchemeSubmissionWaitUntilSettled,
+    pub goldy_scheme_submission_take: FnGoldySchemeSubmissionTake,
+    pub goldy_scheme_submission_take_texture: FnGoldySchemeSubmissionTakeTexture,
+    pub goldy_host_view_len: FnGoldyHostViewLen,
+    pub goldy_host_view_data: FnGoldyHostViewData,
+    pub goldy_host_view_copy: FnGoldyHostViewCopy,
+    pub goldy_host_view_destroy: FnGoldyHostViewDestroy,
     pub goldy_memory_exchange_create: FnGoldyMemoryExchangeCreate,
     pub goldy_memory_exchange_destroy: FnGoldyMemoryExchangeDestroy,
-    pub goldy_memory_exchange_bind_withdraw: FnGoldyMemoryExchangeBindWithdraw,
-    pub goldy_memory_exchange_bind_withdraw_texture: FnGoldyMemoryExchangeBindWithdrawTexture,
     pub goldy_memory_exchange_bind_deposit: FnGoldyMemoryExchangeBindDeposit,
-    pub goldy_withdraw_transaction_destroy: FnGoldyWithdrawTransactionDestroy,
-    pub goldy_withdraw_transaction_byte_size: FnGoldyWithdrawTransactionByteSize,
-    pub goldy_withdraw_transaction_claim: FnGoldyWithdrawTransactionClaim,
-    pub goldy_withdraw_claim_destroy: FnGoldyWithdrawClaimDestroy,
-    pub goldy_withdraw_claim_consume: FnGoldyWithdrawClaimConsume,
-    pub goldy_withdraw_claim_discard: FnGoldyWithdrawClaimDiscard,
-    pub goldy_withdraw_bytes_len: FnGoldyWithdrawBytesLen,
-    pub goldy_withdraw_bytes_data: FnGoldyWithdrawBytesData,
-    pub goldy_withdraw_bytes_copy: FnGoldyWithdrawBytesCopy,
-    pub goldy_withdraw_bytes_destroy: FnGoldyWithdrawBytesDestroy,
     pub goldy_deposit_transaction_destroy: FnGoldyDepositTransactionDestroy,
     pub goldy_deposit_transaction_capacity: FnGoldyDepositTransactionCapacity,
     pub goldy_deposit_transaction_id: FnGoldyDepositTransactionId,
@@ -251,36 +245,21 @@ impl GoldyFfi {
                 "goldy_scheme_submission_wait_until_settled",
                 FnGoldySchemeSubmissionWaitUntilSettled
             ),
+            goldy_scheme_submission_take: sym!("goldy_scheme_submission_take", FnGoldySchemeSubmissionTake),
+            goldy_scheme_submission_take_texture: sym!(
+                "goldy_scheme_submission_take_texture",
+                FnGoldySchemeSubmissionTakeTexture
+            ),
+            goldy_host_view_len: sym!("goldy_host_view_len", FnGoldyHostViewLen),
+            goldy_host_view_data: sym!("goldy_host_view_data", FnGoldyHostViewData),
+            goldy_host_view_copy: sym!("goldy_host_view_copy", FnGoldyHostViewCopy),
+            goldy_host_view_destroy: sym!("goldy_host_view_destroy", FnGoldyHostViewDestroy),
             goldy_memory_exchange_create: sym!("goldy_memory_exchange_create", FnGoldyMemoryExchangeCreate),
             goldy_memory_exchange_destroy: sym!("goldy_memory_exchange_destroy", FnGoldyMemoryExchangeDestroy),
-            goldy_memory_exchange_bind_withdraw: sym!(
-                "goldy_memory_exchange_bind_withdraw",
-                FnGoldyMemoryExchangeBindWithdraw
-            ),
-            goldy_memory_exchange_bind_withdraw_texture: sym!(
-                "goldy_memory_exchange_bind_withdraw_texture",
-                FnGoldyMemoryExchangeBindWithdrawTexture
-            ),
             goldy_memory_exchange_bind_deposit: sym!(
                 "goldy_memory_exchange_bind_deposit",
                 FnGoldyMemoryExchangeBindDeposit
             ),
-            goldy_withdraw_transaction_destroy: sym!(
-                "goldy_withdraw_transaction_destroy",
-                FnGoldyWithdrawTransactionDestroy
-            ),
-            goldy_withdraw_transaction_byte_size: sym!(
-                "goldy_withdraw_transaction_byte_size",
-                FnGoldyWithdrawTransactionByteSize
-            ),
-            goldy_withdraw_transaction_claim: sym!("goldy_withdraw_transaction_claim", FnGoldyWithdrawTransactionClaim),
-            goldy_withdraw_claim_destroy: sym!("goldy_withdraw_claim_destroy", FnGoldyWithdrawClaimDestroy),
-            goldy_withdraw_claim_consume: sym!("goldy_withdraw_claim_consume", FnGoldyWithdrawClaimConsume),
-            goldy_withdraw_claim_discard: sym!("goldy_withdraw_claim_discard", FnGoldyWithdrawClaimDiscard),
-            goldy_withdraw_bytes_len: sym!("goldy_withdraw_bytes_len", FnGoldyWithdrawBytesLen),
-            goldy_withdraw_bytes_data: sym!("goldy_withdraw_bytes_data", FnGoldyWithdrawBytesData),
-            goldy_withdraw_bytes_copy: sym!("goldy_withdraw_bytes_copy", FnGoldyWithdrawBytesCopy),
-            goldy_withdraw_bytes_destroy: sym!("goldy_withdraw_bytes_destroy", FnGoldyWithdrawBytesDestroy),
             goldy_deposit_transaction_destroy: sym!(
                 "goldy_deposit_transaction_destroy",
                 FnGoldyDepositTransactionDestroy

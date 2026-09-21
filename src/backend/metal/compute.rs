@@ -1226,6 +1226,9 @@ pub(super) fn record_commands_to_buffer(
                     .unwrap()
                     .copy_from_buffer(&src_mtl, *src_offset, &dst_mtl, *dst_offset, *size);
             }
+            GpuCommand::CopyToCpuReadableTwin { .. } => {
+                anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
+            }
             GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                 ensure_blit_buf!(*dst);
                 let (src_tex, dst_mtl, bytes_per_row) = {
@@ -1514,6 +1517,7 @@ fn stage_uploads(
             | GpuCommand::CopyTexture { .. }
             | GpuCommand::CopyTextureRegion { .. }
             | GpuCommand::CopyTextureToReadback { .. }
+            | GpuCommand::CopyToCpuReadableTwin { .. }
             | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)
             | GpuCommand::BindResourcesRaw { .. }

@@ -81,6 +81,7 @@ use retained_graph::GraphRegistry;
 pub use retained_graph::{CudaGraphStats, CudaGraphStatsSnapshot};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
+use std::ops::Shr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
@@ -2374,6 +2375,9 @@ impl CudaBackend {
                             height: *height,
                         });
                     }
+                }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {
+                    anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let src_tex = self
@@ -5589,9 +5593,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             .node("double", &pipeline)
             .with_parcel(&buffer, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buffer)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &buffer).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
         Ok(())
     }
@@ -5619,9 +5623,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             .with_parcel(&input, crate::NodeAccess::Read)
             .with_parcel(&output, crate::NodeAccess::Write)
             .dispatch(4, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &output)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &output).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
         Ok(())
     }
@@ -5718,9 +5722,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(EXPECTED)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[EXPECTED]);
         Ok(())
     }
@@ -5742,9 +5746,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(0u32)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0]);
         Ok(())
     }
@@ -5766,9 +5770,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(u32::MAX)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[u32::MAX]);
         Ok(())
     }
@@ -5804,9 +5808,9 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(bits)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[bits]);
         Ok(())
     }
@@ -5842,9 +5846,9 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
             .with_param(A)
             .with_param(B)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[A, B]);
         Ok(())
     }
@@ -5881,9 +5885,9 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(OFFSET)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         let expected: Vec<u32> = input.iter().map(|v| v + OFFSET).collect();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), expected.as_slice());
         Ok(())
@@ -5926,9 +5930,9 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
             .with_parcel(&cfg, crate::NodeAccess::Read)
             .with_parcel(&values, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &values)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &values).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[3, 6, 9, 12]);
         Ok(())
     }
@@ -6064,11 +6068,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&b, crate::NodeAccess::Write)
             .with_param(9u32)
             .dispatch(1, 1, 1);
-        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
-        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+
         let mut submission = scheme.submit()?;
-        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
-        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        let bytes_a = (&mut submission >> &a).take::<u8>()?;
+        let bytes_b = (&mut submission >> &b).take::<u8>()?;
         assert!(bytemuck::cast_slice::<u8, u32>(&bytes_a).iter().all(|&v| v == 7));
         assert!(bytemuck::cast_slice::<u8, u32>(&bytes_b).iter().all(|&v| v == 9));
         Ok(())
@@ -6098,9 +6101,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("add_ten", &add_pipe)
             .with_parcel(&dst, crate::NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &dst)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &dst).take::<u8>()?;
         for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
             assert_eq!(val, (i as u32) * 2 + 10, "element {i}");
         }
@@ -6131,19 +6134,14 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&b, crate::NodeAccess::Write)
             .with_param(99u32)
             .dispatch(1, 1, 1);
-        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
-        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+
         let mut submission = scheme.submit()?;
-        assert!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw_a.claim(&mut submission)?.consume()?)
-                .iter()
-                .all(|&v| v == 42)
-        );
-        assert!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw_b.claim(&mut submission)?.consume()?)
-                .iter()
-                .all(|&v| v == 99)
-        );
+        assert!(bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &a).take::<u8>()?)
+            .iter()
+            .all(|&v| v == 42));
+        assert!(bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &b).take::<u8>()?)
+            .iter()
+            .all(|&v| v == 99));
         Ok(())
     }
 
@@ -6187,9 +6185,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&z, crate::NodeAccess::Read)
             .with_parcel(&out, crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
             assert_eq!(val, (i as u32) * 4, "element {i}");
         }
@@ -6212,9 +6210,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("add_ten", &pipe)
             .with_parcel(&buf, crate::NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buf)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &buf).take::<u8>()?;
         assert!(bytemuck::cast_slice::<u8, u32>(&bytes).iter().all(|&v| v == 10));
         Ok(())
     }
@@ -6238,9 +6236,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&mid, crate::NodeAccess::Read)
             .with_parcel(&dst, crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &dst)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &dst).take::<u8>()?;
         for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
             assert_eq!(val, i as u32, "element {i}");
         }
@@ -6269,9 +6267,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&cells[0], crate::NodeAccess::Read)
             .with_parcel(&cells[1], crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[1])?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &cells[1]).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), src.as_slice());
 
         // Isolation: doubling one field must leave the sibling untouched.
@@ -6290,15 +6288,14 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("double_work", &double)
             .with_parcel(&cells[1], crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant_sentinel = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[0])?;
-        let grant_work = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[1])?;
+
         let mut submission = scheme.submit()?;
         assert!(
-            bytemuck::cast_slice::<u8, u32>(&grant_sentinel.claim(&mut submission)?.consume()?)
+            bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &cells[0]).take::<u8>()?)
                 .iter()
                 .all(|&v| v == 100)
         );
-        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&grant_work.claim(&mut submission)?.consume()?)
+        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &cells[1]).take::<u8>()?)
             .iter()
             .enumerate()
         {
@@ -6514,7 +6511,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("a", &pipeline)
             .with_parcel(&buf_a, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw_a = crate::MemoryExchange::new(&ctx_a).bind_withdraw(&mut scheme_a, &buf_a)?;
+
         let mut submission_a = scheme_a.submit()?;
 
         let mut scheme_b = crate::Scheme::new(&ctx_b);
@@ -6522,11 +6519,11 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("b", &pipeline)
             .with_parcel(&buf_b, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw_b = crate::MemoryExchange::new(&ctx_b).bind_withdraw(&mut scheme_b, &buf_b)?;
+
         let mut submission_b = scheme_b.submit()?;
 
-        let bytes_a = withdraw_a.claim(&mut submission_a)?.consume()?;
-        let bytes_b = withdraw_b.claim(&mut submission_b)?.consume()?;
+        let bytes_a = (&mut submission_a >> &buf_a).take::<u8>()?;
+        let bytes_b = (&mut submission_b >> &buf_b).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[20, 40, 60, 80]);
         Ok(())
@@ -6553,9 +6550,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         let buf = pool.acquire_buffer_with_data(&init, BufferKind::Scattered)?;
         let mut scheme = crate::Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 16 * 4, 32 * 4)?;
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buf)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &buf).take::<u8>()?;
         let words = bytemuck::cast_slice::<u8, u32>(&bytes);
         assert!(words[..16].iter().all(|&v| v == 0xAAAA_AAAA));
         assert!(words[16..48].iter().all(|&v| v == 0));
@@ -6637,9 +6634,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&buffer, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
 
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buffer)?;
         let mut submission = scheme.submit()?;
-        let bytes1 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes1 = (&mut submission >> &buffer).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
 
         let after_first = stats.snapshot();
@@ -6656,7 +6652,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
         // Stable resubmit without rebinding withdraw (would dirty IR).
         let mut submission = scheme.submit()?;
-        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes2 = (&mut submission >> &buffer).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
 
         let after_second = stats.snapshot();
@@ -6695,10 +6691,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(7u32)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
         assert_eq!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw.claim(&mut submission)?.consume()?)[0],
+            bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &out).take::<u8>()?)[0],
             7
         );
         let captures_after_first = stats.snapshot().captures;
@@ -6717,10 +6713,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(9u32)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
         assert_eq!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw.claim(&mut submission)?.consume()?)[0],
+            bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &out).take::<u8>()?)[0],
             9
         );
         assert!(
@@ -7170,9 +7166,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .with_parcel(&work, crate::NodeAccess::ReadWrite)
             .dispatch_shape_parcel(&*shape)?;
 
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &work)?;
         let mut submission = scheme.submit()?;
-        let bytes1 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes1 = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
 
         let after_first = stats.snapshot();
@@ -7184,7 +7179,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let launches_after_first = after_first.launches;
 
         let mut submission = scheme.submit()?;
-        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes2 = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
         let after_second = stats.snapshot();
         assert_eq!(
@@ -7241,9 +7236,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .with_parcel(&work, crate::NodeAccess::ReadWrite)
             .dispatch_shape_parcel(&*shape)?;
 
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &work)?;
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0, 0, 0, 0]);
         let snap = stats.snapshot();
         assert!(snap.captures >= 1, "clear+indirect launches must capture: {snap:?}");
@@ -7256,7 +7250,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let captures_after_first = snap.captures;
         let launches_after_first = snap.launches;
         let mut submission = scheme.submit()?;
-        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes2 = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[0, 0, 0, 0]);
         let after = stats.snapshot();
         assert_eq!(
@@ -7295,11 +7289,9 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .with_parcel(&b, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
 
-        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
-        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
         let mut submission = scheme.submit()?;
-        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
-        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        let bytes_a = (&mut submission >> &a).take::<u8>()?;
+        let bytes_b = (&mut submission >> &b).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[0, 0, 0, 0]);
 
@@ -7316,8 +7308,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let launches_after_first = after_first.launches;
 
         let mut submission = scheme.submit()?;
-        let bytes_a2 = withdraw_a.claim(&mut submission)?.consume()?;
-        let bytes_b2 = withdraw_b.claim(&mut submission)?.consume()?;
+        let bytes_a2 = (&mut submission >> &a).take::<u8>()?;
+        let bytes_b2 = (&mut submission >> &b).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a2), &[4, 8, 12, 16]);
         // Cleared every resubmit, then doubled from zeros → still zeros.
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b2), &[0, 0, 0, 0]);

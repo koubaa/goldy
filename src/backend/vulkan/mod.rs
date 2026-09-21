@@ -782,6 +782,19 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
+    fn host_read_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
+        let buffers = self.state.buffers.read().unwrap();
+        let buf = buffers.entries.get(&buffer)?;
+        if !buf.flags.contains(crate::types::BufferFlags::CPU_READABLE) {
+            return None;
+        }
+        let ptr = buf.host_mapped?;
+        Some(crate::backend::HostMapping {
+            ptr: ptr as *const u8,
+            len: buf.size,
+        })
+    }
+
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
         buffer::read_readback_buffer(&self.state.buffers, buffer, output)
     }

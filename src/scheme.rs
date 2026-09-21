@@ -10,15 +10,14 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
+use crate::backend::BufferHandle;
 #[cfg(feature = "graphics")]
 use crate::backend::RenderCommand;
-use crate::backend::{BufferHandle, GpuCommand};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::cpu_dispatch::{CpuBindingExec, CpuDispatchExec, CpuMain};
 use crate::error::GoldyError;
 use crate::exchange::{DepositBinding, DepositClaim, DepositTarget};
-use crate::handles::TextureHandle;
 use crate::parcel::Parcel;
 #[cfg(feature = "graphics")]
 use crate::render_target::RenderTarget;
@@ -39,7 +38,6 @@ use crate::task_graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]
 use crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
-use crate::texture::TextureCopyFootprint;
 use crate::timeline::TimelineValue;
 #[cfg(feature = "graphics")]
 use crate::timeline::{PromiseResolver, TimelinePromise};
@@ -48,6 +46,7 @@ use crate::types::{
 };
 #[cfg(feature = "graphics")]
 use crate::types::{DepthFormat, IndexFormat};
+#[cfg(test)]
 use crate::validation_env;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -57,135 +56,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Per-withdraw staging buffer pool with scheme-lifetime ownership.
-///
-/// Returned staging buffers are stamped with the submission timeline that must retire
-/// before reuse (`ready_after`). This matches transient-pool epoch gating: dropping a
-/// [`Submission`] without consuming does not require a CPU wait, but in-flight
-/// staging is not handed to a later submit until `gpu_progress` passes that stamp.
-enum WithdrawStagingAllocSpec {
-    Buffer { byte_size: u64 },
-    Texture { layout: TextureCopyFootprint },
-}
-
-/// Staging buffer parked in a withdraw pool until its submission timeline retires.
-struct StampedStagingBuffer {
-    handle: BufferHandle,
-    ready_after: TimelineValue,
-}
-
-pub(crate) struct WithdrawStagingPool {
-    handles: Mutex<Vec<StampedStagingBuffer>>,
-    alloc_spec: WithdrawStagingAllocSpec,
-    ctx: Context,
-    scheme_alive: AtomicBool,
-}
-
-impl WithdrawStagingPool {
-    fn new_buffer(ctx: &Context, byte_size: u64) -> Arc<Self> {
-        Arc::new(Self {
-            handles: Mutex::new(Vec::new()),
-            alloc_spec: WithdrawStagingAllocSpec::Buffer { byte_size },
-            ctx: ctx.clone(),
-            scheme_alive: AtomicBool::new(true),
-        })
-    }
-
-    fn new_texture(ctx: &Context, layout: TextureCopyFootprint) -> Arc<Self> {
-        Arc::new(Self {
-            handles: Mutex::new(Vec::new()),
-            alloc_spec: WithdrawStagingAllocSpec::Texture { layout },
-            ctx: ctx.clone(),
-            scheme_alive: AtomicBool::new(true),
-        })
-    }
-
-    fn take_or_alloc(
-        &self,
-        backend: &mut dyn crate::backend::GpuBackend,
-        device: crate::backend::DeviceHandle,
-    ) -> Result<BufferHandle, GoldyError> {
-        let ctx = self.ctx.backend_handle();
-        let progress = backend.gpu_progress(ctx);
-        let handle = {
-            let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-            pool.iter()
-                .position(|entry| entry.ready_after <= progress)
-                .map(|pos| pool.swap_remove(pos).handle)
-        };
-        match self.alloc_spec {
-            WithdrawStagingAllocSpec::Buffer { byte_size } => {
-                if let Some(handle) = handle {
-                    if validation_env::scheme_validation_enabled() {
-                        let cap = backend.buffer_size(handle);
-                        if cap < byte_size {
-                            return Err(GoldyError::Backend(anyhow::anyhow!(
-                                "recycled withdraw staging buffer capacity {cap} is smaller than withdraw byte size {byte_size}"
-                            )));
-                        }
-                    }
-                    Ok(handle)
-                } else {
-                    backend
-                        .alloc_readback_buffer(device, byte_size)
-                        .map_err(|e| self.ctx.classify(e))
-                }
-            }
-            WithdrawStagingAllocSpec::Texture { layout } => {
-                if let Some(handle) = handle {
-                    if validation_env::scheme_validation_enabled() {
-                        let cap = backend.buffer_size(handle);
-                        if cap < layout.staging_bytes {
-                            return Err(GoldyError::Backend(anyhow::anyhow!(
-                                "recycled texture withdraw staging capacity {cap} is smaller than required {}",
-                                layout.staging_bytes
-                            )));
-                        }
-                    }
-                    Ok(handle)
-                } else {
-                    backend
-                        .alloc_texture_readback_staging(device, layout)
-                        .map_err(|e| self.ctx.classify(e))
-                }
-            }
-        }
-    }
-
-    pub(crate) fn return_handle(&self, handle: BufferHandle, ready_after: TimelineValue) {
-        if self.scheme_alive.load(Ordering::Acquire) {
-            self.handles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(StampedStagingBuffer { handle, ready_after });
-        } else {
-            let _ = self.ctx.wait_until(ready_after);
-            let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
-            backend.free_readback_buffer(handle);
-        }
-    }
-
-    fn mark_scheme_dropped_and_drain(&self) {
-        self.scheme_alive.store(false, Ordering::Release);
-        let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(max_ready) = pool.iter().map(|entry| entry.ready_after).max() {
-            let _ = self.ctx.wait_until(max_ready);
-        }
-        let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
-        for entry in pool.drain(..) {
-            backend.free_readback_buffer(entry.handle);
-        }
-    }
-}
-
-impl fmt::Debug for WithdrawStagingPool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WithdrawStagingPool")
-            .field("scheme_alive", &self.scheme_alive.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
-    }
-}
 
 /// Cloneable GPU submission identity and timeline (no exchange claims).
 #[derive(Debug, Clone)]
@@ -223,15 +93,10 @@ impl From<SubmissionHandle> for TimelineValue {
 }
 
 /// Dense index of an exchange claim slot on a [`Submission`].
+#[cfg(feature = "graphics")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ClaimKey {
-    #[cfg(feature = "graphics")]
-    Present {
-        present_idx: u32,
-    },
-    Withdraw {
-        withdraw_idx: u32,
-    },
+    Present { present_idx: u32 },
 }
 
 /// Stable erased present relationship recorded in one [`Scheme`].
@@ -265,12 +130,12 @@ impl fmt::Debug for Transaction {
 
 /// Unique receipt returned by [`Scheme::submit`].
 ///
-/// Owns untaken exchange claims (present and withdraw). Dropping this receipt
-/// discards every claim that has not been taken.
+/// Owns untaken present claims. Dropping this receipt discards every present
+/// claim that has not been taken.
 ///
-/// Surface present sugar: `(&mut submission >> &transaction).take()?`. The
-/// mutable borrow is required by operator semantics and leaves other claims
-/// on this submission untouched. Explicit claim/consume remains available.
+/// Surface present sugar: `(&mut submission >> &transaction).take()?`.
+/// Host reads: `(&mut submission >> &parcel).take::<T>()?`. The mutable
+/// borrow is required by operator semantics.
 ///
 /// GPU completion is observed via [`Self::is_settled`] / [`Self::wait_until_settled`]
 /// — not via raw timeline values.
@@ -287,25 +152,17 @@ pub struct Submission {
     /// Pool generation snapshotted when each present claim's drawable was acquired.
     #[cfg(feature = "graphics")]
     claim_generations: Vec<u64>,
-    /// Withdraw claim slots; taken by [`crate::exchange::WithdrawTransaction::claim`].
-    withdraw_claims: Vec<Mutex<Option<crate::exchange::WithdrawSlot>>>,
 }
 
 impl Drop for Submission {
     fn drop(&mut self) {
-        let ready_after = self.handle.timeline_value();
-        for claim_mutex in &self.withdraw_claims {
-            if let Ok(mut slot) = claim_mutex.lock() {
-                if let Some(withdraw) = slot.take() {
-                    withdraw.pool.return_handle(withdraw.staging, ready_after);
-                }
-            }
-        }
         #[cfg(feature = "graphics")]
-        for claim_mutex in &self.present_claims {
-            if let Ok(mut slot) = claim_mutex.lock() {
-                if let Some(claim) = slot.take() {
-                    claim.discard_best_effort();
+        {
+            for claim_mutex in &self.present_claims {
+                if let Ok(mut slot) = claim_mutex.lock() {
+                    if let Some(claim) = slot.take() {
+                        claim.discard_best_effort();
+                    }
                 }
             }
         }
@@ -320,7 +177,7 @@ impl fmt::Debug for Submission {
             .field("settled", &self.is_settled());
         #[cfg(feature = "graphics")]
         debug.field("present_claims", &self.present_claims.len());
-        debug.field("withdraw_claims", &self.withdraw_claims.len()).finish()
+        debug.finish()
     }
 }
 
@@ -334,6 +191,10 @@ impl Submission {
     /// Crate-internal clearing epoch for this submission.
     pub(crate) fn timeline_value(&self) -> TimelineValue {
         self.handle.timeline_value()
+    }
+
+    pub(crate) fn context(&self) -> &Context {
+        &self.ctx
     }
 
     /// True when this submission's GPU work has retired.
@@ -417,38 +278,6 @@ impl Submission {
             .take()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("claim already consumed for this submission")))?;
         Ok(crate::exchange::Claim::from_impl(implementation))
-    }
-
-    pub(crate) fn take_withdraw_claim(
-        &mut self,
-        scheme_id: u64,
-        key: ClaimKey,
-    ) -> Result<crate::exchange::WithdrawSlot, GoldyError> {
-        if self.handle.scheme_id() != scheme_id {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "WithdrawTransaction belongs to a different scheme than this submission"
-            )));
-        }
-        let withdraw_idx = match key {
-            ClaimKey::Withdraw { withdraw_idx } => withdraw_idx,
-            #[cfg(feature = "graphics")]
-            ClaimKey::Present { .. } => {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "withdraw claim key required for memory withdrawal"
-                )));
-            }
-        };
-        let idx = withdraw_idx as usize;
-        let claim_mutex = self.withdraw_claims.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "withdraw index {} out of range for submission ({} withdrawals)",
-                idx,
-                self.withdraw_claims.len()
-            ))
-        })?;
-        let mut slot = claim_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        slot.take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("withdraw claim already consumed for this submission")))
     }
 
     /// Submit timeline stamped on the acquired present frame, if still held.
@@ -597,27 +426,6 @@ fn claim_present_easement_promises(
         resolvers.push(Mutex::new(Some(resolver)));
     }
     resolvers
-}
-
-enum WithdrawSource {
-    Buffer {
-        source: BufferHandle,
-        src_offset: u64,
-        #[allow(dead_code)]
-        source_backing: Arc<Allocation>,
-        byte_size: u64,
-    },
-    Texture {
-        source: TextureHandle,
-        #[allow(dead_code)]
-        source_backing: crate::texture::TextureBacking,
-        layout: TextureCopyFootprint,
-    },
-}
-
-struct WithdrawInfo {
-    source: WithdrawSource,
-    staging_pool: Arc<WithdrawStagingPool>,
 }
 
 /// Stable identity of one recorded scheme node, returned when the node is finalized.
@@ -913,11 +721,8 @@ pub struct Scheme {
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     stats: ReplayStats,
-    next_withdraw_id: u32,
-    /// Process-unique identity for cross-scheme [`Submission`] / withdraw pairing.
+    /// Process-unique identity for cross-scheme [`Submission`] pairing.
     scheme_id: u64,
-    /// Memory withdrawals: N-backed staging per submission.
-    withdraws: Vec<WithdrawInfo>,
     /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
     #[cfg(feature = "graphics")]
     present_bindings: Vec<PresentBinding>,
@@ -968,10 +773,8 @@ impl Scheme {
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
-            next_withdraw_id: 0,
             specialization: crate::specialization::SchemePredictor::new(),
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
-            withdraws: Vec::new(),
             #[cfg(feature = "graphics")]
             present_bindings: Vec::new(),
             #[cfg(feature = "graphics")]
@@ -1990,6 +1793,11 @@ impl Scheme {
                 if access.writes {
                     if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
                         stamp.drain_pending_for_submit_gate(ctx);
+                        if stamp.host_claim_count() > 0 {
+                            return Err(GoldyError::Validation(
+                                "cannot write a parcel while a host view is live; drop the HostView first".into(),
+                            ));
+                        }
                     }
                 }
             }
@@ -2498,90 +2306,11 @@ impl Scheme {
         #[cfg(feature = "graphics")] claim_bindings: Vec<u32>,
         #[cfg(feature = "graphics")] claim_generations: Vec<u64>,
     ) -> Result<Submission, GoldyError> {
-        if self.withdraws.is_empty() {
-            return Ok(Submission {
-                handle: SubmissionHandle {
-                    core: Arc::new(SubmissionCore {
-                        scheme_id: self.scheme_id,
-                        timeline: tv_dispatch,
-                    }),
-                },
-                ctx: self.ctx.clone(),
-                #[cfg(feature = "graphics")]
-                present_claims,
-                #[cfg(feature = "graphics")]
-                claim_bindings,
-                #[cfg(feature = "graphics")]
-                claim_generations,
-                withdraw_claims: Vec::new(),
-            });
-        }
-
-        let device = self.ctx.runtime().inner.handle;
-        let mut copy_cmds = Vec::with_capacity(self.withdraws.len());
-        let mut withdraw_claims = Vec::with_capacity(self.withdraws.len());
-        let mut staging_handles = Vec::with_capacity(self.withdraws.len());
-
-        {
-            let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
-            for withdraw in &self.withdraws {
-                let staging = withdraw.staging_pool.take_or_alloc(&mut **backend, device)?;
-                if validation_env::scheme_validation_enabled() {
-                    if staging_handles.contains(&staging) {
-                        return Err(GoldyError::Backend(anyhow::anyhow!(
-                            "duplicate withdraw staging buffer handle in one submission"
-                        )));
-                    }
-                    staging_handles.push(staging);
-                }
-                match &withdraw.source {
-                    WithdrawSource::Buffer {
-                        source,
-                        src_offset,
-                        byte_size,
-                        ..
-                    } => {
-                        copy_cmds.push(GpuCommand::CopyBuffer {
-                            src: *source,
-                            src_offset: *src_offset,
-                            dst: staging,
-                            dst_offset: 0,
-                            size: *byte_size,
-                        });
-                    }
-                    WithdrawSource::Texture { source, layout, .. } => {
-                        copy_cmds.push(GpuCommand::CopyTextureToReadback {
-                            src: *source,
-                            dst: staging,
-                            layout: *layout,
-                        });
-                    }
-                }
-                withdraw_claims.push(Mutex::new(Some(crate::exchange::WithdrawSlot {
-                    staging,
-                    pool: Arc::clone(&withdraw.staging_pool),
-                })));
-            }
-        }
-
-        if validation_env::scheme_validation_enabled() {
-            debug_assert_eq!(withdraw_claims.len(), self.withdraws.len());
-        }
-
-        let tv_copy = {
-            let submit_result = {
-                let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
-                backend.submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
-            };
-            submit_result.map_err(|e| self.ctx.classify(e))?
-        };
-        self.ctx.advance_high_water_timeline(tv_copy);
-
         Ok(Submission {
             handle: SubmissionHandle {
                 core: Arc::new(SubmissionCore {
                     scheme_id: self.scheme_id,
-                    timeline: tv_copy,
+                    timeline: tv_dispatch,
                 }),
             },
             ctx: self.ctx.clone(),
@@ -2591,7 +2320,6 @@ impl Scheme {
             claim_bindings,
             #[cfg(feature = "graphics")]
             claim_generations,
-            withdraw_claims,
         })
     }
 
@@ -2890,7 +2618,7 @@ impl Scheme {
     }
 
     /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
-    /// [`crate::MemoryExchange::bind_withdraw`]).
+    /// `(&mut submission >> &texture).take()`).
     ///
     /// The destination must be a texture parcel with [`TextureFlags::COPY_DST`], homed on
     /// this scheme's context, and matching the render target's width, height, and format.
@@ -3063,10 +2791,6 @@ impl Scheme {
 
 impl Drop for Scheme {
     fn drop(&mut self) {
-        for withdraw in &self.withdraws {
-            withdraw.staging_pool.mark_scheme_dropped_and_drain();
-        }
-
         use crate::task_graph::cross_submit::clear_scheme_topology_registration;
         clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
 
@@ -3090,121 +2814,6 @@ impl Drop for Scheme {
         // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
         let _interned = std::mem::take(&mut self.interned_leases);
         let _constants = std::mem::take(&mut self.record_constants);
-    }
-}
-
-impl Scheme {
-    /// Register a memory withdrawal over a buffer or texture deed parcel.
-    ///
-    /// Called by [`crate::MemoryExchange::bind_withdraw`].
-    pub(crate) fn register_withdraw(
-        &mut self,
-        parcel: &Parcel,
-    ) -> Result<crate::exchange::WithdrawTransaction, GoldyError> {
-        self.mark_structure_dirty();
-        self.submit_state.register_parcel_stamp(parcel);
-        if !parcel.is_homed_on(&self.ctx) {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "parcel home device does not match scheme context"
-            )));
-        }
-
-        let (source, byte_size, read_kind, staging_pool) = if parcel.buffer_handle().is_some() {
-            let source_backing = parcel.grant_buffer_keepalive().map_err(|e| self.ctx.classify(e))?;
-            let source = parcel.buffer_handle().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("bind_withdraw requires buffer or texture parcel"))
-            })?;
-            let byte_size = parcel.byte_size();
-            if byte_size == 0 {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "bind_withdraw requires non-zero buffer byte size"
-                )));
-            }
-            let staging_pool = WithdrawStagingPool::new_buffer(&self.ctx, byte_size);
-            (
-                WithdrawSource::Buffer {
-                    source,
-                    src_offset: parcel.source_offset(),
-                    source_backing,
-                    byte_size,
-                },
-                byte_size,
-                crate::exchange::WithdrawReadKind::Buffer,
-                staging_pool,
-            )
-        } else if parcel.texture_handle().is_some() {
-            let source_backing = parcel.grant_texture_keepalive().map_err(|e| self.ctx.classify(e))?;
-            let source = parcel.texture_handle().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("bind_withdraw requires buffer or texture parcel"))
-            })?;
-            let (width, height, format, access, flags) = parcel.texture_descriptor().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("bind_withdraw requires buffer or texture parcel"))
-            })?;
-            if !flags.contains(TextureFlags::COPY_SRC) {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "bind_withdraw texture requires TextureFlags::COPY_SRC"
-                )));
-            }
-            if matches!(access, TextureKind::Interpolated) {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "bind_withdraw texture requires a storage-writable texture (TextureKind::Direct or DirectInterpolated); \
-                     TextureKind::Interpolated is sampled-only and cannot be a compute output"
-                )));
-            }
-            if width == 0 || height == 0 {
-                return Err(GoldyError::Backend(anyhow::anyhow!(
-                    "bind_withdraw texture requires non-zero texture dimensions"
-                )));
-            }
-            let layout = {
-                let query_result = {
-                    let backend = self.ctx.runtime().inner.backend.lock().unwrap();
-                    backend.query_texture_copy_footprint(self.ctx.runtime().inner.handle, width, height, format)
-                };
-                query_result.map_err(|e| self.ctx.classify(e))?
-            };
-            let staging_pool = WithdrawStagingPool::new_texture(&self.ctx, layout);
-            (
-                WithdrawSource::Texture {
-                    source,
-                    source_backing,
-                    layout,
-                },
-                layout.logical_bytes,
-                crate::exchange::WithdrawReadKind::Texture(layout),
-                staging_pool,
-            )
-        } else {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "bind_withdraw requires buffer or texture parcel"
-            )));
-        };
-
-        let ir_withdraw_id = self.next_withdraw_id;
-        self.next_withdraw_id += 1;
-        let withdraw_idx = self.withdraws.len() as u32;
-        self.withdraws.push(WithdrawInfo {
-            source,
-            staging_pool: Arc::clone(&staging_pool),
-        });
-        let resource = parcel.resource_id();
-        self.ir.nodes.push(TaskNode {
-            label: "withdraw",
-            bindings: vec![ResourceBinding {
-                resource,
-                access: NodeAccess::Read,
-            }],
-            kind: NodeKind::WithdrawRead {
-                withdraw_id: ir_withdraw_id,
-            },
-        });
-        Ok(crate::exchange::WithdrawTransaction {
-            scheme_id: self.scheme_id,
-            key: ClaimKey::Withdraw { withdraw_idx },
-            byte_size,
-            read_kind,
-            ctx: self.ctx.clone(),
-        })
     }
 }
 
@@ -4319,6 +3928,7 @@ mod tests {
     use crate::types::ResourceAccess;
     use crate::BufferKind;
     use crate::{DepositTarget, MemoryExchange};
+    use std::ops::Shr;
     use std::sync::Arc;
 
     fn mock_runtime() -> Arc<Runtime> {
@@ -5002,9 +4612,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("alloc buffer")
     }
 
-    fn read_u32(grant: &crate::WithdrawTransaction, frame: &mut Submission) -> Vec<u32> {
-        let bytes = grant.claim(frame).expect("claim").consume().expect("consume");
-        bytemuck::cast_slice(&bytes).to_vec()
+    fn read_u32(frame: &mut Submission, parcel: &crate::Parcel) -> Vec<u32> {
+        (frame >> parcel).take::<u32>().expect("host take").to_vec()
     }
 
     #[test]
@@ -5234,21 +4843,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 }
             })
             .expect("record");
-        let grant_data = MemoryExchange::new(&ctx)
-            .bind_withdraw(&mut scheme, &data)
-            .expect("withdraw data");
-        let grant_out = MemoryExchange::new(&ctx)
-            .bind_withdraw(&mut scheme, &out)
-            .expect("withdraw out");
 
         let mut frame = scheme.submit().expect("first submit");
-        assert_eq!(read_u32(&grant_data, &mut frame), vec![2, 3, 4, 5]);
-        assert_eq!(read_u32(&grant_out, &mut frame), vec![12, 13, 14, 15]);
+        assert_eq!(read_u32(&mut frame, &*data), vec![2, 3, 4, 5]);
+        assert_eq!(read_u32(&mut frame, &*out), vec![12, 13, 14, 15]);
 
         // Second submission observes the uploaded result of the first.
         let mut frame = scheme.submit().expect("second submit");
-        assert_eq!(read_u32(&grant_data, &mut frame), vec![3, 4, 5, 6]);
-        assert_eq!(read_u32(&grant_out, &mut frame), vec![13, 14, 15, 16]);
+        assert_eq!(read_u32(&mut frame, &*data), vec![3, 4, 5, 6]);
+        assert_eq!(read_u32(&mut frame, &*out), vec![13, 14, 15, 16]);
         assert!(!scheme.is_dirty());
     }
 
@@ -5326,111 +4929,32 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn withdraw_appends_ir_node() {
+    fn host_claim_survives_parcel_drop_after_take() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
-        assert_eq!(scheme.ir_node_count(), 1);
-
-        let _grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
-        assert_eq!(scheme.ir_node_count(), 2);
-        assert!(scheme.is_dirty(), "withdraw is structural");
-
-        match &scheme.ir.nodes[1].kind {
-            NodeKind::WithdrawRead { withdraw_id: 0 } => {}
-            other => panic!("expected GrantRead node, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn withdraw_orders_after_writer() {
-        use crate::task_graph::analysis;
-
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
-        let _grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
-
-        let edges = analysis::build_edges(&scheme.ir);
-        assert!(
-            edges.contains(&(0, 1)),
-            "dispatch (0) must precede grant_read (1); edges: {edges:?}"
-        );
-    }
-
-    #[test]
-    fn scheme_with_grant_retains() {
-        let _cb = crate::test_support::CbReuseOverride::force_enabled();
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
-        let _grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
-
-        scheme.submit().expect("first submit records");
-        scheme.submit().expect("second submit resubmits");
-        scheme.submit().expect("third submit resubmits");
-
-        assert_eq!(scheme.replay_stats().records, 1, "exactly one record with grant node");
-        #[cfg(not(feature = "metal"))]
-        assert_eq!(
-            scheme.replay_stats().resubmit_hits,
-            2,
-            "remaining submits are retention hits"
-        );
-    }
-
-    #[test]
-    fn withdraw_survives_parcel_drop() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
+        let view = (&mut frame >> &*parcel).take::<u8>().expect("take");
         drop(parcel);
         drop(pool);
-
-        let loan = grant
-            .claim(&mut frame)
-            .expect("claim")
-            .consume()
-            .expect("read after parcel drop");
-        assert_eq!(loan.len(), 32, "reads full logical buffer size");
+        assert_eq!(view.len(), 32, "reads full logical buffer size");
     }
 
     #[test]
-    fn withdraw_resubmit_after_parcel_drop() {
+    fn host_claim_then_parcel_drop_stales_next_submit() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
         let mut frame1 = scheme.submit().expect("submit 1");
+        let loan1 = (&mut frame1 >> &*parcel).take::<u8>().expect("take frame1");
         drop(parcel);
         drop(pool);
-        // Retained ownership outranks the scheme: dropping the bound buffer kills its stamp.
         assert!(
             matches!(scheme.submit(), Err(GoldyError::StaleResource)),
             "resubmit after dropping a bound retained buffer must fail"
         );
-        let loan1 = grant
-            .claim(&mut frame1)
-            .expect("claim")
-            .consume()
-            .expect("read frame1 after parcel drop");
         assert_eq!(loan1.len(), 32);
     }
 
@@ -5556,7 +5080,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn withdraw_concurrent_frames_succeed() {
+    fn host_claim_concurrent_submits_succeed() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
@@ -5564,40 +5088,20 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer_with_data(&[7u32; 8], BufferKind::Scattered)
             .expect("parcel");
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
         let mut frame1 = scheme.submit().expect("first submit");
         let mut frame2 = scheme.submit().expect("second submit without waiting on frame1");
 
-        let loan1 = grant.claim(&mut frame1).expect("claim").consume().expect("read frame1");
-        let loan2 = grant.claim(&mut frame2).expect("claim").consume().expect("read frame2");
+        let loan1 = (&mut frame1 >> &*parcel).take::<u8>().expect("read frame1");
+        let loan2 = (&mut frame2 >> &*parcel).take::<u8>().expect("read frame2");
         assert_eq!(loan1.len(), 32);
         assert_eq!(loan2.len(), 32);
         for chunk in loan1.chunks_exact(4) {
             assert_eq!(u32::from_le_bytes(chunk.try_into().unwrap()), 7);
         }
-        let (allocs, _) = mock_readback_counts(&device);
-        assert_eq!(allocs, 2, "two live frames require two staging allocations");
     }
 
     #[test]
-    fn withdraw_double_read_same_frame_errors() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &pool, &ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
-        let mut frame = scheme.submit().expect("submit");
-        let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
-        let err = grant.claim(&mut frame).expect_err("second claim must fail");
-        assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn grant_staging_pool_recycled_on_loan_drop() {
+    fn host_read_pool_recycles_after_view_drop() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
@@ -5605,28 +5109,28 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .acquire_buffer_with_data(&[3u32; 8], BufferKind::Scattered)
             .expect("parcel");
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
 
         let mut frame1 = scheme.submit().expect("submit 1");
         {
-            let loan = grant.claim(&mut frame1).expect("claim").consume().expect("read frame1");
+            let loan = (&mut frame1 >> &*parcel).take::<u8>().expect("read frame1");
             assert_eq!(loan.len(), 32);
         }
-        let mut frame2 = scheme.submit().expect("submit 2 after loan drop");
-        let loan2 = grant
-            .claim(&mut frame2)
-            .expect("claim")
-            .consume()
+        let allocs_after_first = ctx.host_read_staging_alloc_count();
+        assert!(allocs_after_first >= 1);
+        let mut frame2 = scheme.submit().expect("submit 2 after view drop");
+        let loan2 = (&mut frame2 >> &*parcel)
+            .take::<u8>()
             .expect("read frame2 after pool recycle");
         assert_eq!(loan2.len(), 32);
-        let (allocs, _) = mock_readback_counts(&device);
-        assert_eq!(allocs, 1, "pool recycles staging buffer on loan drop");
+        assert_eq!(
+            ctx.host_read_staging_alloc_count(),
+            allocs_after_first,
+            "pool recycles staging buffer after take returns"
+        );
     }
 
     #[test]
-    fn withdraw_rejects_foreign_device_parcel() {
+    fn host_claim_rejects_foreign_device_parcel() {
         let device_a = mock_runtime();
         let device_b = mock_runtime();
         let pool = &device_a;
@@ -5634,74 +5138,29 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx_b = device_b.create_context().unwrap();
         let parcel = retained_buffer(&pool);
         let mut scheme = Scheme::new(&ctx_b);
-        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &parcel) {
-            Ok(_) => panic!("cross-device grant must fail"),
-            Err(e) => e,
-        };
+        let mut frame = scheme.submit().expect("submit");
+        let err = (&mut frame >> &*parcel)
+            .take::<u8>()
+            .expect_err("cross-device take must fail");
         assert!(err.to_string().contains("home device"), "unexpected error: {err}");
         drop(ctx_a);
     }
 
     #[test]
-    fn withdraw_rejects_cross_scheme_frame() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let parcel = retained_buffer(&pool);
-
-        let mut scheme_a = Scheme::new(&ctx);
-        let grant_a = MemoryExchange::new(scheme_a.context())
-            .bind_withdraw(&mut scheme_a, &parcel)
-            .expect("grant_a");
-
-        let mut scheme_b = Scheme::new(&ctx);
-        let _grant_b = MemoryExchange::new(scheme_b.context())
-            .bind_withdraw(&mut scheme_b, &parcel)
-            .expect("grant_b");
-        let mut frame_b = scheme_b.submit().expect("submit b");
-
-        let err = grant_a.claim(&mut frame_b).expect_err("cross-scheme claim must fail");
-        assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn withdraw_drop_scheme_with_outstanding_frame_frees_staging() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let parcel = pool
-            .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
-            .expect("parcel");
-        let mut scheme = Scheme::new(&ctx);
-        let _grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("grant");
-        let frame = scheme.submit().expect("submit");
-        let (allocs_after_submit, frees_before) = mock_readback_counts(&device);
-        assert_eq!(allocs_after_submit, 1, "submit allocates one staging buffer");
-        drop(scheme);
-        drop(frame);
-        let (allocs, frees) = mock_readback_counts(&device);
-        assert_eq!(frees, frees_before + 1, "outstanding frame frees staging on drop");
-        assert_eq!(frees, allocs, "all staging buffers freed");
-    }
-
-    #[test]
-    fn withdraw_rejects_zero_byte_buffer() {
+    fn host_claim_rejects_zero_byte_buffer() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let parcel = pool.acquire_buffer(0, BufferKind::Scattered, None, crate::types::BufferFlags::empty(), None);
         if parcel.is_err() {
-            // Pools/backends may reject zero-byte buffers; guard is still covered at grant_read.
             return;
         }
         let parcel = parcel.unwrap();
         let mut scheme = Scheme::new(&ctx);
-        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &parcel) {
-            Ok(_) => panic!("zero-byte grant must fail"),
-            Err(e) => e,
-        };
+        let mut frame = scheme.submit().expect("submit");
+        let err = (&mut frame >> &*parcel)
+            .take::<u8>()
+            .expect_err("zero-byte take must fail");
         assert!(err.to_string().contains("non-zero"), "unexpected error: {err}");
     }
 
@@ -5722,127 +5181,59 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn withdraw_texture_basic_succeeds() {
+    fn host_claim_texture_basic_succeeds() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &texture)
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-
-        let loan = grant
-            .claim(&mut frame)
-            .expect("claim")
-            .consume()
-            .expect("read texture grant");
+        let loan = (&mut frame >> &*texture).take::<u8>().expect("read texture");
         assert_eq!(loan.len(), 4 * 4 * 4, "Rgba8Unorm 4×4 = 64 bytes");
     }
 
     #[test]
-    fn withdraw_texture_appends_ir_node() {
+    fn host_claim_texture_pool_recycles() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let _grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &texture)
-            .expect("withdraw");
-
-        assert!(scheme.is_dirty(), "withdraw is structural");
-        assert_eq!(scheme.ir_node_count(), 1);
-        match &scheme.ir.nodes[0].kind {
-            NodeKind::WithdrawRead { withdraw_id: 0 } => {}
-            other => panic!("expected GrantRead node, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn withdraw_texture_staging_alloc_and_free() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&pool);
-
-        let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &texture)
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-
-        let (allocs_before, frees_before) = mock_readback_counts(&device);
-        assert_eq!(allocs_before, 1, "one staging alloc per submit");
-        assert_eq!(frees_before, 0, "not freed yet");
-
-        let loan = grant.claim(&mut frame).expect("claim").consume().expect("read");
+        let loan = (&mut frame >> &*texture).take::<u8>().expect("read");
         drop(loan);
+        let allocs_after_first = ctx.host_read_staging_alloc_count();
+        assert!(allocs_after_first >= 1);
 
-        // After loan drop the handle returns to pool (scheme alive) — no free yet.
-        let (_, frees_after_loan) = mock_readback_counts(&device);
-        assert_eq!(frees_after_loan, 0, "pool recycles on loan drop");
-
-        // Resubmit — pool recycles the same staging handle.
         let mut frame2 = scheme.submit().expect("resubmit");
-        let (allocs_after_resubmit, _) = mock_readback_counts(&device);
-        assert_eq!(allocs_after_resubmit, 1, "recycled: no new alloc");
-        let _loan2 = grant.claim(&mut frame2).expect("claim").consume().expect("read frame2");
-
-        // Drop scheme — pool drains and frees all handles.
-        drop(_loan2);
-        drop(frame2);
-        drop(grant);
-        drop(scheme);
-        let (_, frees_final) = mock_readback_counts(&device);
-        assert_eq!(frees_final, 1, "all staging freed on scheme drop");
+        let _loan2 = (&mut frame2 >> &*texture).take::<u8>().expect("read frame2");
+        assert_eq!(
+            ctx.host_read_staging_alloc_count(),
+            allocs_after_first,
+            "recycled: no new alloc"
+        );
     }
 
     #[test]
-    fn withdraw_texture_double_read_same_frame_errors() {
+    fn host_claim_texture_concurrent_submits() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &texture)
-            .expect("withdraw");
-        let mut frame = scheme.submit().expect("submit");
-
-        let _loan = grant.claim(&mut frame).expect("claim").consume().expect("first read");
-        let err = grant.claim(&mut frame).expect_err("second claim must fail");
-        assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn withdraw_texture_concurrent_frames() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx = device.create_context().unwrap();
-        let texture = texture_parcel(&pool);
-
-        let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &texture)
-            .expect("withdraw");
         let mut frame1 = scheme.submit().expect("first submit");
         let mut frame2 = scheme.submit().expect("second submit without waiting on frame1");
 
-        let loan1 = grant.claim(&mut frame1).expect("claim").consume().expect("read frame1");
-        let loan2 = grant.claim(&mut frame2).expect("claim").consume().expect("read frame2");
+        let loan1 = (&mut frame1 >> &*texture).take::<u8>().expect("read frame1");
+        let loan2 = (&mut frame2 >> &*texture).take::<u8>().expect("read frame2");
         assert_eq!(loan1.len(), loan2.len());
-
-        let (allocs, _) = mock_readback_counts(&device);
-        assert_eq!(allocs, 2, "two live frames require two staging allocations");
     }
 
     #[test]
-    fn withdraw_texture_rejects_sampled_only_texture() {
+    fn host_claim_texture_rejects_sampled_only_texture() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
@@ -5858,18 +5249,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             )
             .expect("texture");
         let mut scheme = Scheme::new(&ctx);
-        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &texture) {
-            Ok(_) => panic!("must reject Interpolated texture"),
-            Err(e) => e,
-        };
+        let mut frame = scheme.submit().expect("submit");
+        let err = (&mut frame >> &*texture)
+            .take::<u8>()
+            .expect_err("must reject Interpolated texture");
         assert!(
-            err.to_string().contains("sampled-only") || err.to_string().contains("storage-writable"),
+            err.to_string().contains("Direct") || err.to_string().contains("Interpolated"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn withdraw_texture_rejects_missing_copy_src_flag() {
+    fn host_claim_texture_rejects_missing_copy_src_flag() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
@@ -5885,58 +5276,25 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             )
             .expect("texture");
         let mut scheme = Scheme::new(&ctx);
-        let err = match MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &texture) {
-            Ok(_) => panic!("must reject missing COPY_SRC flag"),
-            Err(e) => e,
-        };
+        let mut frame = scheme.submit().expect("submit");
+        let err = (&mut frame >> &*texture)
+            .take::<u8>()
+            .expect_err("must reject missing COPY_SRC flag");
         assert!(err.to_string().contains("COPY_SRC"), "unexpected error: {err}");
     }
 
     #[test]
-    fn withdraw_texture_rejects_cross_scheme_frame() {
-        let device = mock_runtime();
-        let pool = &device;
-        let ctx_a = device.create_context().unwrap();
-        let ctx_b = device.create_context().unwrap();
-
-        let texture = texture_parcel(&pool);
-
-        let mut scheme_a = Scheme::new(&ctx_a);
-        let grant_a = MemoryExchange::new(scheme_a.context())
-            .bind_withdraw(&mut scheme_a, &texture)
-            .expect("grant_a");
-        let _frame_a = scheme_a.submit().expect("submit a");
-
-        let mut scheme_b = Scheme::new(&ctx_b);
-        let _grant_b = MemoryExchange::new(scheme_b.context())
-            .bind_withdraw(&mut scheme_b, &texture)
-            .expect("grant_b");
-        let mut frame_b = scheme_b.submit().expect("submit b");
-
-        let err = grant_a.claim(&mut frame_b).expect_err("cross-scheme claim must fail");
-        assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn withdraw_texture_survives_parcel_drop() {
+    fn host_claim_texture_after_take_parcel_drop() {
         let device = mock_runtime();
         let pool = &device;
         let ctx = device.create_context().unwrap();
         let texture = texture_parcel(&pool);
 
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &texture)
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
+        let loan = (&mut frame >> &*texture).take::<u8>().expect("take");
         drop(texture);
         drop(pool);
-
-        let loan = grant
-            .claim(&mut frame)
-            .expect("claim")
-            .consume()
-            .expect("read after parcel drop");
         assert_eq!(loan.len(), 4 * 4 * 4);
     }
 

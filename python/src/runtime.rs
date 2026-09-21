@@ -91,7 +91,7 @@ impl PyRuntime {
     /// Acquire a packed tensor from a 1-D NumPy array or bytes.
     ///
     /// Host conversion copies into GPU storage. Read results back with
-    /// `MemoryExchange.bind_withdraw` on `tensor.parcel()`.
+    /// `SchemeSubmission.take` on `tensor.parcel()`.
     #[cfg(feature = "tensor")]
     #[pyo3(signature = (data, shape, dtype=None))]
     fn acquire_tensor(

@@ -132,7 +132,7 @@ let mut submission = scheme.submit()?;
 - `Claim::consume` / `Claim::discard` remain the canonical settlement verbs
 - The program never passes raw GPU addresses to the compositor
 
-**Shipped** CPU readback: `MemoryExchange` with `WithdrawTransaction` / `WithdrawClaim`. See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
+**Shipped** CPU readback: host claims via `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`). See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
 **Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `DepositTransaction::write` prepares an occurrence; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
 
@@ -221,7 +221,8 @@ Capability queries report backend, residency model, resize cost, zero-copy readb
 | Parcel | `Buffer` / `Texture` handle |
 | Merchant | Program |
 | Exchange | `SurfaceExchange`, `MemoryExchange` |
-| Claim (exchange) | `Claim`, `WithdrawClaim`; deposit claims are Runtime-internal |
+| Claim (exchange) | `Claim`; deposit claims are Runtime-internal |
+| Host claim | `PendingHostRead`, `HostView` |
 | Gate | Fence epoch, `boundary_crossed` |
 | Warehouse | `BudgetPolicy`, `VramAllocator` |
 | Ledger | Cross-submit sync analysis |

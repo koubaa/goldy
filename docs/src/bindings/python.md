@@ -71,9 +71,8 @@ with scheme.render_pass("triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.1, 
 
 scheme.copy_to_texture(rt, readback)
 memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw_texture(scheme, readback)
 submission = scheme.submit()
-pixels = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.uint8).reshape(100, 100, 4)
+pixels = np.frombuffer(submission.take_texture(readback), dtype=np.uint8).reshape(100, 100, 4)
 ```
 
 ## NumPy Integration
@@ -104,13 +103,11 @@ parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 
 ### Reading Results Back to NumPy
 
-Use `MemoryExchange.bind_withdraw` / `bind_withdraw_texture`, then claim and consume after submit:
+Use `SchemeSubmission.take` / `take_texture` after submit:
 
 ```python
-memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw(scheme, parcel)
 submission = scheme.submit()
-output = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
+output = np.frombuffer(submission.take(parcel), dtype=np.float32)
 ```
 
 ### Performance Tips
@@ -154,9 +151,8 @@ scheme.node("double", pipeline).with_parcel(
     parcel, goldy.NodeAccess.READ_WRITE
 ).dispatch(4, 1, 1)
 memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw(scheme, parcel)
 submission = scheme.submit()
-output = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
+output = np.frombuffer(submission.take(parcel), dtype=np.float32)
 ```
 
 ### Ping-Pong Buffers
@@ -226,9 +222,8 @@ scheme = goldy.Scheme(ctx)
 tensors.fill_f32(scheme, "fill", b, 10.0)
 c = tensors.add(scheme, "add", a, b)
 memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw(scheme, c.parcel())
 submission = scheme.submit()
-out = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
+out = np.frombuffer(submission.take(c.parcel()), dtype=np.float32)
 ```
 
 #### `Scheme`

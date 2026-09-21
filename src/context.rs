@@ -6,6 +6,7 @@
 use crate::backend::ContextHandle;
 use crate::deposit_pool::DepositExchangePool;
 use crate::error::GoldyError;
+use crate::host_read_pool::HostReadStagingPool;
 use crate::parcel::BytesByKind;
 use crate::runtime::Runtime;
 #[cfg(test)]
@@ -38,6 +39,8 @@ pub(crate) struct ContextInner {
     transient_pool: Mutex<TransientPool>,
     /// Exchange-owned CPU-writable staging for memory deposits.
     deposit_pool: Arc<DepositExchangePool>,
+    /// Context-owned READBACK staging for host-claim copies.
+    host_read_pool: Arc<HostReadStagingPool>,
 }
 
 impl Clone for Context {
@@ -57,6 +60,7 @@ impl std::fmt::Debug for Context {
 impl Drop for ContextInner {
     fn drop(&mut self) {
         self.deposit_pool.drain_backend(&self.device, self.handle);
+        self.host_read_pool.drain_backend(&self.device, self.handle);
         // Drop the transient pool (and its parked parcels) while the device is alive.
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
@@ -107,6 +111,7 @@ impl Context {
                 high_water_timeline: AtomicU64::new(0),
                 transient_pool: Mutex::new(TransientPool::new()),
                 deposit_pool: Arc::new(DepositExchangePool::new()),
+                host_read_pool: Arc::new(HostReadStagingPool::new()),
             }),
         })
     }
@@ -141,6 +146,16 @@ impl Context {
 
     pub(crate) fn deposit_pool(&self) -> &Arc<DepositExchangePool> {
         &self.inner.deposit_pool
+    }
+
+    pub(crate) fn host_read_pool(&self) -> &Arc<HostReadStagingPool> {
+        &self.inner.host_read_pool
+    }
+
+    /// Fresh host-read staging allocations made by this context.
+    #[doc(hidden)]
+    pub fn host_read_staging_alloc_count(&self) -> usize {
+        self.inner.host_read_pool.alloc_count()
     }
 
     /// Fresh deposit-staging allocations made by this context's memory exchange.

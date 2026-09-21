@@ -9,8 +9,9 @@ use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
     Buffer, BufferKind, Color, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, Parcel, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Sampler, Scheme, ShaderBinding, ShaderModule,
-    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv, WithdrawTransaction,
+    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, Transaction, Vertex2DUv,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -96,8 +97,7 @@ struct App {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
-    scene_rt: Option<Lease<LeaseRenderTarget>>,
+        scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     vertex_buffer: Option<Buffer>,
     texture: Option<Texture>,
@@ -119,7 +119,6 @@ impl App {
             present: None,
             capture: None,
             readback: None,
-            withdraw: None,
             scene_rt: None,
             scheme: None,
             vertex_buffer: None,
@@ -183,15 +182,15 @@ impl App {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+            
+            Ok(None)
         }
     }
 
@@ -259,7 +258,7 @@ impl App {
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_buffer, &texture, &sampler, &scene_rt);
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);
@@ -269,7 +268,6 @@ impl App {
         self.present = present;
         self.capture = capture;
         self.readback = readback;
-        self.withdraw = withdraw;
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         self.vertex_buffer = Some(vertex_buffer);
@@ -291,7 +289,7 @@ impl App {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         self.frame_count += 1;
@@ -326,11 +324,10 @@ impl App {
                     let mut scheme = Scheme::new(ctx);
                     if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                         Self::record_pass(&mut scheme, pipeline, vertex_buffer, texture, sampler, &rt);
-                        if let Ok((present, withdraw)) =
+                        if let Ok(present) =
                             Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
                         {
                             self.present = present;
-                            self.withdraw = withdraw;
                             self.scheme = Some(scheme);
                             self.scene_rt = Some(rt);
                         }

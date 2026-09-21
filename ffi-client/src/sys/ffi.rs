@@ -41,34 +41,21 @@ pub type FnGoldySchemeSubmissionDestroy = unsafe extern "C" fn(*mut GoldySchemeS
 pub type FnGoldySchemeSubmissionIsSettled = unsafe extern "C" fn(*const GoldySchemeSubmission) -> bool;
 pub type FnGoldySchemeSubmissionWaitUntilSettled = unsafe extern "C" fn(*const GoldySchemeSubmission) -> GoldyResult;
 
+pub type FnGoldySchemeSubmissionTake =
+    unsafe extern "C" fn(*mut GoldySchemeSubmission, *const GoldyParcel) -> *mut GoldyHostView;
+pub type FnGoldySchemeSubmissionTakeTexture =
+    unsafe extern "C" fn(*mut GoldySchemeSubmission, *const GoldyTexture) -> *mut GoldyHostView;
+pub type FnGoldyHostViewLen = unsafe extern "C" fn(*const GoldyHostView) -> u64;
+pub type FnGoldyHostViewData = unsafe extern "C" fn(*const GoldyHostView) -> *const u8;
+pub type FnGoldyHostViewCopy = unsafe extern "C" fn(*const GoldyHostView, *mut u8, usize) -> GoldyResult;
+pub type FnGoldyHostViewDestroy = unsafe extern "C" fn(*mut GoldyHostView);
 pub type FnGoldyMemoryExchangeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyMemoryExchange;
 pub type FnGoldyMemoryExchangeDestroy = unsafe extern "C" fn(*mut GoldyMemoryExchange);
-pub type FnGoldyMemoryExchangeBindWithdraw = unsafe extern "C" fn(
-    *const GoldyMemoryExchange,
-    *mut GoldyScheme,
-    *const GoldyParcel,
-) -> *mut GoldyWithdrawTransaction;
-pub type FnGoldyMemoryExchangeBindWithdrawTexture = unsafe extern "C" fn(
-    *const GoldyMemoryExchange,
-    *mut GoldyScheme,
-    *const GoldyTexture,
-) -> *mut GoldyWithdrawTransaction;
 pub type FnGoldyMemoryExchangeBindDeposit = unsafe extern "C" fn(
     *const GoldyMemoryExchange,
     *mut GoldyScheme,
     *const GoldyDepositTarget,
 ) -> *mut GoldyDepositTransaction;
-pub type FnGoldyWithdrawTransactionDestroy = unsafe extern "C" fn(*mut GoldyWithdrawTransaction);
-pub type FnGoldyWithdrawTransactionByteSize = unsafe extern "C" fn(*const GoldyWithdrawTransaction) -> u64;
-pub type FnGoldyWithdrawTransactionClaim =
-    unsafe extern "C" fn(*const GoldyWithdrawTransaction, *mut GoldySchemeSubmission) -> *mut GoldyWithdrawClaim;
-pub type FnGoldyWithdrawClaimDestroy = unsafe extern "C" fn(*mut GoldyWithdrawClaim);
-pub type FnGoldyWithdrawClaimConsume = unsafe extern "C" fn(*mut GoldyWithdrawClaim) -> *mut GoldyWithdrawBytes;
-pub type FnGoldyWithdrawClaimDiscard = unsafe extern "C" fn(*mut GoldyWithdrawClaim) -> GoldyResult;
-pub type FnGoldyWithdrawBytesLen = unsafe extern "C" fn(*const GoldyWithdrawBytes) -> u64;
-pub type FnGoldyWithdrawBytesData = unsafe extern "C" fn(*const GoldyWithdrawBytes) -> *const u8;
-pub type FnGoldyWithdrawBytesCopy = unsafe extern "C" fn(*const GoldyWithdrawBytes, *mut u8, usize) -> GoldyResult;
-pub type FnGoldyWithdrawBytesDestroy = unsafe extern "C" fn(*mut GoldyWithdrawBytes);
 pub type FnGoldyDepositTransactionDestroy = unsafe extern "C" fn(*mut GoldyDepositTransaction);
 pub type FnGoldyDepositTransactionCapacity = unsafe extern "C" fn(*const GoldyDepositTransaction) -> u64;
 pub type FnGoldyDepositTransactionId = unsafe extern "C" fn(*const GoldyDepositTransaction) -> u32;

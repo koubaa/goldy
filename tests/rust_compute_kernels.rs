@@ -9,6 +9,7 @@ use goldy::{
     compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions, Runtime,
     RuntimeDescriptor, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 
 #[compute(workgroup_size = [64, 1, 1])]
@@ -161,9 +162,9 @@ fn main() {
                 let kernel = workgroup_sum_manual::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "sum", &data, &out).groups([1, 1, 1]);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert!((got[0] - 256.0).abs() < 1e-3, "sum {}", got[0]);
                 Ok(())
@@ -180,9 +181,9 @@ fn main() {
                 let kernel = reduce_sum::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "sum", &data, &out).groups([1, 1, 1]);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert!((got[0] - 256.0).abs() < 1e-3, "sum {}", got[0]);
                 Ok(())
@@ -199,9 +200,9 @@ fn main() {
                 let kernel = reduce_max::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "max", &data, &out).groups([1, 1, 1]);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert!((got[0] - 42.5).abs() < 1e-4, "max {}", got[0]);
                 Ok(())
@@ -219,9 +220,9 @@ fn main() {
                 let kernel = softmax_slice::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "sm", &buf, 3).groups([1, 1, 1]);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &buf)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &buf).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 let xs = [1.0f32, 2.0, 3.0];
                 let max = 3.0f32;
@@ -251,9 +252,9 @@ fn main() {
                 let kernel = double_u32::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "double", &data).over_1d(n as u32);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &data)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &data).take::<u8>()?;
                 let out: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(out.len(), n);
                 for i in 0..n {
@@ -280,9 +281,9 @@ fn main() {
                 kernel
                     .record(&mut scheme, "saxpy", &x, &y, a)
                     .groups([(n as u32).div_ceil(64), 1, 1]);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &y)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &y).take::<u8>()?;
                 let out: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(out.len(), n);
                 for i in 0..n {
@@ -333,9 +334,9 @@ fn main() {
                 let kernel = fill_red::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "fill", &texture).over_2d(width, height);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &texture)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &texture).take::<u8>()?;
                 assert!(!bytes.iter().all(|&b| b == 0), "texture readback all zeros");
                 Ok(())
             }
@@ -375,9 +376,9 @@ fn main() {
                 let kernel = read_plasma_uniforms::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "read", &uniforms, &out).over_1d(1);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(got.len(), 3);
                 assert!((got[0] - 8.0).abs() < 1e-5, "width {}", got[0]);
@@ -417,9 +418,9 @@ fn main() {
                 let kernel = read_tight_vertex::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "read", &verts, &out).over_1d(1);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(got.len(), 5);
                 for (i, want) in [1.0, 2.0, 3.0, 4.0, 5.0].iter().enumerate() {

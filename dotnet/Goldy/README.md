@@ -28,11 +28,8 @@ using var rt = ctx.LeaseRenderTarget(100, 100, TextureFormat.Rgba8Unorm);
 using (var pass = scheme.RenderPassClear("clear", rt, Color.CornflowerBlue)) { }
 
 scheme.CopyToTexture(rt, readback);
-using var memory = new MemoryExchange(ctx);
-using var withdraw = memory.BindWithdrawTexture(scheme, readback);
 using var submission = scheme.Submit();
-using var claim = withdraw.Claim(submission);
-using var pixels = claim.Consume();
+using var pixels = submission.Take(readback);
 ```
 
 ## Features

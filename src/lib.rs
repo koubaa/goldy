@@ -46,6 +46,8 @@ pub mod cpu_dispatch;
 pub mod cpu_shaders;
 pub(crate) mod deposit_pool;
 pub(crate) mod host_access;
+pub(crate) mod host_claim;
+pub(crate) mod host_read_pool;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
 pub mod slang;
@@ -80,10 +82,9 @@ pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
 pub use exchange::{Claim, PendingClaim, SurfaceExchange};
-pub use exchange::{
-    DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
-};
+pub use exchange::{DepositTarget, DepositTransaction, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
+pub use host_claim::{HostView, PendingHostRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use scheme::{
@@ -195,13 +196,23 @@ pub mod test_support {
     use crate::backend::mock::MockBackend;
     use crate::runtime::{Adapter, Instance, RequestAdapterOptions, RuntimeDescriptor};
     use crate::{BackendType, DeviceType, Runtime};
-    use std::ops::Deref;
+    use std::ops::{Deref, Shr};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
     use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
     pub fn mock_runtime() -> Arc<Runtime> {
         Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    /// Realize a host claim as `u32` elements (test helper replacing withdraw consume).
+    pub fn take_u32(submission: &mut crate::Submission, parcel: &crate::Parcel) -> Vec<u32> {
+        (submission >> parcel).take::<u32>().expect("host take u32").to_vec()
+    }
+
+    /// Realize a host claim as raw bytes (test helper replacing withdraw consume).
+    pub fn take_bytes(submission: &mut crate::Submission, parcel: &crate::Parcel) -> Vec<u8> {
+        (submission >> parcel).take::<u8>().expect("host take bytes").into_vec()
     }
 
     #[allow(private_bounds)]

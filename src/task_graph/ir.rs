@@ -261,16 +261,15 @@ pub enum NodeKind {
     /// [`crate::scheme::SchemeRenderPassBuilder`] so barriers serialize correctly
     /// against compute work. Color load is declared on the node (`color_load`), not
     /// as a command-list clear.
+    /// Read easement grant — recorded once, replayed with the scheme.
+    ///
+    /// Emits no GPU commands in v1; exists so the analyzer can eventually
+    /// choose host-visible backing vs an inserted device→host blit per backend.
     RenderPass {
         target: RenderTargetHandle,
         color_load: crate::types::TargetLoad,
         commands: Vec<crate::backend::RenderCommand>,
     },
-    /// Read easement grant — recorded once, replayed with the scheme.
-    ///
-    /// Emits no GPU commands in v1; exists so the analyzer can eventually
-    /// choose host-visible backing vs an inserted device→host blit per backend.
-    WithdrawRead { withdraw_id: u32 },
     /// GPU acceleration-structure build (BLAS triangles or TLAS instances).
     BuildAccelerationStructure(crate::backend::AccelBuildCommand),
     /// Hardware `TraceRays` / `DispatchRays` (internal SBT on the pipeline).

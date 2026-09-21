@@ -10,6 +10,7 @@ use goldy::{
     TensorContext, TensorDType, TensorScalar, TensorShape, TensorView,
 };
 use std::sync::Mutex;
+use std::ops::Shr;
 
 #[goldy::compute(workgroup_size = [64, 1, 1])]
 fn double_u32(buf: &mut [u32], n: u32) {
@@ -51,11 +52,9 @@ fn runtime() -> Runtime {
 }
 
 fn read_f32(scheme: &mut Scheme, buf: &goldy::Buffer) -> Vec<f32> {
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(scheme, buf)
-        .expect("withdraw");
+    
     let mut sub = scheme.submit().expect("submit");
-    let bytes = grant.claim(&mut sub).expect("claim").consume().expect("consume");
+    let bytes = (&mut sub >> buf).take::<u8>().expect("host take");
     bytemuck::cast_slice(&bytes).to_vec()
 }
 
@@ -203,11 +202,9 @@ fn cast_f32_i32() {
         .recorder(&mut scheme)
         .cast("cast", x.view(), TensorDType::I32)
         .unwrap();
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, y.buffer())
-        .unwrap();
+    
     let mut sub = scheme.submit().unwrap();
-    let bytes = grant.claim(&mut sub).unwrap().consume().unwrap();
+    let bytes = (&mut sub >> y.buffer()).take::<u8>().expect("host take");
     let got: &[i32] = bytemuck::cast_slice(&bytes);
     assert_eq!(got, &[1, -2]);
 }
@@ -222,11 +219,9 @@ fn kernel_bindable_view_and_over_tensor() {
     let mut scheme = Scheme::new(&ctx);
     k.record(&mut scheme, "dbl", &data.view(), data.view().numel_u32())
         .over_tensor(&data.view());
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, data.buffer())
-        .unwrap();
+    
     let mut sub = scheme.submit().unwrap();
-    let bytes = grant.claim(&mut sub).unwrap().consume().unwrap();
+    let bytes = (&mut sub >> data.buffer()).take::<u8>().expect("host take");
     let got: &[u32] = bytemuck::cast_slice(&bytes);
     assert_eq!(got, &[2, 4, 6, 8]);
 }

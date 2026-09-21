@@ -6,7 +6,7 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
     goldy_context_create, goldy_context_destroy, goldy_context_lease_render_target, goldy_instance_destroy,
-    goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create,
+    goldy_memory_exchange_create,
     goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_record_builder_build, goldy_record_builder_create,
     goldy_record_builder_emplace, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
     goldy_runtime_acquire_texture, goldy_runtime_destroy, goldy_scheme_compute_node_begin,
@@ -15,7 +15,7 @@ use goldy_ffi::{
     goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
     goldy_scheme_render_pass_with_field, goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy,
     goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy,
-    goldy_withdraw_transaction_destroy, GoldyColor, GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc,
+    GoldyColor, GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc,
     GoldyResult, GoldyTargetLoad, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
@@ -211,13 +211,9 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
 
         let memory = goldy_memory_exchange_create(ctx);
         assert!(!memory.is_null(), "{}", last_ffi_message());
-        let withdraw_tex = goldy_memory_exchange_bind_withdraw_texture(memory, scheme, readback);
-        assert!(!withdraw_tex.is_null(), "{}", last_ffi_message());
-        let cells_b = goldy_buffer_field(cells, SLOT_B);
+                let cells_b = goldy_buffer_field(cells, SLOT_B);
         assert!(!cells_b.is_null(), "{}", last_ffi_message());
-        let withdraw_cells = goldy_memory_exchange_bind_withdraw(memory, scheme, cells_b);
-        assert!(!withdraw_cells.is_null(), "{}", last_ffi_message());
-
+        
         let mut submission = std::ptr::null_mut();
         assert_eq!(
             goldy_scheme_submit(scheme, &mut submission),
@@ -227,7 +223,7 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         );
         assert!(!submission.is_null());
 
-        let cell_readback = common::withdraw_claim_copy(withdraw_cells, submission);
+        let cell_readback = common::take_parcel_copy(submission, cells_b);
         let cells_out: &[u32] =
             std::slice::from_raw_parts(cell_readback.as_ptr() as *const u32, cell_readback.len() / cell_bytes);
         assert_eq!(
@@ -236,7 +232,7 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             "still-life block should remain 4 live cells after one step"
         );
 
-        let pixels = common::withdraw_claim_copy(withdraw_tex, submission);
+        let pixels = common::take_texture_copy(submission, readback);
 
         let cx = (GRID_WIDTH / 2) as usize;
         let cy = (GRID_HEIGHT / 2) as usize;
@@ -248,8 +244,6 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         );
 
         goldy_scheme_submission_destroy(submission);
-        goldy_withdraw_transaction_destroy(withdraw_cells);
-        goldy_withdraw_transaction_destroy(withdraw_tex);
         goldy_parcel_destroy(cells_b);
         goldy_memory_exchange_destroy(memory);
         goldy_scheme_render_target_lease_destroy(rt);

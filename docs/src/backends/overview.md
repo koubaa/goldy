@@ -277,7 +277,7 @@ parity with the shipped Vulkan/DX12/Metal backends.
 Compute buffers, scalar uniforms, **indirect dispatch**, and **2D textures/samplers** work.
 Submit is **non-blocking**: the context timeline advances from wgpu's
 `on_submitted_work_done` callback (pumped by `Runtime::poll`). Host waits
-(`Context::wait_until`, withdraw) block on the submission index, not on submit
+(`Context::wait_until`, host claims) block on the submission index, not on submit
 itself. Resources bind as a single `@group(0)` in shader-parameter order (no bindless heap). Texture
 notes:
 
@@ -287,7 +287,7 @@ notes:
   Identity `DirectSpatial<float4>` is `rgba32float`. Goldy specializes packed 8-bit
   surfaces at dispatch: `Rgba8Unorm` → `rgba8unorm`, `Bgra8Unorm` → `bgra8unorm`
   (the latter needs wgpu `BGRA8UNORM_STORAGE`). sRGB formats are rejected for storage.
-- Uploads use `queue.write_texture`. Texture withdraw staging uses WebGPU's 256-byte row
+- Uploads use `queue.write_texture`. Texture host-claim staging uses WebGPU's 256-byte row
   pitch; `query_texture_copy_footprint` reports the padded layout.
 - Surfaces: `begin_frame` acquires the wgpu drawable. Present picks
   **Copy** (same-format storage scratch → swapchain) when the scratch format can

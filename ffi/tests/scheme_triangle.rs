@@ -5,15 +5,14 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_context_create, goldy_context_destroy,
-    goldy_context_lease_render_target, goldy_instance_destroy, goldy_memory_exchange_bind_withdraw_texture,
-    goldy_memory_exchange_create, goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_render_pipeline_create,
+    goldy_context_lease_render_target, goldy_instance_destroy,     goldy_memory_exchange_create, goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_render_pipeline_create,
     goldy_render_pipeline_destroy, goldy_runtime_acquire_buffer, goldy_runtime_acquire_texture, goldy_runtime_destroy,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_render_pass_begin,
     goldy_scheme_render_pass_draw, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
     goldy_scheme_render_pass_set_vertex_buffer_parcel, goldy_scheme_render_pass_with_parcel,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
     goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy,
-    goldy_withdraw_transaction_destroy, GoldyBufferKind, GoldyColor, GoldyDepthFormat, GoldyNodeAccess,
+    GoldyBufferKind, GoldyColor, GoldyDepthFormat, GoldyNodeAccess,
     GoldyRenderPipelineDesc, GoldyResult, GoldyTargetLoad, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
     GoldyVertexAttribute, GoldyVertexFormat,
 };
@@ -173,9 +172,7 @@ fn scheme_triangle_readback_center_pixel_lit() {
 
         let memory = goldy_memory_exchange_create(ctx);
         assert!(!memory.is_null(), "{}", last_ffi_message());
-        let withdraw = goldy_memory_exchange_bind_withdraw_texture(memory, scheme, readback);
-        assert!(!withdraw.is_null(), "{}", last_ffi_message());
-
+        
         let mut submission = std::ptr::null_mut();
         assert_eq!(
             goldy_scheme_submit(scheme, &mut submission),
@@ -185,7 +182,7 @@ fn scheme_triangle_readback_center_pixel_lit() {
         );
         assert!(!submission.is_null());
 
-        let pixels = common::withdraw_claim_copy(withdraw, submission);
+        let pixels = common::take_texture_copy(submission, readback);
 
         let stride = (W * 4) as usize;
         let cx = (W / 2) as usize;
@@ -209,7 +206,6 @@ fn scheme_triangle_readback_center_pixel_lit() {
         );
 
         goldy_scheme_submission_destroy(submission);
-        goldy_withdraw_transaction_destroy(withdraw);
         goldy_memory_exchange_destroy(memory);
         goldy_scheme_render_target_lease_destroy(rt);
         goldy_scheme_destroy(scheme);

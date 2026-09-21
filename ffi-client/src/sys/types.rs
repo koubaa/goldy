@@ -246,17 +246,7 @@ pub struct GoldyMemoryExchange {
 }
 
 #[repr(C)]
-pub struct GoldyWithdrawTransaction {
-    _private: [u8; 0],
-}
-
-#[repr(C)]
-pub struct GoldyWithdrawClaim {
-    _private: [u8; 0],
-}
-
-#[repr(C)]
-pub struct GoldyWithdrawBytes {
+pub struct GoldyHostView {
     _private: [u8; 0],
 }
 

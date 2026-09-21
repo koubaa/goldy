@@ -111,9 +111,8 @@ fn main() -> goldy_ffi_client::Result<()> {
     scheme.copy_to_texture(&rt, &readback)?;
 
     let memory = goldy_ffi_client::MemoryExchange::new(&ctx)?;
-    let withdraw = memory.bind_withdraw_texture(&mut scheme, &readback)?;
     let mut submission = scheme.submit()?;
-    let pixels = withdraw.claim(&mut submission)?.consume()?;
+    let pixels = submission.take_texture(&readback)?;
 
     println!("Rendered {} bytes", pixels.len());
     Ok(())
@@ -137,9 +136,9 @@ node.with_buffer(&buf, NodeAccess::ReadWrite);
 node.dispatch(1, 1, 1);
 
 let memory = MemoryExchange::new(&ctx)?;
-let withdraw = memory.bind_withdraw(&mut scheme, &buf.field(0)?)?;
+let parcel = buf.field(0)?;
 let mut submission = scheme.submit()?;
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+let bytes = submission.take(&parcel)?;
 ```
 
 See `ffi-client/examples/compute_simple.rs`.

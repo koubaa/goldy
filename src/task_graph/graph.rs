@@ -328,9 +328,6 @@ fn ensure_partition_retired_before_rerecord(
 fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
     waves.iter().flat_map(|w| &w.node_indices).any(|&ni| {
         let node = &ir.nodes[ni];
-        if matches!(node.kind, NodeKind::WithdrawRead { .. }) {
-            return false;
-        }
         node.bindings
             .iter()
             .any(|b| ResourceKey::from_resource_id(b.resource).is_none())
@@ -555,10 +552,6 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             for cmd in commands {
                 hash_render_command_for_emission(cmd, h);
             }
-        }
-        NodeKind::WithdrawRead { withdraw_id } => {
-            11u8.hash(h);
-            withdraw_id.hash(h);
         }
         NodeKind::CpuDispatch { cpu_id } => {
             12u8.hash(h);
@@ -813,10 +806,6 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 buffer.hash(&mut h);
                 offset.hash(&mut h);
                 size.hash(&mut h);
-            }
-            NodeKind::WithdrawRead { withdraw_id } => {
-                3u8.hash(&mut h);
-                withdraw_id.hash(&mut h);
             }
             NodeKind::CpuDispatch { cpu_id } => {
                 6u8.hash(&mut h);
@@ -4900,22 +4889,10 @@ mod partitioning_tests {
     // Group 7: copy_to_texture retainability
     //
     // CopyRenderTarget → Texture must be retainable (the texture handle is
-    // stable across submissions; the staging readback blit runs standalone
-    // separately via finish_submit_frame).
+    // stable across submissions).
     // CopyRenderTarget → PresentLease must also be retainable (slot-key path).
     // Other destinations (e.g. SwapchainOutput) must NOT be retainable.
     // ------------------------------------------------------------------
-
-    fn grant_read_node(label: &'static str, resource: ResourceId, withdraw_id: u32) -> TaskNode {
-        TaskNode {
-            label,
-            bindings: vec![ResourceBinding {
-                resource,
-                access: NodeAccess::Read,
-            }],
-            kind: NodeKind::WithdrawRead { withdraw_id },
-        }
-    }
 
     /// Call `partition_waves_can_retain` for a single-wave IR built from `nodes`.
     fn can_retain_single_wave(nodes: Vec<TaskNode>) -> bool {
@@ -4927,12 +4904,11 @@ mod partitioning_tests {
 
     #[test]
     fn copy_render_target_to_texture_is_retainable() {
-        // RenderPass → CopyRenderTarget(Texture) → WithdrawRead
-        // All in one chain; CopyRenderTarget → Texture must not force standalone.
+        // RenderPass → CopyRenderTarget(Texture)
+        // CopyRenderTarget → Texture must not force standalone.
         let nodes = vec![
             render_pass_node("rp", 10),
             copy_to_dst_node("copy", 10, ResourceId::Texture(42)),
-            grant_read_node("grant", ResourceId::Texture(42), 0),
         ];
         assert!(
             can_retain_single_wave(nodes),

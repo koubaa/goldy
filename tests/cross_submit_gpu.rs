@@ -18,8 +18,9 @@ mod imp {
     use crate::upload;
     use goldy::{
         BackendType, BufferKind, ComputePipeline, Context, Instance, MemoryExchange, NodeAccess, Parcel,
-        RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission, WithdrawTransaction,
+        RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission,
     };
+    use std::ops::Shr;
     use std::sync::Arc;
 
     fn request_default_device(instance: &Instance) -> Runtime {
@@ -66,9 +67,8 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
 }
 "#;
 
-    fn read_u32(grant: &WithdrawTransaction, submission: &mut Submission) -> u32 {
-        let loan = grant.claim(submission).expect("claim").consume().expect("withdraw");
-        bytemuck::cast_slice::<u8, u32>(&loan)[0]
+    fn read_u32(submission: &mut Submission, parcel: &Parcel) -> u32 {
+        (submission >> parcel).take::<u32>().expect("host take")[0]
     }
 
     fn saxpy_style_chain_closed_form(device: &Runtime) {
@@ -86,16 +86,13 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .node("inc", &pipe)
             .with_parcel(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &buf)
-            .expect("grant");
 
         const STEPS: u32 = 50;
         for _ in 0..STEPS {
             scheme.submit().expect("submit");
         }
         let mut submission = scheme.submit().expect("final");
-        assert_eq!(read_u32(&grant, &mut submission), STEPS + 1);
+        assert_eq!(read_u32(&mut submission, &*buf), STEPS + 1);
     }
 
     fn war_write_after_read_pipelined_overwrite(device: &Runtime) {
@@ -123,12 +120,9 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .node("write", &write_pipe)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(writer.context())
-            .bind_withdraw(&mut writer, &buf)
-            .expect("grant");
         let mut submission = writer.submit().expect("write");
 
-        assert_eq!(read_u32(&grant, &mut submission), 42);
+        assert_eq!(read_u32(&mut submission, &*buf), 42);
     }
 
     /// Pipelined reader + retained writer: `cpu_waits` must retire on the submit worker
@@ -156,20 +150,17 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .node("write", &write_pipe)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(writer.context())
-            .bind_withdraw(&mut writer, &buf)
-            .expect("grant");
 
         // Bootstrap: writer may re-record once after the reader first appears (WAR prologue bake).
         reader.submit().expect("reader record");
         let mut first_write = writer.submit().expect("writer record");
-        assert_eq!(read_u32(&grant, &mut first_write), 42);
+        assert_eq!(read_u32(&mut first_write, &*buf), 42);
 
         const WARMUP: u64 = 4;
         for _ in 0..WARMUP {
             reader.submit().expect("reader warmup");
             let mut submission = writer.submit().expect("writer warmup");
-            assert_eq!(read_u32(&grant, &mut submission), 42);
+            assert_eq!(read_u32(&mut submission, &*buf), 42);
         }
 
         let records_after_warmup = writer.replay_stats().records;
@@ -181,7 +172,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             reader.submit().expect("reader resubmit");
             let mut submission = writer.submit().expect("writer resubmit");
             assert_eq!(
-                read_u32(&grant, &mut submission),
+                read_u32(&mut submission, &*buf),
                 42,
                 "retained writer must stay ordered after pipelined reader via cpu_waits"
             );
@@ -205,17 +196,14 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         pipe: &ComputePipeline,
         src: &Parcel,
         dst: &Parcel,
-    ) -> (Scheme, WithdrawTransaction) {
+    ) -> Scheme {
         let mut reader = Scheme::new(ctx);
         reader
             .node("copy", pipe)
             .with_parcel(src, NodeAccess::Read)
             .with_parcel(dst, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(reader.context())
-            .bind_withdraw(&mut reader, dst)
-            .expect("grant");
-        (reader, grant)
+        reader
     }
 
     fn assert_retained_resubmit_stats(device: &Runtime, reader: &Scheme, expected_resubmit_hits: u64) {
@@ -247,7 +235,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("dst");
 
-        let (mut reader, grant) = retained_copy_reader(&ctx, &pipe, &src, &dst);
+        let mut reader = retained_copy_reader(&ctx, &pipe, &src, &dst);
 
         let mut upload = Scheme::new(&ctx);
         let deposit = upload::bind_upload_deposit(&ctx, &mut upload, &src, 4).expect("bind deposit");
@@ -255,7 +243,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             upload::upload_parcel(&mut upload, &deposit, bytemuck::bytes_of(&value)).expect("upload src");
             let mut submission = reader.submit().expect("retained resubmit");
             assert_eq!(
-                read_u32(&grant, &mut submission),
+                read_u32(&mut submission, &*dst),
                 value,
                 "retained reader must observe independent upload (value={value})"
             );
@@ -279,9 +267,6 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .node("overwrite", &write_pipe)
             .with_parcel(&src, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(worker.context())
-            .bind_withdraw(&mut worker, &src)
-            .expect("grant");
 
         let mut upload_scheme = Scheme::new(&ctx);
         let deposit = upload::bind_upload_deposit(&ctx, &mut upload_scheme, &src, 4).expect("bind deposit");
@@ -289,7 +274,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             upload::upload_parcel(&mut upload_scheme, &deposit, bytemuck::bytes_of(&upload_value)).expect("upload src");
             let mut submission = worker.submit().expect("retained resubmit");
             assert_eq!(
-                read_u32(&grant, &mut submission),
+                read_u32(&mut submission, &*src),
                 42,
                 "retained overwrite must win over upload (upload={upload_value})"
             );
@@ -312,7 +297,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
             .expect("dst");
 
-        let (mut reader, grant) = retained_copy_reader(&ctx_consumer, &pipe, &src, &dst);
+        let mut reader = retained_copy_reader(&ctx_consumer, &pipe, &src, &dst);
 
         let mut upload = Scheme::new(&ctx_producer);
         let deposit = upload::bind_upload_deposit(&ctx_producer, &mut upload, &src, 4).expect("bind deposit");
@@ -320,7 +305,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             upload::upload_parcel(&mut upload, &deposit, bytemuck::bytes_of(&value)).expect("upload src");
             let mut submission = reader.submit().expect("cross-context resubmit");
             assert_eq!(
-                read_u32(&grant, &mut submission),
+                read_u32(&mut submission, &*dst),
                 value,
                 "cross-context retained reader must observe producer upload (value={value})"
             );
@@ -446,9 +431,6 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             .node("read", &read_pipe)
             .with_parcel(&parcel, NodeAccess::Read)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(reader.context())
-            .bind_withdraw(&mut reader, &parcel)
-            .expect("grant");
         reader.submit().expect("reader record");
 
         let mut writer = Scheme::new(&ctx);
@@ -460,7 +442,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
 
         let mut submission = reader.submit().expect("reader topology re-record");
         submission.wait_until_settled().expect("wait");
-        assert_eq!(read_u32(&grant, &mut submission), 42);
+        assert_eq!(read_u32(&mut submission, &*parcel), 42);
     }
 
     fn repeated_resubmit_of_b_never_dirties_a(device: &Runtime) {
@@ -576,12 +558,9 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         scheme
             .copy_buffer_parcel(staging.whole(), 0, dest.whole(), 0, 16)
             .expect("copy");
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &dest)
-            .expect("grant");
         let mut first = scheme.submit().expect("record");
         let first_tv = goldy::test_support::submission_epoch(&first);
-        assert_eq!(read_u32(&grant, &mut first), 0, "initial dest must be zero");
+        assert_eq!(read_u32(&mut first, &dest), 0, "initial dest must be zero");
 
         let new_bytes: Box<[u8]> = Box::from([7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0, 7u8, 0, 0, 0]);
         scheme.record_reuse_buffer(&dest);
@@ -599,7 +578,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
             "resubmit must advance the timeline"
         );
         assert_eq!(
-            read_u32(&grant, &mut second),
+            read_u32(&mut second, &dest),
             7,
             "deferred host write must land before retained GPU copy executes"
         );

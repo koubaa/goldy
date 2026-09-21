@@ -10,8 +10,9 @@ use goldy::{
     types::{BackendType, BufferFlags},
     AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTarget, DepositTransaction,
     Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, Texture, Transaction, WithdrawTransaction,
+    SurfaceConfig, SurfaceExchange, Texture, Transaction,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -170,7 +171,6 @@ struct RenderState {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
     verts: Buffer,
@@ -195,7 +195,7 @@ fn record_scheme(
     height: u32,
     surface: Option<&SurfaceExchange>,
     readback: Option<&Texture>,
-) -> Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+) -> Result<Option<Transaction>> {
     scheme.build_blas(blas, verts.whole(), 3, 12, None)?;
     let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
     scheme.build_tlas(
@@ -217,7 +217,7 @@ fn record_scheme(
             .with_parcel(tlas, NodeAccess::Read)
             .with_present(&lease)
             .dispatch(wg_x, wg_y, 1);
-        Ok((Some(present), None))
+        Ok(Some(present))
     } else {
         let target = readback.expect("capture readback");
         scheme
@@ -226,8 +226,8 @@ fn record_scheme(
             .with_parcel(tlas, NodeAccess::Read)
             .with_parcel(target, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
-        let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, target)?;
-        Ok((None, Some(withdraw)))
+        
+        Ok(None)
     }
 }
 
@@ -241,7 +241,7 @@ fn output_size(state: &RenderState) -> (u32, u32) {
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     let mut scheme = Scheme::new(&state.ctx);
-    let (present, withdraw) = record_scheme(
+    let present = record_scheme(
         &mut scheme,
         &state.compute_pipeline,
         &state.uniform_buffer,
@@ -255,7 +255,6 @@ fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     )
     .expect("failed to record scheme");
     state.present = present;
-    state.withdraw = withdraw;
     state.scheme = scheme;
 }
 
@@ -296,7 +295,7 @@ impl App {
         )?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (present, withdraw) = record_scheme(
+        let present = record_scheme(
             &mut scheme,
             &compute_pipeline,
             &uniform_buffer,
@@ -322,7 +321,6 @@ impl App {
             present,
             capture,
             readback,
-            withdraw,
             scheme,
             compute_pipeline,
             verts,
@@ -435,7 +433,9 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     if let Some(present) = &state.present {
         (&mut submission >> present).take()?;
     } else {
-        let pixels = state.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+        let pixels = (&mut submission >> state.readback.as_ref().unwrap())
+            .take::<u8>()?
+            .to_vec();
         state.capture.as_mut().unwrap().write_rgba(&pixels)?;
     }
     Ok(())

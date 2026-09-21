@@ -6,7 +6,7 @@ use goldy::{
     BufferKind, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
     ShaderModule,
 };
-use std::sync::Arc;
+use std::ops::Shr;
 
 fn run_scheme_double_u32() {
     let instance = Instance::new().expect("instance");
@@ -43,11 +43,8 @@ fn run_scheme_double_u32() {
         .node("double", &pipeline)
         .with_parcel(&data, NodeAccess::ReadWrite)
         .dispatch((n as u32).div_ceil(64), 1, 1);
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &data)
-        .expect("withdraw");
     let mut frame = scheme.submit().expect("submit");
-    let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+    let bytes = (&mut frame >> &data).take::<u8>().expect("host take");
     let out: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
     assert_eq!(out.len(), n);
     for i in 0..n {

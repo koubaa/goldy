@@ -4,12 +4,12 @@
 #![allow(dead_code)]
 
 use goldy::{
-    Context, DepthFormat, MemoryExchange, Parcel, Runtime, Scheme, Submission, Texture, TextureFlags, TextureFormat,
-    TextureKind, WithdrawTransaction,
+    Context, DepthFormat, Parcel, Runtime, Scheme, Submission, Texture, TextureFlags, TextureFormat, TextureKind,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 
-/// Acquire a texture parcel suitable as a copy destination and withdraw source.
+/// Acquire a texture parcel suitable as a copy destination and host-claim source.
 pub fn acquire_readback_texture(pool: &goldy::Runtime, width: u32, height: u32, format: TextureFormat) -> Texture {
     pool.acquire_texture(
         width,
@@ -22,16 +22,11 @@ pub fn acquire_readback_texture(pool: &goldy::Runtime, width: u32, height: u32, 
     .expect("acquire readback texture")
 }
 
-pub fn read_grant_texture(grant: &WithdrawTransaction, submission: &mut Submission) -> Vec<u8> {
-    grant
-        .claim(submission)
-        .expect("claim")
-        .consume()
-        .expect("withdraw consume")
-        .to_vec()
+pub fn read_grant_texture(submission: &mut Submission, parcel: &Parcel) -> Vec<u8> {
+    (submission >> parcel).take::<u8>().expect("host take").to_vec()
 }
 
-/// Record render pass → copy-to-texture → withdraw once on a new scheme.
+/// Record render pass → copy-to-texture on a new scheme.
 pub fn scheme_record_readback(
     ctx: &Context,
     width: u32,
@@ -42,7 +37,7 @@ pub fn scheme_record_readback(
     label: &'static str,
     color_load: goldy::TargetLoad,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
-) -> (Scheme, WithdrawTransaction) {
+) -> Scheme {
     let mut scheme = Scheme::new(ctx);
     let rt = ctx
         .lease_render_target(width, height, format, depth_format)
@@ -53,13 +48,10 @@ pub fn scheme_record_readback(
         pass.finish();
     }
     scheme.copy_to_texture(&rt, readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, readback)
-        .expect("withdraw");
-    (scheme, grant)
+    scheme
 }
 
-/// Record once, submit once, consume withdraw claim, and return pixels.
+/// Record once, submit once, host-claim the readback parcel, and return pixels.
 pub fn scheme_render_and_readback(
     ctx: &Context,
     width: u32,
@@ -71,7 +63,7 @@ pub fn scheme_render_and_readback(
     color_load: goldy::TargetLoad,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> Vec<u8> {
-    let (mut scheme, grant) = scheme_record_readback(
+    let mut scheme = scheme_record_readback(
         ctx,
         width,
         height,
@@ -83,7 +75,7 @@ pub fn scheme_render_and_readback(
         record,
     );
     let mut frame = scheme.submit().expect("submit");
-    read_grant_texture(&grant, &mut frame)
+    read_grant_texture(&mut frame, readback)
 }
 
 pub fn make_device() -> Option<Runtime> {

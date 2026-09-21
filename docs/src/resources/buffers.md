@@ -115,10 +115,10 @@ bitflags! {
 |------|---------|
 | `COPY_SRC` | Buffer can be a copy source |
 | `COPY_DST` | Buffer can be a copy destination |
-| `CPU_READABLE` | Medium hint for host-visible storage. Prefer [`MemoryExchange::bind_withdraw`](../compute/settlement.md) for observation. Not a public host-read API. |
+| `CPU_READABLE` | Placement hint: expect host claims on this parcel. Backends may keep the medium host-coherent so `take()` is wait + pointer. Semantics are identical without the flag (staged copy). |
 | `CPU_WRITABLE` | Host-mapped staging for deposits / upload copies. Prefer [`MemoryExchange::bind_deposit`](../compute/settlement.md) for application uploads. |
 
-Query `RuntimeCapabilities::has_zero_copy_storage_readback` to detect whether withdraw staging can elide a GPU copy on the current backend.
+Query `RuntimeCapabilities::has_zero_copy_storage_readback` to detect whether the backend honors `CPU_READABLE` with a mapped pointer.
 
 ## Writing Data
 
@@ -140,13 +140,11 @@ Both methods write at a byte offset from the start of the buffer.
 
 ## Reading Data
 
-Use a memory exchange withdraw bound into a scheme:
+Use a host claim after submit:
 
 ```rust
-let memory = MemoryExchange::new(&ctx);
-let withdraw = memory.bind_withdraw(&mut scheme, buffer.whole())?;
 let mut submission = scheme.submit()?;
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+let bytes = (&mut submission >> buffer.whole()).take::<u8>()?.to_vec();
 ```
 
 ## Clearing

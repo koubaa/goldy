@@ -9,6 +9,7 @@ use goldy::{
     BufferKind, MatMulDesc, MatMulView, MemoryExchange, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
 };
 use std::sync::Mutex;
+use std::ops::Shr;
 
 static GPU: Mutex<()> = Mutex::new(());
 
@@ -26,11 +27,9 @@ fn runtime() -> Runtime {
 }
 
 fn read_f32(scheme: &mut Scheme, buf: &goldy::Buffer) -> Vec<f32> {
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(scheme, buf)
-        .expect("withdraw");
+    
     let mut sub = scheme.submit().expect("submit");
-    let bytes = grant.claim(&mut sub).expect("claim").consume().expect("consume");
+    let bytes = (&mut sub >> buf).take::<u8>().expect("host take");
     bytemuck::cast_slice(&bytes).to_vec()
 }
 

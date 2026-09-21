@@ -257,7 +257,7 @@ impl CaptureDump {
     }
 }
 
-/// Retained RGBA8 texture for `copy_to_texture` + [`goldy::MemoryExchange::bind_withdraw`].
+/// Retained RGBA8 texture for `copy_to_texture` plus a host claim on the capture path.
 #[allow(dead_code)]
 pub fn capture_readback(device: &Runtime, width: u32, height: u32) -> anyhow::Result<Texture> {
     device.acquire_texture(

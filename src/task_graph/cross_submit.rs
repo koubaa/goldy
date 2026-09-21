@@ -185,7 +185,6 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyTextureRegion { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
         NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
         // The device-visible footprint of a CPU dispatch is its staging copies.
         NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
@@ -243,9 +242,6 @@ pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> Resource
 }
 
 fn absorb_node_net_access(net: &mut ResourceKeyMap<NetAccess>, node: &super::ir::TaskNode) {
-    if matches!(node.kind, NodeKind::WithdrawRead { .. }) {
-        return;
-    }
     for binding in &node.bindings {
         let Some(key) = ResourceKey::from_resource_id(binding.resource) else {
             continue;

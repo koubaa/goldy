@@ -6,6 +6,7 @@
 mod compute;
 mod context;
 mod error;
+mod host_claim;
 mod instance;
 mod memory_exchange;
 mod pipeline;
@@ -22,6 +23,7 @@ mod types;
 pub use compute::*;
 pub use context::*;
 pub use error::*;
+pub use host_claim::*;
 pub use instance::*;
 pub use memory_exchange::*;
 pub use pipeline::*;

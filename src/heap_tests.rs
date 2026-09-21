@@ -1,3 +1,4 @@
+use std::ops::Shr;
 #[cfg(test)]
 mod heap_tests {
     //! Metal heap self-regulation integration tests.
@@ -866,11 +867,8 @@ mod heap_tests {
         // Withdraw — first 256 bytes should be preserved.
         let parcel = Parcel::from_whole_buffer(Arc::clone(&arc), Arc::downgrade(&device.inner));
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(&ctx)
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("withdraw");
         let mut sub = scheme.submit().expect("submit");
-        let readback = grant.claim(&mut sub).expect("claim").consume().expect("consume");
+        let readback = (&mut sub >> &parcel).take::<u8>().expect("host take");
         let result: &[u32] = bytemuck::cast_slice(&readback[..256]);
         assert_eq!(&result[..64], &initial_data[..]);
     }

@@ -1,3 +1,4 @@
+use std::ops::Shr;
 #[cfg(test)]
 mod buffer_alloc_tests {
     use crate::parcel::Parcel;
@@ -13,11 +14,8 @@ mod buffer_alloc_tests {
     fn withdraw_bytes(ctx: &Context, device: &crate::Runtime, arc: &Arc<crate::buffer::Allocation>) -> Vec<u8> {
         let parcel = Parcel::from_whole_buffer(Arc::clone(arc), Arc::downgrade(&device.inner));
         let mut scheme = Scheme::new(ctx);
-        let tx = MemoryExchange::new(ctx)
-            .bind_withdraw(&mut scheme, &parcel)
-            .expect("bind_withdraw");
         let mut sub = scheme.submit().expect("submit");
-        tx.claim(&mut sub).expect("claim").consume().expect("consume").to_vec()
+        (&mut sub >> &parcel).take::<u8>().expect("host take").to_vec()
     }
 
     // ─── Buffer resize (Phase 1: stable handles, realloc-copy fallback) ───────────
@@ -267,11 +265,8 @@ mod buffer_alloc_tests {
                 .with_parcel(arc.as_ref(), NodeAccess::ReadWrite)
                 .dispatch(1, 1, 1);
             let parcel = Parcel::from_whole_buffer(Arc::clone(&arc), Arc::downgrade(&device.inner));
-            let grant = MemoryExchange::new(&ctx)
-                .bind_withdraw(&mut scheme, &parcel)
-                .expect("withdraw");
             let mut sub = scheme.submit().expect("dispatch");
-            let loan = grant.claim(&mut sub).expect("claim").consume().expect("consume");
+            let loan = (&mut sub >> &parcel).take::<u8>().expect("host take");
             let read: &[u32] = bytemuck::cast_slice(&loan[..64]);
             for (i, &v) in read.iter().enumerate() {
                 assert_eq!(v, (i as u32 + 1) * 2, "after first dispatch[{i}]");
@@ -303,11 +298,8 @@ mod buffer_alloc_tests {
             .with_parcel(arc.as_ref(), NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let parcel2 = Parcel::from_whole_buffer(Arc::clone(&arc), Arc::downgrade(&device.inner));
-        let grant2 = MemoryExchange::new(&ctx)
-            .bind_withdraw(&mut scheme2, &parcel2)
-            .expect("withdraw2");
         let mut sub2 = scheme2.submit().expect("dispatch2");
-        let loan2 = grant2.claim(&mut sub2).expect("claim").consume().expect("consume");
+        let loan2 = (&mut sub2 >> &parcel2).take::<u8>().expect("host take");
         let read: &[u32] = bytemuck::cast_slice(&loan2[..64]);
         for (i, &v) in read.iter().enumerate() {
             assert_eq!(v, (i as u32) * 2, "after second dispatch[{i}]");

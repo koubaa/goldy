@@ -1,9 +1,10 @@
 //! Headless dense tensor algebra: fill, add with broadcast, and GEMV.
 
 use goldy::{
-    Instance, MemoryExchange, RequestAdapterOptions, RuntimeDescriptor, Scheme, Tensor, TensorContext, TensorDType,
-    TensorScalar, TensorShape,
+    Instance, RequestAdapterOptions, RuntimeDescriptor, Scheme, Tensor, TensorContext, TensorDType, TensorScalar,
+    TensorShape,
 };
+use std::ops::Shr;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Instance::new()?
@@ -24,9 +25,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let y = rec.matmul("gemv", w.view(), x.view())?;
     drop(rec);
 
-    let grant = MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, y.buffer())?;
+    
     let mut sub = scheme.submit()?;
-    let bytes = grant.claim(&mut sub)?.consume()?;
+    let bytes = (&mut sub >> y.buffer()).take::<u8>()?;
     let out: &[f32] = bytemuck::cast_slice(&bytes);
     println!("gemv(W, ones) = {out:?}");
     assert_eq!(out, &[1.0, 1.0]);

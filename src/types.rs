@@ -436,15 +436,13 @@ bitflags! {
         const COPY_SRC = 1 << 0;
         /// Can be used as a copy destination.
         const COPY_DST = 1 << 1;
-        /// Medium hint: prefer host-visible storage when the runtime chooses to map
-        /// withdraw staging onto the same allocation (UMA backends). Discrete backends may
-        /// still keep GPU-local storage and blit into withdraw staging at claim time.
-        ///
-        /// Prefer [`crate::MemoryExchange::bind_withdraw`] for CPU observation — this flag
-        /// is not a public readback API.
+        /// Placement hint: expect host claims (`(&mut submission >> &parcel).take()`) on this
+        /// parcel. Backends that can may keep the medium host-coherent so `take()` is a
+        /// timeline wait plus a mapped pointer. Semantics are identical without the flag
+        /// (a staged copy). This is not a public readback API by itself.
         ///
         /// Query [`crate::runtime::RuntimeCapabilities::has_zero_copy_storage_readback`] to
-        /// distinguish zero-copy vs staged withdraw behavior.
+        /// see whether this backend honors the hint with a mapped `take()`.
         const CPU_READABLE = 1 << 2;
         /// GPU-local storage (Metal: [`MTLStorageMode::Private`]), no CPU mapping.
         ///

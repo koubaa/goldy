@@ -13,7 +13,7 @@ use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
 use goldy::{Scheme, Submission};
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyBytes};
 use std::cell::RefCell;
 
 /// GPU submission context — one per scheme.
@@ -58,6 +58,33 @@ impl PySchemeSubmission {
 
     fn wait_until_settled(&self) -> PyResult<()> {
         self.inner.wait_until_settled().into_py_result()
+    }
+
+    /// Host-claim parcel bytes after this submission.
+    fn take<'py>(&mut self, py: Python<'py>, parcel: &PyParcel) -> PyResult<Bound<'py, PyBytes>> {
+        let view = (&mut self.inner >> parcel.inner.as_parcel())
+            .take::<u8>()
+            .into_py_result()?;
+        Ok(PyBytes::new(py, &view))
+    }
+
+    /// Host-claim texture bytes after this submission.
+    fn take_texture<'py>(&mut self, py: Python<'py>, texture: &PyTexture) -> PyResult<Bound<'py, PyBytes>> {
+        let view = (&mut self.inner >> &*texture.inner).take::<u8>().into_py_result()?;
+        Ok(PyBytes::new(py, &view))
+    }
+
+    /// `submission >> parcel` / `submission >> texture` realizes a host claim as `bytes`.
+    fn __rshift__<'py>(&mut self, py: Python<'py>, rhs: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
+        if let Ok(parcel) = rhs.extract::<PyRef<PyParcel>>() {
+            return self.take(py, &parcel);
+        }
+        if let Ok(texture) = rhs.extract::<PyRef<PyTexture>>() {
+            return self.take_texture(py, &texture);
+        }
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "SchemeSubmission >> expects a Parcel or Texture",
+        ))
     }
 
     fn __repr__(&self) -> String {

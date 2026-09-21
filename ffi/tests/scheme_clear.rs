@@ -5,11 +5,11 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_context_create, goldy_context_destroy, goldy_context_lease_render_target, goldy_instance_destroy,
-    goldy_memory_exchange_bind_withdraw_texture, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
+    goldy_memory_exchange_create, goldy_memory_exchange_destroy,
     goldy_runtime_acquire_texture, goldy_runtime_destroy, goldy_scheme_copy_to_texture, goldy_scheme_create,
     goldy_scheme_destroy, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_finish,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
-    goldy_texture_destroy, goldy_withdraw_transaction_byte_size, goldy_withdraw_transaction_destroy, GoldyColor,
+    goldy_texture_destroy, GoldyColor,
     GoldyDepthFormat, GoldyResult, GoldyTargetLoad, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
@@ -79,10 +79,7 @@ fn scheme_clear_render_target_readback_is_red() {
 
         let memory = goldy_memory_exchange_create(ctx);
         assert!(!memory.is_null(), "{}", last_ffi_message());
-        let withdraw = goldy_memory_exchange_bind_withdraw_texture(memory, scheme, readback);
-        assert!(!withdraw.is_null(), "{}", last_ffi_message());
-        assert_eq!(goldy_withdraw_transaction_byte_size(withdraw), (W * H * 4) as u64);
-
+        
         let mut submission = std::ptr::null_mut();
         assert_eq!(
             goldy_scheme_submit(scheme, &mut submission),
@@ -92,7 +89,7 @@ fn scheme_clear_render_target_readback_is_red() {
         );
         assert!(!submission.is_null());
 
-        let pixels = common::withdraw_claim_copy(withdraw, submission);
+        let pixels = common::take_texture_copy(submission, readback);
 
         for chunk in pixels.chunks_exact(4) {
             assert_eq!(chunk[0], 255, "R");
@@ -102,7 +99,6 @@ fn scheme_clear_render_target_readback_is_red() {
         }
 
         goldy_scheme_submission_destroy(submission);
-        goldy_withdraw_transaction_destroy(withdraw);
         goldy_memory_exchange_destroy(memory);
         goldy_scheme_render_target_lease_destroy(rt);
         goldy_scheme_destroy(scheme);

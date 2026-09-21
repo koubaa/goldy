@@ -7,8 +7,9 @@
 use goldy::{
     shader::builtins, Buffer, BufferKind, Color, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig,
-    SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, Vertex2D, WithdrawTransaction,
+    SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, Vertex2D,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -33,8 +34,7 @@ struct App {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
-    scene_rt: Option<Lease<LeaseRenderTarget>>,
+        scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     frame_count: u64,
     /// Set after GPU init; FPS excludes startup / shader compile.
@@ -56,7 +56,6 @@ impl App {
             present: None,
             capture: None,
             readback: None,
-            withdraw: None,
             scene_rt: None,
             scheme: None,
             frame_count: 0,
@@ -111,15 +110,15 @@ impl App {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+            
+            Ok(None)
         }
     }
 
@@ -169,7 +168,7 @@ impl App {
             a: 1.0,
         };
         Self::record_pass(&mut scheme, &pipeline, &vertex_buffer, &scene_rt, bg_color);
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);
@@ -180,7 +179,6 @@ impl App {
         self.present = present;
         self.capture = capture;
         self.readback = readback;
-        self.withdraw = withdraw;
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         self.perf_start = Some(Instant::now());
@@ -200,7 +198,7 @@ impl App {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 
@@ -243,11 +241,10 @@ impl App {
                             a: 1.0,
                         };
                         Self::record_pass(&mut scheme, pipeline, vertex_buffer, &rt, bg_color);
-                        if let Ok((present, withdraw)) =
+                        if let Ok(present) =
                             Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
                         {
                             self.present = present;
-                            self.withdraw = withdraw;
                             self.scheme = Some(scheme);
                             self.scene_rt = Some(rt);
                         }

@@ -284,6 +284,36 @@ pub unsafe fn goldy_scheme_submission_wait_until_settled(submission: *const Gold
     (lib().goldy_scheme_submission_wait_until_settled)(submission)
 }
 
+pub unsafe fn goldy_scheme_submission_take(
+    submission: *mut GoldySchemeSubmission,
+    parcel: *const GoldyParcel,
+) -> *mut GoldyHostView {
+    (lib().goldy_scheme_submission_take)(submission, parcel)
+}
+
+pub unsafe fn goldy_scheme_submission_take_texture(
+    submission: *mut GoldySchemeSubmission,
+    texture: *const GoldyTexture,
+) -> *mut GoldyHostView {
+    (lib().goldy_scheme_submission_take_texture)(submission, texture)
+}
+
+pub unsafe fn goldy_host_view_len(view: *const GoldyHostView) -> u64 {
+    (lib().goldy_host_view_len)(view)
+}
+
+pub unsafe fn goldy_host_view_data(view: *const GoldyHostView) -> *const u8 {
+    (lib().goldy_host_view_data)(view)
+}
+
+pub unsafe fn goldy_host_view_copy(view: *const GoldyHostView, output: *mut u8, output_size: usize) -> GoldyResult {
+    (lib().goldy_host_view_copy)(view, output, output_size)
+}
+
+pub unsafe fn goldy_host_view_destroy(view: *mut GoldyHostView) {
+    (lib().goldy_host_view_destroy)(view)
+}
+
 pub unsafe fn goldy_memory_exchange_create(ctx: *const GoldyContext) -> *mut GoldyMemoryExchange {
     (lib().goldy_memory_exchange_create)(ctx)
 }
@@ -292,75 +322,12 @@ pub unsafe fn goldy_memory_exchange_destroy(exchange: *mut GoldyMemoryExchange) 
     (lib().goldy_memory_exchange_destroy)(exchange)
 }
 
-pub unsafe fn goldy_memory_exchange_bind_withdraw(
-    exchange: *const GoldyMemoryExchange,
-    scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
-) -> *mut GoldyWithdrawTransaction {
-    (lib().goldy_memory_exchange_bind_withdraw)(exchange, scheme, parcel)
-}
-
-pub unsafe fn goldy_memory_exchange_bind_withdraw_texture(
-    exchange: *const GoldyMemoryExchange,
-    scheme: *mut GoldyScheme,
-    texture: *const GoldyTexture,
-) -> *mut GoldyWithdrawTransaction {
-    (lib().goldy_memory_exchange_bind_withdraw_texture)(exchange, scheme, texture)
-}
-
 pub unsafe fn goldy_memory_exchange_bind_deposit(
     exchange: *const GoldyMemoryExchange,
     scheme: *mut GoldyScheme,
     target: *const GoldyDepositTarget,
 ) -> *mut GoldyDepositTransaction {
     (lib().goldy_memory_exchange_bind_deposit)(exchange, scheme, target)
-}
-
-pub unsafe fn goldy_withdraw_transaction_destroy(transaction: *mut GoldyWithdrawTransaction) {
-    (lib().goldy_withdraw_transaction_destroy)(transaction)
-}
-
-pub unsafe fn goldy_withdraw_transaction_byte_size(transaction: *const GoldyWithdrawTransaction) -> u64 {
-    (lib().goldy_withdraw_transaction_byte_size)(transaction)
-}
-
-pub unsafe fn goldy_withdraw_transaction_claim(
-    transaction: *const GoldyWithdrawTransaction,
-    submission: *mut GoldySchemeSubmission,
-) -> *mut GoldyWithdrawClaim {
-    (lib().goldy_withdraw_transaction_claim)(transaction, submission)
-}
-
-pub unsafe fn goldy_withdraw_claim_destroy(claim: *mut GoldyWithdrawClaim) {
-    (lib().goldy_withdraw_claim_destroy)(claim)
-}
-
-pub unsafe fn goldy_withdraw_claim_consume(claim: *mut GoldyWithdrawClaim) -> *mut GoldyWithdrawBytes {
-    (lib().goldy_withdraw_claim_consume)(claim)
-}
-
-pub unsafe fn goldy_withdraw_claim_discard(claim: *mut GoldyWithdrawClaim) -> GoldyResult {
-    (lib().goldy_withdraw_claim_discard)(claim)
-}
-
-pub unsafe fn goldy_withdraw_bytes_len(bytes: *const GoldyWithdrawBytes) -> u64 {
-    (lib().goldy_withdraw_bytes_len)(bytes)
-}
-
-pub unsafe fn goldy_withdraw_bytes_data(bytes: *const GoldyWithdrawBytes) -> *const u8 {
-    (lib().goldy_withdraw_bytes_data)(bytes)
-}
-
-pub unsafe fn goldy_withdraw_bytes_copy(
-    bytes: *const GoldyWithdrawBytes,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    (lib().goldy_withdraw_bytes_copy)(bytes, output, output_size)
-}
-
-pub unsafe fn goldy_withdraw_bytes_destroy(bytes: *mut GoldyWithdrawBytes) {
-    (lib().goldy_withdraw_bytes_destroy)(bytes)
 }
 
 pub unsafe fn goldy_deposit_transaction_destroy(transaction: *mut GoldyDepositTransaction) {

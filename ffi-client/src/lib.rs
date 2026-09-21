@@ -33,9 +33,7 @@ pub use context::Context;
 pub use error::{GoldyError, Result};
 pub use exchange::{Claim, Transaction};
 pub use instance::{AdapterInfo, Instance};
-pub use memory_exchange::{
-    DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
-};
+pub use memory_exchange::{DepositTarget, DepositTransaction, HostView, MemoryExchange};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use retained_pool::{RecordBuilder, RecordField};

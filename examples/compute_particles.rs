@@ -9,8 +9,9 @@ use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
-    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
+    Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -77,8 +78,7 @@ struct RenderState {
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
     present: Option<Transaction>,
-    withdraw: Option<WithdrawTransaction>,
-    scheme: Scheme,
+        scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
     render_shader: ShaderModule,
@@ -115,15 +115,15 @@ impl RenderState {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+            
+            Ok(None)
         }
     }
 
@@ -183,14 +183,13 @@ impl RenderState {
                 &self.params_buffer,
                 &self.scene_rt,
             );
-            if let Ok((present, withdraw)) = Self::bind_frame(
+            if let Ok(present) = Self::bind_frame(
                 &mut scheme,
                 &self.scene_rt,
                 self.surface.as_ref(),
                 self.readback.as_ref(),
             ) {
                 self.present = present;
-                self.withdraw = withdraw;
                 self.scheme = scheme;
             }
         }
@@ -261,7 +260,7 @@ impl RenderState {
             &params_buffer,
             &scene_rt,
         );
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
@@ -279,7 +278,6 @@ impl RenderState {
             capture,
             readback,
             present,
-            withdraw,
             scheme,
             scene_rt,
             compute_pipeline,
@@ -314,7 +312,7 @@ impl RenderState {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

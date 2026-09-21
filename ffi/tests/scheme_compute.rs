@@ -8,12 +8,12 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
     goldy_context_create, goldy_context_destroy, goldy_instance_backend_type, goldy_instance_destroy,
-    goldy_memory_exchange_bind_withdraw, goldy_memory_exchange_create, goldy_memory_exchange_destroy,
+    goldy_memory_exchange_create, goldy_memory_exchange_destroy,
     goldy_parcel_destroy, goldy_runtime_acquire_buffer, goldy_runtime_destroy, goldy_scheme_compute_node_begin,
     goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_param, goldy_scheme_compute_node_with_parcel,
     goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len, goldy_scheme_replay_stats,
     goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
-    goldy_withdraw_transaction_byte_size, goldy_withdraw_transaction_destroy, GoldyBackendType, GoldyBufferKind,
+    GoldyBackendType, GoldyBufferKind,
     GoldyNodeAccess, GoldyReplayStats, GoldyResult,
 };
 use std::ffi::CString;
@@ -74,10 +74,7 @@ fn scheme_compute_node_fills_buffer_with_42() {
 
         let memory = goldy_memory_exchange_create(ctx);
         assert!(!memory.is_null(), "{}", last_ffi_message());
-        let withdraw = goldy_memory_exchange_bind_withdraw(memory, scheme, parcel);
-        assert!(!withdraw.is_null(), "{}", last_ffi_message());
-        assert_eq!(goldy_withdraw_transaction_byte_size(withdraw), 64 * 4);
-
+        
         let mut submission = std::ptr::null_mut();
         assert_eq!(
             goldy_scheme_submit(scheme, &mut submission),
@@ -87,7 +84,7 @@ fn scheme_compute_node_fills_buffer_with_42() {
         );
         assert!(!submission.is_null());
 
-        let readback = common::withdraw_claim_copy(withdraw, submission);
+        let readback = common::take_parcel_copy(submission, parcel);
 
         let values: &[u32] = std::slice::from_raw_parts(
             readback.as_ptr() as *const u32,
@@ -118,8 +115,6 @@ fn scheme_compute_node_fills_buffer_with_42() {
         if goldy_instance_backend_type(instance) != GoldyBackendType::WebGpu {
             assert_eq!(stats.records, 1, "only the first submit should record");
         }
-
-        goldy_withdraw_transaction_destroy(withdraw);
         goldy_memory_exchange_destroy(memory);
         goldy_scheme_destroy(scheme);
         goldy_compute_pipeline_destroy(pipeline);
@@ -193,9 +188,7 @@ fn scheme_compute_node_with_param_uint_roundtrip() {
 
         let memory = goldy_memory_exchange_create(ctx);
         assert!(!memory.is_null(), "{}", last_ffi_message());
-        let withdraw = goldy_memory_exchange_bind_withdraw(memory, scheme, parcel);
-        assert!(!withdraw.is_null(), "{}", last_ffi_message());
-
+        
         let mut submission = std::ptr::null_mut();
         assert_eq!(
             goldy_scheme_submit(scheme, &mut submission),
@@ -205,13 +198,12 @@ fn scheme_compute_node_with_param_uint_roundtrip() {
         );
         assert!(!submission.is_null());
 
-        let readback = common::withdraw_claim_copy(withdraw, submission);
+        let readback = common::take_parcel_copy(submission, parcel);
 
         let value = u32::from_le_bytes(readback[..4].try_into().unwrap());
         assert_eq!(value, EXPECTED);
 
         goldy_scheme_submission_destroy(submission);
-        goldy_withdraw_transaction_destroy(withdraw);
         goldy_memory_exchange_destroy(memory);
         goldy_scheme_destroy(scheme);
         goldy_compute_pipeline_destroy(pipeline);

@@ -1,5 +1,5 @@
 /**
- * Headless compute — Scheme compute dispatch + MemoryExchange withdraw (no GLFW).
+ * Headless compute — Scheme compute dispatch + host claim (no GLFW).
  *
  * Mirrors ffi-client/examples/compute_simple.rs.
  *
@@ -55,10 +55,8 @@ int main() {
             node.with_buffer(buffer, goldy::NodeAccess::ReadWrite);
             node.dispatch(1, 1, 1);
         }
-        goldy::MemoryExchange memory(ctx);
-        auto withdraw = memory.bind_withdraw(scheme, buffer);
         auto frame = scheme.submit();
-        const auto bytes = withdraw.claim(frame).consume();
+        const auto bytes = frame.take(buffer);
 
         if (bytes.size() < 64 * sizeof(float)) {
             throw std::runtime_error("readback too small");

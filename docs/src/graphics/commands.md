@@ -87,10 +87,9 @@ For fullscreen or procedurally-generated geometry (no vertex buffer at all), ski
 
 ## Offscreen-Only (Tests, Readback)
 
-Headless rendering — no window, no `SurfaceExchange` — records the same render pass node, then withdraws pixels through [`MemoryExchange`](../resources/runtime-owned-memory.md):
+Headless rendering — no window, no `SurfaceExchange` — records the same render pass node, then host-claims pixels from a copy destination:
 
 ```rust
-let memory = MemoryExchange::new(&ctx);
 let mut scheme = Scheme::new(&ctx);
 let rt = ctx.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
 
@@ -98,9 +97,8 @@ let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::RED));
 pass.finish();
 
 scheme.copy_to_texture(&rt, &readback_texture);
-let withdraw = memory.bind_withdraw(&mut scheme, &readback_texture)?;
 let mut submission = scheme.submit()?;
-let pixels = withdraw.claim(&mut submission)?.consume()?;
+let pixels = (&mut submission >> &readback_texture).take::<u8>()?.to_vec();
 ```
 
 ## Windowed Rendering

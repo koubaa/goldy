@@ -29,6 +29,28 @@ public sealed class SchemeSubmission : IDisposable
             throw GoldyException.FromLastError("Scheme submission wait until settled");
     }
 
+    /// <summary>Host-claim parcel bytes after this submission.</summary>
+    public HostView Take(Parcel parcel)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(parcel);
+        var view = Native.NativeMethods.SchemeSubmissionTake(Handle, parcel.Handle);
+        if (view == nint.Zero)
+            throw GoldyException.FromLastError("Scheme submission take");
+        return new HostView(view);
+    }
+
+    /// <summary>Host-claim texture bytes after this submission.</summary>
+    public HostView Take(Texture texture)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(texture);
+        var view = Native.NativeMethods.SchemeSubmissionTakeTexture(Handle, texture.Handle);
+        if (view == nint.Zero)
+            throw GoldyException.FromLastError("Scheme submission take texture");
+        return new HostView(view);
+    }
+
     public void Dispose()
     {
         if (!_disposed)

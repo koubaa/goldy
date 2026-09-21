@@ -317,8 +317,8 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_dispatch(
 /// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 ///
 /// Does not block. The caller owns `*out_submission` and must call
-/// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded withdrawal, use
-/// [`crate::goldy_withdraw_transaction_claim`] then [`crate::goldy_withdraw_claim_consume`].
+/// [`goldy_scheme_submission_destroy`]. To read parcel bytes, use
+/// [`crate::goldy_scheme_submission_take`] then [`crate::goldy_host_view_copy`].
 ///
 /// # Safety
 /// `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn goldy_scheme_submission_is_settled(submission: *const G
 
 /// Block until the GPU work for `submission` has completed.
 ///
-/// Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
+/// Prefer [`crate::goldy_scheme_submission_take`] when verifying compute output.
 ///
 /// # Safety
 /// `submission` must be valid.

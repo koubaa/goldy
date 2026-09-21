@@ -16,7 +16,7 @@ or whitespace-separated list of categories:
 | `api` | Enable backend GPU API validation (see below) |
 | `layout` | Enable Rust ↔ Slang struct layout checks and buffer stride checks |
 | `host_access` | Page-protect CPU-visible GPU copies (CPU backend parcels; stray host pointers fault) |
-| `scheme`, `graph`, `readback` | Retained withdraw-staging checks, plus strict Accel build-before-trace in the same scheme |
+| `scheme`, `graph`, `readback` | Host-read staging checks, plus strict Accel build-before-trace in the same scheme |
 | `all` | Enable `api`, `layout`, timeline, scheme, and `host_access` |
 | `1`, `true`, `yes` | GPU API validation only (legacy shorthand; does **not** enable layout checks) |
 
@@ -314,7 +314,7 @@ GOLDY_VALIDATION=all cargo run
 
 When `host_access` is on, the CPU backend allocates each parcel in its own
 page-aligned mapping (plus a guard page) and leaves it inaccessible except
-during upload, kernel dispatch, and withdraw. A leftover host pointer then
+during deposit, kernel dispatch, and host claims. A leftover host pointer then
 faults instead of silently reading GPU-owned bytes. This is a debug allocator:
 slower, not complete (native device-local VRAM is not mapped), and meant to
 grow to staging buffers on other backends.

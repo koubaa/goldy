@@ -82,9 +82,7 @@ class SurfaceExchange;
 class Transaction;
 class Claim;
 class MemoryExchange;
-class WithdrawTransaction;
-class WithdrawClaim;
-class WithdrawBytes;
+class HostView;
 class DepositTransaction;
 class DepositTarget;
 class ComputePipeline;
@@ -322,18 +320,8 @@ struct MemoryExchangeDeleter {
     void operator()(GoldyMemoryExchange* p) const { if (p) goldy_memory_exchange_destroy(p); }
 };
 
-struct WithdrawTransactionDeleter {
-    void operator()(GoldyWithdrawTransaction* p) const {
-        if (p) goldy_withdraw_transaction_destroy(p);
-    }
-};
-
-struct WithdrawClaimDeleter {
-    void operator()(GoldyWithdrawClaim* p) const { if (p) goldy_withdraw_claim_destroy(p); }
-};
-
-struct WithdrawBytesDeleter {
-    void operator()(GoldyWithdrawBytes* p) const { if (p) goldy_withdraw_bytes_destroy(p); }
+struct HostViewDeleter {
+    void operator()(GoldyHostView* p) const { if (p) goldy_host_view_destroy(p); }
 };
 
 struct DepositTransactionDeleter {
@@ -1080,6 +1068,10 @@ public:
         detail::throw_on_result(goldy_scheme_submission_wait_until_settled(ptr_.get()));
     }
 
+    [[nodiscard]] HostView take(const Parcel& parcel);
+    [[nodiscard]] HostView take(const Texture& texture);
+    [[nodiscard]] HostView take(const Buffer& buffer, uint32_t unit = 0);
+
     GoldySchemeSubmission* get() const { return ptr_.get(); }
 
 private:
@@ -1087,104 +1079,70 @@ private:
 };
 
 /**
- * @brief CPU-readable bytes from a consumed withdraw claim.
+ * @brief Host-claimed parcel bytes after a submission (`goldy_scheme_submission_take`).
  */
-class WithdrawBytes {
+class HostView {
 public:
-    WithdrawBytes() = default;
+    HostView() = default;
 
-    explicit WithdrawBytes(GoldyWithdrawBytes* bytes) : ptr_(bytes) {}
+    explicit HostView(GoldyHostView* view) : ptr_(view) {}
 
-    WithdrawBytes(const WithdrawBytes&) = delete;
-    WithdrawBytes& operator=(const WithdrawBytes&) = delete;
-    WithdrawBytes(WithdrawBytes&&) = default;
-    WithdrawBytes& operator=(WithdrawBytes&&) = default;
+    HostView(const HostView&) = delete;
+    HostView& operator=(const HostView&) = delete;
+    HostView(HostView&&) = default;
+    HostView& operator=(HostView&&) = default;
 
     [[nodiscard]] uint64_t size() const {
-        return goldy_withdraw_bytes_len(ptr_.get());
+        return goldy_host_view_len(ptr_.get());
     }
 
     [[nodiscard]] const uint8_t* data() const {
-        return goldy_withdraw_bytes_data(ptr_.get());
+        return goldy_host_view_data(ptr_.get());
     }
 
     [[nodiscard]] std::vector<uint8_t> to_vector() const {
         std::vector<uint8_t> output(static_cast<size_t>(size()));
-        detail::throw_on_result(goldy_withdraw_bytes_copy(ptr_.get(), output.data(), output.size()));
+        detail::throw_on_result(goldy_host_view_copy(ptr_.get(), output.data(), output.size()));
         return output;
     }
 
-    GoldyWithdrawBytes* get() const { return ptr_.get(); }
+    GoldyHostView* get() const { return ptr_.get(); }
 
 private:
-    std::unique_ptr<GoldyWithdrawBytes, detail::WithdrawBytesDeleter> ptr_;
+    std::unique_ptr<GoldyHostView, detail::HostViewDeleter> ptr_;
 };
 
 /**
- * @brief Linear claim for one submission's memory withdrawal.
+ * @brief Selected host read, realized by [`PendingHostRead::take`].
  */
-class WithdrawClaim {
+class PendingHostRead {
 public:
-    WithdrawClaim() = default;
+    PendingHostRead(SchemeSubmission& submission, const Parcel& parcel)
+        : submission_(&submission), parcel_(&parcel), texture_(nullptr) {}
 
-    explicit WithdrawClaim(GoldyWithdrawClaim* claim) : ptr_(claim) {}
+    PendingHostRead(SchemeSubmission& submission, const Texture& texture)
+        : submission_(&submission), parcel_(nullptr), texture_(&texture) {}
 
-    WithdrawClaim(const WithdrawClaim&) = delete;
-    WithdrawClaim& operator=(const WithdrawClaim&) = delete;
-    WithdrawClaim(WithdrawClaim&&) = default;
-    WithdrawClaim& operator=(WithdrawClaim&&) = default;
-
-    [[nodiscard]] WithdrawBytes consume() {
-        GoldyWithdrawClaim* raw = ptr_.release();
-        GoldyWithdrawBytes* bytes = goldy_withdraw_claim_consume(raw);
-        if (!bytes) {
-            throw Exception::from_last_error();
+    [[nodiscard]] HostView take() {
+        if (texture_) {
+            return submission_->take(*texture_);
         }
-        return WithdrawBytes{bytes};
+        return submission_->take(*parcel_);
     }
-
-    void discard() {
-        GoldyWithdrawClaim* raw = ptr_.release();
-        detail::throw_on_result(goldy_withdraw_claim_discard(raw));
-    }
-
-    GoldyWithdrawClaim* get() const { return ptr_.get(); }
 
 private:
-    std::unique_ptr<GoldyWithdrawClaim, detail::WithdrawClaimDeleter> ptr_;
+    SchemeSubmission* submission_;
+    const Parcel* parcel_;
+    const Texture* texture_;
 };
 
-/**
- * @brief Stable withdraw relationship recorded in one scheme.
- */
-class WithdrawTransaction {
-public:
-    WithdrawTransaction() = default;
+inline PendingHostRead operator>>(SchemeSubmission& submission, const Parcel& parcel) {
+    return PendingHostRead(submission, parcel);
+}
 
-    explicit WithdrawTransaction(GoldyWithdrawTransaction* transaction) : ptr_(transaction) {}
-
-    WithdrawTransaction(const WithdrawTransaction&) = delete;
-    WithdrawTransaction& operator=(const WithdrawTransaction&) = delete;
-    WithdrawTransaction(WithdrawTransaction&&) = default;
-    WithdrawTransaction& operator=(WithdrawTransaction&&) = default;
-
-    [[nodiscard]] uint64_t byte_size() const {
-        return goldy_withdraw_transaction_byte_size(ptr_.get());
-    }
-
-    [[nodiscard]] WithdrawClaim claim(SchemeSubmission& submission) const {
-        GoldyWithdrawClaim* claim = goldy_withdraw_transaction_claim(ptr_.get(), submission.get());
-        if (!claim) {
-            throw Exception::from_last_error();
-        }
-        return WithdrawClaim{claim};
-    }
-
-    GoldyWithdrawTransaction* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyWithdrawTransaction, detail::WithdrawTransactionDeleter> ptr_;
-};
+inline PendingHostRead operator>>(SchemeSubmission& submission, const Texture& texture) {
+    return PendingHostRead(submission, texture);
+}
 
 /**
  * @brief Stable deposit relationship recorded in one scheme.
@@ -1275,7 +1233,7 @@ private:
 };
 
 /**
- * @brief CPU↔GPU memory exchange: withdrawals (readback) and deposits (upload).
+ * @brief CPU→GPU memory exchange (deposits / uploads).
  */
 class MemoryExchange {
 public:
@@ -1293,9 +1251,6 @@ public:
     MemoryExchange& operator=(MemoryExchange&&) = default;
 
     // Defined after Scheme.
-    [[nodiscard]] WithdrawTransaction bind_withdraw(Scheme& scheme, const Parcel& parcel);
-    [[nodiscard]] WithdrawTransaction bind_withdraw(Scheme& scheme, const Buffer& buffer, uint32_t unit = 0);
-    [[nodiscard]] WithdrawTransaction bind_withdraw_texture(Scheme& scheme, const Texture& texture);
     [[nodiscard]] DepositTransaction bind_deposit(Scheme& scheme, const DepositTarget& target);
 
     GoldyMemoryExchange* get() const { return ptr_.get(); }
@@ -1856,25 +1811,24 @@ inline DepositTransaction MemoryExchange::bind_deposit(Scheme& scheme, const Dep
     return DepositTransaction{tx};
 }
 
-inline WithdrawTransaction MemoryExchange::bind_withdraw(Scheme& scheme, const Parcel& parcel) {
-    GoldyWithdrawTransaction* tx = goldy_memory_exchange_bind_withdraw(ptr_.get(), scheme.get(), parcel.get());
-    if (!tx) {
+inline HostView SchemeSubmission::take(const Parcel& parcel) {
+    GoldyHostView* view = goldy_scheme_submission_take(ptr_.get(), parcel.get());
+    if (!view) {
         throw Exception::from_last_error();
     }
-    return WithdrawTransaction{tx};
+    return HostView{view};
 }
 
-inline WithdrawTransaction MemoryExchange::bind_withdraw(Scheme& scheme, const Buffer& buffer, uint32_t unit) {
-    return bind_withdraw(scheme, buffer.field(unit));
-}
-
-inline WithdrawTransaction MemoryExchange::bind_withdraw_texture(Scheme& scheme, const Texture& texture) {
-    GoldyWithdrawTransaction* tx =
-        goldy_memory_exchange_bind_withdraw_texture(ptr_.get(), scheme.get(), texture.get());
-    if (!tx) {
+inline HostView SchemeSubmission::take(const Texture& texture) {
+    GoldyHostView* view = goldy_scheme_submission_take_texture(ptr_.get(), texture.get());
+    if (!view) {
         throw Exception::from_last_error();
     }
-    return WithdrawTransaction{tx};
+    return HostView{view};
+}
+
+inline HostView SchemeSubmission::take(const Buffer& buffer, uint32_t unit) {
+    return take(buffer.field(unit));
 }
 
 // =============================================================================

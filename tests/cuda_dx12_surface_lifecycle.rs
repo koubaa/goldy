@@ -18,6 +18,7 @@ use raw_window_handle::{
     Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
 };
 use std::num::NonZeroIsize;
+use std::ops::Shr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows::core::w;
@@ -502,11 +503,8 @@ fn cuda_offscreen_rt_recreate_stress() {
             pass.finish();
         }
         scheme.copy_to_texture(&rt, &readback).expect("copy");
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &readback)
-            .expect("withdraw");
         let mut submission = scheme.submit().expect("submit");
-        let _pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume");
+        let _pixels = (&mut submission >> &readback).take::<u8>().expect("host take");
         total += t0.elapsed();
     }
     eprintln!(

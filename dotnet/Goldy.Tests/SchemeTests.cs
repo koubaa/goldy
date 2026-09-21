@@ -36,11 +36,8 @@ public class SchemeTests
                     .Dispatch(1, 1, 1);
             }
 
-            using var memory = new MemoryExchange(ctx);
-            using var withdraw = memory.BindWithdraw(scheme, buffer.Field(0));
             using var frame = scheme.Submit();
-            using var claim = withdraw.Claim(frame);
-            using var bytes = claim.Consume();
+            using var bytes = frame.Take(buffer.Field(0));
             var values = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan());
             foreach (var v in values)
                 Assert.Equal(42u, v);
@@ -91,11 +88,8 @@ public class SchemeTests
                     .Dispatch(2, 2, 1);
             }
 
-            using var memory = new MemoryExchange(ctx);
-            using var withdraw = memory.BindWithdrawTexture(scheme, texture);
             using var frame = scheme.Submit();
-            using var claim = withdraw.Claim(frame);
-            using var bytes = claim.Consume();
+            using var bytes = frame.Take(texture);
             Assert.True(bytes.Length > 0);
             Assert.Equal(255, bytes[0]);
             Assert.Equal(0, bytes[1]);
@@ -129,11 +123,8 @@ public class SchemeTests
             { }
 
             scheme.CopyToTexture(rt, readback);
-            using var memory = new MemoryExchange(ctx);
-            using var withdraw = memory.BindWithdrawTexture(scheme, readback);
             using var submission = scheme.Submit();
-            using var claim = withdraw.Claim(submission);
-            using var pixels = claim.Consume();
+            using var pixels = submission.Take(readback);
 
             Assert.Equal(2u * 2u * 4u, (uint)pixels.Length);
             for (var i = 0; i < pixels.Length; i += 4)
@@ -198,11 +189,8 @@ public class SchemeTests
             }
 
             scheme.CopyToTexture(rt, readback);
-            using var memory = new MemoryExchange(ctx);
-            using var withdraw = memory.BindWithdrawTexture(scheme, readback);
             using var submission = scheme.Submit();
-            using var claim = withdraw.Claim(submission);
-            using var pixels = claim.Consume();
+            using var pixels = submission.Take(readback);
             var hasColor = false;
             foreach (var b in pixels.AsSpan())
             {

@@ -59,8 +59,8 @@ let mut submission = scheme.submit()?;
 // Present
 (&mut submission >> &transaction).take()?;
 
-// Readback — consume waits for the submission internally
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+// Host claim — wait + mapped pointer or staged copy
+let view = (&mut submission >> &parcel).take::<u32>()?;
 ```
 
 A live linear claim is unsettled until `consume` or `discard`. Dropping an unsettled claim

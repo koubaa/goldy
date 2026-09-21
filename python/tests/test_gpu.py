@@ -173,12 +173,11 @@ class TestComputePipeline:
         scheme.node("fill", pipeline).with_parcel(
             buffer[0], goldy.NodeAccess.WRITE
         ).dispatch(1, 1, 1)
-        grant = goldy.MemoryExchange(ctx).bind_withdraw(scheme, buffer[0])
         frame = scheme.submit()
-        values = np.frombuffer(grant.claim(frame).consume(), dtype=np.uint32)
+        values = np.frombuffer(frame.take(buffer[0]), dtype=np.uint32)
         assert np.all(values == 42)
 
-    def test_withdraw_texture(self, device):
+    def test_take_texture(self, device):
         import goldy
 
         source = '''
@@ -209,9 +208,8 @@ class TestComputePipeline:
         scheme.node("write_tex", pipeline).with_texture(
             texture, goldy.NodeAccess.WRITE
         ).dispatch(2, 2, 1)
-        grant = goldy.MemoryExchange(ctx).bind_withdraw_texture(scheme, texture)
         frame = scheme.submit()
-        pixels = grant.claim(frame).consume()
+        pixels = frame.take_texture(texture)
         assert len(pixels) > 0
         assert pixels[0] == 255
         assert pixels[1] == 0
