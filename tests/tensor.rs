@@ -19,6 +19,22 @@ fn double_u32(buf: &mut [u32], n: u32) {
     }
 }
 
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn copy_view(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<f32>) {
+    let i = goldy::gpu::global_id().x;
+    if i < dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn scale_view(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<f32>, a: f32) {
+    let i = goldy::gpu::global_id().x;
+    if i < dst.len() {
+        dst[i] = a * src[i];
+    }
+}
+
 static GPU: Mutex<()> = Mutex::new(());
 
 fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -236,6 +252,117 @@ fn batched_matmul_rank3() {
     let mut scheme = Scheme::new(&ctx);
     let y = tensors.recorder(&mut scheme).matmul("bmm", a.view(), b.view()).unwrap();
     assert_eq!(read_f32(&mut scheme, y.buffer()), vec![3.0, 4.0, 10.0, 12.0]);
+}
+
+#[test]
+fn tensor_kernel_canonical_source_and_abi() {
+    let slang = copy_view::CANONICAL_SOURCE;
+    assert!(slang.contains("struct GoldyTensorLayout"));
+    assert!(slang.contains("BufRO<GoldyTensorLayout> _goldy_tensor_meta"));
+    assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[0u]"));
+    assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[1u]"));
+    assert!(slang.contains("_goldy_tensor_meta[1u].numel"));
+    assert!(scale_view::CANONICAL_SOURCE.contains("float a"));
+}
+
+#[test]
+fn tensor_kernel_nonzero_offset_narrow() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::vector(2), TensorDType::F32).unwrap();
+    let k = copy_view::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    k.record(&mut scheme, "narrow", src.view().narrow(0, 2, 2).unwrap(), dst.view())
+        .unwrap()
+        .over_1d(2);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![3.0, 4.0]);
+}
+
+#[test]
+fn tensor_kernel_permuted_read() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::matrix(2, 2), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::matrix(2, 2), TensorDType::F32).unwrap();
+    let k = copy_view::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    k.record(&mut scheme, "perm", src.view().transpose().unwrap(), dst.view())
+        .unwrap()
+        .over_1d(4);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![1.0, 3.0, 2.0, 4.0]);
+}
+
+#[test]
+fn tensor_kernel_broadcast_read() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::vector(1), &[7.0]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let k = copy_view::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    k.record(
+        &mut scheme,
+        "bcast",
+        src.view().broadcast_to(TensorShape::vector(3)).unwrap(),
+        dst.view(),
+    )
+    .unwrap()
+    .over_1d(3);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![7.0, 7.0, 7.0]);
+}
+
+#[test]
+fn tensor_kernel_strided_write() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::matrix(2, 2), TensorDType::F32).unwrap();
+    let k = copy_view::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    k.record(&mut scheme, "stride_w", src.view(), dst.view().transpose().unwrap())
+        .unwrap()
+        .over_1d(4);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![1.0, 3.0, 2.0, 4.0]);
+}
+
+#[test]
+fn tensor_kernel_rejects_broadcast_write() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::vector(2), &[1.0, 2.0]).unwrap();
+    let dst = Tensor::from_f32(&device, TensorShape::vector(1), &[0.0]).unwrap();
+    let dest = dst.view().broadcast_to(TensorShape::vector(2)).unwrap();
+    assert!(!dest.is_writeable());
+    let k = copy_view::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    assert!(k.record(&mut scheme, "bcast_w", src.view(), dest).is_err());
+}
+
+#[test]
+fn tensor_kernel_alias_and_retained_replay() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let buf = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let k = scale_view::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let left = buf.view().narrow(0, 0, 2).unwrap();
+    let right = buf.view().narrow(0, 2, 2).unwrap();
+    k.record(&mut scheme, "alias", right, left, 10.0).unwrap().over_1d(2);
+    let got = read_f32(&mut scheme, buf.buffer());
+    assert_eq!(got, vec![30.0, 40.0, 3.0, 4.0]);
+    let _ = scheme.submit().unwrap();
+    assert!(
+        scheme.replay_stats().records <= 2,
+        "tensor kernel metadata should retain, stats={:?}",
+        scheme.replay_stats()
+    );
 }
 
 #[allow(dead_code)]

@@ -85,6 +85,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
     let mut bind_stmts = Vec::new();
     let mut gpu_type_idents: Vec<syn::Ident> = Vec::new();
     let mut type_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut has_tensors = false;
 
     for input in &func.sig.inputs {
         let FnArg::Typed(PatType { pat, ty, .. }) = input else {
@@ -148,6 +149,36 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     );
                 });
             }
+            ClassifiedParam::TensorRead(elem) => {
+                has_tensors = true;
+                params.push(KernelParam::tensor_read(&pname, elem));
+                type_env.insert(pname.clone(), format!("Tensor<{}>", elem.slang_name()));
+                let dtype = tensor_dtype_tokens(elem);
+                record_args.push(quote! { #pident: ::goldy::TensorView<'_> });
+                bind_stmts.push(quote! {
+                    start = start.bind_tensor_view(#pident, ::goldy::NodeAccess::Read, #dtype)?;
+                });
+            }
+            ClassifiedParam::TensorReadWrite(elem) => {
+                has_tensors = true;
+                params.push(KernelParam::tensor_read_write(&pname, elem));
+                type_env.insert(pname.clone(), format!("TensorMut<{}>", elem.slang_name()));
+                let dtype = tensor_dtype_tokens(elem);
+                record_args.push(quote! { #pident: ::goldy::TensorView<'_> });
+                bind_stmts.push(quote! {
+                    start = start.bind_tensor_view(#pident, ::goldy::NodeAccess::ReadWrite, #dtype)?;
+                });
+            }
+            ClassifiedParam::TensorWrite(elem) => {
+                has_tensors = true;
+                params.push(KernelParam::tensor_write(&pname, elem));
+                type_env.insert(pname.clone(), format!("TensorWrite<{}>", elem.slang_name()));
+                let dtype = tensor_dtype_tokens(elem);
+                record_args.push(quote! { #pident: ::goldy::TensorView<'_> });
+                bind_stmts.push(quote! {
+                    start = start.bind_tensor_view(#pident, ::goldy::NodeAccess::Write, #dtype)?;
+                });
+            }
             ClassifiedParam::Uniform(type_name) => {
                 let ty_ident = syn::Ident::new(&type_name, pident.span());
                 if !gpu_type_idents.iter().any(|id| id == &ty_ident) {
@@ -160,6 +191,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     scalar: None,
                     slang_type: type_name.clone(),
                     stride_bytes: None,
+                    is_tensor: false,
                 });
                 type_env.insert(pname, type_name);
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
@@ -275,6 +307,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 Some(s) => quote! { Some(#s) },
                 None => quote! { None },
             };
+            let is_tensor = p.is_tensor;
             quote! {
                 ::goldy::kernel::KernelParam {
                     name: #name.to_string(),
@@ -283,6 +316,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     scalar: #scalar,
                     slang_type: #slang_type.to_string(),
                     stride_bytes: #stride,
+                    is_tensor: #is_tensor,
                 }
             }
         })
@@ -301,6 +335,35 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
         }
     };
 
+    let record_method = if has_tensors {
+        quote! {
+            /// Record a dispatch into `scheme`, binding tensor views and packing their layouts.
+            pub fn record<'a>(
+                &'a self,
+                scheme: &'a mut ::goldy::Scheme,
+                label: &'static str,
+                #(#record_args),*
+            ) -> ::core::result::Result<::goldy::kernel::DispatchBuilder<'a>, ::goldy::GoldyError> {
+                let mut start = self.prepared.begin_record(scheme, label);
+                #(#bind_stmts)*
+                start.finish_with_tensor_meta()
+            }
+        }
+    } else {
+        quote! {
+            /// Record a dispatch into `scheme`, binding arguments in declaration order.
+            pub fn record<'a>(
+                &'a self,
+                scheme: &'a mut ::goldy::Scheme,
+                label: &'static str,
+                #(#record_args),*
+            ) -> ::goldy::kernel::DispatchBuilder<'a> {
+                let mut start = self.prepared.begin_record(scheme, label);
+                #(#bind_stmts)*
+                start.finish()
+            }
+        }
+    };
     let kernel_struct = format_ident!("Kernel");
     let docs = format!(
         "Prepared handle for the `{fn_name}` compute kernel (workgroup {:?}).",
@@ -351,17 +414,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     Ok(Self { prepared })
                 }
 
-                /// Record a dispatch into `scheme`, binding arguments in declaration order.
-                pub fn record<'a>(
-                    &'a self,
-                    scheme: &'a mut ::goldy::Scheme,
-                    label: &'static str,
-                    #(#record_args),*
-                ) -> ::goldy::kernel::DispatchBuilder<'a> {
-                    let mut start = self.prepared.begin_record(scheme, label);
-                    #(#bind_stmts)*
-                    start.finish()
-                }
+                #record_method
 
                 pub fn workgroup_size(&self) -> [u32; 3] {
                     self.prepared.workgroup_size()
@@ -396,6 +449,9 @@ enum ClassifiedParam {
     BufferReadNamed(String),
     BufferReadWrite(ElementType),
     BufferWrite(ElementType),
+    TensorRead(ElementType),
+    TensorReadWrite(ElementType),
+    TensorWrite(ElementType),
     Uniform(String),
     StorageImage(String),
     Scalar(ScalarType),
@@ -406,6 +462,15 @@ fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
     if let Some(inner) = match_gpu_generic(ty, "Scattered") {
         let elem = element_from_type(inner)?;
         return Ok(ClassifiedParam::BufferWrite(elem));
+    }
+    if let Some(inner) = match_gpu_generic(ty, "Tensor") {
+        return Ok(ClassifiedParam::TensorRead(tensor_element_from_type(inner)?));
+    }
+    if let Some(inner) = match_gpu_generic(ty, "TensorMut") {
+        return Ok(ClassifiedParam::TensorReadWrite(tensor_element_from_type(inner)?));
+    }
+    if let Some(inner) = match_gpu_generic(ty, "TensorWrite") {
+        return Ok(ClassifiedParam::TensorWrite(tensor_element_from_type(inner)?));
     }
     if let Some(inner) = match_gpu_generic(ty, "BufRO") {
         return match buffer_element(inner)? {
@@ -493,7 +558,7 @@ fn classify_param_type(ty: &Type) -> Result<ClassifiedParam, Error> {
         }
         _ => Err(Error::new(
             ty.span(),
-            "unsupported kernel parameter type; expected &[T], &mut [T], gpu::BufRO<T>, gpu::Scattered<T>, gpu::Uniform<T>, gpu::DirectSpatial<T>, or u32/i32/f32/bool",
+            "unsupported kernel parameter type; expected &[T], &mut [T], gpu::BufRO<T>, gpu::Scattered<T>, gpu::Tensor<T>, gpu::TensorMut<T>, gpu::TensorWrite<T>, gpu::Uniform<T>, gpu::DirectSpatial<T>, or u32/i32/f32/bool",
         )),
     }
 }
@@ -584,6 +649,30 @@ fn texel_element_slang(ty: &Type) -> Result<String, Error> {
             ))
         }
     })
+}
+
+fn tensor_dtype_tokens(elem: ElementType) -> TokenStream {
+    match elem {
+        ElementType::F32 => quote! { ::goldy::TensorDType::F32 },
+        ElementType::U32 => quote! { ::goldy::TensorDType::U32 },
+        ElementType::I32 => quote! { ::goldy::TensorDType::I32 },
+        ElementType::Bool => quote! { ::goldy::TensorDType::F32 },
+    }
+}
+
+fn tensor_element_from_type(ty: &Type) -> Result<ElementType, Error> {
+    let elem = element_from_type(ty)?;
+    if matches!(elem, ElementType::Bool) {
+        return Err(Error::new(
+            ty.span(),
+            "gpu::Tensor parameters support f32, u32, and i32 (not bool)",
+        ));
+    }
+    Ok(elem)
+}
+
+fn is_tensor_env_ty(ty: &str) -> bool {
+    ty.starts_with("Tensor<") || ty.starts_with("TensorMut<") || ty.starts_with("TensorWrite<")
 }
 
 fn element_from_type(ty: &Type) -> Result<ElementType, Error> {
@@ -684,7 +773,7 @@ fn lower_stmt(
                     len,
                 }]);
             }
-            if let Some(collective) = try_parse_collective(&init.expr, builtins, wg_x)? {
+            if let Some(collective) = try_parse_collective(&init.expr, builtins, wg_x, env)? {
                 let dest_name = name.ident.to_string();
                 return match collective {
                     Collective::Reduce { op, n, val, scratch } => {
@@ -711,7 +800,7 @@ fn lower_stmt(
                     )),
                 };
             }
-            let expr = lower_expr(&init.expr, builtins)?;
+            let expr = lower_expr(&init.expr, builtins, env)?;
             let ty = ascribed.or_else(|| infer_slang_ty(&expr, env));
             if let Some(ref ty) = ty {
                 env.insert(name.ident.to_string(), ty.clone());
@@ -729,20 +818,20 @@ fn lower_stmt(
             }
             match expr {
                 SynExpr::Assign(a) => {
-                    if let Some(collective) = try_parse_collective(&a.right, builtins, wg_x)? {
+                    if let Some(collective) = try_parse_collective(&a.right, builtins, wg_x, env)? {
                         return Ok(vec![lower_collective_assign(
-                            lower_expr(&a.left, builtins)?,
+                            lower_expr(&a.left, builtins, env)?,
                             collective,
                             a.right.span(),
                         )?]);
                     }
                     Ok(vec![Stmt::Assign {
-                        target: lower_expr(&a.left, builtins)?,
-                        value: lower_expr(&a.right, builtins)?,
+                        target: lower_expr(&a.left, builtins, env)?,
+                        value: lower_expr(&a.right, builtins, env)?,
                     }])
                 }
                 SynExpr::Binary(ExprBinary { left, op, right, .. }) if assign_arith(op).is_some() => {
-                    if try_parse_collective(right, builtins, wg_x)?.is_some() {
+                    if try_parse_collective(right, builtins, wg_x, env)?.is_some() {
                         return Err(Error::new(
                             right.span(),
                             "workgroup collectives must be used as a `let` or simple assignment, not `+=`",
@@ -750,16 +839,16 @@ fn lower_stmt(
                     }
                     let arith = assign_arith(op).unwrap();
                     Ok(vec![Stmt::Assign {
-                        target: lower_expr(left, builtins)?,
+                        target: lower_expr(left, builtins, env)?,
                         value: Expr::Binary {
                             op: arith,
-                            left: Box::new(lower_expr(left, builtins)?),
-                            right: Box::new(lower_expr(right, builtins)?),
+                            left: Box::new(lower_expr(left, builtins, env)?),
+                            right: Box::new(lower_expr(right, builtins, env)?),
                         },
                     }])
                 }
                 SynExpr::If(i) => {
-                    let cond = lower_expr(&i.cond, builtins)?;
+                    let cond = lower_expr(&i.cond, builtins, env)?;
                     let then_body = lower_block_from_expr_block(&i.then_branch, builtins, env, wg_x)?;
                     let else_body = match &i.else_branch {
                         Some((_, else_e)) => match else_e.as_ref() {
@@ -781,7 +870,7 @@ fn lower_stmt(
                     }])
                 }
                 SynExpr::While(w) => Ok(vec![Stmt::While {
-                    cond: lower_expr(&w.cond, builtins)?,
+                    cond: lower_expr(&w.cond, builtins, env)?,
                     body: lower_block_from_expr_block(&w.body, builtins, env, wg_x)?,
                 }]),
                 SynExpr::ForLoop(f) => {
@@ -811,16 +900,16 @@ fn lower_stmt(
                     env.insert(var.ident.to_string(), "uint".into());
                     Ok(vec![Stmt::ForRange {
                         var: var.ident.to_string(),
-                        start: lower_expr(start, builtins)?,
-                        end: lower_expr(end, builtins)?,
+                        start: lower_expr(start, builtins, env)?,
+                        end: lower_expr(end, builtins, env)?,
                         body: lower_block_from_expr_block(&f.body, builtins, env, wg_x)?,
                     }])
                 }
                 SynExpr::Return(r) => Ok(vec![Stmt::Return {
-                    value: r.expr.as_ref().map(|e| lower_expr(e, builtins)).transpose()?,
+                    value: r.expr.as_ref().map(|e| lower_expr(e, builtins, env)).transpose()?,
                 }]),
                 other => {
-                    if let Some(collective) = try_parse_collective(other, builtins, wg_x)? {
+                    if let Some(collective) = try_parse_collective(other, builtins, wg_x, env)? {
                         return match collective {
                             Collective::Softmax {
                                 n,
@@ -841,7 +930,7 @@ fn lower_stmt(
                             )),
                         };
                     }
-                    Ok(vec![Stmt::Expr(lower_expr(other, builtins)?)])
+                    Ok(vec![Stmt::Expr(lower_expr(other, builtins, env)?)])
                 }
             }
         }
@@ -951,7 +1040,31 @@ fn resolve_collective_n(n: Option<u32>, wg_x: u32, span: proc_macro2::Span) -> R
     Ok(n)
 }
 
-fn try_parse_collective(expr: &SynExpr, builtins: &mut BuiltinMask, wg_x: u32) -> Result<Option<Collective>, Error> {
+fn require_tensor_method(
+    receiver: &SynExpr,
+    env: &std::collections::HashMap<String, String>,
+    method: &str,
+) -> Result<(), Error> {
+    let peeled = peel_ref(receiver);
+    if let SynExpr::Path(p) = peeled {
+        if let Some(id) = p.path.get_ident() {
+            if env.get(&id.to_string()).is_some_and(|ty| is_tensor_env_ty(ty)) {
+                return Ok(());
+            }
+        }
+    }
+    Err(Error::new(
+        receiver.span(),
+        format!(".{method}() is only valid on gpu::Tensor / TensorMut / TensorWrite parameters"),
+    ))
+}
+
+fn try_parse_collective(
+    expr: &SynExpr,
+    builtins: &mut BuiltinMask,
+    wg_x: u32,
+    env: &std::collections::HashMap<String, String>,
+) -> Result<Option<Collective>, Error> {
     let SynExpr::Call(ExprCall { func, args, .. }) = expr else {
         return Ok(None);
     };
@@ -986,8 +1099,8 @@ fn try_parse_collective(expr: &SynExpr, builtins: &mut BuiltinMask, wg_x: u32) -
         return Ok(Some(Collective::Softmax {
             n,
             buf,
-            base: lower_expr(&args[1], builtins)?,
-            count: lower_expr(&args[2], builtins)?,
+            base: lower_expr(&args[1], builtins, env)?,
+            count: lower_expr(&args[2], builtins, env)?,
             scratch,
         }));
     }
@@ -1001,12 +1114,16 @@ fn try_parse_collective(expr: &SynExpr, builtins: &mut BuiltinMask, wg_x: u32) -
     Ok(Some(Collective::Reduce {
         op,
         n,
-        val: lower_expr(&args[0], builtins)?,
+        val: lower_expr(&args[0], builtins, env)?,
         scratch: ident_from_expr(&args[1], "workgroup reduce scratch")?,
     }))
 }
 
-fn lower_expr(expr: &SynExpr, builtins: &mut BuiltinMask) -> Result<Expr, Error> {
+fn lower_expr(
+    expr: &SynExpr,
+    builtins: &mut BuiltinMask,
+    env: &std::collections::HashMap<String, String>,
+) -> Result<Expr, Error> {
     match expr {
         SynExpr::Lit(ExprLit { lit, .. }) => match lit {
             Lit::Int(i) => {
@@ -1031,36 +1148,47 @@ fn lower_expr(expr: &SynExpr, builtins: &mut BuiltinMask) -> Result<Expr, Error>
                 syn::Member::Unnamed(i) => i.index.to_string(),
             };
             Ok(Expr::Field {
-                base: Box::new(lower_expr(base, builtins)?),
+                base: Box::new(lower_expr(base, builtins, env)?),
                 field,
             })
         }
         SynExpr::Index(ExprIndex { expr, index, .. }) => Ok(Expr::Index {
-            base: Box::new(lower_expr(expr, builtins)?),
-            index: Box::new(lower_expr(index, builtins)?),
+            base: Box::new(lower_expr(expr, builtins, env)?),
+            index: Box::new(lower_expr(index, builtins, env)?),
         }),
         SynExpr::Binary(ExprBinary { left, op, right, .. }) => Ok(Expr::Binary {
             op: map_binop(op)?,
-            left: Box::new(lower_expr(left, builtins)?),
-            right: Box::new(lower_expr(right, builtins)?),
+            left: Box::new(lower_expr(left, builtins, env)?),
+            right: Box::new(lower_expr(right, builtins, env)?),
         }),
         SynExpr::Unary(ExprUnary { op, expr, .. }) => Ok(Expr::Unary {
             op: map_unary(op)?,
-            expr: Box::new(lower_expr(expr, builtins)?),
+            expr: Box::new(lower_expr(expr, builtins, env)?),
         }),
-        SynExpr::Paren(p) => lower_expr(&p.expr, builtins),
-        SynExpr::Group(g) => lower_expr(&g.expr, builtins),
+        SynExpr::Paren(p) => lower_expr(&p.expr, builtins, env),
+        SynExpr::Group(g) => lower_expr(&g.expr, builtins, env),
         SynExpr::Cast(c) => Ok(Expr::Cast {
-            expr: Box::new(lower_expr(&c.expr, builtins)?),
+            expr: Box::new(lower_expr(&c.expr, builtins, env)?),
             ty: type_to_slang_name(&c.ty)?,
         }),
-        SynExpr::Call(ExprCall { func, args, .. }) => lower_call(func, args, builtins),
+        SynExpr::Call(ExprCall { func, args, .. }) => lower_call(func, args, builtins, env),
         SynExpr::MethodCall(ExprMethodCall {
             receiver, method, args, ..
         }) => {
             if method == "len" && args.is_empty() {
                 Ok(Expr::Len {
-                    base: Box::new(lower_expr(receiver, builtins)?),
+                    base: Box::new(lower_expr(receiver, builtins, env)?),
+                })
+            } else if method == "dim" && args.len() == 1 {
+                require_tensor_method(receiver, env, "dim")?;
+                Ok(Expr::Dim {
+                    base: Box::new(lower_expr(receiver, builtins, env)?),
+                    axis: Box::new(lower_expr(&args[0], builtins, env)?),
+                })
+            } else if method == "rank" && args.is_empty() {
+                require_tensor_method(receiver, env, "rank")?;
+                Ok(Expr::Rank {
+                    base: Box::new(lower_expr(receiver, builtins, env)?),
                 })
             } else {
                 Err(Error::new(
@@ -1096,6 +1224,7 @@ fn lower_call(
     func: &SynExpr,
     args: &syn::punctuated::Punctuated<SynExpr, syn::Token![,]>,
     builtins: &mut BuiltinMask,
+    env: &std::collections::HashMap<String, String>,
 ) -> Result<Expr, Error> {
     let path = match func {
         SynExpr::Path(p) => &p.path,
@@ -1172,7 +1301,7 @@ fn lower_call(
         };
     let mut lowered_args = Vec::new();
     for a in args {
-        lowered_args.push(lower_expr(a, builtins)?);
+        lowered_args.push(lower_expr(a, builtins, env)?);
     }
     Ok(Expr::Call {
         func: builtin,
@@ -1323,12 +1452,15 @@ fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) 
         Expr::LitI32(_) => Some("int".into()),
         Expr::LitF32(_) => Some("float".into()),
         Expr::LitBool(_) => Some("bool".into()),
-        Expr::Len { .. } => Some("uint".into()),
+        Expr::Len { .. } | Expr::Dim { .. } | Expr::Rank { .. } => Some("uint".into()),
         Expr::Var(name) => env.get(name).cloned(),
         Expr::Index { base, .. } => {
             let base_ty = infer_slang_ty(base, env)?;
             unwrap_generic(&base_ty, "BufRO<")
                 .or_else(|| unwrap_generic(&base_ty, "Scattered<"))
+                .or_else(|| unwrap_generic(&base_ty, "Tensor<"))
+                .or_else(|| unwrap_generic(&base_ty, "TensorMut<"))
+                .or_else(|| unwrap_generic(&base_ty, "TensorWrite<"))
                 .or_else(|| unwrap_generic(&base_ty, "DirectSpatial<"))
                 .or_else(|| unwrap_generic(&base_ty, "groupshared<"))
                 .map(str::to_string)

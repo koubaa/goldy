@@ -84,8 +84,17 @@ pub enum Expr {
         base: Box<Expr>,
         index: Box<Expr>,
     },
-    /// Buffer / slice `.len()` → Slang `.Length`.
+    /// Buffer / slice `.len()` → Slang `goldy_buf_len`, or a tensor's logical `numel`.
     Len {
+        base: Box<Expr>,
+    },
+    /// Tensor `.dim(axis)` → checked logical extent.
+    Dim {
+        base: Box<Expr>,
+        axis: Box<Expr>,
+    },
+    /// Tensor `.rank()` → packed layout rank (0..=4).
+    Rank {
         base: Box<Expr>,
     },
     Binary {

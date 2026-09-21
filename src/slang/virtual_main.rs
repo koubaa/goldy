@@ -179,6 +179,7 @@ fn params_from_entry(entry: &EntryDef) -> Option<(Vec<KernelParam>, BuiltinMask)
                         scalar: None,
                         slang_type: inner.to_string(),
                         stride_bytes: element_stride(inner),
+                        is_tensor: false,
                     });
                 } else if let Some(inner) = strip_wrapper(ty, "DirectSpatial<") {
                     params.push(KernelParam::storage_image(p.name.clone(), inner));
@@ -191,6 +192,7 @@ fn params_from_entry(entry: &EntryDef) -> Option<(Vec<KernelParam>, BuiltinMask)
                         scalar: None,
                         slang_type: inner.to_string(),
                         stride_bytes: element_stride(inner),
+                        is_tensor: false,
                     });
                 }
             }
@@ -202,6 +204,7 @@ fn params_from_entry(entry: &EntryDef) -> Option<(Vec<KernelParam>, BuiltinMask)
                     scalar: None,
                     slang_type: p.ty.clone(),
                     stride_bytes: None,
+                    is_tensor: false,
                 });
             }
             ParamKind::Scalar => {

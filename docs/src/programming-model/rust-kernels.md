@@ -49,6 +49,9 @@ Rust GPU-dialect types use the same names as `shaders/goldy_exp/access.slang`
 | `&[T]` / `gpu::BufRO<T>` | `BufRO<T>`, `NodeAccess::Read` |
 | `&mut [T]` | `Scattered<T>`, `NodeAccess::ReadWrite` |
 | `gpu::Scattered<T>` | `Scattered<T>`, `NodeAccess::Write` |
+| `gpu::Tensor<T>` | parent `BufRO<T>` + packed layout, `NodeAccess::Read` |
+| `gpu::TensorMut<T>` | parent `Scattered<T>` + packed layout, `NodeAccess::ReadWrite` |
+| `gpu::TensorWrite<T>` | parent `Scattered<T>` + packed layout, `NodeAccess::Write` |
 | `gpu::Uniform<T>` | broadcast resource, `NodeAccess::Read` |
 | `gpu::DirectSpatial<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
 | `u32` / `i32` / `f32` / `bool` | typed scalar push words (no manual `to_bits`) |
@@ -79,7 +82,28 @@ the result is immediately usable. Softmax writes `buf[base + t]` for
 `t < count`; unused lanes contribute identity (`-1e30` / `0`). All threads in
 the workgroup must execute the call (no divergent branches around it).
 `workgroup_sum`/`workgroup_max` must be a `let` or simple assignment, not nested
-in a larger expression. Omit `::<N>` to use `workgroup_size.x`.
+in a larger expression. Omit `::<N>` to use `workgroup_size.x`. When `buf` is a
+tensor parameter, softmax indexes through the view (logical `base + t`).
+
+## Logical tensors vs physical buffers
+
+`gpu::Tensor<T>` / `TensorMut<T>` / `TensorWrite<T>` bind a [`TensorView`](../compute/tensor.md):
+the shader receives the **parent** parcel plus a scheme-owned packed metadata
+parcel (`GoldyTensorLayout` per tensor, one buffer for the dispatch). Indexing
+is logical-view-relative:
+
+- `view[i]` delinearizes `i` through rank/shape, then applies offset and strides
+- `view.len()` is the logical `numel`
+- `view.dim(axis)` and `view.rank()` read checked layout facts
+
+Ordinary `&[T]` / `&mut [T]` / `gpu::Scattered<T>` stay the physical-index escape
+hatch: `buf[i]` is an element index in the parent buffer, and `.len()` is the
+buffer length. Tensor `record` methods take `TensorView` arguments, validate
+dtype and writeability, and return `Result` because packing the layout can fail.
+
+Goldy only has eight user scalar words, so layouts are **not** push constants.
+The metadata parcel is interned on the scheme, read-only in GraphIR, and does
+not need an external `TensorContext` keepalive.
 
 ## Architecture
 
@@ -112,7 +136,8 @@ PushLayout lowering.
 Allowed: scalar arithmetic/comparisons, `let` / `let mut`, assignment,
 field/index access, `if`/`else`, `while`, `for i in 0..n`, casts, selected math
 intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`cos`/`exp`/`pow`/`length`),
-vector constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, `return`,
+vector constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, tensor
+`.len()` / `.dim(axis)` / `.rank()`, `return`,
 workgroup shared arrays + barriers, workgroup sum/max/softmax collectives, and the ID builtins above.
 
 `#[goldy::gpu]` structs may be passed as `&[T]` uniforms; `prepare` prepends

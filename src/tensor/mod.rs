@@ -23,7 +23,7 @@ mod view;
 mod contract;
 
 pub use dtype::TensorDType;
-pub use layout::TensorLayout;
+pub use layout::{GoldyTensorLayout, TensorLayout};
 pub use ops::{ScatterMode, TensorContext, TensorRecorder, TensorScalar};
 pub use shape::TensorShape;
 pub use view::{Tensor, TensorView};

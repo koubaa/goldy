@@ -46,6 +46,8 @@ impl PreparedKernel {
             def: &self.def,
             resource_i: 0,
             scalar_i: 0,
+            #[cfg(feature = "tensor")]
+            tensor_layouts: Vec::new(),
         }
     }
 }
@@ -57,6 +59,8 @@ pub struct SchemeNodeStart<'a> {
     def: &'a KernelDef,
     resource_i: usize,
     scalar_i: usize,
+    #[cfg(feature = "tensor")]
+    tensor_layouts: Vec<crate::tensor::GoldyTensorLayout>,
 }
 
 impl<'a> SchemeNodeStart<'a> {
@@ -107,6 +111,40 @@ impl<'a> SchemeNodeStart<'a> {
 
     pub fn bind_bool(self, value: bool) -> Self {
         self.bind_u32(u32::from(value))
+    }
+
+    /// Bind a tensor view as the next resource: parent parcel + collected layout metadata.
+    #[cfg(feature = "tensor")]
+    pub fn bind_tensor_view(
+        mut self,
+        view: crate::tensor::TensorView<'_>,
+        access: NodeAccess,
+        expected_dtype: crate::tensor::TensorDType,
+    ) -> Result<Self, crate::error::GoldyError> {
+        view.layout().require_dtype(expected_dtype, "kernel tensor")?;
+        if matches!(access, NodeAccess::Write | NodeAccess::ReadWrite) {
+            view.layout().require_writeable("kernel tensor")?;
+        }
+        let coords = view.layout().gpu_coords()?;
+        self.tensor_layouts.push(coords);
+        Ok(self.bind_resource(&view, access))
+    }
+
+    /// Pack collected tensor layouts into a scheme-owned metadata parcel and bind it last.
+    #[cfg(feature = "tensor")]
+    pub fn finish_with_tensor_meta(mut self) -> Result<DispatchBuilder<'a>, crate::error::GoldyError> {
+        let layouts = std::mem::take(&mut self.tensor_layouts);
+        if layouts.is_empty() {
+            return Err(crate::error::GoldyError::Validation(
+                "kernel tensor metadata: no tensor views were bound".into(),
+            ));
+        }
+        let runtime = self.builder.scheme_runtime();
+        let buf = runtime
+            .acquire_buffer_with_data(&layouts, crate::types::BufferKind::Scattered)
+            .map_err(crate::error::GoldyError::from)?;
+        self.builder = self.builder.bind_record_constant(buf, NodeAccess::Read);
+        Ok(self.finish())
     }
 
     pub fn finish(self) -> DispatchBuilder<'a> {

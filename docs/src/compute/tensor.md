@@ -76,12 +76,29 @@ Allocating methods (`add`, `matmul`, `sum`, …) create packed outputs. `_into` 
 (`add_into`, `matmul_into`, `cast_into`, `fill`) use caller storage, including in-place
 work when the write layout is legal.
 
-Custom `#[goldy::compute]` kernels bind `Tensor` / `TensorView` like any other parcel and
-can dispatch by logical extent:
+Custom `#[goldy::compute]` kernels can take `gpu::Tensor<T>` parameters and
+index them as logical views, or bind `Tensor` / `TensorView` like any other
+parcel for physical indexing:
 
 ```rust,ignore
-kernel.record(&mut scheme, "rope", &q_view, &k_view, &step, ...).over_tensor(&q_view);
+// Logical: view[i] applies offset/shape/strides. Layouts live on the scheme.
+kernel.record(&mut scheme, "rope", q_view, k_layer, &step, head_size, theta)?
+    .over_tensor(&q_view);
+
+// Physical escape hatch: buf[i] is a parent-buffer element index.
+kernel.record(&mut scheme, "double", &data.view(), n).over_tensor(&data.view());
 ```
+
+```rust,ignore
+fn rope(q: gpu::TensorMut<f32>, k: gpu::TensorMut<f32>, step: &[DecodeStep], head_size: u32, theta: f32) {
+    let k_base = pos * k.dim(1);
+    k[k_base + i] = ...;
+}
+// host: pass layout.embedding(weights)? and layer_cache(key_cache, layer)?
+```
+
+Packed checkpoint pointer walking stays in the ingestion crate. It is the
+single boundary that translates foreign offsets into validated `TensorView`s.
 
 ## Operations
 

@@ -8,7 +8,7 @@ use super::kernels::{
     OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX,
     OP_SCATTER_MIN, OP_SCATTER_SET, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
 };
-use super::layout::GpuCoords;
+use super::layout::GoldyTensorLayout;
 use super::shape::TensorShape;
 use super::view::{broadcast_shapes, Tensor, TensorView};
 use super::MAX_TENSOR_RANK;
@@ -595,13 +595,14 @@ pub(crate) fn encode_meta(
     Ok(pack_meta(op, axis, scalar_bits, reduce_len, a, b, o))
 }
 
-fn empty_coords() -> GpuCoords {
-    GpuCoords {
+fn empty_coords() -> GoldyTensorLayout {
+    GoldyTensorLayout {
         offset: 0,
         rank: 0,
         numel: 0,
         shape: [1; MAX_TENSOR_RANK],
         stride: [0; MAX_TENSOR_RANK],
+        pad: 0,
     }
 }
 
@@ -610,9 +611,9 @@ fn pack_meta(
     axis: u32,
     scalar_bits: u32,
     reduce_len: u32,
-    a: GpuCoords,
-    b: GpuCoords,
-    o: GpuCoords,
+    a: GoldyTensorLayout,
+    b: GoldyTensorLayout,
+    o: GoldyTensorLayout,
 ) -> TensorOpMeta {
     TensorOpMeta {
         op,

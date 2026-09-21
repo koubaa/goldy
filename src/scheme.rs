@@ -899,6 +899,9 @@ pub struct Scheme {
     ctx: Context,
     /// Interned lease clones: held for lifetime so backing outlives IR handles, not for lookup.
     interned_leases: Vec<Arc<LeaseInner>>,
+    /// Scheme-owned constant buffers (tensor kernel metadata, …). Held so retained
+    /// replay does not need an external keepalive.
+    record_constants: Vec<crate::Buffer>,
     /// Recorded deposit relationships (topology only; staging lives on the exchange).
     deposits: Vec<Arc<DepositBinding>>,
     /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
@@ -958,6 +961,7 @@ impl Scheme {
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
             interned_leases: Vec::new(),
+            record_constants: Vec::new(),
             deposits: Vec::new(),
             cpu_dispatches: Vec::new(),
             dirty: SchemeDirty::Structure,
@@ -1592,6 +1596,13 @@ impl Scheme {
                 .register_stamp_parts(ResourceId::RenderTarget(rt.backend_handle()), rt.stamp_handle());
         }
         self.interned_leases.push(Arc::clone(inner));
+    }
+
+    /// Intern a record-time constant buffer so it outlives IR nodes that bind it.
+    pub(crate) fn intern_record_buffer(&mut self, buf: crate::Buffer) -> crate::parcel::Parcel {
+        let parcel = buf.whole().clone();
+        self.record_constants.push(buf);
+        parcel
     }
 
     /// Intern `lease` and borrow its backing render target.
@@ -3078,6 +3089,7 @@ impl Drop for Scheme {
         // Interned lease Arcs drop here (after wait_until). Pool return is in
         // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
         let _interned = std::mem::take(&mut self.interned_leases);
+        let _constants = std::mem::take(&mut self.record_constants);
     }
 }
 
@@ -3467,6 +3479,16 @@ impl<'a> SchemeNodeBuilder<'a> {
             self.yield_parcels.push(bindable.buffer_parcel().map(|p| (p, access)));
         }
         self
+    }
+
+    /// Bind a scheme-owned constant buffer as the next shader resource slot.
+    pub(crate) fn bind_record_constant(self, buf: crate::Buffer, access: NodeAccess) -> Self {
+        let parcel = self.scheme.intern_record_buffer(buf);
+        self.with_parcel(&parcel, access)
+    }
+
+    pub(crate) fn scheme_runtime(&self) -> crate::runtime::Runtime {
+        self.scheme.context().runtime().clone()
     }
 
     /// Bind the handler for continuation `name` of a yielding script.

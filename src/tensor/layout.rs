@@ -169,7 +169,7 @@ impl TensorLayout {
         }
     }
 
-    pub(crate) fn gpu_coords(self) -> Result<GpuCoords, GoldyError> {
+    pub fn gpu_coords(self) -> Result<GoldyTensorLayout, GoldyError> {
         let numel = self.numel()?;
         let numel = u32::try_from(numel)
             .map_err(|_| GoldyError::Validation("tensor layout: numel does not fit in u32".into()))?;
@@ -187,12 +187,13 @@ impl TensorLayout {
             shape = [1; MAX_TENSOR_RANK];
             stride = [0; MAX_TENSOR_RANK];
         }
-        Ok(GpuCoords {
+        Ok(GoldyTensorLayout {
             offset,
             rank: self.shape.rank() as u32,
             numel,
             shape,
             stride,
+            pad: 0,
         })
     }
 }
@@ -226,12 +227,24 @@ impl TensorLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub(crate) struct GpuCoords {
+/// Packed kernel-ABI layout: parent element offset, rank, numel, four extents, four strides.
+///
+/// Unused axes are stored as extent `1` and stride `0` so a shader can delinearize a
+/// logical 1D index through all four axes. Matches the `GoldyTensorLayout` Slang struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct GoldyTensorLayout {
     pub offset: u32,
     pub rank: u32,
     pub numel: u32,
     pub shape: [u32; MAX_TENSOR_RANK],
     pub stride: [u32; MAX_TENSOR_RANK],
+    pub pad: u32,
 }
+
+impl crate::buffer::StructuredBufferElement for GoldyTensorLayout {}
+
+const _: () = assert!(std::mem::size_of::<GoldyTensorLayout>() == 48);
+
+#[allow(dead_code)]
+pub(crate) type GpuCoords = GoldyTensorLayout;

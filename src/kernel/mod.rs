@@ -11,7 +11,7 @@ mod prepare;
 pub use dispatch::{DispatchBuilder, RecordedDispatch};
 pub use goldy_shader_ir::{
     AccessKind, BuiltinMask, ElementType, KernelDef, KernelParam, KernelSource, ParamCategory, ScalarType, SourceMap,
-    KERNEL_ABI_VERSION,
+    KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM,
 };
 pub use prepare::{dump_kernel_artifacts, prepare_kernel, PreparedKernel, SchemeNodeStart};
 
@@ -294,6 +294,7 @@ pub mod gpu {
     ///
     /// Unused lanes contribute identity (`-1e30` for max, `0` for the exp-sum).
     /// `count` must be greater than zero. Trailing barrier; convergent.
+    /// Indexing is logical when `buf` is a tensor parameter.
     pub fn workgroup_softmax_in_place<const N: usize>(
         _buf: &mut [f32],
         _base: u32,
@@ -301,5 +302,25 @@ pub mod gpu {
         _scratch: &mut [f32; N],
     ) {
         unimplemented!("gpu::workgroup_softmax_in_place is only valid inside #[goldy::compute] bodies")
+    }
+
+    /// Rank-0–4 read-only tensor view. Indexing is logical: `view[i]` delinearizes `i`
+    /// through shape then applies strides. `len()` is `numel`; `dim(axis)` / `rank()`
+    /// read checked layout facts. Ordinary `&[T]` stays the physical-index escape hatch.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Tensor<T> {
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    /// Rank-0–4 read-write tensor view (`Scattered<T>` physically, `NodeAccess::ReadWrite`).
+    #[derive(Debug, Clone, Copy)]
+    pub struct TensorMut<T> {
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    /// Rank-0–4 write-only tensor view (`Scattered<T>` physically, `NodeAccess::Write`).
+    #[derive(Debug, Clone, Copy)]
+    pub struct TensorWrite<T> {
+        _marker: core::marker::PhantomData<T>,
     }
 }

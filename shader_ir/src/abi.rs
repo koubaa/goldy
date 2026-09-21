@@ -5,7 +5,16 @@
 //! does not need to re-parse generated Slang to bind Scheme parameters.
 
 /// Bump when the wire layout or parameter classification changes.
-pub const KERNEL_ABI_VERSION: u32 = 2;
+pub const KERNEL_ABI_VERSION: u32 = 3;
+
+/// Hidden structured-buffer parameter that packs every tensor layout for one dispatch.
+pub const TENSOR_META_PARAM: &str = "_goldy_tensor_meta";
+
+/// Slang struct name for [`TENSOR_META_PARAM`] elements.
+pub const TENSOR_LAYOUT_SLANG: &str = "GoldyTensorLayout";
+
+/// Host/device stride of [`TENSOR_LAYOUT_SLANG`] (`12` `uint`s, 16-byte aligned).
+pub const TENSOR_LAYOUT_STRIDE_BYTES: u32 = 48;
 
 /// Bitflags for hidden builtins injected into the generated Slang signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -158,6 +167,8 @@ pub struct KernelParam {
     pub slang_type: String,
     /// Expected structured-buffer stride in bytes, when applicable.
     pub stride_bytes: Option<u32>,
+    /// Logical tensor view: indexing is view-relative; a packed metadata parcel follows user resources.
+    pub is_tensor: bool,
 }
 
 impl KernelParam {
@@ -169,6 +180,7 @@ impl KernelParam {
             scalar: None,
             slang_type: element.slang_name().to_string(),
             stride_bytes: Some(element.stride_bytes()),
+            is_tensor: false,
         }
     }
 
@@ -180,6 +192,7 @@ impl KernelParam {
             scalar: None,
             slang_type: element.slang_name().to_string(),
             stride_bytes: Some(element.stride_bytes()),
+            is_tensor: false,
         }
     }
 
@@ -191,6 +204,7 @@ impl KernelParam {
             scalar: None,
             slang_type: slang_type.into(),
             stride_bytes: None,
+            is_tensor: false,
         }
     }
 
@@ -202,6 +216,7 @@ impl KernelParam {
             scalar: None,
             slang_type: slang_element.into(),
             stride_bytes: None,
+            is_tensor: false,
         }
     }
 
@@ -213,6 +228,37 @@ impl KernelParam {
             scalar: None,
             slang_type: element.slang_name().to_string(),
             stride_bytes: Some(element.stride_bytes()),
+            is_tensor: false,
+        }
+    }
+
+    pub fn tensor_read(name: impl Into<String>, element: ElementType) -> Self {
+        let mut p = Self::buffer_read(name, element);
+        p.is_tensor = true;
+        p
+    }
+
+    pub fn tensor_read_write(name: impl Into<String>, element: ElementType) -> Self {
+        let mut p = Self::buffer_read_write(name, element);
+        p.is_tensor = true;
+        p
+    }
+
+    pub fn tensor_write(name: impl Into<String>, element: ElementType) -> Self {
+        let mut p = Self::buffer_write(name, element);
+        p.is_tensor = true;
+        p
+    }
+
+    pub fn tensor_meta() -> Self {
+        Self {
+            name: TENSOR_META_PARAM.to_string(),
+            category: ParamCategory::BufferRead,
+            access: Some(AccessKind::Read),
+            scalar: None,
+            slang_type: TENSOR_LAYOUT_SLANG.to_string(),
+            stride_bytes: Some(TENSOR_LAYOUT_STRIDE_BYTES),
+            is_tensor: false,
         }
     }
 
@@ -224,6 +270,7 @@ impl KernelParam {
             scalar: Some(ty),
             slang_type: ty.slang_name().to_string(),
             stride_bytes: None,
+            is_tensor: false,
         }
     }
 

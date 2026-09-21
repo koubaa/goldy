@@ -124,6 +124,7 @@ pub use kernel::gpu;
 pub use kernel::{
     prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
     KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
+    TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM,
 };
 pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
 #[cfg(feature = "graphics")]
@@ -143,8 +144,8 @@ pub use slang::{
 pub use task_graph::NodeAccess;
 #[cfg(feature = "tensor")]
 pub use tensor::{
-    ScatterMode, Tensor, TensorContext, TensorDType, TensorLayout, TensorRecorder, TensorScalar, TensorShape,
-    TensorView, MAX_TENSOR_RANK,
+    GoldyTensorLayout, ScatterMode, Tensor, TensorContext, TensorDType, TensorLayout, TensorRecorder, TensorScalar,
+    TensorShape, TensorView, MAX_TENSOR_RANK,
 };
 pub use texture::TextureCopyFootprint;
 

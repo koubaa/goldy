@@ -99,6 +99,18 @@ fn scatter_modes_are_explicit() {
 }
 
 #[test]
+fn gpu_layout_is_stable_kernel_abi() {
+    assert_eq!(std::mem::size_of::<GoldyTensorLayout>(), 48);
+    let layout = TensorLayout::strided(TensorDType::F32, shape(&[2, 3]), 5, &[3, 1]).unwrap();
+    let gpu = layout.gpu_coords().unwrap();
+    assert_eq!(gpu.offset, 5);
+    assert_eq!(gpu.rank, 2);
+    assert_eq!(gpu.numel, 6);
+    assert_eq!(gpu.shape, [2, 3, 1, 1]);
+    assert_eq!(gpu.stride, [3, 1, 0, 0]);
+}
+
+#[test]
 fn dtype_support_is_per_op() {
     assert!(TensorDType::U32.require_f32("exp").is_err());
     assert!(TensorDType::F32.require_f32("exp").is_ok());
