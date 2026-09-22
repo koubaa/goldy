@@ -5,12 +5,11 @@
 //!
 //! Run with: cargo run --example depth_quads
 
-use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTarget, DepositTransaction, DepthFormat,
     DepthStencilState, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
-    TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
+    TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
 use std::ops::Shr;
 use std::sync::Arc;
@@ -24,13 +23,11 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-#[derive(Clone, Copy, Pod, Zeroable)]
-#[repr(C)]
+#[goldy::gpu]
 struct DepthVertex {
     position: [f32; 3],
     color: [f32; 4],
 }
-impl goldy::StructuredBufferElement for DepthVertex {}
 
 impl DepthVertex {
     const fn new(x: f32, y: f32, z: f32, r: f32, g: f32, b: f32) -> Self {
@@ -42,21 +39,9 @@ impl DepthVertex {
 }
 
 fn depth_vertex_layout() -> VertexBufferLayout {
-    VertexBufferLayout {
-        stride: std::mem::size_of::<DepthVertex>() as u32,
-        attributes: vec![
-            VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttribute {
-                location: 1,
-                format: VertexFormat::Float32x4,
-                offset: 12,
-            },
-        ],
-    }
+    DepthVertex::GPU_TYPE
+        .vertex_buffer_layout()
+        .expect("depth vertex layout")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -268,11 +253,11 @@ impl App {
         self.warm_deposit
             .as_ref()
             .unwrap()
-            .write(0, bytemuck::cast_slice(&warm_verts))?;
+            .write_data(0, &warm_verts)?;
         self.cool_deposit
             .as_ref()
             .unwrap()
-            .write(0, bytemuck::cast_slice(&cool_verts))?;
+            .write_data(0, &cool_verts)?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
@@ -280,7 +265,7 @@ impl App {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

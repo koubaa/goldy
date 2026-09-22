@@ -8,7 +8,7 @@ use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
+    Transaction, VertexBufferLayout,
 };
 mod common;
 use common::CaptureDump;
@@ -130,37 +130,16 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowAttributes, WindowId},
 };
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct QuadVertex {
     position: [f32; 2],
     uv: [f32; 2],
     time: f32,
 }
-impl goldy::StructuredBufferElement for QuadVertex {}
 
 impl QuadVertex {
     fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-                VertexAttribute {
-                    location: 2,
-                    format: VertexFormat::Float32,
-                    offset: 16,
-                },
-            ],
-        }
+        Self::GPU_TYPE.vertex_buffer_layout().expect("quad vertex layout")
     }
 }
 
@@ -482,14 +461,14 @@ impl WindowState {
         }
 
         let vertices = create_quad(self.current_time());
-        self.vertex_deposit.write(0, bytemuck::cast_slice(&vertices))?;
+        self.vertex_deposit.write_data(0, &vertices)?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())

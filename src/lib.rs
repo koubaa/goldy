@@ -123,9 +123,10 @@ pub mod __private {
 }
 pub use kernel::gpu;
 pub use kernel::{
-    prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
-    KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
-    TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM,
+    prepare_kernel, AccessKind, BoundTensorDim, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef,
+    KernelParam, KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, TensorDimSpec,
+    TensorShapeEnv, TensorShapeSpec, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES,
+    TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
 pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
 #[cfg(feature = "graphics")]

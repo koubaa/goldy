@@ -36,10 +36,50 @@ fn scale_view(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<f32>, a
     }
 }
 
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn copy_eq(
+    #[tensor(shape = [n])] src: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [n])] dst: goldy::gpu::TensorWrite<f32>,
+) {
+    let i = goldy::gpu::global_id().x;
+    if i < dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn copy_exact4(
+    #[tensor(shape = [4])] src: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [4])] dst: goldy::gpu::TensorWrite<f32>,
+) {
+    let i = goldy::gpu::global_id().x;
+    if i < dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn copy_wildcard_cols(
+    #[tensor(shape = [_, n])] src: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [_, n])] dst: goldy::gpu::TensorWrite<f32>,
+) {
+    let i = goldy::gpu::global_id().x;
+    if i < dst.len() {
+        dst[i] = src[i];
+    }
+}
+
 static GPU: Mutex<()> = Mutex::new(());
 
 fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
     GPU.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn expect_record_err<T>(r: Result<T, goldy::GoldyError>) -> goldy::GoldyError {
+    match r {
+        Err(e) => e,
+        Ok(_) => panic!("expected tensor shape contract error"),
+    }
 }
 
 fn runtime() -> Runtime {
@@ -358,6 +398,104 @@ fn tensor_kernel_alias_and_retained_replay() {
         "tensor kernel metadata should retain, stats={:?}",
         scheme.replay_stats()
     );
+}
+
+#[test]
+fn tensor_shape_contract_accepts_matching_and_strided_views() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let parent = Tensor::from_f32(&device, TensorShape::matrix(2, 3), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let src = parent.view().narrow(0, 1, 1).unwrap().reshape(&[3]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let k = copy_eq::Kernel::prepare(&device).unwrap();
+    assert!(k
+        .def()
+        .params
+        .iter()
+        .any(|p| p.shape_spec.as_ref().is_some_and(|s| s.rank() == 1)));
+    let mut scheme = Scheme::new(&ctx);
+    k.record(&mut scheme, "eq", src, dst.view()).unwrap().over_1d(3);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![4.0, 5.0, 6.0]);
+    let _ = scheme.submit().unwrap();
+    assert!(
+        scheme.replay_stats().records <= 2,
+        "contracted tensor kernel should retain, stats={:?}",
+        scheme.replay_stats()
+    );
+}
+
+#[test]
+fn tensor_shape_contract_rejects_before_graphir() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::vector(2), &[1.0, 2.0]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let k = copy_eq::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let before = scheme.ir_node_count();
+    let err = expect_record_err(k.record(&mut scheme, "mismatch", src.view(), dst.view()));
+    assert!(err.to_string().contains("parameter `dst`"), "{err}");
+    assert!(err.to_string().contains("`n`"), "{err}");
+    assert_eq!(scheme.ir_node_count(), before);
+    let dst_ok = Tensor::zeros(&device, TensorShape::vector(2), TensorDType::F32).unwrap();
+    k.record(&mut scheme, "ok", src.view(), dst_ok.view())
+        .unwrap()
+        .over_1d(2);
+    assert!(scheme.ir_node_count() > before);
+}
+
+#[test]
+fn tensor_shape_contract_exact_and_wildcard() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src4 = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let dst4 = Tensor::zeros(&device, TensorShape::vector(4), TensorDType::F32).unwrap();
+    let exact = copy_exact4::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    exact
+        .record(&mut scheme, "exact", src4.view(), dst4.view())
+        .unwrap()
+        .over_1d(4);
+    assert_eq!(read_f32(&mut scheme, dst4.buffer()), vec![1.0, 2.0, 3.0, 4.0]);
+
+    let src2 = Tensor::from_f32(&device, TensorShape::vector(2), &[1.0, 2.0]).unwrap();
+    let dst2 = Tensor::zeros(&device, TensorShape::vector(2), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let err = expect_record_err(exact.record(&mut scheme, "exact_bad", src2.view(), dst2.view()));
+    assert!(err.to_string().contains("expected 4, got 2"), "{err}");
+
+    let a = Tensor::from_f32(&device, TensorShape::matrix(2, 3), &[1.0; 6]).unwrap();
+    let b = Tensor::zeros(&device, TensorShape::matrix(2, 3), TensorDType::F32).unwrap();
+    let wild = copy_wildcard_cols::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    wild.record(&mut scheme, "wild", a.view(), b.view()).unwrap().over_1d(6);
+    assert_eq!(read_f32(&mut scheme, b.buffer()), vec![1.0; 6]);
+
+    let taller = Tensor::zeros(&device, TensorShape::matrix(5, 3), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    assert!(wild.record(&mut scheme, "wild_rows", a.view(), taller.view()).is_ok());
+    assert_eq!(scheme.ir_node_count(), 0);
+
+    let c = Tensor::zeros(&device, TensorShape::matrix(2, 4), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let err = expect_record_err(wild.record(&mut scheme, "wild_bad", a.view(), c.view()));
+    assert!(err.to_string().contains("parameter `dst`"), "{err}");
+}
+
+#[test]
+fn tensor_shape_contract_wrong_rank() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let src = Tensor::from_f32(&device, TensorShape::matrix(2, 2), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::matrix(2, 2), TensorDType::F32).unwrap();
+    let k = copy_eq::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let err = expect_record_err(k.record(&mut scheme, "rank", src.view(), dst.view()));
+    assert!(err.to_string().contains("expected rank 1"), "{err}");
 }
 
 #[allow(dead_code)]

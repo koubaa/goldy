@@ -1,12 +1,7 @@
 //! Per-instance data for the instancing example.
-//!
-//! Layout matches `QuadInstance` in `instancing_update.slang` / `instancing_render.slang`.
 
-use bytemuck::{Pod, Zeroable};
-use goldy::StructuredBufferElement;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
+#[goldy::gpu]
+#[derive(Debug, Default)]
 pub struct Instance2D {
     pub position: [f32; 2],
     pub rotation: f32,
@@ -24,5 +19,3 @@ impl Instance2D {
         }
     }
 }
-
-impl StructuredBufferElement for Instance2D {}

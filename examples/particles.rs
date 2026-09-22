@@ -25,27 +25,18 @@ use common::CaptureDump;
 
 const NUM_PARTICLES: u32 = 1000;
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Particle {
     position: [f32; 2],
     velocity: [f32; 2],
     size: f32,
-    _pad1: f32,
-    _pad2: f32,
-    _pad3: f32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct ParticleParams {
     is_snow: f32,
     frame: f32,
-    _pad1: f32,
-    _pad2: f32,
 }
-impl goldy::StructuredBufferElement for Particle {}
-impl goldy::StructuredBufferElement for ParticleParams {}
 
 static mut SEED: u32 = 42;
 fn random() -> f32 {
@@ -256,8 +247,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/rain_snow_update.slang"),
+            &[Particle::GPU_TYPE, ParticleParams::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/rain_snow_render.slang"),
+            &[Particle::GPU_TYPE, ParticleParams::GPU_TYPE],
+        )?;
 
         let particles = Self::create_particles(false);
         let particle_buffer = device.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
@@ -283,7 +282,7 @@ impl RenderState {
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&params_buffer, std::mem::size_of::<ParticleParams>() as u64),
+            DepositTarget::buffer_elements::<ParticleParams>(&params_buffer, 1),
         )?;
 
         println!("Created rain/snow simulation with {NUM_PARTICLES} particles (Scheme + Present)");
@@ -335,9 +334,6 @@ impl RenderState {
                 position: [x, y],
                 velocity: [vx, vy],
                 size,
-                _pad1: 0.0,
-                _pad2: 0.0,
-                _pad3: 0.0,
             });
         }
         particles
@@ -347,13 +343,12 @@ impl RenderState {
         self.is_snow = !self.is_snow;
 
         let particles = Self::create_particles(self.is_snow);
-        let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
         let mut particle_upload = Scheme::new(&self.ctx);
         let particle_deposit = MemoryExchange::new(&self.ctx).bind_deposit(
             &mut particle_upload,
-            DepositTarget::buffer(&self.particle_buffer, particle_capacity),
+            DepositTarget::buffer_elements::<Particle>(&self.particle_buffer, NUM_PARTICLES as u64),
         )?;
-        particle_deposit.write(0, bytemuck::cast_slice(&particles))?;
+        particle_deposit.write_data(0, &particles)?;
         particle_upload.submit()?;
 
         if let Some(window) = &self.window {
@@ -373,18 +368,16 @@ impl RenderState {
         let params = ParticleParams {
             is_snow: if self.is_snow { 1.0 } else { 0.0 },
             frame: self.frame_count,
-            _pad1: 0.0,
-            _pad2: 0.0,
         };
 
-        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
+        self.params_deposit.write_data(0, &[params])?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

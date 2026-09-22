@@ -23,13 +23,10 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-/// Uniform buffer data (must match shader cbuffer layout)
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
+#[goldy::gpu]
+struct TimeUniforms {
     time: f32,
 }
-impl goldy::StructuredBufferElement for Uniforms {}
 
 struct App {
     instance: Instance,
@@ -147,11 +144,11 @@ impl App {
             )
         };
 
-        let shader = ShaderModule::from_slang(&device, shaders::METABALLS)?;
+        let shader = ShaderModule::from_slang_with_gpu_types(&device, shaders::METABALLS, &[TimeUniforms::GPU_TYPE])?;
 
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
-        let uniform = device.acquire_buffer_sized::<Uniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+        let uniform = device.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
@@ -161,7 +158,7 @@ impl App {
         let mut upload_scheme = Scheme::new(&ctx);
         let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&uniform, std::mem::size_of::<Uniforms>() as u64),
+            DepositTarget::buffer_elements::<TimeUniforms>(&uniform, 1),
         )?;
 
         self.ctx = Some(ctx);
@@ -197,19 +194,19 @@ impl App {
             .as_ref()
             .map(CaptureDump::time)
             .unwrap_or_else(|| self.start_time.elapsed().as_secs_f32());
-        let uniforms = Uniforms { time };
+        let uniforms = TimeUniforms { time };
         let upload = self.upload_scheme.as_mut().unwrap();
         self.uniform_deposit
             .as_ref()
             .unwrap()
-            .write(0, bytemuck::bytes_of(&uniforms))?;
+            .write_data(0, &[uniforms])?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())

@@ -25,20 +25,16 @@ use common::CaptureDump;
 
 const NUM_PARTICLES: u32 = 1024;
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Particle {
     position: [f32; 2],
     velocity: [f32; 2],
 }
-impl goldy::StructuredBufferElement for Particle {}
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct SimParams {
     delta_time: f32,
 }
-impl goldy::StructuredBufferElement for SimParams {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -223,8 +219,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/particle_update.slang"),
+            &[Particle::GPU_TYPE, SimParams::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/particle_render.slang"),
+            &[Particle::GPU_TYPE],
+        )?;
 
         let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
         for i in 0..NUM_PARTICLES {
@@ -265,7 +269,7 @@ impl RenderState {
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&params_buffer, std::mem::size_of::<SimParams>() as u64),
+            DepositTarget::buffer_elements::<SimParams>(&params_buffer, 1),
         )?;
 
         println!("Created compute particles example with {NUM_PARTICLES} particles (Scheme + Present)");
@@ -305,14 +309,14 @@ impl RenderState {
         self.last_frame_time = std::time::Instant::now();
 
         self.params_deposit
-            .write(0, bytemuck::bytes_of(&SimParams { delta_time: dt }))?;
+            .write_data(0, &[SimParams { delta_time: dt }])?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

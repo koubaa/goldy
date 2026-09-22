@@ -21,15 +21,11 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-/// Uniform buffer data (must match shader cbuffer layout)
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
+#[goldy::gpu]
+struct ViewUniforms {
     center: [f32; 2],
     zoom: f32,
-    _padding: f32, // Align to 16 bytes
 }
-impl goldy::StructuredBufferElement for Uniforms {}
 
 struct App {
     instance: Instance,
@@ -151,15 +147,14 @@ impl App {
             )
         };
 
-        let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
+        let shader = ShaderModule::from_slang_with_gpu_types(&device, shaders::MANDELBROT, &[ViewUniforms::GPU_TYPE])?;
 
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
         let uniform = device.acquire_buffer_with_data(
-            &[Uniforms {
+            &[ViewUniforms {
                 center: self.center,
                 zoom: self.zoom,
-                _padding: 0.0,
             }],
             BufferKind::Broadcast,
         )?;
@@ -172,7 +167,7 @@ impl App {
         let mut upload_scheme = Scheme::new(&ctx);
         let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&uniform, std::mem::size_of::<Uniforms>() as u64),
+            DepositTarget::buffer_elements::<ViewUniforms>(&uniform, 1),
         )?;
 
         self.ctx = Some(ctx);
@@ -203,23 +198,19 @@ impl App {
 
         let scheme = self.scheme.as_mut().unwrap();
 
-        let uniforms = Uniforms {
+        let uniforms = ViewUniforms {
             center: self.center,
             zoom: self.zoom,
-            _padding: 0.0,
         };
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.uniform_deposit
-            .as_ref()
-            .unwrap()
-            .write(0, bytemuck::bytes_of(&uniforms))?;
+        self.uniform_deposit.as_ref().unwrap().write_data(0, &[uniforms])?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())

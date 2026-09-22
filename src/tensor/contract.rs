@@ -129,3 +129,21 @@ fn matmul_shape_rules() {
     assert_eq!(TensorShape::vector(4).numel().unwrap(), 4);
     assert_eq!(TensorShape::scalar().numel().unwrap(), 1);
 }
+
+#[test]
+fn kernel_shape_contracts_are_host_only() {
+    use crate::{TensorDimSpec, TensorShapeSpec};
+    use std::collections::HashMap;
+
+    let spec = TensorShapeSpec {
+        dims: vec![TensorDimSpec::Symbol("n".into())],
+    };
+    let mut env = HashMap::new();
+    spec.check("copy", "src", TensorShape::vector(3).dims(), &mut env)
+        .unwrap();
+    let err = spec
+        .check("copy", "dst", TensorShape::vector(4).dims(), &mut env)
+        .unwrap_err();
+    assert!(err.contains("expected `n`=3"), "{err}");
+    assert_eq!(crate::KERNEL_ABI_VERSION, 3);
+}

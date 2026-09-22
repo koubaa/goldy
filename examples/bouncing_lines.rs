@@ -24,20 +24,14 @@ use common::CaptureDump;
 
 const NUM_LINES: u32 = 20;
 
-/// Line structure matching the shader layout
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Line {
     p1: [f32; 2],
     v1: [f32; 2],
     p2: [f32; 2],
     v2: [f32; 2],
     color_index: u32,
-    _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
 }
-impl goldy::StructuredBufferElement for Line {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -218,8 +212,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/bouncing_lines_update.slang"),
+            &[Line::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/bouncing_lines_render.slang"),
+            &[Line::GPU_TYPE],
+        )?;
 
         let mut lines = Vec::with_capacity(NUM_LINES as usize);
         for idx in 0..NUM_LINES {
@@ -230,9 +232,6 @@ impl RenderState {
                 p2: [-angle.cos() * 0.3, -angle.sin() * 0.3],
                 v2: [-0.011 * (idx as f32 * 1.1).cos(), 0.009 * (idx as f32 * 1.3).sin()],
                 color_index: idx,
-                _pad1: 0,
-                _pad2: 0,
-                _pad3: 0,
             });
         }
 
@@ -280,7 +279,7 @@ impl RenderState {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

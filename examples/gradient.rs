@@ -5,11 +5,10 @@
 //!
 //! Run with: `cargo run --example gradient`
 //!
-//! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, LayoutCheckable,
-    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
     Transaction, VertexBufferLayout,
 };
@@ -26,13 +25,10 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-/// Uniform buffer data — fields must match `struct TimeUniforms` in `shaders/gradient.slang`.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, LayoutCheckable)]
+#[goldy::gpu]
 struct TimeUniforms {
     time: f32,
 }
-impl goldy::StructuredBufferElement for TimeUniforms {}
 
 struct App {
     instance: Instance,
@@ -150,14 +146,7 @@ impl App {
             )
         };
 
-        let shader = ShaderModule::from_slang_with_options(
-            &device,
-            shaders::GRADIENT,
-            &[],
-            &[],
-            Default::default(),
-            &[TimeUniforms::LAYOUT_CHECK],
-        )?;
+        let shader = ShaderModule::from_slang_with_gpu_types(&device, shaders::GRADIENT, &[TimeUniforms::GPU_TYPE])?;
 
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
@@ -171,7 +160,7 @@ impl App {
         let mut upload_scheme = Scheme::new(&ctx);
         let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&uniform, std::mem::size_of::<TimeUniforms>() as u64),
+            DepositTarget::buffer_elements::<TimeUniforms>(&uniform, 1),
         )?;
 
         self.ctx = Some(ctx);
@@ -212,14 +201,14 @@ impl App {
         self.uniform_deposit
             .as_ref()
             .unwrap()
-            .write(0, bytemuck::bytes_of(&uniforms))?;
+            .write_data(0, &[uniforms])?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())

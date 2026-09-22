@@ -28,12 +28,6 @@ use common::CaptureDump;
 const RAY_SHADER: &str = r#"
 import goldy_exp;
 
-struct Uniforms {
-    uint width;
-    uint height;
-    float time;
-    float _padding;
-};
 
 [goldy_compute]
 [numthreads(8, 8, 1)]
@@ -66,15 +60,12 @@ void cs_main(BufRO<Uniforms> uniforms_buf, Accel scene, DirectSpatial<float4> ou
 }
 "#;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Uniforms {
     width: u32,
     height: u32,
     time: f32,
-    _padding: f32,
 }
-impl goldy::StructuredBufferElement for Uniforms {}
 
 const INITIAL_WIDTH: u32 = 800;
 const INITIAL_HEIGHT: u32 = 600;
@@ -141,7 +132,7 @@ fn warm_gpu() -> Result<GpuWarmup> {
         std::process::exit(0);
     }
     let ctx = device.create_context()?;
-    let shader = ShaderModule::from_slang(&device, RAY_SHADER)?;
+    let shader = ShaderModule::from_slang_with_gpu_types(&device, RAY_SHADER, &[Uniforms::GPU_TYPE])?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
     let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.7, -0.5, 0.0], [0.7, -0.5, 0.0]];
     let verts =
@@ -289,7 +280,6 @@ impl App {
                 width,
                 height,
                 time: 0.0,
-                _padding: 0.0,
             }],
             BufferKind::Scattered,
         )?;
@@ -425,9 +415,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
             .as_ref()
             .map(CaptureDump::time)
             .unwrap_or_else(|| state.start_time.elapsed().as_secs_f32()),
-        _padding: 0.0,
     };
-    state.uniform_deposit.write(0, bytemuck::bytes_of(&uniforms))?;
+    state.uniform_deposit.write_data(0, &[uniforms])?;
     state.upload_scheme.submit()?;
     let mut submission = state.scheme.submit()?;
     if let Some(present) = &state.present {

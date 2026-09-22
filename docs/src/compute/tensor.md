@@ -82,16 +82,34 @@ parcel for physical indexing:
 
 ```rust,ignore
 // Logical: view[i] applies offset/shape/strides. Layouts live on the scheme.
-kernel.record(&mut scheme, "rope", q_view, k_layer, &step, head_size, theta)?
+kernel.record(&mut scheme, "rope", q_view, k_layer, &step, theta)?
     .over_tensor(&q_view);
 
 // Physical escape hatch: buf[i] is a parent-buffer element index.
 kernel.record(&mut scheme, "double", &data.view(), n).over_tensor(&data.view());
 ```
 
+Kernel parameters may declare a **shape contract** that `record` checks before
+GraphIR insertion. The list fixes rank; repeated names must match; `_` is
+unconstrained; integer literals are exact extents. Unannotated tensors stay
+any-shape. See [Rust compute kernels](../programming-model/rust-kernels.md).
+
 ```rust,ignore
-fn rope(q: gpu::TensorMut<f32>, k: gpu::TensorMut<f32>, step: &[DecodeStep], head_size: u32, theta: f32) {
-    let k_base = pos * k.dim(1);
+fn rmsnorm(
+    #[tensor(shape = [dim])] x: gpu::Tensor<f32>,
+    #[tensor(shape = [dim])] weight: gpu::Tensor<f32>,
+    #[tensor(shape = [dim])] out: gpu::TensorWrite<f32>,
+) { /* ... */ }
+```
+
+```rust,ignore
+fn rope(
+    #[tensor(shape = [q_heads, head])] q: gpu::TensorMut<f32>,
+    #[tensor(shape = [seq, kv_heads, head])] k: gpu::TensorMut<f32>,
+    step: &[DecodeStep],
+    theta: f32,
+) {
+    let k_base = pos * k.dim(1) * k.dim(2);
     k[k_base + i] = ...;
 }
 // host: pass layout.embedding(weights)? and layer_cache(key_cache, layer)?
@@ -129,4 +147,6 @@ arbitrary zero-copy host view of GPU storage.
 [`llama3.goldy`](https://github.com/koubaa/llama3.goldy) is the proving consumer: activations
 and checkpoint weights are tensors. Static GEMVs and residuals go through Ammon's
 `TensorKernels` (Goldy semantic matmul / portable add). Custom RMSNorm / RoPE /
-attention / SwiGLU kernels bind tensor views. Dynamic decode state stays a `DecodeStep` deposit.
+attention / SwiGLU kernels bind tensor views with rank and symbolic-extent
+contracts; the host reshapes Q, KV cache, and attention scores at recording
+boundaries. Dynamic decode state stays a `DecodeStep` deposit.

@@ -99,7 +99,34 @@ is logical-view-relative:
 Ordinary `&[T]` / `&mut [T]` / `gpu::Scattered<T>` stay the physical-index escape
 hatch: `buf[i]` is an element index in the parent buffer, and `.len()` is the
 buffer length. Tensor `record` methods take `TensorView` arguments, validate
-dtype and writeability, and return `Result` because packing the layout can fail.
+dtype, writeability, and optional shape contracts, and return `Result` because
+packing the layout (or a contract miss) can fail.
+
+### Shape contracts
+
+Annotate tensor parameters with `#[tensor(shape = [...])]` to fix rank and to
+require equal extents at record time. Dimensions may be `_` (any extent), an
+integer literal (exact), or an identifier (symbolic equality within one `record`
+call):
+
+```rust
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn rmsnorm(
+    #[tensor(shape = [dim])] x: gpu::Tensor<f32>,
+    #[tensor(shape = [dim])] weight: gpu::Tensor<f32>,
+    #[tensor(shape = [dim])] out: gpu::TensorWrite<f32>,
+) { /* ... */ }
+```
+
+Unannotated tensor parameters keep today's any-shape behavior. The generated
+`record` method checks every tensor argument against the contract **before**
+binding parcels or appending GraphIR. Failures name the kernel, parameter, axis,
+expected spec, and actual shape. Shader parameter order, the 48-byte
+`GoldyTensorLayout` ABI, and `KERNEL_ABI_VERSION` are unchanged.
+
+Relationships that are not dimension equality — for example query-head /
+KV-head divisibility — stay explicit kernel or domain checks, not part of this
+DSL.
 
 Goldy only has eight user scalar words, so layouts are **not** push constants.
 The metadata parcel is interned on the scheme, read-only in GraphIR, and does

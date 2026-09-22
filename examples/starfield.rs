@@ -30,8 +30,7 @@ const STAR_TYPE_GALAXY: f32 = 1.0;
 const STAR_TYPE_QUASAR: f32 = 2.0;
 const STAR_TYPE_WHITE_DWARF: f32 = 3.0;
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Star {
     x: f32,
     y: f32,
@@ -39,16 +38,11 @@ struct Star {
     star_type: f32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct StarfieldParams {
     speed: f32,
     frame: f32,
-    _pad1: f32,
-    _pad2: f32,
 }
-impl goldy::StructuredBufferElement for Star {}
-impl goldy::StructuredBufferElement for StarfieldParams {}
 
 static mut SEED: u32 = 12345;
 fn rand_f32() -> f32 {
@@ -238,8 +232,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/starfield_update.slang"),
+            &[Star::GPU_TYPE, StarfieldParams::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/starfield_render.slang"),
+            &[Star::GPU_TYPE],
+        )?;
 
         let mut stars = Vec::with_capacity(NUM_STARS as usize);
         for _ in 0..NUM_STARS {
@@ -284,7 +286,7 @@ impl RenderState {
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&params_buffer, std::mem::size_of::<StarfieldParams>() as u64),
+            DepositTarget::buffer_elements::<StarfieldParams>(&params_buffer, 1),
         )?;
 
         println!("Created starfield with {NUM_STARS} stars (Scheme + Present)");
@@ -318,18 +320,16 @@ impl RenderState {
         let params = StarfieldParams {
             speed: self.speed,
             frame: self.frame_count,
-            _pad1: 0.0,
-            _pad2: 0.0,
         };
 
-        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
+        self.params_deposit.write_data(0, &[params])?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

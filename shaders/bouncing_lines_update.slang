@@ -3,16 +3,6 @@
 
 import goldy_exp;
 
-struct Line {
-    float2 p1;
-    float2 v1;
-    float2 p2;
-    float2 v2;
-    uint color_index;
-    uint _pad1;
-    uint _pad2;
-    uint _pad3;
-};
 
 static const uint NUM_LINES = 20;
 

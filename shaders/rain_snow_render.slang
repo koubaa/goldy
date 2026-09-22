@@ -3,21 +3,6 @@
 
 import goldy_exp;
 
-struct Particle {
-    float2 position;
-    float2 velocity;
-    float size;
-    float _pad1;
-    float _pad2;
-    float _pad3;
-};
-
-struct ParticleParams {
-    float is_snow;
-    float frame;
-    float _pad1;
-    float _pad2;
-};
 
 struct VSOutput {
     float4 position : SV_Position;

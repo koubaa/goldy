@@ -11,7 +11,6 @@ use goldy::{
     Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease, LeaseRenderTarget,
     MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
-    VertexFormat,
 };
 use std::ops::Shr;
 use std::sync::Arc;
@@ -55,7 +54,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
 "#;
 
 fn clock_vertex_layout() -> VertexBufferLayout {
-    VertexBufferLayout::from_formats::<ClockVertex>(&[VertexFormat::Float32x2, VertexFormat::Float32x4])
+    ClockVertex::GPU_TYPE.vertex_buffer_layout().expect("clock vertex layout")
 }
 
 struct App {
@@ -249,10 +248,7 @@ impl App {
         let mut upload_scheme = Scheme::new(ctx);
         let vertex_deposit = MemoryExchange::new(ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(
-                vertex_parcel,
-                (MAX_CLOCK_VERTICES * std::mem::size_of::<ClockVertex>()) as u64,
-            ),
+            DepositTarget::buffer_elements::<ClockVertex>(vertex_parcel, MAX_CLOCK_VERTICES as u64),
         )?;
         self.upload_scheme = Some(upload_scheme);
         self.vertex_deposit = Some(vertex_deposit);
@@ -313,7 +309,7 @@ impl App {
         self.vertex_deposit
             .as_ref()
             .unwrap()
-            .write(0, bytemuck::cast_slice(&vertices))?;
+            .write_data(0, &vertices)?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
@@ -321,7 +317,7 @@ impl App {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap().as_ref()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())

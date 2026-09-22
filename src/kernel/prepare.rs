@@ -7,9 +7,23 @@ use crate::scheme::{Scheme, SchemeBindable};
 use crate::shader::ShaderModule;
 use crate::task_graph::NodeAccess;
 use anyhow::{Context, Result};
+use goldy_shader_ir::{BoundTensorDim, TensorShapeSpec};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Symbolic extents unified across one generated `record` call.
+#[derive(Debug, Default)]
+pub struct TensorShapeEnv {
+    dims: HashMap<String, BoundTensorDim>,
+}
+
+impl TensorShapeEnv {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 /// Runtime-scoped prepared kernel: compiled pipeline + ABI metadata.
 pub struct PreparedKernel {
@@ -113,6 +127,35 @@ impl<'a> SchemeNodeStart<'a> {
         self.bind_u32(u32::from(value))
     }
 
+    /// Validate dtype, writeability, and the parameter's shape contract without binding.
+    ///
+    /// Generated `record` methods call this for every tensor argument before any
+    /// parcel bind or GraphIR growth.
+    #[cfg(feature = "tensor")]
+    pub fn check_tensor_view(
+        &self,
+        view: crate::tensor::TensorView<'_>,
+        param_name: &str,
+        access: NodeAccess,
+        expected_dtype: crate::tensor::TensorDType,
+        env: &mut TensorShapeEnv,
+    ) -> Result<(), crate::error::GoldyError> {
+        view.layout().require_dtype(expected_dtype, "kernel tensor")?;
+        if matches!(access, NodeAccess::Write | NodeAccess::ReadWrite) {
+            view.layout().require_writeable("kernel tensor")?;
+        }
+        let Some(param) = self.def.params.iter().find(|p| p.name == param_name) else {
+            return Err(crate::error::GoldyError::Validation(format!(
+                "kernel `{}` has no parameter `{param_name}`",
+                self.def.entry
+            )));
+        };
+        if let Some(spec) = &param.shape_spec {
+            check_tensor_shape_spec(&self.def.entry, param_name, spec, view.shape().dims(), env)?;
+        }
+        Ok(())
+    }
+
     /// Bind a tensor view as the next resource: parent parcel + collected layout metadata.
     #[cfg(feature = "tensor")]
     pub fn bind_tensor_view(
@@ -210,15 +253,45 @@ pub fn dump_kernel_artifacts(def: &KernelDef, override_dir: Option<&std::path::P
     );
     fs::write(dir.join(format!("{stem}.slang")), &def.source.canonical_slang)?;
     let abi = format!(
-        "abi_version = {}\nentry = {}\nworkgroup_size = {:?}\nparams = {:#?}\nbuiltins = {:?}\nsource = {}:{}\n",
+        "abi_version = {}\nentry = {}\nworkgroup_size = {:?}\nparams = {:#?}\nshape_contracts = {}\nbuiltins = {:?}\nsource = {}:{}\n",
         def.abi_version,
         def.entry,
         def.workgroup_size,
         def.params,
+        format_shape_contracts(&def.params),
         def.builtins,
         def.source_map.rust_file,
         def.source_map.rust_line
     );
     fs::write(dir.join(format!("{stem}.abi.txt")), abi)?;
     Ok(())
+}
+
+fn check_tensor_shape_spec(
+    kernel: &str,
+    param: &str,
+    spec: &TensorShapeSpec,
+    actual: &[u32],
+    env: &mut TensorShapeEnv,
+) -> Result<(), crate::error::GoldyError> {
+    spec.check(kernel, param, actual, &mut env.dims)
+        .map_err(crate::error::GoldyError::Validation)
+}
+
+fn format_shape_contracts(params: &[goldy_shader_ir::KernelParam]) -> String {
+    let mut parts = Vec::new();
+    for p in params {
+        if !p.is_tensor {
+            continue;
+        }
+        match &p.shape_spec {
+            Some(spec) => parts.push(format!("{}: {}", p.name, spec)),
+            None => parts.push(format!("{}: <any>", p.name)),
+        }
+    }
+    if parts.is_empty() {
+        "<none>".into()
+    } else {
+        parts.join(", ")
+    }
 }

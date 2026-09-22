@@ -2,7 +2,8 @@
 
 use goldy_shader_ir::{
     emit_canonical_compute_source, BinOp, BuiltinFn, BuiltinMask, ElementType, Expr, KernelParam, ParamCategory,
-    ScalarType, ShaderKernel, SourceMap, Stmt, UnaryOp, WorkgroupReduceOp,
+    ScalarType, ShaderKernel, SourceMap, Stmt, TensorDimSpec, TensorShapeSpec, UnaryOp, WorkgroupReduceOp,
+    TENSOR_SHAPE_SPEC_MAX_RANK,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -83,12 +84,13 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
     let mut params = Vec::new();
     let mut record_args = Vec::new();
     let mut bind_stmts = Vec::new();
+    let mut validate_stmts = Vec::new();
     let mut gpu_type_idents: Vec<syn::Ident> = Vec::new();
     let mut type_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut has_tensors = false;
 
     for input in &func.sig.inputs {
-        let FnArg::Typed(PatType { pat, ty, .. }) = input else {
+        let FnArg::Typed(PatType { attrs, pat, ty, .. }) = input else {
             return Err(Error::new(input.span(), "#[compute] does not support `self`"));
         };
         let Pat::Ident(name) = pat.as_ref() else {
@@ -96,7 +98,20 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
         };
         let pname = name.ident.to_string();
         let pident = &name.ident;
-        match classify_param_type(ty)? {
+        let shape_spec = take_tensor_shape_spec(attrs)?;
+        let classified = classify_param_type(ty)?;
+        if shape_spec.is_some()
+            && !matches!(
+                classified,
+                ClassifiedParam::TensorRead(_) | ClassifiedParam::TensorReadWrite(_) | ClassifiedParam::TensorWrite(_)
+            )
+        {
+            return Err(Error::new(
+                ty.span(),
+                "#[tensor(shape = ...)] is only valid on gpu::Tensor / TensorMut / TensorWrite parameters",
+            ));
+        }
+        match classified {
             ClassifiedParam::BufferRead(elem) => {
                 params.push(KernelParam::buffer_read(&pname, elem));
                 type_env.insert(pname.clone(), format!("BufRO<{}>", elem.slang_name()));
@@ -151,30 +166,63 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             }
             ClassifiedParam::TensorRead(elem) => {
                 has_tensors = true;
-                params.push(KernelParam::tensor_read(&pname, elem));
+                let mut p = KernelParam::tensor_read(&pname, elem);
+                p.shape_spec = shape_spec;
+                params.push(p);
                 type_env.insert(pname.clone(), format!("Tensor<{}>", elem.slang_name()));
                 let dtype = tensor_dtype_tokens(elem);
                 record_args.push(quote! { #pident: ::goldy::TensorView<'_> });
+                validate_stmts.push(quote! {
+                    start.check_tensor_view(
+                        #pident,
+                        #pname,
+                        ::goldy::NodeAccess::Read,
+                        #dtype,
+                        &mut tensor_shape_env,
+                    )?;
+                });
                 bind_stmts.push(quote! {
                     start = start.bind_tensor_view(#pident, ::goldy::NodeAccess::Read, #dtype)?;
                 });
             }
             ClassifiedParam::TensorReadWrite(elem) => {
                 has_tensors = true;
-                params.push(KernelParam::tensor_read_write(&pname, elem));
+                let mut p = KernelParam::tensor_read_write(&pname, elem);
+                p.shape_spec = shape_spec;
+                params.push(p);
                 type_env.insert(pname.clone(), format!("TensorMut<{}>", elem.slang_name()));
                 let dtype = tensor_dtype_tokens(elem);
                 record_args.push(quote! { #pident: ::goldy::TensorView<'_> });
+                validate_stmts.push(quote! {
+                    start.check_tensor_view(
+                        #pident,
+                        #pname,
+                        ::goldy::NodeAccess::ReadWrite,
+                        #dtype,
+                        &mut tensor_shape_env,
+                    )?;
+                });
                 bind_stmts.push(quote! {
                     start = start.bind_tensor_view(#pident, ::goldy::NodeAccess::ReadWrite, #dtype)?;
                 });
             }
             ClassifiedParam::TensorWrite(elem) => {
                 has_tensors = true;
-                params.push(KernelParam::tensor_write(&pname, elem));
+                let mut p = KernelParam::tensor_write(&pname, elem);
+                p.shape_spec = shape_spec;
+                params.push(p);
                 type_env.insert(pname.clone(), format!("TensorWrite<{}>", elem.slang_name()));
                 let dtype = tensor_dtype_tokens(elem);
                 record_args.push(quote! { #pident: ::goldy::TensorView<'_> });
+                validate_stmts.push(quote! {
+                    start.check_tensor_view(
+                        #pident,
+                        #pname,
+                        ::goldy::NodeAccess::Write,
+                        #dtype,
+                        &mut tensor_shape_env,
+                    )?;
+                });
                 bind_stmts.push(quote! {
                     start = start.bind_tensor_view(#pident, ::goldy::NodeAccess::Write, #dtype)?;
                 });
@@ -192,6 +240,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     slang_type: type_name.clone(),
                     stride_bytes: None,
                     is_tensor: false,
+                    shape_spec: None,
                 });
                 type_env.insert(pname, type_name);
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
@@ -308,6 +357,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 None => quote! { None },
             };
             let is_tensor = p.is_tensor;
+            let shape_spec = quote_shape_spec(&p.shape_spec);
             quote! {
                 ::goldy::kernel::KernelParam {
                     name: #name.to_string(),
@@ -317,6 +367,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     slang_type: #slang_type.to_string(),
                     stride_bytes: #stride,
                     is_tensor: #is_tensor,
+                    shape_spec: #shape_spec,
                 }
             }
         })
@@ -345,6 +396,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 #(#record_args),*
             ) -> ::core::result::Result<::goldy::kernel::DispatchBuilder<'a>, ::goldy::GoldyError> {
                 let mut start = self.prepared.begin_record(scheme, label);
+                let mut tensor_shape_env = ::goldy::kernel::TensorShapeEnv::new();
+                #(#validate_stmts)*
                 #(#bind_stmts)*
                 start.finish_with_tensor_meta()
             }
@@ -429,6 +482,11 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 pub fn pipeline_arc(&self) -> ::std::sync::Arc<::goldy::ComputePipeline> {
                     self.prepared.pipeline_arc()
                 }
+
+                /// Structured ABI used to prepare this kernel.
+                pub fn def(&self) -> &::goldy::kernel::KernelDef {
+                    self.prepared.def()
+                }
             }
         }
     })
@@ -440,6 +498,96 @@ fn is_compute_attr(attr: &Attribute) -> bool {
         | Meta::List(syn::MetaList { path: p, .. })
         | Meta::NameValue(syn::MetaNameValue { path: p, .. }) => {
             p.is_ident("compute") || p.segments.last().is_some_and(|s| s.ident == "compute")
+        }
+    }
+}
+
+fn take_tensor_shape_spec(attrs: &[Attribute]) -> Result<Option<TensorShapeSpec>, Error> {
+    let mut found = None;
+    for attr in attrs {
+        if !attr.path().is_ident("tensor") {
+            continue;
+        }
+        if found.is_some() {
+            return Err(Error::new(attr.span(), "duplicate #[tensor(...)] attribute"));
+        }
+        found = Some(parse_tensor_attr(attr)?);
+    }
+    Ok(found)
+}
+
+fn parse_tensor_attr(attr: &Attribute) -> Result<TensorShapeSpec, Error> {
+    match &attr.meta {
+        Meta::List(_) => attr.parse_args_with(parse_tensor_attr_args),
+        _ => Err(Error::new(attr.span(), "expected #[tensor(shape = [...])]")),
+    }
+}
+
+fn parse_tensor_attr_args(input: ParseStream) -> Result<TensorShapeSpec, Error> {
+    let ident: syn::Ident = input.parse()?;
+    if ident != "shape" {
+        return Err(Error::new(
+            ident.span(),
+            "expected `shape = [...]` in #[tensor(...)]",
+        ));
+    }
+    input.parse::<syn::Token![=]>()?;
+    let content;
+    syn::bracketed!(content in input);
+    let mut dims = Vec::new();
+    while !content.is_empty() {
+        dims.push(parse_tensor_dim(&content)?);
+        if content.peek(syn::Token![,]) {
+            let _ = content.parse::<syn::Token![,]>()?;
+        } else if !content.is_empty() {
+            return Err(content.error("expected comma or closing `]` in tensor shape"));
+        }
+    }
+    if dims.len() > TENSOR_SHAPE_SPEC_MAX_RANK {
+        return Err(Error::new(
+            ident.span(),
+            format!("tensor shape contracts support at most {TENSOR_SHAPE_SPEC_MAX_RANK} dimensions"),
+        ));
+    }
+    if !input.is_empty() {
+        return Err(input.error("unexpected tokens after tensor shape"));
+    }
+    Ok(TensorShapeSpec { dims })
+}
+
+fn parse_tensor_dim(input: ParseStream) -> Result<TensorDimSpec, Error> {
+    if input.peek(syn::Token![_]) {
+        let _: syn::Token![_] = input.parse()?;
+        return Ok(TensorDimSpec::Any);
+    }
+    if input.peek(syn::LitInt) {
+        let n: syn::LitInt = input.parse()?;
+        let v: u32 = n.base10_parse()?;
+        return Ok(TensorDimSpec::Exact(v));
+    }
+    if input.peek(syn::Ident) {
+        let id: syn::Ident = input.parse()?;
+        return Ok(TensorDimSpec::Symbol(id.to_string()));
+    }
+    Err(input.error("tensor dim must be `_`, an integer literal, or an identifier"))
+}
+
+fn quote_shape_spec(spec: &Option<TensorShapeSpec>) -> TokenStream {
+    match spec {
+        None => quote! { None },
+        Some(spec) => {
+            let dims = spec.dims.iter().map(|d| match d {
+                TensorDimSpec::Any => quote! { ::goldy::kernel::TensorDimSpec::Any },
+                TensorDimSpec::Exact(n) => quote! { ::goldy::kernel::TensorDimSpec::Exact(#n) },
+                TensorDimSpec::Symbol(name) => {
+                    quote! { ::goldy::kernel::TensorDimSpec::Symbol(#name.to_string()) }
+                }
+            });
+            quote! {
+                Some(::goldy::kernel::TensorShapeSpec {
+                    dims: vec![#(#dims),*],
+                })
+            }
         }
     }
 }
@@ -1585,4 +1733,98 @@ fn workgroup_array_in_nested_scope(stmts: &[Stmt]) -> bool {
         Stmt::While { body, .. } | Stmt::ForRange { body, .. } => nested(body),
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+    use syn::parse_quote;
+
+    fn parse_attr(tokens: Attribute) -> Result<TensorShapeSpec, Error> {
+        parse_tensor_attr(&tokens)
+    }
+
+    #[test]
+    fn parse_symbolic_and_wildcard_and_exact() {
+        let spec = parse_attr(parse_quote! { #[tensor(shape = [vocab, dim])] }).unwrap();
+        assert_eq!(
+            spec.dims,
+            vec![
+                TensorDimSpec::Symbol("vocab".into()),
+                TensorDimSpec::Symbol("dim".into()),
+            ]
+        );
+        let spec = parse_attr(parse_quote! { #[tensor(shape = [_, 4])] }).unwrap();
+        assert_eq!(spec.dims, vec![TensorDimSpec::Any, TensorDimSpec::Exact(4)]);
+        let spec = parse_attr(parse_quote! { #[tensor(shape = [])] }).unwrap();
+        assert!(spec.dims.is_empty());
+    }
+
+    #[test]
+    fn reject_rank_above_four() {
+        let err = parse_attr(parse_quote! { #[tensor(shape = [a, b, c, d, e])] }).unwrap_err();
+        assert!(err.to_string().contains("at most 4"), "{err}");
+    }
+
+    #[test]
+    fn reject_malformed_dim() {
+        let err = parse_attr(parse_quote! { #[tensor(shape = [true])] }).unwrap_err();
+        assert!(err.to_string().contains("tensor dim must be"), "{err}");
+    }
+
+    #[test]
+    fn reject_shape_on_buffer_param() {
+        let err = expand(
+            quote! { workgroup_size = [64, 1, 1] },
+            quote! {
+                fn k(#[tensor(shape = [n])] x: &[f32]) {}
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("only valid on gpu::Tensor"), "{err}");
+    }
+
+    #[test]
+    fn generated_abi_embeds_shape_spec() {
+        let tokens = expand(
+            quote! { workgroup_size = [64, 1, 1] },
+            quote! {
+                fn rmsnorm(
+                    #[tensor(shape = [dim])] x: gpu::Tensor<f32>,
+                    #[tensor(shape = [dim])] weight: gpu::Tensor<f32>,
+                    #[tensor(shape = [dim])] out: gpu::TensorWrite<f32>,
+                ) {
+                    let i = gpu::global_id().x;
+                    if i < x.len() {
+                        out[i] = x[i] * weight[i];
+                    }
+                }
+            },
+        )
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("TensorShapeSpec"), "{text}");
+        assert!(text.contains("TensorDimSpec :: Symbol"), "{text}");
+        assert!(text.contains("check_tensor_view"), "{text}");
+    }
+
+    #[test]
+    fn unannotated_tensor_has_no_shape_spec() {
+        let tokens = expand(
+            quote! { workgroup_size = [64, 1, 1] },
+            quote! {
+                fn copy_view(src: gpu::Tensor<f32>, dst: gpu::TensorWrite<f32>) {
+                    let i = gpu::global_id().x;
+                    if i < dst.len() {
+                        dst[i] = src[i];
+                    }
+                }
+            },
+        )
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("shape_spec : None"), "{text}");
+        assert!(!text.contains("TensorDimSpec"), "{text}");
+    }
 }
