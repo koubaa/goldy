@@ -1147,7 +1147,7 @@ inline PendingHostRead operator>>(SchemeSubmission& submission, const Texture& t
 /**
  * @brief Stable deposit relationship recorded in one scheme.
  *
- * Write staging bytes before submit; submit claims the occurrence internally.
+ * Write staging bytes before submit (`write` or `deposit << data`); submit claims the occurrence internally.
  */
 class DepositTransaction {
 public:
@@ -1181,6 +1181,12 @@ public:
 private:
     std::unique_ptr<GoldyDepositTransaction, detail::DepositTransactionDeleter> ptr_;
 };
+
+/// Tender bytes for this submission (`deposit << data`). Offset 0; use `write` for partial fills.
+inline DepositTransaction& operator<<(DepositTransaction& deposit, const std::vector<uint8_t>& data) {
+    deposit.write(data);
+    return deposit;
+}
 
 /**
  * @brief Destination of a memory-exchange deposit (buffer range or texture region).

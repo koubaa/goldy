@@ -250,14 +250,8 @@ impl App {
         }
 
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.warm_deposit
-            .as_ref()
-            .unwrap()
-            .write_data(0, &warm_verts)?;
-        self.cool_deposit
-            .as_ref()
-            .unwrap()
-            .write_data(0, &cool_verts)?;
+        (self.warm_deposit.as_ref().unwrap() << warm_verts.as_slice())?;
+        (self.cool_deposit.as_ref().unwrap() << cool_verts.as_slice())?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

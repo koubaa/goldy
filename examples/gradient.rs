@@ -42,7 +42,7 @@ struct App {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-        scene_rt: Option<Lease<LeaseRenderTarget>>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     upload_scheme: Option<Scheme>,
     uniform_deposit: Option<DepositTransaction>,
@@ -198,10 +198,7 @@ impl App {
             .unwrap_or_else(|| self.start_time.elapsed().as_secs_f32());
         let uniforms = TimeUniforms { time };
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.uniform_deposit
-            .as_ref()
-            .unwrap()
-            .write_data(0, &[uniforms])?;
+        (self.uniform_deposit.as_ref().unwrap() << &uniforms)?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;

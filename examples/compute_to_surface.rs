@@ -377,7 +377,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         time: elapsed,
     };
 
-    state.uniform_deposit.write_data(0, &[uniforms])?;
+    (&state.uniform_deposit << &uniforms)?;
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;

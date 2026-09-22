@@ -139,6 +139,12 @@ public sealed class MemoryExchange : IDisposable
     public DepositTransaction BindDeposit(Scheme scheme, DepositTarget target);
 }
 
+public sealed class DepositTransaction : IDisposable
+{
+    public void Write(ReadOnlySpan<byte> data, ulong offset = 0);
+    public static DepositTransaction operator <<(DepositTransaction deposit, byte[] data);
+}
+
 public sealed class SchemeSubmission : IDisposable
 {
     public HostView Take(Parcel parcel);

@@ -308,8 +308,7 @@ impl RenderState {
         .min(0.05);
         self.last_frame_time = std::time::Instant::now();
 
-        self.params_deposit
-            .write_data(0, &[SimParams { delta_time: dt }])?;
+        (&self.params_deposit << &SimParams { delta_time: dt })?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;

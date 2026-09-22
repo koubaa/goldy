@@ -55,7 +55,8 @@ impl Drop for HostView {
 
 /// Stable deposit relationship recorded in one [`Scheme`].
 ///
-/// Write staging bytes before [`Scheme::submit`]; submit claims the occurrence internally.
+/// Write staging bytes before [`Scheme::submit`] (`write` or `(&deposit << data)?`);
+/// submit claims the occurrence internally.
 pub struct DepositTransaction {
     ptr: *mut GoldyDepositTransaction,
 }
@@ -71,6 +72,14 @@ impl DepositTransaction {
 
     pub fn write(&self, data: &[u8], offset: u64) -> Result<()> {
         check(unsafe { sys::goldy_deposit_transaction_write(self.ptr, offset, data.as_ptr(), data.len()) })
+    }
+}
+
+impl std::ops::Shl<&[u8]> for &DepositTransaction {
+    type Output = Result<()>;
+
+    fn shl(self, data: &[u8]) -> Self::Output {
+        self.write(data, 0)
     }
 }
 

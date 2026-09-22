@@ -288,7 +288,7 @@ impl App {
         for ch in 0..NUM_CHANNELS {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
-            channel_deposits[ch].write(0, bytemuck::cast_slice(&vertices))?;
+            (&channel_deposits[ch] << vertices.as_slice())?;
         }
         upload.submit()?;
 

@@ -4,7 +4,8 @@ namespace Goldy;
 
 /// <summary>
 /// Stable deposit relationship recorded in one <see cref="Scheme"/>.
-/// Write staging bytes before <see cref="Scheme.Submit"/>; submit claims the occurrence internally.
+/// Write staging bytes before <see cref="Scheme.Submit"/> (`Write` or <c>deposit &lt;&lt; data</c>);
+/// submit claims the occurrence internally.
 /// </summary>
 public sealed class DepositTransaction : IDisposable
 {
@@ -44,6 +45,18 @@ public sealed class DepositTransaction : IDisposable
                     throw GoldyException.FromLastError("DepositTransaction write");
             }
         }
+    }
+
+    /// <summary>
+    /// Tender bytes for this submission (<c>deposit &lt;&lt; data</c>). Offset 0; use
+    /// <see cref="Write"/> for partial fills.
+    /// </summary>
+    public static DepositTransaction operator <<(DepositTransaction deposit, byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(deposit);
+        ArgumentNullException.ThrowIfNull(data);
+        deposit.Write(data);
+        return deposit;
     }
 
     public void Dispose()

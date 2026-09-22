@@ -40,7 +40,7 @@ That split is a substrate artifact, not a machine requirement.
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | **Shipped** (internal) |
 | Gate | Submission gate, `Context::boundary_crossed` | **Shipped** |
 | Exchange | `SurfaceExchange`, `MemoryExchange` | **Shipped** |
-| Exchange claim | Present: `(&mut submission >> &transaction).take()?`; canonical `Transaction` → `Claim` → `consume` / `discard` (deposit claims are Runtime-internal) | **Shipped** |
+| Exchange claim | Present: `(&mut submission >> &transaction).take()?`; deposit: `(&deposit << &data)?` tenders this submission (internal claim at submit) | **Shipped** |
 | Warehouse / budget | `BudgetPolicy`, `VramAllocator` | **Shipped** (partial) |
 | Growable buffers | `Buffer::resize_to`, stable handles | **Shipped** |
 | Retained resubmit | Clean schemes replay with zero re-record | **Shipped** |
@@ -134,7 +134,7 @@ let mut submission = scheme.submit()?;
 
 **Shipped** CPU readback: host claims via `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`). See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
-**Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `DepositTransaction::write` prepares an occurrence; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
+**Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `(&deposit << &data)?` (or `DepositTransaction::write`) prepares an occurrence for this submission; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
 
 **Designed**: video-encoder exchange (foreign read continues after enqueue).
 

@@ -91,7 +91,7 @@ def test_parcel_write(device):
     upload = goldy.Scheme(ctx)
     memory = goldy.MemoryExchange(ctx)
     deposit = memory.bind_deposit(upload, goldy.DepositTarget.buffer(buffer[0], 16))
-    deposit.write(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
+    deposit << np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes()
     frame = upload.submit()
     frame.wait_until_settled()
 

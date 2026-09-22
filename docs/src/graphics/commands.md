@@ -131,7 +131,7 @@ Because render pass nodes and compute nodes live in the same graph, a hybrid fra
 ```rust
 let memory = MemoryExchange::new(&ctx);
 let deposit = memory.bind_deposit(&mut scheme, goldy::DepositTarget::buffer(&staging, data.len() as u64))?;
-deposit.write(0, &data)?;
+(&deposit << data.as_slice())?;
 
 scheme.node("sim", &compute_pipeline)
     .with_parcel(&state_buf, NodeAccess::ReadWrite)

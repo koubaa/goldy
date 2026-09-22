@@ -322,7 +322,7 @@ impl RenderState {
             frame: self.frame_count,
         };
 
-        self.params_deposit.write_data(0, &[params])?;
+        (&self.params_deposit << &params)?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;

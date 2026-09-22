@@ -416,7 +416,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
             .map(CaptureDump::time)
             .unwrap_or_else(|| state.start_time.elapsed().as_secs_f32()),
     };
-    state.uniform_deposit.write_data(0, &[uniforms])?;
+    (&state.uniform_deposit << &uniforms)?;
     state.upload_scheme.submit()?;
     let mut submission = state.scheme.submit()?;
     if let Some(present) = &state.present {

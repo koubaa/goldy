@@ -223,6 +223,11 @@ goldy::SurfaceExchange surface(ctx, window_handle, width, height);
 auto present = surface.bind_render_target(scheme, rt);
 goldy::SchemeSubmission submission = scheme.submit();
 present.claim(submission).consume();
+
+goldy::MemoryExchange memory(ctx);
+auto deposit = memory.bind_deposit(scheme, goldy::DepositTarget::buffer(parcel, capacity));
+deposit << std::vector<uint8_t>{1, 2, 3, 4};
+scheme.submit();
 ```
 
 ### Raw C API

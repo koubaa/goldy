@@ -108,7 +108,7 @@ class TestAcquire:
         upload = goldy.Scheme(ctx)
         memory = goldy.MemoryExchange(ctx)
         deposit = memory.bind_deposit(upload, goldy.DepositTarget.buffer(buffer[0], 16))
-        deposit.write(np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
+        deposit << np.array([1, 2, 3, 4], dtype=np.uint32).tobytes()
         frame = upload.submit()
         frame.wait_until_settled()
 

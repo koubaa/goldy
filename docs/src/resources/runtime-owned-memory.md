@@ -41,7 +41,7 @@ let cells = runtime.acquire_record([
 let memory = MemoryExchange::new(&ctx);
 let mut upload = Scheme::new(&ctx);
 let deposit = memory.bind_deposit(&mut upload, goldy::DepositTarget::buffer_elements::<MyUniforms>(&*uniform, 1))?;
-deposit.write_data(0, &[data])?;
+(&deposit << &data)?;
 upload.submit()?;
 
 let mut pass = scheme.render_pass("draw", &rt);

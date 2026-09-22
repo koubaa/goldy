@@ -276,10 +276,7 @@ impl App {
         }
 
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.vertex_deposit
-            .as_ref()
-            .unwrap()
-            .write(0, bytemuck::cast_slice(&vertices))?;
+        (self.vertex_deposit.as_ref().unwrap() << vertices.as_slice())?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

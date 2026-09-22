@@ -137,6 +137,8 @@ node.dispatch(1, 1, 1);
 
 let memory = MemoryExchange::new(&ctx)?;
 let parcel = buf.field(0)?;
+let deposit = memory.bind_deposit(&mut scheme, goldy_ffi_client::DepositTarget::buffer(&parcel, 16))?;
+(&deposit << &[1u8, 2, 3, 4])?;
 let mut submission = scheme.submit()?;
 let bytes = submission.take(&parcel)?;
 ```

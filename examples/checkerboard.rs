@@ -198,10 +198,7 @@ impl App {
             .unwrap_or_else(|| self.start_time.elapsed().as_secs_f32());
         let uniforms = TimeUniforms { time };
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.uniform_deposit
-            .as_ref()
-            .unwrap()
-            .write_data(0, &[uniforms])?;
+        (self.uniform_deposit.as_ref().unwrap() << &uniforms)?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;

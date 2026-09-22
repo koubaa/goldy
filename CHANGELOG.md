@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deposit `<<`** — `(&deposit << &data)?` tenders a per-submission memory-exchange occurrence (`Shl` on `&DepositTransaction`, offset 0). `write` / `write_data` remain for offsets and partial fills. Mirrored in Python (`deposit << bytes`), C++ (`deposit << vector`), C# (`deposit << byte[]`), and ffi-client (`&deposit << &[u8]`).
+
 - **Host claims** — `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`) realizes a public CPU read of a parcel after the submission gate. Host-coherent media map in place; others copy through a context staging pool. `BufferFlags::CPU_READABLE` is a placement hint that backends may honor with a mapped pointer (`RuntimeCapabilities::has_zero_copy_storage_readback`).
 
 - **Dense tensor layer** (`tensor` feature, default-on, independent of `graphics`) —

@@ -172,7 +172,7 @@ Hybrid compute + render workflows use a single `Scheme` with both compute nodes 
 | Retained buffer | `runtime.acquire_buffer_with_data(&data, access)` | `device.acquire_buffer(numpy_array, access)` → `Parcel` |
 | Render pass | `scheme.render_pass(...)` | `with scheme.render_pass(...) as rp:` |
 | Compute node | `scheme.node(...).dispatch(...)` | `scheme.node(...).with_parcel(...).dispatch(...)` |
-| Readback | `grant.consume(&submission)` | `grant.consume(submission)` |
+| Update retained buffer | `(&deposit << &data)?` | `deposit << numpy_bytes` |
 | Resource lifetime | Explicit `Arc<Runtime>` ownership | Managed by Python GC via PyO3 |
 
 ## Backend Selection

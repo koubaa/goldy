@@ -203,7 +203,7 @@ impl App {
             zoom: self.zoom,
         };
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.uniform_deposit.as_ref().unwrap().write_data(0, &[uniforms])?;
+        (self.uniform_deposit.as_ref().unwrap() << &uniforms)?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;

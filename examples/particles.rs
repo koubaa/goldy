@@ -348,7 +348,7 @@ impl RenderState {
             &mut particle_upload,
             DepositTarget::buffer_elements::<Particle>(&self.particle_buffer, NUM_PARTICLES as u64),
         )?;
-        particle_deposit.write_data(0, &particles)?;
+        (&particle_deposit << particles.as_slice())?;
         particle_upload.submit()?;
 
         if let Some(window) = &self.window {
@@ -370,7 +370,7 @@ impl RenderState {
             frame: self.frame_count,
         };
 
-        self.params_deposit.write_data(0, &[params])?;
+        (&self.params_deposit << &params)?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;

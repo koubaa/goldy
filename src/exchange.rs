@@ -7,8 +7,10 @@
 //! - Surface present: [`Transaction::claim`] → erased [`Claim`] → [`Claim::consume`] / discard,
 //!   or `(&mut submission >> &transaction).take()` for the common consume path
 //! - Host reads of parcels: `(&mut submission >> &parcel).take::<T>()` ([`crate::HostView`])
-//! - Memory deposit: [`DepositTransaction::write`] prepares an occurrence; submit claims it
-//!   internally and graph execution consumes it at the copy dispatch.
+//! - Memory deposit: [`DepositTransaction::write`] (or `(&deposit << &data)?`) prepares an
+//!   occurrence for this submission; submit claims it internally and graph execution consumes
+//!   it at the copy dispatch. Recording ([`MemoryExchange::bind_deposit`]) survives across
+//!   submissions; `<<` does not.
 
 use crate::backend::BufferHandle;
 use crate::buffer::StructuredBufferElement;
@@ -30,6 +32,7 @@ use crate::Buffer;
 use crate::Texture;
 #[cfg(feature = "graphics")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::ops::Shl;
 #[cfg(feature = "graphics")]
 use std::ops::Shr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -374,9 +377,10 @@ impl MemoryExchange {
 
     /// Bind a deposit into `target`. Shape (buffer range vs texture region) is target data.
     ///
-    /// Records copy topology once. Each submission must [`DepositTransaction::write`] before
-    /// [`Scheme::submit`]; submit claims the occurrence internally and graph execution consumes
-    /// it at the deposit copy dispatch.
+    /// Records copy topology once. Each submission must tender bytes via
+    /// [`DepositTransaction::write`] or `(&deposit << &data)?` before [`Scheme::submit`];
+    /// submit claims the occurrence internally and graph execution consumes it at the
+    /// deposit copy dispatch.
     pub fn bind_deposit(
         &self,
         scheme: &mut Scheme,
@@ -486,9 +490,18 @@ impl DepositBinding {
 
 /// Stable deposit relationship recorded in one [`Scheme`].
 ///
-/// Topology (destination copy) is recorded at bind time. Each submission writes staging
-/// bytes via [`Self::write`]; [`Scheme::submit`] claims the occurrence internally and graph
-/// execution consumes it at the deposit copy.
+/// Topology (destination copy) is recorded at bind time. Each submission tenders staging
+/// bytes via [`Self::write`] or `(&deposit << &data)?`; [`Scheme::submit`] claims the
+/// occurrence internally and graph execution consumes it at the copy dispatch.
+///
+/// `<<` applies to **this submission only**. [`MemoryExchange::bind_deposit`] is what
+/// survives across submissions. Offset and partial fills stay on [`Self::write`].
+///
+/// ```ignore
+/// (&deposit << &uniforms)?;      // StructuredBufferElement value
+/// (&deposit << vertices.as_slice())?;
+/// (&deposit << pixels.as_slice())?; // raw `[u8]`
+/// ```
 #[derive(Clone)]
 pub struct DepositTransaction {
     pub(crate) inner: Arc<DepositBinding>,
@@ -571,6 +584,30 @@ impl std::hash::Hash for DepositTransaction {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.inner.scheme_id.hash(state);
         self.inner.deposit_id.hash(state);
+    }
+}
+
+impl<T: StructuredBufferElement> Shl<&T> for &DepositTransaction {
+    type Output = Result<(), GoldyError>;
+
+    fn shl(self, data: &T) -> Self::Output {
+        self.write_data(0, std::slice::from_ref(data))
+    }
+}
+
+impl<T: StructuredBufferElement> Shl<&[T]> for &DepositTransaction {
+    type Output = Result<(), GoldyError>;
+
+    fn shl(self, data: &[T]) -> Self::Output {
+        self.write_data(0, data)
+    }
+}
+
+impl Shl<&[u8]> for &DepositTransaction {
+    type Output = Result<(), GoldyError>;
+
+    fn shl(self, data: &[u8]) -> Self::Output {
+        self.write(0, data)
     }
 }
 

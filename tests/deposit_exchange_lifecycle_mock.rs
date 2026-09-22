@@ -352,3 +352,32 @@ fn staging_absent_from_ledger_destination_raw_enforced() {
         "shared exchange staging must not appear as a cross-scheme ledger key"
     );
 }
+
+#[test]
+fn deposit_shl_tenders_occurrence_and_rejects_oversize() {
+    let device = mock_runtime();
+    let ctx = device.create_context().unwrap();
+    let dest = device
+        .acquire_buffer(
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            goldy::types::BufferFlags::empty(),
+            None,
+        )
+        .unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let deposit = MemoryExchange::new(&ctx)
+        .bind_deposit(&mut scheme, DepositTarget::buffer(dest.whole(), 16))
+        .unwrap();
+
+    let payload = [3u8; 16];
+    (&deposit << payload.as_slice()).expect("shl tender");
+    scheme.submit().expect("submit after shl");
+
+    let too_big = [0u8; 17];
+    assert!(
+        (&deposit << too_big.as_slice()).is_err(),
+        "oversize shl must fail like write"
+    );
+}

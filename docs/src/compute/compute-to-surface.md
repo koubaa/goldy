@@ -140,10 +140,7 @@ let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload,
     goldy::DepositTarget::buffer_elements::<Uniforms>(&uniform_buffer, 1),
 )?;
-uniform_deposit.write_data(
-    0,
-    &[Uniforms { width, height, time: elapsed }],
-)?;
+(&uniform_deposit << &Uniforms { width, height, time: elapsed })?;
 upload.submit()?;
 
 let mut submission = scheme.submit()?;

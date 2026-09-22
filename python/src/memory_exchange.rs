@@ -156,6 +156,9 @@ impl PyMemoryExchange {
 }
 
 /// Stable deposit relationship recorded in one scheme.
+///
+/// Write staging bytes before submit (`write` or `deposit << data`); submit claims
+/// the occurrence internally.
 #[pyclass(name = "DepositTransaction", module = "goldy", unsendable)]
 pub struct PyDepositTransaction {
     pub(crate) inner: DepositTransaction,
@@ -174,6 +177,11 @@ impl PyDepositTransaction {
     #[pyo3(signature = (data, offset=0))]
     fn write(&self, data: &[u8], offset: u64) -> PyResult<()> {
         self.inner.write(offset, data).into_py_result()
+    }
+
+    /// Tender bytes for this submission (`deposit << data`). Offset 0; use `write` for partial fills.
+    fn __lshift__(&self, data: &[u8]) -> PyResult<()> {
+        self.inner.write(0, data).into_py_result()
     }
 
     fn __repr__(&self) -> String {

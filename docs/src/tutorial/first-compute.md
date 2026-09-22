@@ -99,7 +99,7 @@ scheme
 
 ### Rendering a Frame
 
-Each frame: upload new uniform values via a small upload scheme with a bound deposit, submit the main scheme, then present with `(&mut submission >> &present).take()?`.
+Each frame: upload new uniform values via a small upload scheme with a bound deposit (`(&deposit << &uniforms)?`), submit the main scheme, then present with `(&mut submission >> &present).take()?`.
 
 ```rust
 fn render_frame(state: &mut RenderState) -> Result<()> {
@@ -112,7 +112,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         time: elapsed,
     };
 
-    state.uniform_deposit.write_data(0, &[uniforms])?;
+    (&state.uniform_deposit << &uniforms)?;
     state.upload_scheme.submit()?;
 
     let mut submission = state.scheme.submit()?;
@@ -133,7 +133,7 @@ let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
 
 ### Step by Step
 
-**Update uniforms** — `MemoryExchange::bind_deposit` records the upload topology once; each frame call `deposit.write_data` before the main submit.
+**Update uniforms** — `MemoryExchange::bind_deposit` records the upload topology once; each frame tender `(&deposit << &uniforms)?` before the main submit. `write` remains for offsets and partial fills.
 
 **Record the scheme once** — `SurfaceExchange::bind_destination` registers the present exchange and returns a [`PresentLease`](https://docs.rs/goldy/latest/goldy/struct.PresentLease.html) plus a [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). `scheme.node()` creates a compute node bound to a pipeline. `with_parcel()` declares the uniform buffer dependency. `with_present()` binds the drawable lease. `dispatch()` sets the workgroup count.
 

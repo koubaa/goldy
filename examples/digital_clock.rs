@@ -306,10 +306,7 @@ impl App {
         self.rerecord_scheme_if_needed(vertex_count, bg_color);
 
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.vertex_deposit
-            .as_ref()
-            .unwrap()
-            .write_data(0, &vertices)?;
+        (self.vertex_deposit.as_ref().unwrap() << vertices.as_slice())?;
         upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();

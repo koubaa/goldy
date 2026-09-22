@@ -461,7 +461,7 @@ impl WindowState {
         }
 
         let vertices = create_quad(self.current_time());
-        self.vertex_deposit.write_data(0, &vertices)?;
+        (&self.vertex_deposit << vertices.as_slice())?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
