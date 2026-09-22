@@ -191,12 +191,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         );
     }
 
-    fn retained_copy_reader(
-        ctx: &Context,
-        pipe: &ComputePipeline,
-        src: &Parcel,
-        dst: &Parcel,
-    ) -> Scheme {
+    fn retained_copy_reader(ctx: &Context, pipe: &ComputePipeline, src: &Parcel, dst: &Parcel) -> Scheme {
         let mut reader = Scheme::new(ctx);
         reader
             .node("copy", pipe)

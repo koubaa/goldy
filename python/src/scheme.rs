@@ -166,12 +166,8 @@ impl PyScheme {
                     "Only one recorder may be open per scheme",
                 ));
             }
-            let pass = RenderPassRecord::new_for_scheme_lease(
-                label,
-                &mut scheme.inner.borrow_mut(),
-                &lease.inner,
-                load.inner,
-            );
+            let pass =
+                RenderPassRecord::new_for_scheme_lease(label, &mut scheme.inner.borrow_mut(), &lease.inner, load.inner);
             *scheme.active_render_pass.borrow_mut() = Some(pass);
         }
         Ok(PySchemeRenderPass { scheme: slf })

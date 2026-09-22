@@ -526,10 +526,7 @@ fn parse_tensor_attr(attr: &Attribute) -> Result<TensorShapeSpec, Error> {
 fn parse_tensor_attr_args(input: ParseStream) -> Result<TensorShapeSpec, Error> {
     let ident: syn::Ident = input.parse()?;
     if ident != "shape" {
-        return Err(Error::new(
-            ident.span(),
-            "expected `shape = [...]` in #[tensor(...)]",
-        ));
+        return Err(Error::new(ident.span(), "expected `shape = [...]` in #[tensor(...)]"));
     }
     input.parse::<syn::Token![=]>()?;
     let content;

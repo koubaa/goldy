@@ -228,7 +228,7 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        
+
         let mut frame = scheme.submit().expect("submit");
         let loan = (&mut frame >> buf.whole()).take::<u8>().expect("host take");
         let result: &[f32] = bytemuck::cast_slice(&loan);
@@ -304,7 +304,7 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        
+
         let mut frame = scheme.submit().expect("submit");
         let loan = (&mut frame >> buf.whole()).take::<u8>().expect("host take");
         let result: &[f32] = bytemuck::cast_slice(&loan);
@@ -370,9 +370,11 @@ mod imp {
             .with_parcel(&buffers[0], NodeAccess::Read)
             .with_parcel(&buffers[NUM_BUFFERS - 1], NodeAccess::Write)
             .dispatch(workgroups, 1, 1);
-        
+
         let mut frame = scheme.submit().expect("submit");
-        let loan = (&mut frame >> buffers[NUM_BUFFERS - 1].whole()).take::<u8>().expect("host take");
+        let loan = (&mut frame >> buffers[NUM_BUFFERS - 1].whole())
+            .take::<u8>()
+            .expect("host take");
         let result: &[u32] = bytemuck::cast_slice(&loan);
         for i in (0..ELEM_COUNT).step_by(1024) {
             assert_eq!(

@@ -97,7 +97,7 @@ struct App {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-        scene_rt: Option<Lease<LeaseRenderTarget>>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     vertex_buffer: Option<Buffer>,
     texture: Option<Texture>,
@@ -189,7 +189,7 @@ impl App {
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            
+
             Ok(None)
         }
     }
@@ -289,7 +289,9 @@ impl App {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         self.frame_count += 1;

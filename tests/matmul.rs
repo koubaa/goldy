@@ -8,8 +8,8 @@ mod submission;
 use goldy::{
     BufferKind, MatMulDesc, MatMulView, MemoryExchange, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
 };
-use std::sync::Mutex;
 use std::ops::Shr;
+use std::sync::Mutex;
 
 static GPU: Mutex<()> = Mutex::new(());
 
@@ -27,7 +27,6 @@ fn runtime() -> Runtime {
 }
 
 fn read_f32(scheme: &mut Scheme, buf: &goldy::Buffer) -> Vec<f32> {
-    
     let mut sub = scheme.submit().expect("submit");
     let bytes = (&mut sub >> buf).take::<u8>().expect("host take");
     bytemuck::cast_slice(&bytes).to_vec()

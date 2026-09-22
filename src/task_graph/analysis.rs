@@ -1917,7 +1917,12 @@ mod tests {
     }
 
     /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
-    fn dispatch_node(label: impl Into<crate::SchemeLabel>, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
+    fn dispatch_node(
+        label: impl Into<crate::SchemeLabel>,
+        pipeline: u64,
+        bindings: Vec<(ResourceId, NodeAccess)>,
+        wg: u32,
+    ) -> TaskNode {
         TaskNode {
             group: None,
             label: label.into(),
@@ -2512,7 +2517,10 @@ mod tests {
 
     #[test]
     fn empty_graph() {
-        let ir = GraphIR { nodes: Vec::new(), ..Default::default() };
+        let ir = GraphIR {
+            nodes: Vec::new(),
+            ..Default::default()
+        };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
         let schedule = schedule_waves(&ir, &edges);
@@ -3107,7 +3115,10 @@ mod tests {
         let nodes: Vec<TaskNode> = (0..6)
             .map(|i| node("dispatch", i, vec![(range(0, i * 256, 256), NodeAccess::Write)], 1))
             .collect();
-        let ir = GraphIR { nodes, ..Default::default() };
+        let ir = GraphIR {
+            nodes,
+            ..Default::default()
+        };
         assert!(build_edges(&ir).is_empty());
     }
 
@@ -3198,7 +3209,10 @@ mod tests {
         let nodes: Vec<TaskNode> = (0..8)
             .map(|i| node("write", i, vec![(range(0, i * 128, 128), NodeAccess::Write)], 1))
             .collect();
-        let ir = GraphIR { nodes, ..Default::default() };
+        let ir = GraphIR {
+            nodes,
+            ..Default::default()
+        };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
         let schedule = schedule_waves(&ir, &edges);
@@ -3225,7 +3239,10 @@ mod tests {
                 1,
             ));
         }
-        let ir = GraphIR { nodes, ..Default::default() };
+        let ir = GraphIR {
+            nodes,
+            ..Default::default()
+        };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         // Each pair (write → read) is a chain of 2 waves, but pairs are independent
@@ -3320,7 +3337,10 @@ mod tests {
         let nodes: Vec<TaskNode> = (0..4)
             .map(|i| node("w", i, vec![(range(0, 0, 512), NodeAccess::Write)], 1))
             .collect();
-        let ir = GraphIR { nodes, ..Default::default() };
+        let ir = GraphIR {
+            nodes,
+            ..Default::default()
+        };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 4);
@@ -3930,7 +3950,10 @@ mod tests {
     /// Empty graph returns empty results without panicking.
     #[test]
     fn node_to_wave_map_empty_graph() {
-        let ir = GraphIR { nodes: vec![], ..Default::default() };
+        let ir = GraphIR {
+            nodes: vec![],
+            ..Default::default()
+        };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         let map = node_to_wave_map(&schedule, 0);

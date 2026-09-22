@@ -28,9 +28,8 @@ impl SchemeSubmission {
 
     /// Realize a host read of `parcel` after this submission.
     pub fn take(&mut self, parcel: &Parcel) -> Result<crate::memory_exchange::HostView> {
-        let ptr = crate::error::non_null_expect(unsafe {
-            sys::goldy_scheme_submission_take(self.ptr, parcel.as_ptr())
-        });
+        let ptr =
+            crate::error::non_null_expect(unsafe { sys::goldy_scheme_submission_take(self.ptr, parcel.as_ptr()) });
         Ok(crate::memory_exchange::HostView { ptr })
     }
 
@@ -150,7 +149,11 @@ impl Scheme {
         Ok(SchemeSubmission { ptr: submission })
     }
 
-    pub fn compute_node<'a>(&'a mut self, label: impl AsRef<str>, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
+    pub fn compute_node<'a>(
+        &'a mut self,
+        label: impl AsRef<str>,
+        pipeline: &ComputePipeline,
+    ) -> ComputeNodeBuilder<'a> {
         let label = CString::new(label.as_ref()).expect("compute node label contains interior null byte");
         expect_ok(unsafe { sys::goldy_scheme_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr()) });
         ComputeNodeBuilder {

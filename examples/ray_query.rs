@@ -217,7 +217,7 @@ fn record_scheme(
             .with_parcel(tlas, NodeAccess::Read)
             .with_parcel(target, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
-        
+
         Ok(None)
     }
 }

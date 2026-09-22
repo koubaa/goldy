@@ -123,7 +123,6 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        
         let mut frame = scheme.submit().expect("submit");
         let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
@@ -230,7 +229,6 @@ void rchit_main(inout HitPayload p) {
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        
         let mut frame = scheme.submit().expect("submit");
         drop(blas);
         drop(tlas);

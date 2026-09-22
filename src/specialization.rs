@@ -597,7 +597,9 @@ impl SchemePredictor {
                             })
                         }
                         // Evicted between insert and poll (cache smaller than the working set).
-                        None => tracing::debug!(node, label = %site.label, "specialization: variant evicted before use"),
+                        None => {
+                            tracing::debug!(node, label = %site.label, "specialization: variant evicted before use")
+                        }
                     }
                 }
                 Err(err) => {
@@ -749,7 +751,8 @@ fn compile_variant(
     // Once Slang is running the cancel flag is advisory: the module compile cannot be
     // aborted, but a result that arrives after cancellation is still worth caching.
     let module = ShaderModule::from_provenance(device, provenance, &define_refs).map_err(|e| format!("{e:#}"))?;
-    let pipeline = ComputePipeline::new_with_label(device, &module, Some(label.as_str())).map_err(|e| format!("{e:#}"))?;
+    let pipeline =
+        ComputePipeline::new_with_label(device, &module, Some(label.as_str())).map_err(|e| format!("{e:#}"))?;
     Ok(Some(pipeline))
 }
 

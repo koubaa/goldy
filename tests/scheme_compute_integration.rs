@@ -776,10 +776,7 @@ mod imp {
 
         let mut frame = scheme.submit().unwrap();
 
-        let nonzero_count = read_grant_u32(&mut frame, &out, N)
-            .iter()
-            .filter(|&&v| v != 0)
-            .count();
+        let nonzero_count = read_grant_u32(&mut frame, &out, N).iter().filter(|&&v| v != 0).count();
         assert_eq!(nonzero_count, 0, "expected all zeros after zero write");
     }
 
@@ -4342,8 +4339,7 @@ mod imp {
         for _ in 0..FRAMES {
             worker.submit().expect("worker submit");
             let mut frame = reader.submit().expect("reader submit");
-            last_pixels = (&mut frame >> &texture).take::<u8>().expect("host take")
-                .to_vec();
+            last_pixels = (&mut frame >> &texture).take::<u8>().expect("host take").to_vec();
         }
 
         assert!(

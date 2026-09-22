@@ -92,9 +92,9 @@ pub use scheme::{
     GroupBuilder, GroupId, Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder,
     SchemeNodeBuilder, Submission,
 };
-pub use scheme_label::SchemeLabel;
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
+pub use scheme_label::SchemeLabel;
 pub use shader_timing::{dump_totals, reset_totals};
 #[cfg(feature = "graphics")]
 pub use swapchain_pool::{AcquiredPresent, PresentLease};

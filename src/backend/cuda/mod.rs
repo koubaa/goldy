@@ -1613,8 +1613,15 @@ impl CudaBackend {
             };
 
             ops.push(
-                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z), label.clone())
-                    .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
+                self.materialize_launch(
+                    stream,
+                    pipeline_handle,
+                    &indices,
+                    &user,
+                    (wg_x, wg_y, wg_z),
+                    label.clone(),
+                )
+                .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
             );
         }
         Ok(ops)
@@ -2519,7 +2526,16 @@ impl CudaBackend {
                     }
                 }
                 GpuCommand::MatMul { label, desc, a, b, c } => {
-                    ops.push(matmul::materialize(self, ctx, stream, label.clone(), *desc, *a, *b, *c)?);
+                    ops.push(matmul::materialize(
+                        self,
+                        ctx,
+                        stream,
+                        label.clone(),
+                        *desc,
+                        *a,
+                        *b,
+                        *c,
+                    )?);
                 }
             }
         }

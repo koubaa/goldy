@@ -266,10 +266,7 @@ impl fmt::Display for TensorShapeSpec {
 }
 
 fn format_extents(dims: &[u32]) -> String {
-    dims.iter()
-        .map(|d| d.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+    dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
 }
 
 /// First binding of a symbolic contract dimension within one `record` call.
@@ -516,10 +513,7 @@ mod tests {
         dim.check("rms", "x", &[4], &mut env).unwrap();
         dim.check("rms", "weight", &[4], &mut env).unwrap();
         let err = dim.check("rms", "o", &[8], &mut env).unwrap_err();
-        assert!(
-            err.contains("expected `dim`=4 (from `x` axis 0), got 8"),
-            "{err}"
-        );
+        assert!(err.contains("expected `dim`=4 (from `x` axis 0), got 8"), "{err}");
     }
 
     #[test]

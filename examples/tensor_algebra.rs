@@ -25,7 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let y = rec.matmul("gemv", w.view(), x.view())?;
     drop(rec);
 
-    
     let mut sub = scheme.submit()?;
     let bytes = (&mut sub >> y.buffer()).take::<u8>()?;
     let out: &[f32] = bytemuck::cast_slice(&bytes);

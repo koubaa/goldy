@@ -161,7 +161,7 @@ fn record_scheme(
     } else {
         let target = readback.expect("capture readback");
         kernel.record(scheme, "compute", uniform, target).over_2d(width, height);
-        
+
         Ok(None)
     }
 }

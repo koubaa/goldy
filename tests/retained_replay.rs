@@ -700,7 +700,9 @@ fn withdraw_second_consume_errors() {
     drop(first);
     let second = (&mut frame >> &*buf).take::<u8>().expect("second host take");
     assert_eq!(second.len(), 64 * 4);
-    assert!(second.chunks_exact(4).all(|c| u32::from_le_bytes(c.try_into().unwrap()) == 42));
+    assert!(second
+        .chunks_exact(4)
+        .all(|c| u32::from_le_bytes(c.try_into().unwrap()) == 42));
 }
 
 /// Grant with no producing dispatch copies parcel bytes as-is (zero-initialized here so

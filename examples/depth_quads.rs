@@ -66,7 +66,7 @@ struct App {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-        scene_rt: Option<Lease<LeaseRenderTarget>>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     window: Option<Arc<Window>>,
     frame_count: u64,
@@ -144,14 +144,8 @@ impl App {
         cool_parcel: &Buffer,
     ) -> anyhow::Result<(DepositTransaction, DepositTransaction)> {
         let memory = MemoryExchange::new(ctx);
-        let warm_deposit = memory.bind_deposit(
-            scheme,
-            DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()),
-        )?;
-        let cool_deposit = memory.bind_deposit(
-            scheme,
-            DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()),
-        )?;
+        let warm_deposit = memory.bind_deposit(scheme, DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()))?;
+        let cool_deposit = memory.bind_deposit(scheme, DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()))?;
         Ok((warm_deposit, cool_deposit))
     }
 
@@ -167,7 +161,7 @@ impl App {
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            
+
             Ok(None)
         }
     }
@@ -259,7 +253,9 @@ impl App {
         if let Some(present) = &self.present {
             (&mut submission >> present).take()?;
         } else {
-            let pixels = (&mut submission >> self.readback.as_ref().unwrap()).take::<u8>()?.to_vec();
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

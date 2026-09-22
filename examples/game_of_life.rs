@@ -9,10 +9,9 @@
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, ComputePipeline, Context, Init, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
-    ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
-    VertexBufferLayout,
+    field, Buffer, ComputePipeline, Context, Init, Instance, Lease, LeaseRenderTarget, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, Submission,
+    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
 use std::ops::Shr;
 use std::sync::Arc;
@@ -76,7 +75,7 @@ fn bind_frame(
     } else {
         let readback = bind.readback.expect("capture readback");
         scheme.copy_to_texture(scene_rt, readback)?;
-        
+
         Ok(None)
     }
 }
@@ -102,10 +101,7 @@ fn build_scheme(
         &scene_rt,
     );
     let present = bind_frame(&mut scheme, &scene_rt, bind)?;
-    Ok(Recorded {
-        scheme,
-        present,
-    })
+    Ok(Recorded { scheme, present })
 }
 
 fn build_schemes(
@@ -366,7 +362,9 @@ impl RenderState {
         if let Some(present) = present {
             (submission >> present).take()?;
         } else {
-            let pixels = (submission >> readback.expect("capture readback")).take::<u8>()?.to_vec();
+            let pixels = (submission >> readback.expect("capture readback"))
+                .take::<u8>()?
+                .to_vec();
             capture.expect("capture dump").write_rgba(&pixels)?;
         }
         Ok(())

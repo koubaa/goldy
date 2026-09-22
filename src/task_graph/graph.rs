@@ -4919,7 +4919,10 @@ mod partitioning_tests {
 
     /// Call `partition_waves_can_retain` for a single-wave IR built from `nodes`.
     fn can_retain_single_wave(nodes: Vec<TaskNode>) -> bool {
-        let ir = GraphIR { nodes, ..Default::default() };
+        let ir = GraphIR {
+            nodes,
+            ..Default::default()
+        };
         let edges = analysis::build_edges(&ir);
         let schedule = analysis::schedule_waves(&ir, &edges);
         partition_waves_can_retain(&ir, &schedule.waves)

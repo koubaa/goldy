@@ -103,7 +103,6 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        
         let mut frame = scheme.submit().expect("submit");
         let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
@@ -170,7 +169,6 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        
         let mut frame = scheme.submit().expect("submit");
         let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
@@ -291,7 +289,6 @@ void cs_main(Accel scene, BufRO<float> verts, BufRO<uint> indices, Scattered<uin
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(2, 1, 1);
 
-        
         let mut frame = scheme.submit().expect("submit");
         let bytes = (&mut frame >> out.whole()).take::<u8>().expect("host take");
         let vals: [u32; 4] = bytemuck::pod_read_unaligned(&bytes);

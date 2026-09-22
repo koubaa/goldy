@@ -686,7 +686,7 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
     );
 
     let mut verify = Scheme::new(&ctx);
-    
+
     let mut sub = verify.submit().expect("verify submit");
     let staging_bytes = (&mut sub >> staging.whole()).take::<u8>().expect("host take");
     assert_eq!(&staging_bytes[..4], &[7, 0, 0, 0]);

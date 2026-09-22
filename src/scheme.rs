@@ -993,7 +993,11 @@ impl Scheme {
             node_range: node_offset..(node_offset + child_node_count),
         });
         for g in &child.desc.ir.groups {
-            let parent = Some(g.parent.map(|p| GroupId(p.0 + group_offset as u32 + 1)).unwrap_or(wrapper));
+            let parent = Some(
+                g.parent
+                    .map(|p| GroupId(p.0 + group_offset as u32 + 1))
+                    .unwrap_or(wrapper),
+            );
             self.desc.ir.groups.push(GroupInfo {
                 label: g.label.clone(),
                 parent,
@@ -1044,7 +1048,9 @@ impl Scheme {
                 self.desc.stdlib_pipelines.push(Arc::clone(pipe));
             }
         }
-        self.desc.prior_built_accels.extend(child.desc.prior_built_accels.iter().copied());
+        self.desc
+            .prior_built_accels
+            .extend(child.desc.prior_built_accels.iter().copied());
         self.specialization
             .copy_sites_from(&child.specialization, node_offset as u32);
         wrapper
@@ -1603,8 +1609,13 @@ impl Scheme {
     ) {
         let label = label.into();
         self.mark_structure_dirty();
-        self.specialization
-            .register_site(self.desc.ir.nodes.len() as u32, pipeline, provenance, label.clone(), &user_slots);
+        self.specialization.register_site(
+            self.desc.ir.nodes.len() as u32,
+            pipeline,
+            provenance,
+            label.clone(),
+            &user_slots,
+        );
         self.desc.ir.nodes.push(TaskNode {
             group: None,
             label,
@@ -2120,11 +2131,10 @@ impl Scheme {
             }
         }
         for id in referenced {
-            let binding = self
-                .desc
-                .deposits
-                .get(id as usize)
-                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
+            let binding =
+                self.desc.deposits.get(id as usize).ok_or_else(|| {
+                    GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})"))
+                })?;
             let handle = binding
                 .pending
                 .lock()
@@ -2276,7 +2286,10 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.desc.ir, &self.desc.prior_built_accels)?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(
+            &self.desc.ir,
+            &self.desc.prior_built_accels,
+        )?;
 
         let submit_result = {
             let grant_count = self.desc.present_transactions.len();
@@ -2447,7 +2460,10 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.desc.ir, &self.desc.prior_built_accels)?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(
+            &self.desc.ir,
+            &self.desc.prior_built_accels,
+        )?;
         let mut present_slots = Vec::new();
         let mut partial = crate::task_graph::PartitionSubmitResult::default();
         let mut partial_tv = self.ctx.gpu_progress();
@@ -2696,8 +2712,7 @@ impl Scheme {
         let binding_id = self.intern_present_binding(dst);
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
-        self.desc
-            .register_stamp_parts(ResourceId::Texture(src_h), stamp);
+        self.desc.register_stamp_parts(ResourceId::Texture(src_h), stamp);
         self.desc.ir.nodes.push(TaskNode {
             group: None,
             label: "copy_texture_to_present".into(),
@@ -3545,9 +3560,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         }
         let offset = validate_dispatch_shape_parcel(parcel)?;
         let resource = parcel.resource_id();
-        self.scheme
-            .desc
-            .register_stamp_parts(resource, parcel.stamp_handle());
+        self.scheme.desc.register_stamp_parts(resource, parcel.stamp_handle());
         self.register_specialization_site();
         let mut bindings = self.bindings;
         bindings.push(ResourceBinding {
@@ -3575,9 +3588,13 @@ impl<'a> SchemeNodeBuilder<'a> {
     fn register_specialization_site(&mut self) {
         if let Some(provenance) = self.provenance.as_ref() {
             let node = self.scheme.desc.ir.nodes.len() as u32;
-            self.scheme
-                .specialization
-                .register_site(node, self.pipeline, provenance, self.label.clone(), &self.user_slots);
+            self.scheme.specialization.register_site(
+                node,
+                self.pipeline,
+                provenance,
+                self.label.clone(),
+                &self.user_slots,
+            );
         }
     }
 
@@ -5087,7 +5104,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             vec![vec![0, 2], vec![1], vec![3]],
             "cpu node (1) is peeled from its depth group into its own wave"
         );
-        assert_eq!(analysis::wave_cpu_dispatch(&scheme.desc.ir, &schedule.waves[1]), Some(0));
+        assert_eq!(
+            analysis::wave_cpu_dispatch(&scheme.desc.ir, &schedule.waves[1]),
+            Some(0)
+        );
         assert!(
             !schedule.waves[1].barriers_before.is_empty(),
             "producer→cpu edge yields a barrier on A"
@@ -6261,7 +6281,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
         let transaction = scheme.register_present_exchange(&lease);
 
-        let dispatch = scheme.desc.ir
+        let dispatch = scheme
+            .desc
+            .ir
             .nodes
             .iter()
             .find(|n| matches!(n.kind, NodeKind::Dispatch { .. }))
@@ -6314,7 +6336,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
         let transaction = scheme.register_present_exchange(&lease);
 
-        let dispatch = scheme.desc.ir
+        let dispatch = scheme
+            .desc
+            .ir
             .nodes
             .iter()
             .find(|n| matches!(n.kind, NodeKind::Dispatch { .. }))
@@ -6739,7 +6763,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .expect_err("second bind for same lease must fail");
         assert!(err.to_string().contains("already bound"), "unexpected: {err}");
         // First transaction still works; only one copy+grant recorded beyond the bind path.
-        let copy_count = scheme.desc.ir
+        let copy_count = scheme
+            .desc
+            .ir
             .nodes
             .iter()
             .filter(|n| n.label == "copy_texture_to_present")
@@ -6775,7 +6801,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
 
         assert_ne!(left_tx.binding_id(), right_tx.binding_id());
-        let copy_bindings: Vec<_> = scheme.desc.ir
+        let copy_bindings: Vec<_> = scheme
+            .desc
+            .ir
             .nodes
             .iter()
             .filter(|n| n.label == "copy_texture_to_present")
@@ -7468,14 +7496,18 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         scheme.copy_texture_to_present(&tex, &lease);
         let present = scheme.register_present_exchange(&lease);
 
-        let fine_bindings: Vec<_> = scheme.desc.ir
+        let fine_bindings: Vec<_> = scheme
+            .desc
+            .ir
             .nodes
             .iter()
             .filter(|n| n.label == "fine_write")
             .flat_map(|n| &n.bindings)
             .filter(|b| matches!(b.resource, ResourceId::Texture(h) if h == tex_handle))
             .collect();
-        scheme.desc.ir
+        scheme
+            .desc
+            .ir
             .nodes
             .iter()
             .find(|n| n.label == "copy_texture_to_present")
@@ -7590,11 +7622,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let compute_tv = sub1.timeline_value();
         // Source WAR resolves at submit from the known copy timeline — before claim consume.
         let copy_tv = {
-            let stamp = scheme
-                .desc
-                .resource_stamps()
-                .get(&key)
-                .expect("out_image stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("out_image stamp");
             match stamp.pending.lock().unwrap()[0].poll() {
                 PromiseState::Resolved(tv) => tv,
                 other => panic!("present promise must be resolved after submit, got {other:?}"),
@@ -7947,7 +7975,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
         parent.include("g", &child).expect("include").finish();
         let edges = analysis::build_edges(&parent.desc.ir);
-        assert!(edges.contains(&(0, 1)), "writer must precede included reader: {edges:?}");
+        assert!(
+            edges.contains(&(0, 1)),
+            "writer must precede included reader: {edges:?}"
+        );
 
         crate::test_support::mock_reset_tracking(&device);
         parent.submit().expect("submit");
@@ -7963,7 +7994,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             }
             n
         });
-        assert!(barriers > 0, "RAW between parent write and included read must emit a barrier");
+        assert!(
+            barriers > 0,
+            "RAW between parent write and included read must emit a barrier"
+        );
     }
 
     #[test]
@@ -8155,7 +8189,12 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
                 Ok(())
             })
             .expect("group");
-        let labels = |s: &Scheme| s.ir_nodes().iter().map(|n| n.label.as_str().to_string()).collect::<Vec<_>>();
+        let labels = |s: &Scheme| {
+            s.ir_nodes()
+                .iter()
+                .map(|n| n.label.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
         let bindings = |s: &Scheme| s.ir_nodes().iter().map(|n| n.bindings.clone()).collect::<Vec<_>>();
         assert_eq!(labels(&via_include), labels(&via_group));
         assert_eq!(bindings(&via_include), bindings(&via_group));
@@ -8550,5 +8589,4 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         assert_eq!(f.scheme.specialization().cached_variants(), 2);
         assert!(f.scheme.specialization().cached_variants() <= SpecializationPolicy::default().max_cached_variants);
     }
-
 }

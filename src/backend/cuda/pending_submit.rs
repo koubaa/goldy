@@ -671,7 +671,15 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 args,
                 ..
             } => {
-                launch_direct(stream, label.as_deref(), function, *workgroup_size, *grid, args, validate)?;
+                launch_direct(
+                    stream,
+                    label.as_deref(),
+                    function,
+                    *workgroup_size,
+                    *grid,
+                    args,
+                    validate,
+                )?;
             }
             CudaOp::LaunchIndirect {
                 label,
