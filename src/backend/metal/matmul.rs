@@ -12,7 +12,7 @@ use objc::{class, msg_send, sel, sel_impl};
 #[link(name = "MetalPerformanceShaders", kind = "framework")]
 extern "C" {}
 
-const MPS_DATA_TYPE_FLOAT32: u32 = 0x10000 | 32;
+const MPS_DATA_TYPE_FLOAT32: u32 = 0x10000000 | 32;
 
 pub(super) fn encode(
     state: &MetalState,
@@ -31,10 +31,11 @@ pub(super) fn encode(
         let left = mps_matrix(state, &a, matrix_rows_cols_a(&desc), name, "A")?;
         let right = mps_matrix(state, &b, matrix_rows_cols_b(&desc), name, "B")?;
         let result = mps_matrix(state, &c, (desc.m as u64, desc.n as u64), name, "C")?;
+        let device: id = msg_send![command_buffer, device];
         let kernel: id = msg_send![class!(MPSMatrixMultiplication), alloc];
         let kernel: id = msg_send![
             kernel,
-            initWithDevice: command_buffer.device()
+            initWithDevice: device
             transposeLeft: desc.transpose_a
             transposeRight: desc.transpose_b
             resultRows: desc.m as u64
