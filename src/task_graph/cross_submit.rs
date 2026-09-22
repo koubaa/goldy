@@ -903,6 +903,7 @@ mod tests {
     fn single_binding_ir(resource: ResourceId, access: NodeAccess) -> GraphIR {
         GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "n".into(),
                 bindings: vec![ResourceBinding { resource, access }],
                 kind: NodeKind::Dispatch {
@@ -912,6 +913,7 @@ mod tests {
                     dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         }
     }
 
@@ -927,6 +929,7 @@ mod tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "write_tex".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(4),
@@ -965,6 +968,7 @@ mod tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "write_tex".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(4),
@@ -1230,6 +1234,7 @@ mod tests {
         let ledger = ledger_with_write(producer, key, 1);
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "draw".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::Buffer(10),
@@ -1241,6 +1246,7 @@ mod tests {
                     commands: vec![],
                 },
             }],
+            ..Default::default()
         };
         let net = net_access_per_resource(&ir);
         assert!(net[&key].read_pipeline_kinds.contains(UsageKindFlags::RENDER));
@@ -1289,6 +1295,7 @@ mod tests {
         let ledger = ledger_with_write(producer, key, 2);
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "read_tail".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::BufferRange {
@@ -1305,6 +1312,7 @@ mod tests {
                     dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         };
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
@@ -1329,6 +1337,7 @@ mod tests {
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "rw".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::Buffer(10),
@@ -1341,6 +1350,7 @@ mod tests {
                     dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         };
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);

@@ -18,6 +18,11 @@ impl SchemeLabel {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// `prefix/rest` for nested group provenance labels.
+    pub(crate) fn join_path(prefix: &Self, rest: &Self) -> Self {
+        format!("{prefix}/{rest}").into()
+    }
 }
 
 impl Deref for SchemeLabel {

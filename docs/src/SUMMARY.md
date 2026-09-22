@@ -11,6 +11,7 @@
 # Programming Model
 
 - [Parcels](./programming-model/parcels.md)
+- [Schemes](./programming-model/schemes.md)
 - [Virtual Entry Points](./programming-model/virtual-entry-points.md)
 - [Rust Compute Kernels](./programming-model/rust-kernels.md)
 - [CPU Dispatches](./programming-model/cpu-dispatch.md)

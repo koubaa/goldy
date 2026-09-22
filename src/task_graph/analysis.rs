@@ -372,6 +372,27 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         }
     }
 
+    for &(i, j) in &ir.extra_edges {
+        if i < j && j < n {
+            edge_set.insert((i, j));
+        }
+    }
+    for &(from, to) in &ir.extra_group_edges {
+        let Some(from_info) = ir.groups.get(from.0 as usize) else {
+            continue;
+        };
+        let Some(to_info) = ir.groups.get(to.0 as usize) else {
+            continue;
+        };
+        for i in from_info.node_range.clone() {
+            for j in to_info.node_range.clone() {
+                if i < j && j < n {
+                    edge_set.insert((i, j));
+                }
+            }
+        }
+    }
+
     let mut edges: Vec<_> = edge_set.into_iter().collect();
     edges.sort_unstable();
     edges
@@ -1888,7 +1909,7 @@ pub(crate) fn emit_graph_commands_for_waves(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task_graph::ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
+    use crate::task_graph::ir::{DispatchDim, GroupId, GroupInfo, NodeKind, ResourceBinding, TaskNode};
     use std::sync::Arc;
 
     fn buf(id: u64) -> ResourceId {
@@ -1898,6 +1919,7 @@ mod tests {
     /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
     fn dispatch_node(label: impl Into<crate::SchemeLabel>, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: bindings
                 .into_iter()
@@ -1922,6 +1944,7 @@ mod tests {
     /// is emitted (the staging prefix is only inserted when bindings exist).
     fn node_bound(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: bindings
                 .into_iter()
@@ -1939,6 +1962,7 @@ mod tests {
     /// Build a `ClearBuffer` `TaskNode`.
     fn clear_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: buffer,
@@ -1955,6 +1979,7 @@ mod tests {
     /// Build a `WriteBuffer` `TaskNode`.
     fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: buffer,
@@ -1970,6 +1995,7 @@ mod tests {
 
     fn write_texture_node(label: &'static str, texture: ResourceId, tex_handle: u64) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: texture,
@@ -1986,6 +2012,7 @@ mod tests {
 
     fn copy_buffer_node(label: &'static str, src: ResourceId, dst: ResourceId) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![
                 ResourceBinding {
@@ -2015,6 +2042,7 @@ mod tests {
         src_row_pitch: u32,
     ) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![
                 ResourceBinding {
@@ -2046,6 +2074,7 @@ mod tests {
                 copy_buffer_node("scene", buf(0), buf(1)),
                 copy_buffer_to_texture_node("gradient", buf(2), ResourceId::Texture(3), 3, 0),
             ],
+            ..Default::default()
         };
         let waves = graph_node_waves(&ir).unwrap();
         assert_eq!(
@@ -2063,6 +2092,7 @@ mod tests {
                 copy_buffer_node("config", buf(2), buf(3)),
                 copy_buffer_to_texture_node("gradient", buf(4), ResourceId::Texture(5), 5, 0),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2086,6 +2116,7 @@ mod tests {
                 1,
                 256,
             )],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2102,6 +2133,7 @@ mod tests {
                 1,
                 0,
             )],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2112,6 +2144,7 @@ mod tests {
     fn accel_build_wave_is_not_retainable() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "build_blas".into(),
                 bindings: vec![],
                 kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
@@ -2125,6 +2158,7 @@ mod tests {
                     index_count: 0,
                 }),
             }],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2136,6 +2170,7 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 TaskNode {
+                    group: None,
                     label: "draw".into(),
                     bindings: vec![],
                     kind: NodeKind::RenderPass {
@@ -2145,6 +2180,7 @@ mod tests {
                     },
                 },
                 TaskNode {
+                    group: None,
                     label: "copy_to_swapchain".into(),
                     bindings: vec![
                         ResourceBinding {
@@ -2162,6 +2198,7 @@ mod tests {
                     },
                 },
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2176,6 +2213,7 @@ mod tests {
     fn copy_render_target_resolves_swapchain_output_dst() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "copy_rt_to_swapchain".into(),
                 bindings: vec![
                     ResourceBinding {
@@ -2192,6 +2230,7 @@ mod tests {
                     dst: ResourceId::SwapchainOutput,
                 },
             }],
+            ..Default::default()
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
         let resolver = SlotResolver {
@@ -2214,6 +2253,7 @@ mod tests {
     fn copy_texture_resolves_swapchain_output_dst() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "copy_to_swapchain".into(),
                 bindings: vec![
                     ResourceBinding {
@@ -2231,6 +2271,7 @@ mod tests {
                     dst_buffer_layout: None,
                 },
             }],
+            ..Default::default()
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
         let resolver = SlotResolver {
@@ -2257,6 +2298,7 @@ mod tests {
     fn write_only_graph_no_staging_prefix() {
         let ir = GraphIR {
             nodes: vec![write_node("upload_a", buf(0), 0), write_node("upload_b", buf(1), 1)],
+            ..Default::default()
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
         let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
@@ -2273,6 +2315,7 @@ mod tests {
     fn dispatch_graph_gets_staging_prefix() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "A".into(),
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
@@ -2285,6 +2328,7 @@ mod tests {
                     dispatch: DispatchDim::Direct { x: 4, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
         let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
@@ -2302,6 +2346,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2322,6 +2367,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 node("B", 2, vec![(buf(1), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2339,6 +2385,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Read)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2356,6 +2403,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Read)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2372,6 +2420,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2388,6 +2437,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2400,6 +2450,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Overwrite)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2412,6 +2463,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Overwrite)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2424,6 +2476,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Read)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Overwrite)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2443,6 +2496,7 @@ mod tests {
                 node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
                 node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
 
@@ -2458,7 +2512,7 @@ mod tests {
 
     #[test]
     fn empty_graph() {
-        let ir = GraphIR { nodes: Vec::new() };
+        let ir = GraphIR { nodes: Vec::new(), ..Default::default() };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
         let schedule = schedule_waves(&ir, &edges);
@@ -2469,6 +2523,7 @@ mod tests {
     fn single_node() {
         let ir = GraphIR {
             nodes: vec![node("A", 1, vec![(buf(0), NodeAccess::ReadWrite)], 4)],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2487,6 +2542,7 @@ mod tests {
                 node("B", 2, vec![(buf(1), NodeAccess::Write)], 1),
                 node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2504,6 +2560,7 @@ mod tests {
                 node("A", 10, vec![(buf(0), NodeAccess::Write)], 8),
                 node("B", 20, vec![(buf(0), NodeAccess::Read)], 4),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2542,6 +2599,7 @@ mod tests {
                 node("A", 10, vec![(buf(0), NodeAccess::Write)], 8),
                 node("B", 20, vec![(buf(1), NodeAccess::Write)], 4),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2557,6 +2615,7 @@ mod tests {
     fn command_emission_with_resource_slots() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
+                group: None,
                 label: "A".into(),
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
@@ -2569,6 +2628,7 @@ mod tests {
                     dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2597,6 +2657,7 @@ mod tests {
         // A single ClearBuffer node should emit exactly one ClearBuffer command.
         let ir = GraphIR {
             nodes: vec![clear_node("clear", buf(0), 0)],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2611,6 +2672,7 @@ mod tests {
     fn write_node_emits_write_buffer_command() {
         let ir = GraphIR {
             nodes: vec![write_node("write", buf(0), 0)],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2629,6 +2691,7 @@ mod tests {
                 clear_node("clear", buf(0), 0),
                 node("read", 1, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2654,6 +2717,7 @@ mod tests {
                 clear_node("clear", buf(0), 0),
                 node("write", 1, vec![(buf(1), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2675,6 +2739,7 @@ mod tests {
                 write_node("write", buf(0), 0),
                 node("read", 1, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2696,6 +2761,7 @@ mod tests {
                 write_node("write", buf(0), 0),
                 node("write_b", 1, vec![(buf(1), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2711,6 +2777,7 @@ mod tests {
     fn write_texture_node_emits_write_texture_command() {
         let ir = GraphIR {
             nodes: vec![write_texture_node("up", tex(0), 0)],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2728,6 +2795,7 @@ mod tests {
                 write_texture_node("up", tex(0), 0),
                 node("read", 1, vec![(tex(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -2748,6 +2816,7 @@ mod tests {
                 write_texture_node("up", tex(0), 0),
                 node("buf", 1, vec![(buf(1), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2764,6 +2833,7 @@ mod tests {
         // Two clears on different buffers → independent → wave 0, no barrier
         let ir = GraphIR {
             nodes: vec![clear_node("clear_a", buf(0), 0), clear_node("clear_b", buf(1), 1)],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2785,6 +2855,7 @@ mod tests {
                 node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
                 node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -2987,6 +3058,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 256), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 256, 256), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         assert!(build_edges(&ir).is_empty());
     }
@@ -2999,6 +3071,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 512), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 256, 256), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         assert_eq!(build_edges(&ir), vec![(0, 1)]);
     }
@@ -3011,6 +3084,7 @@ mod tests {
                 node("A", 1, vec![(buf(10), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(10, 0, 64), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         assert_eq!(build_edges(&ir), vec![(0, 1)]);
     }
@@ -3022,6 +3096,7 @@ mod tests {
                 node("A", 1, vec![(buf(10), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(20, 0, 64), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         assert!(build_edges(&ir).is_empty());
     }
@@ -3032,7 +3107,7 @@ mod tests {
         let nodes: Vec<TaskNode> = (0..6)
             .map(|i| node("dispatch", i, vec![(range(0, i * 256, 256), NodeAccess::Write)], 1))
             .collect();
-        let ir = GraphIR { nodes };
+        let ir = GraphIR { nodes, ..Default::default() };
         assert!(build_edges(&ir).is_empty());
     }
 
@@ -3046,6 +3121,7 @@ mod tests {
                 node("B", 2, vec![(range(0, 0, 256), NodeAccess::Write)], 1),
                 node("C", 3, vec![(buf(99), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 2)]);
@@ -3068,6 +3144,7 @@ mod tests {
                 ),
                 node("B", 2, vec![(range(0, 200, 200), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         assert_eq!(build_edges(&ir), vec![(0, 1)]);
     }
@@ -3080,6 +3157,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 100), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 100, 100), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         assert!(build_edges(&ir).is_empty());
     }
@@ -3092,6 +3170,7 @@ mod tests {
                 node("A", 1, vec![(range(1, 0, 1024), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(2, 0, 1024), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         assert!(build_edges(&ir).is_empty());
     }
@@ -3104,6 +3183,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 1024), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 256, 256), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         assert_eq!(build_edges(&ir), vec![(0, 1)]);
     }
@@ -3118,7 +3198,7 @@ mod tests {
         let nodes: Vec<TaskNode> = (0..8)
             .map(|i| node("write", i, vec![(range(0, i * 128, 128), NodeAccess::Write)], 1))
             .collect();
-        let ir = GraphIR { nodes };
+        let ir = GraphIR { nodes, ..Default::default() };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
         let schedule = schedule_waves(&ir, &edges);
@@ -3145,7 +3225,7 @@ mod tests {
                 1,
             ));
         }
-        let ir = GraphIR { nodes };
+        let ir = GraphIR { nodes, ..Default::default() };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         // Each pair (write → read) is a chain of 2 waves, but pairs are independent
@@ -3192,6 +3272,7 @@ mod tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3221,6 +3302,7 @@ mod tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3238,7 +3320,7 @@ mod tests {
         let nodes: Vec<TaskNode> = (0..4)
             .map(|i| node("w", i, vec![(range(0, 0, 512), NodeAccess::Write)], 1))
             .collect();
-        let ir = GraphIR { nodes };
+        let ir = GraphIR { nodes, ..Default::default() };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         assert_eq!(schedule.waves.len(), 4);
@@ -3251,6 +3333,7 @@ mod tests {
     fn waves_single_node_with_buffer_range() {
         let ir = GraphIR {
             nodes: vec![node("A", 1, vec![(range(0, 0, 256), NodeAccess::ReadWrite)], 1)],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -3266,6 +3349,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 64), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 64, 64), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -3281,6 +3365,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 512), NodeAccess::Read)], 1),
                 node("B", 2, vec![(range(0, 0, 512), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -3295,6 +3380,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 512), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 0, 512), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         assert_eq!(edges, vec![(0, 1)]);
@@ -3320,6 +3406,7 @@ mod tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3340,6 +3427,7 @@ mod tests {
                 node("A", 1, vec![(range(42, 0, 256), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(42, 0, 256), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3364,6 +3452,7 @@ mod tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3381,6 +3470,7 @@ mod tests {
                 node("A", 1, vec![(buf(5), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(5, 0, 100), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3406,6 +3496,7 @@ mod tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3427,6 +3518,7 @@ mod tests {
                 node("A", 1, vec![(range(0, 0, 256), NodeAccess::Write)], 1),
                 node("B", 2, vec![(range(0, 256, 256), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3442,6 +3534,7 @@ mod tests {
                 node("A", 1, vec![(tex(7), NodeAccess::Write)], 1),
                 node("B", 2, vec![(tex(7), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3476,6 +3569,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 4),
                 node("B", 2, vec![(buf(1), NodeAccess::Write)], 4),
             ],
+            ..Default::default()
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1, "single wave must not be split");
@@ -3491,6 +3585,7 @@ mod tests {
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 node("B", 2, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1, "two-wave graph must not be split");
@@ -3509,6 +3604,7 @@ mod tests {
                 node_bound("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
                 node_bound("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 2, "3-wave diamond must produce two partitions");
@@ -3548,6 +3644,7 @@ mod tests {
                 node_bound("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
                 node_bound("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
@@ -3627,6 +3724,7 @@ mod tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 2, "coarse/fine graph must produce two partitions");
@@ -3659,6 +3757,7 @@ mod tests {
             nodes: (0u64..10)
                 .map(|i| node("x", i + 1, vec![(buf(i), NodeAccess::Write)], 1))
                 .collect(),
+            ..Default::default()
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1, "all-independent graph must not be split");
@@ -3680,6 +3779,7 @@ mod tests {
                 node("D", 4, vec![(buf(2), NodeAccess::Read), (buf(3), NodeAccess::Write)], 1),
                 node("E", 5, vec![(buf(3), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 2);
@@ -3719,6 +3819,7 @@ mod tests {
                 node("B", 2, vec![(buf(1), NodeAccess::Write)], 1),
                 node("C", 3, vec![(buf(2), NodeAccess::Write)], 1),
             ],
+            ..Default::default()
         };
         // All three nodes are independent → one wave → fewer than 3 waves → single partition.
         let parts = partitions(&ir);
@@ -3747,6 +3848,7 @@ mod tests {
                 node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
                 node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
 
         let old_map = graph_node_waves(&ir).unwrap();
@@ -3783,6 +3885,7 @@ mod tests {
                 ),
                 node("C", 3, vec![(transient_buf(1), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
 
         let edges = build_edges(&ir);
@@ -3812,6 +3915,7 @@ mod tests {
                 ),
                 node("read1", 3, vec![(transient_tex(1), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
 
         let edges = build_edges(&ir);
@@ -3826,12 +3930,119 @@ mod tests {
     /// Empty graph returns empty results without panicking.
     #[test]
     fn node_to_wave_map_empty_graph() {
-        let ir = GraphIR { nodes: vec![] };
+        let ir = GraphIR { nodes: vec![], ..Default::default() };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         let map = node_to_wave_map(&schedule, 0);
         assert!(map.is_empty());
         let intervals = transient_wave_intervals(&ir, &map).unwrap();
         assert!(intervals.is_empty());
+    }
+
+    #[test]
+    fn extra_edge_orders_independent_nodes() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("B", 2, vec![(buf(1), NodeAccess::Write)], 1),
+            ],
+            extra_edges: vec![(0, 1)],
+            ..Default::default()
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+        assert_eq!(schedule.waves[0].node_indices, vec![0]);
+        assert_eq!(schedule.waves[1].node_indices, vec![1]);
+    }
+
+    #[test]
+    fn extra_edge_redundant_with_ownership_is_idempotent() {
+        let base = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("B", 2, vec![(buf(0), NodeAccess::Write)], 1),
+            ],
+            ..Default::default()
+        };
+        let with_extra = GraphIR {
+            nodes: base.nodes.clone(),
+            extra_edges: vec![(0, 1)],
+            ..Default::default()
+        };
+        let without = build_edges(&base);
+        let with = build_edges(&with_extra);
+        assert_eq!(without, vec![(0, 1)]);
+        assert_eq!(with, without);
+        assert_eq!(schedule_waves(&base, &without).waves.len(), 2);
+        assert_eq!(schedule_waves(&with_extra, &with).waves.len(), 2);
+    }
+
+    #[test]
+    fn group_precedence_expands_to_all_pairs() {
+        let ir = GraphIR {
+            nodes: vec![
+                node("a0", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("a1", 2, vec![(buf(1), NodeAccess::Write)], 1),
+                node("b0", 3, vec![(buf(2), NodeAccess::Write)], 1),
+                node("b1", 4, vec![(buf(3), NodeAccess::Write)], 1),
+            ],
+            groups: vec![
+                GroupInfo {
+                    label: "A".into(),
+                    parent: None,
+                    node_range: 0..2,
+                },
+                GroupInfo {
+                    label: "B".into(),
+                    parent: None,
+                    node_range: 2..4,
+                },
+            ],
+            extra_group_edges: vec![(GroupId(0), GroupId(1))],
+            ..Default::default()
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 2), (0, 3), (1, 2), (1, 3)]);
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+    }
+
+    #[test]
+    fn backward_extra_edge_rejected() {
+        let mut ir = GraphIR {
+            nodes: vec![
+                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node("B", 2, vec![(buf(1), NodeAccess::Write)], 1),
+            ],
+            ..Default::default()
+        };
+        assert!(ir.add_extra_edge(1, 0).is_err());
+        ir.extra_edges.push((1, 0));
+        let err = crate::task_graph::validate::validate_graph(&ir).expect_err("backward extra edge");
+        assert!(err.to_string().contains("backward"), "{err}");
+    }
+
+    #[test]
+    fn group_label_path_propagates() {
+        let mut ir = GraphIR {
+            nodes: vec![node("node", 1, vec![(buf(0), NodeAccess::Write)], 1)],
+            groups: vec![
+                GroupInfo {
+                    label: "a".into(),
+                    parent: None,
+                    node_range: 0..1,
+                },
+                GroupInfo {
+                    label: "b".into(),
+                    parent: Some(GroupId(0)),
+                    node_range: 0..1,
+                },
+            ],
+            ..Default::default()
+        };
+        ir.nodes[0].group = Some(GroupId(1));
+        assert_eq!(ir.group_path_label(0).as_str(), "a/b/node");
     }
 }

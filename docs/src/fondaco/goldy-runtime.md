@@ -47,6 +47,7 @@ That split is a substrate artifact, not a machine requirement.
 | Compute-to-surface | `SurfaceExchange::bind_destination` | **Shipped** |
 | Pipelined frames | `FrameOrchestrator`, surface depth | **Shipped** |
 | Yielding scripts / `$yield` | Slang intrinsic + petition servicing | **Designed** |
+| Sub-scheme inclusion | `Scheme::include` / `Scheme::group` — snapshot copy of a child description | **Shipped** |
 | Scheme fusion (mega-kernel) | Merge adjacent dispatches | **Designed** |
 | Raster pass as fused draws | One `RenderPass` node per framebuffer epoch | **Shipped** (finer per-draw nodes: **Designed**) |
 | Scheme splitting (wavefront) | Split at yield points | **Designed** |
@@ -140,7 +141,11 @@ let mut submission = scheme.submit()?;
 
 ## 7. Schemes and GraphIR
 
-**Shipped.** Public type: `Scheme`. Internally Goldy holds **GraphIR** — nodes, ownership-derived edges, wave / partition analysis, retention fingerprints.
+**Shipped.** Public type: `Scheme`. Internally Goldy holds **GraphIR** — nodes, ownership-derived edges, group provenance, wave / partition analysis, retention fingerprints.
+
+`Scheme::include` copies a child's description into the parent as one group (snapshot: later mutation of the child does not affect the parent; the child stays independently submittable). `Scheme::group` is sugar: a temporary child on the same `Context`, then include. Group-level `.after(prior)` expands to node-pair precedences when the schedule cache is rebuilt — never on the clean submit path.
+
+**Restrictions** (all `GoldyError::Validation` at include time; the parent is left untouched): same `Context`; no pending record errors; no CPU dispatch, deposit, present/swapchain, yielding, or transient nodes; all child stamps alive (`StaleResource` otherwise).
 
 On `Scheme::submit`:
 

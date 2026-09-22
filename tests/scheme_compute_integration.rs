@@ -5010,6 +5010,49 @@ mod imp {
         assert_eq!(read_grant_u32(&mut frame, &b, 4), vec![15, 27, 39, 51]);
     }
 
+    fn scheme_include_child_dispatch_retains(device: &Runtime) {
+        let ctx = submission_context(device);
+        let shader = ShaderModule::from_slang(device, IN_PLACE_DOUBLE_SHADER).expect("compile shader");
+        let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
+
+        const N: usize = 64;
+        let initial: Vec<u32> = (0..N as u32).collect();
+        let buffer = device
+            .acquire_buffer_with_data(&initial, BufferKind::Scattered)
+            .expect("buffer");
+
+        let mut child = Scheme::new(&ctx);
+        child
+            .node("gemv", &pipeline)
+            .with_parcel(&buffer, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let mut standalone = child.submit().expect("standalone child");
+        let expected = read_grant_u32(&mut standalone, &buffer, N);
+        drop(standalone);
+
+        write_to_parcel(&ctx, &buffer, bytemuck::cast_slice(&initial)).expect("reset before parent");
+
+        let mut parent = Scheme::new(&ctx);
+        parent.include("child", &child).expect("include").finish();
+
+        const ROUNDS: u64 = 4;
+        let mut frame = parent.submit().expect("parent first submit");
+        let got = read_grant_u32(&mut frame, &buffer, N);
+        assert_eq!(got, expected, "included child must match standalone submit");
+        drop(frame);
+
+        for _ in 1..ROUNDS {
+            parent.submit().expect("parent resubmit");
+        }
+        assert_eq!(parent.replay_stats().records, 1, "included dispatch records once");
+        assert_eq!(
+            parent.replay_stats().clean_submits,
+            ROUNDS - 1,
+            "remaining submits are clean"
+        );
+    }
+
     /// Compute integration gate for all shipped backends, including CUDA-only builds:
     /// `cargo test --no-default-features --features cuda --test scheme_compute_integration`
     pub fn run() {
@@ -5163,6 +5206,7 @@ mod imp {
         trial!(scheme_cpu_dispatch_read_overwrite_and_params);
         trial!(scheme_cpu_dispatch_on_lease);
         trial!(scheme_cpu_dispatch_only_scheme);
+        trial_retain!(scheme_include_child_dispatch_retains);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);

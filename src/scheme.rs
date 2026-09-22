@@ -24,9 +24,7 @@ use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
 #[cfg(feature = "graphics")]
 use crate::swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
-use crate::task_graph::cross_submit::ResourceKey;
-#[cfg(feature = "graphics")]
-use crate::task_graph::cross_submit::ResourceKeyMap;
+use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
 #[cfg(feature = "graphics")]
 use crate::task_graph::DeferredPresentAcquire;
 use crate::task_graph::IrSubmitState;
@@ -37,7 +35,7 @@ use crate::task_graph::ResourceId;
 use crate::task_graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]
 use crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
-use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use crate::task_graph::{DispatchDim, GraphIR, GroupInfo, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::timeline::TimelineValue;
 #[cfg(feature = "graphics")]
 use crate::timeline::{PromiseResolver, TimelinePromise};
@@ -98,6 +96,8 @@ impl From<SubmissionHandle> for TimelineValue {
 pub(crate) enum ClaimKey {
     Present { present_idx: u32 },
 }
+
+pub use crate::task_graph::GroupId;
 
 /// Stable erased present relationship recorded in one [`Scheme`].
 ///
@@ -684,6 +684,30 @@ enum SchemeDirty {
     Structure,
 }
 
+/// Builder returned by [`Scheme::include`] for optional group-level precedence.
+pub struct GroupBuilder<'a> {
+    scheme: &'a mut Scheme,
+    id: GroupId,
+}
+
+impl GroupBuilder<'_> {
+    /// Require `prior` to complete before this included group.
+    ///
+    /// Record order is the total order: `prior` must have been recorded earlier.
+    /// A backward precedence is a [`GoldyError::Validation`] on the next submit.
+    pub fn after(self, prior: GroupId) -> Self {
+        if let Err(e) = self.scheme.desc.ir.add_group_edge(prior, self.id) {
+            self.scheme.record_errors.push(e.to_string());
+        }
+        self
+    }
+
+    /// Finish the include and return the group's identity.
+    pub fn finish(self) -> GroupId {
+        self.id
+    }
+}
+
 /// Snapshot of dirty/replay state taken at the start of [`Scheme::submit`].
 struct IrSubmitPrep {
     topo_dirty: bool,
@@ -695,25 +719,155 @@ struct IrSubmitPrep {
     deposit_claims: std::collections::HashMap<u32, Option<DepositClaim>>,
 }
 
+/// Recorded work: graph IR, keepalives, and topology side tables.
+///
+/// Distinct from [`Scheme`]'s per-Context instance state (retention, dirty flags,
+/// specialization predictor). [`Scheme::include`] copies this description.
+pub(crate) struct SchemeDesc {
+    pub ir: GraphIR,
+    interned_leases: Vec<Arc<LeaseInner>>,
+    record_constants: Vec<Arc<crate::Buffer>>,
+    stdlib_pipelines: Vec<Arc<crate::compute::ComputePipeline>>,
+    resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+    stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
+    prior_built_accels: HashSet<u64>,
+    cpu_dispatches: Vec<CpuDispatchExec>,
+    deposits: Vec<Arc<DepositBinding>>,
+    #[cfg(feature = "graphics")]
+    present_bindings: Vec<PresentBinding>,
+    #[cfg(feature = "graphics")]
+    present_transactions: Vec<PresentTransactionInfo>,
+}
+
+impl SchemeDesc {
+    fn new() -> Self {
+        Self {
+            ir: GraphIR::default(),
+            interned_leases: Vec::new(),
+            record_constants: Vec::new(),
+            stdlib_pipelines: Vec::new(),
+            resource_stamps: ResourceKeyMap::default(),
+            stamp_targets: Vec::new(),
+            prior_built_accels: HashSet::new(),
+            cpu_dispatches: Vec::new(),
+            deposits: Vec::new(),
+            #[cfg(feature = "graphics")]
+            present_bindings: Vec::new(),
+            #[cfg(feature = "graphics")]
+            present_transactions: Vec::new(),
+        }
+    }
+
+    fn register_parcel_stamp(&mut self, parcel: &Parcel) {
+        self.register_stamp_parts(parcel.resource_id(), parcel.stamp_handle());
+    }
+
+    fn register_stamp_parts(&mut self, resource_id: ResourceId, stamp: Arc<crate::parcel::ParcelStamp>) {
+        if let Some(key) = ResourceKey::from_resource_id(resource_id) {
+            if let Some(old) = self.resource_stamps.insert(key, stamp) {
+                self.stamp_targets
+                    .retain(|s| !std::sync::Arc::ptr_eq(s, &old) && s.is_alive());
+            }
+        } else {
+            self.stamp_targets.push(stamp);
+        }
+    }
+
+    fn register_buffer_stamps(&mut self, buffer: &crate::Buffer) {
+        for parcel in buffer.parcels() {
+            self.register_parcel_stamp(parcel);
+        }
+    }
+
+    fn register_stamp(&mut self, stamp: Arc<crate::parcel::ParcelStamp>) {
+        self.stamp_targets.push(stamp);
+    }
+
+    fn all_stamps_alive(&self) -> bool {
+        self.resource_stamps.values().all(|s| s.is_alive()) && self.stamp_targets.iter().all(|s| s.is_alive())
+    }
+
+    fn resource_stamps(&self) -> &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>> {
+        &self.resource_stamps
+    }
+
+    /// Conservative admission for [`Scheme::include`]: instance-state hybrids stay on the root.
+    fn validate_for_include(&self) -> Result<(), GoldyError> {
+        if !self.all_stamps_alive() {
+            return Err(GoldyError::StaleResource);
+        }
+        if !self.interned_leases.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme binds a transient parcel. \
+                 hint: lease-epoch semantics across two submitters are not admitted in v1"
+                    .into(),
+            ));
+        }
+        if !self.deposits.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme binds a memory deposit. \
+                 hint: deposits are single-use at the submitting root; record the deposit on the parent"
+                    .into(),
+            ));
+        }
+        #[cfg(feature = "graphics")]
+        if !self.present_transactions.is_empty() || !self.present_bindings.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme binds a present exchange. \
+                 hint: present/swapchain exchanges belong to the submitting root"
+                    .into(),
+            ));
+        }
+        for node in &self.ir.nodes {
+            if matches!(node.kind, NodeKind::CpuDispatch { .. }) {
+                return Err(GoldyError::Validation(
+                    "include: child scheme contains a CPU dispatch. \
+                     hint: CPU nodes hold instance closures and cannot be snapshotted"
+                        .into(),
+                ));
+            }
+            for b in &node.bindings {
+                match b.resource {
+                    ResourceId::Deposit(_) => {
+                        return Err(GoldyError::Validation(
+                            "include: child scheme binds a memory deposit. \
+                             hint: deposits are single-use at the submitting root"
+                                .into(),
+                        ));
+                    }
+                    #[cfg(feature = "graphics")]
+                    ResourceId::PresentLease(_) | ResourceId::SwapchainOutput => {
+                        return Err(GoldyError::Validation(
+                            "include: child scheme binds a present lease or swapchain output. \
+                             hint: exchanges belong to the submitting root"
+                                .into(),
+                        ));
+                    }
+                    ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_) => {
+                        return Err(GoldyError::Validation(
+                            "include: child scheme binds a transient parcel. \
+                             hint: lease-epoch semantics across two submitters are not admitted in v1"
+                                .into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A retained scheme: a set of dispatches held across submissions with COW dirty tracking.
 ///
 /// Build the scheme's nodes once via [`Self::node`]; call [`Self::submit`] every frame.
 /// While clean, `submit` pays neither recording nor fingerprint-hashing cost.
 pub struct Scheme {
-    ir: GraphIR,
+    desc: SchemeDesc,
     submit_state: IrSubmitState,
     /// Context this scheme submits on. Fixed at construction; many schemes per context,
     /// exactly one context per scheme.
     ctx: Context,
-    /// Interned lease clones: held for lifetime so backing outlives IR handles, not for lookup.
-    interned_leases: Vec<Arc<LeaseInner>>,
-    /// Scheme-owned constant buffers (tensor kernel metadata, …). Held so retained
-    /// replay does not need an external keepalive.
-    record_constants: Vec<crate::Buffer>,
-    /// Recorded deposit relationships (topology only; staging lives on the exchange).
-    deposits: Vec<Arc<DepositBinding>>,
-    /// Host functions and staging for [`NodeKind::CpuDispatch`] nodes, indexed by `cpu_id`.
-    cpu_dispatches: Vec<CpuDispatchExec>,
     /// COW dirty level: structural vs params-only vs clean. Cleared by a successful submit.
     dirty: SchemeDirty,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
@@ -723,22 +877,12 @@ pub struct Scheme {
     stats: ReplayStats,
     /// Process-unique identity for cross-scheme [`Submission`] pairing.
     scheme_id: u64,
-    /// Interned present bindings: index is [`ResourceId::PresentLease`] id.
-    #[cfg(feature = "graphics")]
-    present_bindings: Vec<PresentBinding>,
-    /// Registered present exchanges: one claim slot per transaction, keyed by dense present_idx.
-    #[cfg(feature = "graphics")]
-    present_transactions: Vec<PresentTransactionInfo>,
     /// Record-time diagnostics flushed on [`Self::submit`].
     record_errors: Vec<String>,
-    /// Accel handles already GPU-built on this object (`build_blas` / `build_tlas`).
-    prior_built_accels: HashSet<u64>,
     /// Per-dispatch-site shader specialization predictor (see `specialization.rs`).
     specialization: crate::specialization::SchemePredictor,
     /// Counters of yielding nodes, keyed by node index.
     yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
-    /// Stdlib compute pipelines interned for semantic ops (MatMul fallback).
-    stdlib_pipelines: Vec<Arc<crate::compute::ComputePipeline>>,
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -762,27 +906,17 @@ impl Scheme {
     /// Create a scheme bound to `ctx`.
     pub fn new(ctx: &Context) -> Self {
         Self {
-            ir: GraphIR::default(),
+            desc: SchemeDesc::new(),
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
-            interned_leases: Vec::new(),
-            record_constants: Vec::new(),
-            deposits: Vec::new(),
-            cpu_dispatches: Vec::new(),
             dirty: SchemeDirty::Structure,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
             specialization: crate::specialization::SchemePredictor::new(),
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
-            #[cfg(feature = "graphics")]
-            present_bindings: Vec::new(),
-            #[cfg(feature = "graphics")]
-            present_transactions: Vec::new(),
             record_errors: Vec::new(),
-            prior_built_accels: HashSet::new(),
             yield_stats: HashMap::new(),
-            stdlib_pipelines: Vec::new(),
         }
     }
 
@@ -800,6 +934,120 @@ impl Scheme {
     /// Context this scheme submits on.
     pub fn context(&self) -> &Context {
         &self.ctx
+    }
+
+    /// Copy `child`'s description into this scheme as one group.
+    ///
+    /// Snapshot: later mutation of `child` does not affect `self`; `child` remains
+    /// independently submittable. Interleaving parent and child submits on shared
+    /// parcels will `topology_dirty` the parent and re-record barriers (correct, not free).
+    pub fn include(
+        &mut self,
+        label: impl Into<crate::SchemeLabel>,
+        child: &Scheme,
+    ) -> Result<GroupBuilder<'_>, GoldyError> {
+        if !Arc::ptr_eq(&self.ctx.inner, &child.ctx.inner) {
+            return Err(GoldyError::Validation(
+                "include: child scheme was recorded on a different Context. \
+                 hint: parent and child must share a Context"
+                    .into(),
+            ));
+        }
+        if let Some(msg) = child.record_errors.first() {
+            return Err(GoldyError::Validation(format!(
+                "include: child scheme has a pending record error: {msg}"
+            )));
+        }
+        if !child.yield_stats.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme contains a yielding dispatch. \
+                 hint: yielding nodes are host-driven instance state and cannot be snapshotted"
+                    .into(),
+            ));
+        }
+        child.desc.validate_for_include()?;
+        let id = self.copy_child_desc(label.into(), child);
+        self.mark_structure_dirty();
+        Ok(GroupBuilder { scheme: self, id })
+    }
+
+    /// Record `f` onto a temporary child on this context and [`Self::include`] it.
+    pub fn group(
+        &mut self,
+        label: impl Into<crate::SchemeLabel>,
+        f: impl FnOnce(&mut Scheme) -> Result<(), GoldyError>,
+    ) -> Result<GroupId, GoldyError> {
+        let mut child = Scheme::new(&self.ctx);
+        f(&mut child)?;
+        Ok(self.include(label, &child)?.finish())
+    }
+
+    fn copy_child_desc(&mut self, label: crate::SchemeLabel, child: &Scheme) -> GroupId {
+        let node_offset = self.desc.ir.nodes.len();
+        let group_offset = self.desc.ir.groups.len();
+        let child_node_count = child.desc.ir.nodes.len();
+        let wrapper = GroupId(group_offset as u32);
+        self.desc.ir.groups.push(GroupInfo {
+            label: label.clone(),
+            parent: None,
+            node_range: node_offset..(node_offset + child_node_count),
+        });
+        for g in &child.desc.ir.groups {
+            let parent = Some(g.parent.map(|p| GroupId(p.0 + group_offset as u32 + 1)).unwrap_or(wrapper));
+            self.desc.ir.groups.push(GroupInfo {
+                label: g.label.clone(),
+                parent,
+                node_range: (g.node_range.start + node_offset)..(g.node_range.end + node_offset),
+            });
+        }
+        for node in &child.desc.ir.nodes {
+            let mut copied = node.clone();
+            copied.label = crate::SchemeLabel::join_path(&label, &node.label);
+            copied.group = Some(match node.group {
+                Some(g) => GroupId(g.0 + group_offset as u32 + 1),
+                None => wrapper,
+            });
+            self.desc.ir.nodes.push(copied);
+        }
+        for &(i, j) in &child.desc.ir.extra_edges {
+            self.desc.ir.extra_edges.push((i + node_offset, j + node_offset));
+        }
+        for &(from, to) in &child.desc.ir.extra_group_edges {
+            self.desc.ir.extra_group_edges.push((
+                GroupId(from.0 + group_offset as u32 + 1),
+                GroupId(to.0 + group_offset as u32 + 1),
+            ));
+        }
+
+        for (key, stamp) in child.desc.resource_stamps.iter() {
+            if let Some(old) = self.desc.resource_stamps.insert(*key, Arc::clone(stamp)) {
+                self.desc
+                    .stamp_targets
+                    .retain(|s| !Arc::ptr_eq(s, &old) && s.is_alive());
+            }
+        }
+        for stamp in &child.desc.stamp_targets {
+            if !self.desc.stamp_targets.iter().any(|s| Arc::ptr_eq(s, stamp)) {
+                self.desc.stamp_targets.push(Arc::clone(stamp));
+            }
+        }
+        for lease in &child.desc.interned_leases {
+            if !self.desc.interned_leases.iter().any(|held| Arc::ptr_eq(held, lease)) {
+                self.desc.interned_leases.push(Arc::clone(lease));
+            }
+        }
+        self.desc
+            .record_constants
+            .extend(child.desc.record_constants.iter().cloned());
+        for pipe in &child.desc.stdlib_pipelines {
+            if !self.desc.stdlib_pipelines.iter().any(|held| Arc::ptr_eq(held, pipe)) {
+                self.desc.stdlib_pipelines.push(Arc::clone(pipe));
+            }
+        }
+        self.desc.prior_built_accels.extend(child.desc.prior_built_accels.iter().copied());
+        self.specialization
+            .copy_sites_from(&child.specialization, node_offset as u32);
+        wrapper
     }
 
     /// True when the next [`Self::submit`] must re-record at least one partition.
@@ -843,7 +1091,7 @@ impl Scheme {
     /// Register stamp targets collected during compute-node recording.
     pub(crate) fn apply_compute_stamps(&mut self, stamps: &[std::sync::Arc<crate::parcel::ParcelStamp>]) {
         for stamp in stamps {
-            self.submit_state.register_stamp(stamp.clone());
+            self.desc.register_stamp(stamp.clone());
         }
     }
 
@@ -869,14 +1117,15 @@ impl Scheme {
                 "copy_buffer_parcel requires buffer parcels"
             )));
         }
-        self.submit_state.register_parcel_stamp(src);
-        self.submit_state.register_parcel_stamp(dst);
+        self.desc.register_parcel_stamp(src);
+        self.desc.register_parcel_stamp(dst);
         let dst_access = if dst_offset == 0 && size == dst.byte_size() {
             NodeAccess::Overwrite
         } else {
             NodeAccess::Write
         };
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_buffer_parcel".into(),
             bindings: vec![
                 ResourceBinding {
@@ -945,7 +1194,7 @@ impl Scheme {
             )));
         }
         let (vertex_buffer, vertex_offset) = parcel_gpu_buffer(vertices)?;
-        self.submit_state.register_parcel_stamp(vertices);
+        self.desc.register_parcel_stamp(vertices);
         let mut bindings = vec![
             ResourceBinding {
                 resource: vertices.resource_id(),
@@ -957,7 +1206,7 @@ impl Scheme {
             },
         ];
         let (index_buffer, index_offset, index_count) = if let Some((idx, count)) = indices {
-            self.submit_state.register_parcel_stamp(idx);
+            self.desc.register_parcel_stamp(idx);
             bindings.push(ResourceBinding {
                 resource: idx.resource_id(),
                 access: NodeAccess::Read,
@@ -996,7 +1245,8 @@ impl Scheme {
             }
             (None, 0, 0)
         };
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "build_blas".into(),
             bindings,
             kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
@@ -1060,7 +1310,8 @@ impl Scheme {
             });
         }
         dest.retain_blases(instances);
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "build_tlas".into(),
             bindings,
             kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::Tlas {
@@ -1078,7 +1329,7 @@ impl Scheme {
         target: DepositTarget<'_>,
     ) -> Result<crate::exchange::DepositTransaction, GoldyError> {
         self.mark_structure_dirty();
-        let deposit_id = u32::try_from(self.deposits.len()).expect("deposit id overflow");
+        let deposit_id = u32::try_from(self.desc.deposits.len()).expect("deposit id overflow");
         let src_resource = ResourceId::Deposit(deposit_id);
         let capacity = match target {
             DepositTarget::Buffer {
@@ -1105,14 +1356,15 @@ impl Scheme {
                     )));
                 }
                 let copy_size = capacity.min(remaining);
-                self.submit_state.register_parcel_stamp(destination);
+                self.desc.register_parcel_stamp(destination);
                 let abs_dst_offset = destination.source_offset() + dst_offset;
                 let dst_access = if dst_offset == 0 && copy_size == destination.byte_size() {
                     NodeAccess::Overwrite
                 } else {
                     NodeAccess::Write
                 };
-                self.ir.nodes.push(TaskNode {
+                self.desc.ir.nodes.push(TaskNode {
+                    group: None,
                     label: "deposit_buffer".into(),
                     bindings: vec![
                         ResourceBinding {
@@ -1182,7 +1434,8 @@ impl Scheme {
                 } else {
                     NodeAccess::Write
                 };
-                self.ir.nodes.push(TaskNode {
+                self.desc.ir.nodes.push(TaskNode {
+                    group: None,
                     label: "deposit_texture".into(),
                     bindings: vec![
                         ResourceBinding {
@@ -1218,7 +1471,7 @@ impl Scheme {
             pool: Arc::clone(self.ctx.deposit_pool()),
             scheme_alive: Arc::new(AtomicBool::new(true)),
         });
-        self.deposits.push(Arc::clone(&binding));
+        self.desc.deposits.push(Arc::clone(&binding));
         Ok(crate::exchange::DepositTransaction { inner: binding })
     }
 
@@ -1269,13 +1522,14 @@ impl Scheme {
             )));
         }
         let th = dst.gpu_handle();
-        self.submit_state.register_parcel_stamp(src);
+        self.desc.register_parcel_stamp(src);
         let dst_access = if x == 0 && y == 0 && width == dst.width() && height == dst.height() {
             NodeAccess::Overwrite
         } else {
             NodeAccess::Write
         };
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_buffer_to_texture".into(),
             bindings: vec![
                 ResourceBinding {
@@ -1318,8 +1572,9 @@ impl Scheme {
         } else {
             size
         };
-        self.submit_state.register_parcel_stamp(parcel);
-        self.ir.nodes.push(TaskNode {
+        self.desc.register_parcel_stamp(parcel);
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "clear_parcel".into(),
             bindings: vec![ResourceBinding {
                 resource: parcel.resource_id(),
@@ -1349,8 +1604,9 @@ impl Scheme {
         let label = label.into();
         self.mark_structure_dirty();
         self.specialization
-            .register_site(self.ir.nodes.len() as u32, pipeline, provenance, label.clone(), &user_slots);
-        self.ir.nodes.push(TaskNode {
+            .register_site(self.desc.ir.nodes.len() as u32, pipeline, provenance, label.clone(), &user_slots);
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label,
             bindings,
             kind: NodeKind::Dispatch {
@@ -1375,7 +1631,8 @@ impl Scheme {
     ) {
         self.apply_compute_stamps(stamp_targets);
         self.mark_structure_dirty();
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: label.into(),
             bindings,
             kind: NodeKind::RenderPass {
@@ -1391,21 +1648,21 @@ impl Scheme {
     /// Render-target stamps are registered here (moved from mint time) so submit still
     /// knows the stamp before the first present WAR.
     pub(crate) fn intern_lease(&mut self, inner: &Arc<LeaseInner>) {
-        if self.interned_leases.iter().any(|held| Arc::ptr_eq(held, inner)) {
+        if self.desc.interned_leases.iter().any(|held| Arc::ptr_eq(held, inner)) {
             return;
         }
         #[cfg(feature = "graphics")]
         if let Some(LeaseBacking::RenderTarget(rt)) = inner.backing.as_ref() {
-            self.submit_state
+            self.desc
                 .register_stamp_parts(ResourceId::RenderTarget(rt.backend_handle()), rt.stamp_handle());
         }
-        self.interned_leases.push(Arc::clone(inner));
+        self.desc.interned_leases.push(Arc::clone(inner));
     }
 
     /// Intern a record-time constant buffer so it outlives IR nodes that bind it.
     pub(crate) fn intern_record_buffer(&mut self, buf: crate::Buffer) -> crate::parcel::Parcel {
         let parcel = buf.whole().clone();
-        self.record_constants.push(buf);
+        self.desc.record_constants.push(Arc::new(buf));
         parcel
     }
 
@@ -1501,7 +1758,7 @@ impl Scheme {
     }
 
     pub(crate) fn register_stamp(&mut self, resource: ResourceId, stamp: std::sync::Arc<crate::parcel::ParcelStamp>) {
-        self.submit_state.register_stamp_parts(resource, stamp);
+        self.desc.register_stamp_parts(resource, stamp);
     }
 
     pub(crate) fn push_matmul_node(
@@ -1515,7 +1772,8 @@ impl Scheme {
         native: bool,
     ) {
         self.mark_structure_dirty();
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label,
             bindings: vec![
                 ResourceBinding {
@@ -1545,10 +1803,10 @@ impl Scheme {
 
     /// Identity of the node appended most recently. Call sites push first, then ask.
     fn last_node_id(&self) -> NodeId {
-        debug_assert!(!self.ir.nodes.is_empty(), "last_node_id after a push");
+        debug_assert!(!self.desc.ir.nodes.is_empty(), "last_node_id after a push");
         NodeId {
             scheme_id: self.scheme_id,
-            index: (self.ir.nodes.len() - 1) as u32,
+            index: (self.desc.ir.nodes.len() - 1) as u32,
         }
     }
 
@@ -1565,6 +1823,7 @@ impl Scheme {
         }
         let index = node.index();
         let kind = self
+            .desc
             .ir
             .nodes
             .get_mut(index)
@@ -1603,7 +1862,7 @@ impl Scheme {
             }
             _ => (false, Vec::new()),
         };
-        let label = self.ir.nodes[node.index()].label.clone();
+        let label = self.desc.ir.nodes[node.index()].label.clone();
         self.specialization.register_site(
             node.index() as u32,
             pipeline.handle,
@@ -1681,7 +1940,7 @@ impl Scheme {
         if changed {
             let index = node.index();
             if let Some(universal) = self.specialization.on_param_changed(index as u32, param_index) {
-                if let NodeKind::Dispatch { pipeline, .. } = &mut self.ir.nodes[index].kind {
+                if let NodeKind::Dispatch { pipeline, .. } = &mut self.desc.ir.nodes[index].kind {
                     *pipeline = universal;
                 }
             }
@@ -1712,16 +1971,16 @@ impl Scheme {
     /// Number of CPU dispatch nodes recorded on this scheme.
     #[doc(hidden)]
     pub fn cpu_dispatch_count(&self) -> usize {
-        self.cpu_dispatches.len()
+        self.desc.cpu_dispatches.len()
     }
 
     /// Mark every CPU dispatch's staging as referenced by the submission at `tv`.
     fn stamp_cpu_dispatches(&self, tv: TimelineValue) {
-        if self.cpu_dispatches.is_empty() {
+        if self.desc.cpu_dispatches.is_empty() {
             return;
         }
         let ctx_h = self.ctx.backend_handle();
-        for exec in &self.cpu_dispatches {
+        for exec in &self.desc.cpu_dispatches {
             exec.stamp(ctx_h, tv);
         }
     }
@@ -1753,7 +2012,7 @@ impl Scheme {
     }
 
     fn prepare_ir_submit(&mut self) -> Result<IrSubmitPrep, GoldyError> {
-        if !self.submit_state.all_stamps_alive() {
+        if !self.desc.all_stamps_alive() {
             // Dropping a retained-pool resource invalidates schemes that still bind it.
             self.submit_state.invalidate_retention();
             return Err(GoldyError::StaleResource);
@@ -1771,7 +2030,7 @@ impl Scheme {
             let device = self.ctx.runtime().clone();
             if self
                 .specialization
-                .begin_submit(&device, &mut self.ir, was_clean, topo_dirty)
+                .begin_submit(&device, &mut self.desc.ir, was_clean, topo_dirty)
             {
                 self.mark_params_dirty();
             }
@@ -1788,11 +2047,11 @@ impl Scheme {
         {
             let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
             use crate::task_graph::cross_submit::net_access_per_resource;
-            let net = net_access_per_resource(&self.ir);
+            let net = net_access_per_resource(&self.desc.ir);
             let ctx = self.ctx.backend_handle();
             for (key, access) in &net {
                 if access.writes {
-                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
+                    if let Some(stamp) = self.desc.resource_stamps().get(key) {
                         stamp.drain_pending_for_submit_gate(ctx);
                         if stamp.host_claim_count() > 0 {
                             return Err(GoldyError::Validation(
@@ -1816,7 +2075,7 @@ impl Scheme {
     }
 
     fn realize_matmul_nodes(&mut self) -> Result<(), GoldyError> {
-        let needs_fallback = self.ir.nodes.iter().any(|n| {
+        let needs_fallback = self.desc.ir.nodes.iter().any(|n| {
             matches!(
                 &n.kind,
                 NodeKind::MatMul(node) if !node.native && node.fallback_pipeline.is_none()
@@ -1827,8 +2086,8 @@ impl Scheme {
         }
         let pipeline = self.ctx.runtime().stdlib_matmul_f32()?;
         let handle = pipeline.handle;
-        self.stdlib_pipelines.push(pipeline);
-        for node in &mut self.ir.nodes {
+        self.desc.stdlib_pipelines.push(pipeline);
+        for node in &mut self.desc.ir.nodes {
             if let NodeKind::MatMul(matmul) = &mut node.kind {
                 if !matmul.native && matmul.fallback_pipeline.is_none() {
                     matmul.fallback_pipeline = Some(handle);
@@ -1853,7 +2112,7 @@ impl Scheme {
 
     fn claim_deposits_into(&mut self, prep: &mut IrSubmitPrep) -> Result<(), GoldyError> {
         let mut referenced = HashSet::new();
-        for node in &self.ir.nodes {
+        for node in &self.desc.ir.nodes {
             for b in &node.bindings {
                 if let ResourceId::Deposit(id) = b.resource {
                     referenced.insert(id);
@@ -1862,6 +2121,7 @@ impl Scheme {
         }
         for id in referenced {
             let binding = self
+                .desc
                 .deposits
                 .get(id as usize)
                 .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("submit: IR references unknown Deposit({id})")))?;
@@ -1909,10 +2169,10 @@ impl Scheme {
 
         if on_record_path {
             use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
-            let net = net_access_per_resource(&self.ir);
+            let net = net_access_per_resource(&self.desc.ir);
             self.prev_topology_parcels = reregister_scheme_topology(
                 &net,
-                self.submit_state.resource_stamps(),
+                self.desc.resource_stamps(),
                 &self.prev_topology_parcels,
                 self.scheme_id,
                 self.ctx.backend_handle(),
@@ -2012,14 +2272,14 @@ impl Scheme {
         self.claim_deposits_into(&mut prep)?;
         let mut deposit_claims = std::mem::take(&mut prep.deposit_claims);
 
-        validate_present_exchange_bindings(&self.ir, &self.present_transactions)?;
+        validate_present_exchange_bindings(&self.desc.ir, &self.desc.present_transactions)?;
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.ir, &self.prior_built_accels)?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.desc.ir, &self.desc.prior_built_accels)?;
 
         let submit_result = {
-            let grant_count = self.present_transactions.len();
+            let grant_count = self.desc.present_transactions.len();
             let mut present_slots = Vec::with_capacity(grant_count);
             // Fixed-size slots indexed by grant order so partial acquires leave holes
             // rather than shifting later bindings.
@@ -2031,6 +2291,7 @@ impl Scheme {
             // Snapshot grant pools so the deferred-acquire closure does not borrow `self`
             // across the mutable `submit_state` call below.
             let present_grant_pools: Vec<(u32, Arc<crate::swapchain_pool::SwapchainPoolInner>, u32)> = self
+                .desc
                 .present_transactions
                 .iter()
                 .map(|g| (g.binding_id, Arc::clone(&g.pool), g.pool_lease_id))
@@ -2114,15 +2375,17 @@ impl Scheme {
                     };
                 self.submit_state.submit_pipelined_and_retain_with_presents(
                     &self.ctx,
-                    &self.ir,
+                    &self.desc.ir,
                     &mut present_slots,
                     deferred,
                     &prep.deposit_resolutions,
                     &mut deposit_claims,
+                    self.desc.resource_stamps(),
+                    &self.desc.stamp_targets,
                     prep.ir_clean,
                     &mut partial,
                     &mut partial_tv,
-                    &self.cpu_dispatches,
+                    &self.desc.cpu_dispatches,
                 )
             };
             self.teardown_replay_if_disabled(prep.had_replay);
@@ -2148,6 +2411,7 @@ impl Scheme {
         // Stamp each acquired frame with the timeline of the partition that wrote it.
         for (binding_id, binding_tv) in &part_result.present_binding_tvs {
             if let Some(idx) = self
+                .desc
                 .present_transactions
                 .iter()
                 .position(|g| g.binding_id == *binding_id)
@@ -2163,9 +2427,9 @@ impl Scheme {
         self.finish_ir_submit_bookkeeping(tv, &part_result, &prep);
 
         let present_resolvers = claim_present_easement_promises(
-            &self.ir,
-            &self.present_transactions,
-            self.submit_state.resource_stamps(),
+            &self.desc.ir,
+            &self.desc.present_transactions,
+            self.desc.resource_stamps(),
         );
         let claim_generations: Vec<u64> = surface_generations
             .into_iter()
@@ -2183,7 +2447,7 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.ir, &self.prior_built_accels)?;
+        crate::task_graph::validate::validate_graph_with_prior_built_accels(&self.desc.ir, &self.desc.prior_built_accels)?;
         let mut present_slots = Vec::new();
         let mut partial = crate::task_graph::PartitionSubmitResult::default();
         let mut partial_tv = self.ctx.gpu_progress();
@@ -2191,15 +2455,17 @@ impl Scheme {
             .submit_state
             .submit_pipelined_and_retain_with_presents(
                 &self.ctx,
-                &self.ir,
+                &self.desc.ir,
                 &mut present_slots,
                 None,
                 &prep.deposit_resolutions,
                 &mut deposit_claims,
+                self.desc.resource_stamps(),
+                &self.desc.stamp_targets,
                 prep.ir_clean,
                 &mut partial,
                 &mut partial_tv,
-                &self.cpu_dispatches,
+                &self.desc.cpu_dispatches,
             )
             .map_err(|e| {
                 crate::exchange::park_unconsumed_deposit_claims(&mut deposit_claims, partial_tv);
@@ -2229,7 +2495,7 @@ impl Scheme {
     ) -> GoldyError {
         self.ctx.advance_high_water_timeline(partial_tv);
 
-        for (grant, frame_mutex) in self.present_transactions.iter().zip(surface_frames) {
+        for (grant, frame_mutex) in self.desc.present_transactions.iter().zip(surface_frames) {
             let submitted_tv = partial
                 .present_binding_tvs
                 .iter()
@@ -2243,7 +2509,7 @@ impl Scheme {
                 frame.note_submit_timeline(tv);
                 let (promise, resolver) = TimelinePromise::new();
                 for stamp in
-                    present_easement_source_stamps(&self.ir, grant.binding_id, self.submit_state.resource_stamps())
+                    present_easement_source_stamps(&self.desc.ir, grant.binding_id, self.desc.resource_stamps())
                 {
                     stamp.push_pending(promise.clone());
                 }
@@ -2271,7 +2537,7 @@ impl Scheme {
         // Resolve source WAR from the known copy/present-partition timeline immediately.
         // Claim consumption waits for presentation independently; it must not gate source reuse.
         let mut present_claims = Vec::with_capacity(present_frames.len());
-        let claim_bindings: Vec<u32> = self.present_transactions.iter().map(|g| g.binding_id).collect();
+        let claim_bindings: Vec<u32> = self.desc.present_transactions.iter().map(|g| g.binding_id).collect();
         debug_assert_eq!(
             claim_bindings.len(),
             present_frames.len(),
@@ -2330,13 +2596,13 @@ impl Scheme {
     /// binding ids. Reusing the same lease returns the same binding.
     #[cfg(feature = "graphics")]
     fn intern_present_binding(&mut self, lease: &PresentLease) -> u32 {
-        for (i, binding) in self.present_bindings.iter().enumerate() {
+        for (i, binding) in self.desc.present_bindings.iter().enumerate() {
             if Arc::ptr_eq(&binding.pool, &lease.pool) && binding.pool_lease_id == lease.id {
                 return i as u32;
             }
         }
-        let id = self.present_bindings.len() as u32;
-        self.present_bindings.push(PresentBinding {
+        let id = self.desc.present_bindings.len() as u32;
+        self.desc.present_bindings.push(PresentBinding {
             pool: Arc::clone(&lease.pool),
             pool_lease_id: lease.id,
         });
@@ -2346,10 +2612,10 @@ impl Scheme {
     /// True when this scheme already has a present exchange transaction for `lease`.
     #[cfg(feature = "graphics")]
     pub(crate) fn has_present_transaction_for(&self, lease: &PresentLease) -> bool {
-        self.present_bindings.iter().enumerate().any(|(i, binding)| {
+        self.desc.present_bindings.iter().enumerate().any(|(i, binding)| {
             Arc::ptr_eq(&binding.pool, &lease.pool)
                 && binding.pool_lease_id == lease.id
-                && self.present_transactions.iter().any(|t| t.binding_id == i as u32)
+                && self.desc.present_transactions.iter().any(|t| t.binding_id == i as u32)
         })
     }
 
@@ -2365,6 +2631,7 @@ impl Scheme {
         let binding_id = self.intern_present_binding(lease);
         let generation = lease.generation_handle();
         let present_idx = if let Some((idx, _)) = self
+            .desc
             .present_transactions
             .iter()
             .enumerate()
@@ -2373,8 +2640,8 @@ impl Scheme {
             idx as u32
         } else {
             self.mark_structure_dirty();
-            let present_idx = self.present_transactions.len() as u32;
-            self.present_transactions.push(PresentTransactionInfo {
+            let present_idx = self.desc.present_transactions.len() as u32;
+            self.desc.present_transactions.push(PresentTransactionInfo {
                 binding_id,
                 pool: Arc::clone(&lease.pool),
                 pool_lease_id: lease.id,
@@ -2395,7 +2662,8 @@ impl Scheme {
         self.mark_structure_dirty();
         let binding_id = self.intern_present_binding(dst);
         let handle = self.intern_rt(src).backend_handle();
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_to_present".into(),
             bindings: vec![
                 ResourceBinding {
@@ -2428,9 +2696,10 @@ impl Scheme {
         let binding_id = self.intern_present_binding(dst);
         let src_h = src.gpu_handle();
         let stamp = src.whole().stamp_handle();
-        self.submit_state
+        self.desc
             .register_stamp_parts(ResourceId::Texture(src_h), stamp);
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_texture_to_present".into(),
             bindings: vec![
                 ResourceBinding {
@@ -2559,9 +2828,9 @@ impl Scheme {
         }
 
         self.mark_structure_dirty();
-        self.submit_state
+        self.desc
             .register_stamp_parts(ResourceId::Texture(src_h), src.whole().stamp_handle());
-        self.submit_state
+        self.desc
             .register_stamp_parts(ResourceId::Texture(dst_h), dst.whole().stamp_handle());
         let full_dst = dst_x == 0 && dst_y == 0 && width == dst.width() && height == dst.height();
         let dst_access = if full_dst {
@@ -2572,7 +2841,8 @@ impl Scheme {
         // Full-texture copies keep the compact `CopyTexture` node (and its present/readback
         // variants). Partial copies use `CopyTextureRegion`.
         if full_dst && src_x == 0 && src_y == 0 && width == src.width() && height == src.height() {
-            self.ir.nodes.push(TaskNode {
+            self.desc.ir.nodes.push(TaskNode {
+                group: None,
                 label: "copy_texture".into(),
                 bindings: vec![
                     ResourceBinding {
@@ -2591,7 +2861,8 @@ impl Scheme {
                 },
             });
         } else {
-            self.ir.nodes.push(TaskNode {
+            self.desc.ir.nodes.push(TaskNode {
+                group: None,
                 label: "copy_texture_region".into(),
                 bindings: vec![
                     ResourceBinding {
@@ -2663,9 +2934,10 @@ impl Scheme {
 
         let src_handle = src_rt.backend_handle();
         self.mark_structure_dirty();
-        self.submit_state.register_parcel_stamp(dst);
+        self.desc.register_parcel_stamp(dst);
         let dst_resource = dst.resource_id();
-        self.ir.nodes.push(TaskNode {
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_to_texture".into(),
             bindings: vec![
                 ResourceBinding {
@@ -2722,13 +2994,13 @@ impl Scheme {
     /// Intended for tests and debug tooling only. Do **not** use for synchronisation.
     #[doc(hidden)]
     pub fn ir_node_count(&self) -> usize {
-        self.ir.nodes.len()
+        self.desc.ir.nodes.len()
     }
 
     /// Recorded task-graph nodes (tests / diagnostics only).
     #[doc(hidden)]
     pub fn ir_nodes(&self) -> &[crate::task_graph::TaskNode] {
-        &self.ir.nodes
+        &self.desc.ir.nodes
     }
 
     /// True when the IR contains a copy-to-present blit node.
@@ -2736,7 +3008,7 @@ impl Scheme {
     #[doc(hidden)]
     pub fn test_has_copy_render_target_to_present(&self) -> bool {
         use crate::task_graph::{NodeKind, ResourceId};
-        self.ir.nodes.iter().any(|node| {
+        self.desc.ir.nodes.iter().any(|node| {
             matches!(
                 &node.kind,
                 NodeKind::CopyRenderTarget { dst, .. }
@@ -2750,7 +3022,7 @@ impl Scheme {
     #[doc(hidden)]
     pub fn test_has_present_lease_dispatch_binding(&self) -> bool {
         use crate::task_graph::ResourceId;
-        self.ir.nodes.iter().any(|node| {
+        self.desc.ir.nodes.iter().any(|node| {
             node.bindings
                 .iter()
                 .any(|b| matches!(b.resource, ResourceId::PresentLease(_)))
@@ -2805,16 +3077,16 @@ impl Drop for Scheme {
         self.submit_state.release_backend_retained_graphs(&self.ctx);
 
         let ctx = self.ctx.clone();
-        for binding in std::mem::take(&mut self.deposits) {
+        for binding in std::mem::take(&mut self.desc.deposits) {
             binding.discard_pending();
         }
-        for exec in std::mem::take(&mut self.cpu_dispatches) {
+        for exec in std::mem::take(&mut self.desc.cpu_dispatches) {
             exec.release(&ctx);
         }
         // Interned lease Arcs drop here (after wait_until). Pool return is in
         // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
-        let _interned = std::mem::take(&mut self.interned_leases);
-        let _constants = std::mem::take(&mut self.record_constants);
+        let _interned = std::mem::take(&mut self.desc.interned_leases);
+        let _constants = std::mem::take(&mut self.desc.record_constants);
     }
 }
 
@@ -3070,7 +3342,7 @@ impl<'a> SchemeNodeBuilder<'a> {
             );
         }
         if let Some(h) = bindable.prior_built_accel_handle() {
-            self.scheme.prior_built_accels.insert(h);
+            self.scheme.desc.prior_built_accels.insert(h);
         }
         let slot = slot.unwrap_or_else(|| {
             panic!(
@@ -3080,7 +3352,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         });
         if let Some((resource, maybe_stamp)) = resource_identity {
             if let Some(stamp) = maybe_stamp {
-                self.scheme.submit_state.register_stamp_parts(resource, stamp);
+                self.scheme.desc.register_stamp_parts(resource, stamp);
             }
             self.bindings.push(ResourceBinding { resource, access });
         }
@@ -3119,7 +3391,7 @@ impl<'a> SchemeNodeBuilder<'a> {
 
     /// Register dependency on all parcels of a buffer without emitting shader slots.
     pub fn with_buffer_dependency(mut self, buffer: &crate::Buffer, access: NodeAccess) -> Self {
-        self.scheme.submit_state.register_buffer_stamps(buffer);
+        self.scheme.desc.register_buffer_stamps(buffer);
         for parcel in buffer.parcels() {
             self.bindings.push(ResourceBinding {
                 resource: parcel.resource_id(),
@@ -3220,16 +3492,17 @@ impl<'a> SchemeNodeBuilder<'a> {
             dispatch,
         };
         let scheme = self.scheme;
-        let node_index = scheme.ir.nodes.len() as u32;
+        let node_index = scheme.desc.ir.nodes.len() as u32;
         match crate::petition::YieldDriver::build(&scheme.ctx, record) {
             Ok((driver, stats)) => {
-                let cpu_id = scheme.cpu_dispatches.len() as u32;
-                scheme.cpu_dispatches.push(CpuDispatchExec::new_host_driver(
+                let cpu_id = scheme.desc.cpu_dispatches.len() as u32;
+                scheme.desc.cpu_dispatches.push(CpuDispatchExec::new_host_driver(
                     label.clone(),
                     crate::petition::driver_main(Arc::new(driver)),
                 ));
                 scheme.yield_stats.insert(node_index, stats);
-                scheme.ir.nodes.push(TaskNode {
+                scheme.desc.ir.nodes.push(TaskNode {
+                    group: None,
                     label: label.clone(),
                     bindings: self.bindings,
                     kind: NodeKind::CpuDispatch { cpu_id },
@@ -3238,7 +3511,8 @@ impl<'a> SchemeNodeBuilder<'a> {
             Err(msg) => {
                 scheme.record_errors.push(msg);
                 // Keep node numbering stable for the caller: an inert node stands in.
-                scheme.ir.nodes.push(TaskNode {
+                scheme.desc.ir.nodes.push(TaskNode {
+                    group: None,
                     label,
                     bindings: Vec::new(),
                     kind: NodeKind::Dispatch {
@@ -3272,7 +3546,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         let offset = validate_dispatch_shape_parcel(parcel)?;
         let resource = parcel.resource_id();
         self.scheme
-            .submit_state
+            .desc
             .register_stamp_parts(resource, parcel.stamp_handle());
         self.register_specialization_site();
         let mut bindings = self.bindings;
@@ -3283,7 +3557,8 @@ impl<'a> SchemeNodeBuilder<'a> {
         let buffer = parcel
             .buffer_handle()
             .expect("validate_dispatch_shape_parcel ensures buffer parcel");
-        self.scheme.ir.nodes.push(TaskNode {
+        self.scheme.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: self.label,
             bindings,
             kind: NodeKind::Dispatch {
@@ -3299,7 +3574,7 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// Hand the node about to be pushed to the specialization predictor.
     fn register_specialization_site(&mut self) {
         if let Some(provenance) = self.provenance.as_ref() {
-            let node = self.scheme.ir.nodes.len() as u32;
+            let node = self.scheme.desc.ir.nodes.len() as u32;
             self.scheme
                 .specialization
                 .register_site(node, self.pipeline, provenance, self.label.clone(), &self.user_slots);
@@ -3331,7 +3606,8 @@ impl<'a> SchemeNodeBuilder<'a> {
         if self.rt_pipeline.is_none() {
             self.register_specialization_site();
         }
-        self.scheme.ir.nodes.push(TaskNode {
+        self.scheme.desc.ir.nodes.push(TaskNode {
+            group: None,
             label: self.label,
             bindings: self.bindings,
             kind: if let Some(rt) = self.rt_pipeline {
@@ -3556,11 +3832,11 @@ impl SchemeCpuNodeBuilder<'_> {
             staged.push((readback, upload));
         }
 
-        let cpu_id = scheme.cpu_dispatches.len() as u32;
+        let cpu_id = scheme.desc.cpu_dispatches.len() as u32;
         let mut ir_bindings: Vec<ResourceBinding> = Vec::with_capacity(bindings.len());
         let mut execs: Vec<CpuBindingExec> = Vec::with_capacity(bindings.len());
         for (b, (readback, upload)) in bindings.into_iter().zip(staged) {
-            scheme.submit_state.register_stamp_parts(b.resource, b.stamp);
+            scheme.desc.register_stamp_parts(b.resource, b.stamp);
             ir_bindings.push(ResourceBinding {
                 resource: b.resource,
                 access: b.access,
@@ -3577,10 +3853,12 @@ impl SchemeCpuNodeBuilder<'_> {
             });
         }
         scheme
+            .desc
             .cpu_dispatches
             .push(CpuDispatchExec::new(label.clone(), main, execs, params));
         scheme.mark_structure_dirty();
-        scheme.ir.nodes.push(TaskNode {
+        scheme.desc.ir.nodes.push(TaskNode {
+            group: None,
             label,
             bindings: ir_bindings,
             kind: NodeKind::CpuDispatch { cpu_id },
@@ -3659,7 +3937,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
     /// When [`Self::set_pipeline`] is called, parcels declared here are also registered
     /// for push-constant resource binding in call order.
     pub fn with_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
-        self.scheme.submit_state.register_parcel_stamp(parcel);
+        self.scheme.desc.register_parcel_stamp(parcel);
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
@@ -3671,7 +3949,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     /// Register dependency on all parcels of a buffer without push-constant binding.
     pub fn with_buffer_dependency(&mut self, buffer: &crate::Buffer, access: NodeAccess) -> &mut Self {
-        self.scheme.submit_state.register_buffer_stamps(buffer);
+        self.scheme.desc.register_buffer_stamps(buffer);
         for parcel in buffer.parcels() {
             self.bindings.push(ResourceBinding {
                 resource: parcel.resource_id(),
@@ -3689,7 +3967,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         for slot in slots {
             match slot {
                 ShaderResourceSlot::Parcel { parcel, access } => {
-                    self.scheme.submit_state.register_parcel_stamp(parcel);
+                    self.scheme.desc.register_parcel_stamp(parcel);
                     self.bindings.push(ResourceBinding {
                         resource: parcel.resource_id(),
                         access: *access,
@@ -3721,7 +3999,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         for binding in bindings {
             match binding.slot {
                 ShaderResourceSlot::Parcel { parcel, access } => {
-                    self.scheme.submit_state.register_parcel_stamp(parcel);
+                    self.scheme.desc.register_parcel_stamp(parcel);
                     self.bindings.push(ResourceBinding {
                         resource: parcel.resource_id(),
                         access,
@@ -3905,7 +4183,8 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             pending_push_constants: _,
             pending_named: _,
         } = self;
-        scheme.ir.nodes.push(TaskNode {
+        scheme.desc.ir.nodes.push(TaskNode {
+            group: None,
             label,
             bindings,
             kind: NodeKind::RenderPass {
@@ -4088,7 +4367,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let mut clear_scheme = Scheme::new(&ctx);
         clear_scheme.clear_parcel(parcel, 0, parcel.byte_size()).expect("clear");
-        assert_eq!(clear_scheme.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
+        assert_eq!(clear_scheme.desc.ir.nodes[0].bindings[0].access, NodeAccess::Overwrite);
 
         let mut write_scheme = Scheme::new(&ctx);
         let deposit = memory
@@ -4097,14 +4376,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         deposit
             .write(0, &vec![0u8; parcel.byte_size() as usize])
             .expect("full deposit write");
-        assert_eq!(write_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Overwrite);
+        assert_eq!(write_scheme.desc.ir.nodes[0].bindings[1].access, NodeAccess::Overwrite);
 
         let mut partial_scheme = Scheme::new(&ctx);
         let partial_deposit = memory
             .bind_deposit(&mut partial_scheme, DepositTarget::buffer_at(parcel, 4, 4))
             .expect("bind partial deposit");
         partial_deposit.write(0, &[1, 2, 3, 4]).expect("partial deposit write");
-        assert_eq!(partial_scheme.ir.nodes[0].bindings[1].access, NodeAccess::Write);
+        assert_eq!(partial_scheme.desc.ir.nodes[0].bindings[1].access, NodeAccess::Write);
     }
 
     #[test]
@@ -4640,19 +4919,19 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(scheme.ir_node_count(), 1);
         assert_eq!(scheme.cpu_dispatch_count(), 1);
         assert!(scheme.is_dirty());
-        match &scheme.ir.nodes[0].kind {
+        match &scheme.desc.ir.nodes[0].kind {
             NodeKind::CpuDispatch { cpu_id: 0 } => {}
             other => panic!("expected CpuDispatch node, got {other:?}"),
         }
-        assert_eq!(scheme.ir.nodes[0].bindings.len(), 1);
-        assert_eq!(scheme.ir.nodes[0].bindings[0].access, NodeAccess::ReadWrite);
+        assert_eq!(scheme.desc.ir.nodes[0].bindings.len(), 1);
+        assert_eq!(scheme.desc.ir.nodes[0].bindings[0].access, NodeAccess::ReadWrite);
         let (allocs_after, _) = mock_readback_counts(&device);
         assert_eq!(
             allocs_after - allocs_before,
             1,
             "ReadWrite binding allocates one readback staging"
         );
-        let exec = &scheme.cpu_dispatches[0];
+        let exec = &scheme.desc.cpu_dispatches[0];
         assert!(exec.bindings[0].readback.is_some());
         assert!(exec.bindings[0].upload.is_some());
 
@@ -4679,7 +4958,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&c, NodeAccess::Write)
             .dispatch(|_a: &[u32], _b: &mut [u32], _c: &mut [u32]| {})
             .expect("record");
-        let b = &scheme.cpu_dispatches[0].bindings;
+        let b = &scheme.desc.cpu_dispatches[0].bindings;
         assert!(b[0].readback.is_some() && b[0].upload.is_none(), "Read: download only");
         assert!(
             b[1].readback.is_none() && b[1].upload.is_some(),
@@ -4800,15 +5079,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_parcel(&b, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
-        let edges = analysis::build_edges(&scheme.ir);
-        let schedule = analysis::schedule_waves(&scheme.ir, &edges);
+        let edges = analysis::build_edges(&scheme.desc.ir);
+        let schedule = analysis::schedule_waves(&scheme.desc.ir, &edges);
         let waves: Vec<Vec<usize>> = schedule.waves.iter().map(|w| w.node_indices.clone()).collect();
         assert_eq!(
             waves,
             vec![vec![0, 2], vec![1], vec![3]],
             "cpu node (1) is peeled from its depth group into its own wave"
         );
-        assert_eq!(analysis::wave_cpu_dispatch(&scheme.ir, &schedule.waves[1]), Some(0));
+        assert_eq!(analysis::wave_cpu_dispatch(&scheme.desc.ir, &schedule.waves[1]), Some(0));
         assert!(
             !schedule.waves[1].barriers_before.is_empty(),
             "producer→cpu edge yields a barrier on A"
@@ -4818,7 +5097,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             "cpu→consumer edge yields a barrier on B"
         );
 
-        let parts = analysis::partition_wave_ranges(&scheme.ir, &schedule, true);
+        let parts = analysis::partition_wave_ranges(&scheme.desc.ir, &schedule, true);
         assert_eq!(parts, vec![0..1, 1..2, 2..3], "cpu wave is its own partition");
     }
 
@@ -5523,8 +5802,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
 
         let partitions = analysis::describe_logical_partitions(
-            &scheme.ir,
-            &analysis::schedule_waves(&scheme.ir, &analysis::build_edges(&scheme.ir)),
+            &scheme.desc.ir,
+            &analysis::schedule_waves(&scheme.desc.ir, &analysis::build_edges(&scheme.desc.ir)),
         );
         assert!(
             partitions.iter().any(|p| p.is_pure_compute() && !p.has_present),
@@ -5615,7 +5894,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.copy_to_present(&rt, &lease);
         assert_eq!(scheme.ir_node_count(), 1);
 
-        match &scheme.ir.nodes[0].kind {
+        match &scheme.desc.ir.nodes[0].kind {
             NodeKind::CopyRenderTarget {
                 dst: ResourceId::PresentLease(0),
                 ..
@@ -5654,7 +5933,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.copy_to_texture(&rt, &tex).expect("copy_to_texture");
         assert_eq!(scheme.ir_node_count(), 1);
 
-        match &scheme.ir.nodes[0].kind {
+        match &scheme.desc.ir.nodes[0].kind {
             NodeKind::CopyRenderTarget {
                 dst: ResourceId::Texture(h),
                 ..
@@ -5806,7 +6085,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
 
         // Node 0 must be a Dispatch whose resource_slots end with PRESENT_LEASE_SLOT_PLACEHOLDER.
-        match &scheme.ir.nodes[0].kind {
+        match &scheme.desc.ir.nodes[0].kind {
             NodeKind::Dispatch { resource_slots, .. } => {
                 assert!(
                     resource_slots.last() == Some(&crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER),
@@ -5818,7 +6097,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         // Bindings must include PresentLease(0) as the last entry.
         assert!(
-            scheme.ir.nodes[0]
+            scheme.desc.ir.nodes[0]
                 .bindings
                 .iter()
                 .any(|b| b.resource == ResourceId::PresentLease(0)),
@@ -5846,7 +6125,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .with_views(&[lease_tex]) // must preserve PLACEHOLDER
             .dispatch(1, 1, 1);
 
-        match &scheme.ir.nodes[0].kind {
+        match &scheme.desc.ir.nodes[0].kind {
             NodeKind::Dispatch { resource_slots, .. } => {
                 let has_placeholder = resource_slots
                     .iter()
@@ -5911,7 +6190,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
             .with_present(&lease)
             .dispatch(1, 1, 1);
 
-        match &scheme.ir.nodes[0].kind {
+        match &scheme.desc.ir.nodes[0].kind {
             NodeKind::Dispatch { resource_slots, .. } => {
                 assert_eq!(resource_slots.len(), 2);
                 assert_ne!(resource_slots[0], PRESENT_LEASE_SLOT_PLACEHOLDER);
@@ -5936,7 +6215,7 @@ void cs_main(Scattered<uint> buf, DirectSpatial<float4> dst, ThreadId id) {
             .with_present_access(&lease, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
-        let binding = scheme.ir.nodes[0]
+        let binding = scheme.desc.ir.nodes[0]
             .bindings
             .iter()
             .find(|b| b.resource == ResourceId::PresentLease(0))
@@ -5982,8 +6261,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
         let transaction = scheme.register_present_exchange(&lease);
 
-        let dispatch = scheme
-            .ir
+        let dispatch = scheme.desc.ir
             .nodes
             .iter()
             .find(|n| matches!(n.kind, NodeKind::Dispatch { .. }))
@@ -6036,8 +6314,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .dispatch(1, 1, 1);
         let transaction = scheme.register_present_exchange(&lease);
 
-        let dispatch = scheme
-            .ir
+        let dispatch = scheme.desc.ir
             .nodes
             .iter()
             .find(|n| matches!(n.kind, NodeKind::Dispatch { .. }))
@@ -6181,8 +6458,8 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             1
         );
 
-        let left_res = scheme.ir.nodes[0].bindings[1].resource;
-        let right_res = scheme.ir.nodes[1].bindings[1].resource;
+        let left_res = scheme.desc.ir.nodes[0].bindings[1].resource;
+        let right_res = scheme.desc.ir.nodes[1].bindings[1].resource;
         assert_eq!(left_res, ResourceId::PresentLease(left_grant.binding_id));
         assert_eq!(right_res, ResourceId::PresentLease(right_grant.binding_id));
         assert_ne!(left_res, right_res);
@@ -6462,8 +6739,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             .expect_err("second bind for same lease must fail");
         assert!(err.to_string().contains("already bound"), "unexpected: {err}");
         // First transaction still works; only one copy+grant recorded beyond the bind path.
-        let copy_count = scheme
-            .ir
+        let copy_count = scheme.desc.ir
             .nodes
             .iter()
             .filter(|n| n.label == "copy_texture_to_present")
@@ -6499,8 +6775,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let right_tx = right.bind(&mut scheme, &right_tex).expect("bind right");
 
         assert_ne!(left_tx.binding_id(), right_tx.binding_id());
-        let copy_bindings: Vec<_> = scheme
-            .ir
+        let copy_bindings: Vec<_> = scheme.desc.ir
             .nodes
             .iter()
             .filter(|n| n.label == "copy_texture_to_present")
@@ -6609,7 +6884,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
         let key = ResourceKey::Texture(left_tex.gpu_handle());
         let war = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("left tex stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("left tex stamp");
             let pending = stamp.pending.lock().unwrap();
             assert!(
                 !pending.is_empty(),
@@ -6871,8 +7146,8 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         scheme.register_present_exchange(&lease);
 
         let partitions = analysis::describe_logical_partitions(
-            &scheme.ir,
-            &analysis::schedule_waves(&scheme.ir, &analysis::build_edges(&scheme.ir)),
+            &scheme.desc.ir,
+            &analysis::schedule_waves(&scheme.desc.ir, &analysis::build_edges(&scheme.desc.ir)),
         );
         assert!(
             partitions.len() >= 2,
@@ -6959,7 +7234,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let key = ResourceKey::Texture(tex.gpu_handle());
         let submission = scheme.submit().expect("submit");
         let resolved_tv = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("texture stamp");
             assert_eq!(stamp.pending.lock().unwrap().len(), 1);
             // Source WAR resolves at submit from the known copy timeline. Dropping the
             // submission discards the drawable claim without abandoning the WAR promise.
@@ -6971,7 +7246,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(resolved_tv, submission.timeline_value());
         drop(submission);
         let after_drop = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("texture stamp");
             stamp.pending.lock().unwrap()[0].poll()
         };
         match after_drop {
@@ -7006,13 +7281,13 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
         let key = ResourceKey::RenderTarget(rt_handle);
         assert!(
-            scheme.submit_state.resource_stamps().contains_key(&key),
+            scheme.desc.resource_stamps().contains_key(&key),
             "lease_render_target must register an RT stamp for present WAR"
         );
 
         let submission = scheme.submit().expect("submit");
         let resolved_tv = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("rt stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("rt stamp");
             assert_eq!(
                 stamp.pending.lock().unwrap().len(),
                 1,
@@ -7055,7 +7330,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
         let key = ResourceKey::Texture(tex.gpu_handle());
         let poll_state = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("texture stamp");
             stamp.pending.lock().unwrap()[0].poll()
         };
         match poll_state {
@@ -7090,7 +7365,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         consume_present(&present, &mut sub1);
 
         let _sub2 = scheme.submit().expect("submit 2");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+        let stamp = scheme.desc.resource_stamps().get(&key).expect("texture stamp");
         let sync = stamp.sync.lock().unwrap();
         assert!(
             sync.foreign_reads.get(ctx_handle).is_some(),
@@ -7144,7 +7419,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
 
         let submission = scheme.submit().expect("submit");
         let poll = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("texture stamp");
             stamp.pending.lock().unwrap()[0].poll()
         };
         assert!(
@@ -7153,7 +7428,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         );
         drop(submission);
         let after = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            let stamp = scheme.desc.resource_stamps().get(&key).expect("texture stamp");
             stamp.pending.lock().unwrap()[0].poll()
         };
         assert!(
@@ -7193,16 +7468,14 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         scheme.copy_texture_to_present(&tex, &lease);
         let present = scheme.register_present_exchange(&lease);
 
-        let fine_bindings: Vec<_> = scheme
-            .ir
+        let fine_bindings: Vec<_> = scheme.desc.ir
             .nodes
             .iter()
             .filter(|n| n.label == "fine_write")
             .flat_map(|n| &n.bindings)
             .filter(|b| matches!(b.resource, ResourceId::Texture(h) if h == tex_handle))
             .collect();
-        scheme
-            .ir
+        scheme.desc.ir
             .nodes
             .iter()
             .find(|n| n.label == "copy_texture_to_present")
@@ -7216,7 +7489,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(fine_bindings[0].access, NodeAccess::Write);
 
         let registered = scheme
-            .submit_state
+            .desc
             .resource_stamps()
             .get(&key)
             .expect("out_image stamp registered before submit")
@@ -7227,7 +7500,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             "fine write and present copy must share one ResourceSync ledger cell"
         );
 
-        let net = net_access_per_resource(&scheme.ir);
+        let net = net_access_per_resource(&scheme.desc.ir);
         assert!(
             net[&key].reads && net[&key].writes,
             "scheme net access must include both sides"
@@ -7270,7 +7543,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut write_only = ResourceKeyMap::default();
         write_only.insert(
             key,
-            net_access_per_resource(&scheme.ir)[&key], // reads+writes in IR; override for next-frame write admission
+            net_access_per_resource(&scheme.desc.ir)[&key], // reads+writes in IR; override for next-frame write admission
         );
         write_only.get_mut(&key).unwrap().reads = false;
         let ledger = {
@@ -7318,7 +7591,7 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         // Source WAR resolves at submit from the known copy timeline — before claim consume.
         let copy_tv = {
             let stamp = scheme
-                .submit_state
+                .desc
                 .resource_stamps()
                 .get(&key)
                 .expect("out_image stamp");
@@ -7545,6 +7818,348 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             "fresh path must not count retention hits"
         );
     }
+
+    fn include_dispatch_child(ctx: &Context, pipeline: &ComputePipeline, buf: &crate::Buffer, label: &str) -> Scheme {
+        let mut child = Scheme::new(ctx);
+        child
+            .node(label, pipeline)
+            .with_parcel(buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        child
+    }
+
+    #[test]
+    fn scheme_new_desc_empty_node_populates_ir_and_stamps() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        assert!(scheme.desc.ir.nodes.is_empty());
+        assert!(scheme.desc.resource_stamps.is_empty());
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        scheme
+            .node("a", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        assert_eq!(scheme.ir_node_count(), 1);
+        assert_eq!(scheme.ir_nodes().len(), scheme.desc.ir.nodes.len());
+        assert_eq!(scheme.desc.resource_stamps.len(), 1);
+    }
+
+    #[test]
+    fn include_appends_nodes_with_group_provenance() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let parent_buf = retained_buffer(&device);
+        let child_buf = retained_buffer(&device);
+        let mut parent = Scheme::new(&ctx);
+        parent
+            .node("prior", &pipeline)
+            .with_parcel(&parent_buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let mut child = Scheme::new(&ctx);
+        child
+            .node("x", &pipeline)
+            .with_parcel(&child_buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        child
+            .node("y", &pipeline)
+            .with_parcel(&child_buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+        let gid = parent.include("g", &child).expect("include").finish();
+        assert_eq!(parent.ir_node_count(), 3);
+        assert_eq!(parent.desc.ir.groups[gid.index()].node_range, 1..3);
+        assert_eq!(parent.ir_nodes()[1].label.as_str(), "g/x");
+        assert_eq!(parent.ir_nodes()[2].label.as_str(), "g/y");
+        assert_eq!(parent.ir_nodes()[1].group, Some(gid));
+        assert_eq!(parent.ir_nodes()[2].group, Some(gid));
+    }
+
+    #[test]
+    fn include_is_snapshot() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut child = include_dispatch_child(&ctx, &pipeline, &buf, "x");
+        let mut parent = Scheme::new(&ctx);
+        parent.include("g", &child).expect("include").finish();
+        parent.submit().expect("submit parent");
+        assert!(!parent.is_dirty());
+        let count = parent.ir_node_count();
+        child
+            .node("later", &pipeline)
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+        assert_eq!(parent.ir_node_count(), count);
+        assert!(!parent.is_dirty());
+    }
+
+    #[test]
+    fn include_marks_structure_dirty() {
+        let device = mock_runtime();
+        let _cb = crate::test_support::CbReuseOverride::force_enabled();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut parent = Scheme::new(&ctx);
+        parent
+            .node("prior", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        parent.submit().expect("first");
+        assert!(!parent.is_dirty());
+        let records = parent.replay_stats().records;
+        let child = include_dispatch_child(&ctx, &pipeline, &buf, "x");
+        parent.include("g", &child).expect("include").finish();
+        assert!(parent.is_dirty());
+        parent.submit().expect("after include");
+        assert_eq!(parent.replay_stats().records, records + 1);
+        let clean = parent.replay_stats().clean_submits;
+        parent.submit().expect("clean");
+        assert_eq!(parent.replay_stats().clean_submits, clean + 1);
+    }
+
+    #[test]
+    fn include_preserves_record_order_edges() {
+        use crate::backend::GpuCommand;
+        use crate::task_graph::analysis;
+
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut parent = Scheme::new(&ctx);
+        parent
+            .node("write", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let mut child = Scheme::new(&ctx);
+        child
+            .node("read", &pipeline)
+            .with_parcel(&buf, NodeAccess::Read)
+            .dispatch(1, 1, 1);
+        parent.include("g", &child).expect("include").finish();
+        let edges = analysis::build_edges(&parent.desc.ir);
+        assert!(edges.contains(&(0, 1)), "writer must precede included reader: {edges:?}");
+
+        crate::test_support::mock_reset_tracking(&device);
+        parent.submit().expect("submit");
+        let handle = buf.buffer_handle().unwrap();
+        let barriers = crate::test_support::with_mock(&device, |m| {
+            let mut n = 0usize;
+            for batch in &m.recorded_compute_commands {
+                for cmd in batch {
+                    if let GpuCommand::ResourceBarrier { buffers, .. } = cmd {
+                        n += buffers.iter().filter(|(h, _)| *h == handle).count();
+                    }
+                }
+            }
+            n
+        });
+        assert!(barriers > 0, "RAW between parent write and included read must emit a barrier");
+    }
+
+    #[test]
+    fn include_after_adds_precedence() {
+        use crate::task_graph::analysis;
+
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let a = retained_buffer(&device);
+        let b = retained_buffer(&device);
+        let child_a = include_dispatch_child(&ctx, &pipeline, &a, "a");
+        let child_b = include_dispatch_child(&ctx, &pipeline, &b, "b");
+        let mut parent = Scheme::new(&ctx);
+        let ga = parent.include("A", &child_a).expect("include a").finish();
+        parent.include("B", &child_b).expect("include b").after(ga).finish();
+        let edges = analysis::build_edges(&parent.desc.ir);
+        let schedule = analysis::schedule_waves(&parent.desc.ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+        assert_eq!(edges, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn child_remains_submittable() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut child = include_dispatch_child(&ctx, &pipeline, &buf, "x");
+        child.submit().expect("submit before include");
+        let mut parent = Scheme::new(&ctx);
+        parent.include("g", &child).expect("include").finish();
+        child.submit().expect("submit after include");
+    }
+
+    #[test]
+    fn include_rejects_cross_context() {
+        let device = mock_runtime();
+        let ctx_a = device.create_context().unwrap();
+        let ctx_b = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let child = include_dispatch_child(&ctx_b, &pipeline, &buf, "x");
+        let mut parent = Scheme::new(&ctx_a);
+        let err = parent.include("g", &child).err().expect("cross-context");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn include_rejects_deposit_child() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let buf = retained_buffer(&device);
+        let mut child = Scheme::new(&ctx);
+        MemoryExchange::new(&ctx)
+            .bind_deposit(&mut child, DepositTarget::buffer(&buf, buf.byte_size()))
+            .expect("bind deposit");
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("deposit");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn include_rejects_present_child() {
+        let device = mock_runtime();
+        let (ctx, pool) = mock_swapchain_pool(&device);
+        let lease = pool.lease();
+        let mut child = Scheme::new(&ctx);
+        let _tx = child.register_present_exchange(&lease);
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("present");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn include_rejects_cpu_node_child() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let buf = u32_buffer(&device, &[1, 2, 3, 4]);
+        let mut child = Scheme::new(&ctx);
+        child
+            .cpu_node("double")
+            .with_parcel(&buf, NodeAccess::ReadWrite)
+            .dispatch(|data: &mut [u32]| {
+                for d in data {
+                    *d *= 2;
+                }
+            })
+            .expect("record");
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("cpu");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn include_rejects_transient_child() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let lease = ctx.lease_buffer(64).expect("lease");
+        let mut child = Scheme::new(&ctx);
+        child
+            .node("t", &pipeline)
+            .with_parcel(&lease, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("transient");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn include_rejects_yielding_child() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut child = include_dispatch_child(&ctx, &pipeline, &buf, "x");
+        child
+            .yield_stats
+            .insert(0, Arc::new(Mutex::new(crate::petition::YieldStats::default())));
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("yielding");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn include_rejects_child_with_record_error() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut child = include_dispatch_child(&ctx, &pipeline, &buf, "x");
+        child.push_record_error("boom".into());
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("record error");
+        assert!(matches!(err, GoldyError::Validation(_)), "{err:?}");
+        assert!(err.to_string().contains("boom"), "{err}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn include_rejects_dropped_buffer() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let child = include_dispatch_child(&ctx, &pipeline, &buf, "x");
+        drop(buf);
+        let mut parent = Scheme::new(&ctx);
+        let err = parent.include("g", &child).err().expect("stale");
+        assert!(matches!(err, GoldyError::StaleResource), "{err:?}");
+        assert_eq!(parent.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn group_closure_matches_include() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buf = retained_buffer(&device);
+        let mut child = Scheme::new(&ctx);
+        child
+            .node("x", &pipeline)
+            .with_parcel(&buf, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        let mut via_include = Scheme::new(&ctx);
+        via_include.include("g", &child).expect("include").finish();
+        let mut via_group = Scheme::new(&ctx);
+        via_group
+            .group("g", |s| {
+                s.node("x", &pipeline)
+                    .with_parcel(&buf, NodeAccess::Write)
+                    .dispatch(1, 1, 1);
+                Ok(())
+            })
+            .expect("group");
+        let labels = |s: &Scheme| s.ir_nodes().iter().map(|n| n.label.as_str().to_string()).collect::<Vec<_>>();
+        let bindings = |s: &Scheme| s.ir_nodes().iter().map(|n| n.bindings.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&via_include), labels(&via_group));
+        assert_eq!(bindings(&via_include), bindings(&via_group));
+    }
 }
 
 #[cfg(test)]
@@ -7620,7 +8235,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     }
 
     fn bound_pipeline(scheme: &Scheme, node: NodeId) -> crate::backend::ComputePipelineHandle {
-        match &scheme.ir.nodes[node.index()].kind {
+        match &scheme.desc.ir.nodes[node.index()].kind {
             NodeKind::Dispatch { pipeline, .. } => *pipeline,
             _ => unreachable!(),
         }
@@ -7935,4 +8550,5 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         assert_eq!(f.scheme.specialization().cached_variants(), 2);
         assert!(f.scheme.specialization().cached_variants() <= SpecializationPolicy::default().max_cached_variants);
     }
+
 }

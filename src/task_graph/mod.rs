@@ -16,9 +16,10 @@ pub use graph::ShaderResourceSlot;
 pub(crate) use graph::{DeferredPresentAcquire, ResolvedPresentSlot};
 pub(crate) use graph::{IrSubmitState, PartitionSubmitResult};
 pub use ir::NodeAccess;
+pub use ir::GroupId;
 pub(crate) use ir::{BarrierSet, BarrierUsage, GraphIR};
 // Re-exported for backend barrier lowering (vulkan/dx12); unused with --no-default-features.
-pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
+pub(crate) use ir::{DispatchDim, GroupInfo, NodeKind, ResourceBinding, TaskNode};
 #[allow(unused_imports)]
 pub(crate) use ir::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub use record::ComputeNodeRecord;

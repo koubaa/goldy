@@ -89,7 +89,8 @@ pub use host_claim::{HostView, PendingHostRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use scheme::{
-    Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission,
+    GroupBuilder, GroupId, Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder,
+    SchemeNodeBuilder, Submission,
 };
 pub use scheme_label::SchemeLabel;
 #[cfg(feature = "graphics")]

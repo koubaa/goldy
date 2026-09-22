@@ -322,6 +322,26 @@ impl SchemePredictor {
         self.sites.insert(node, site);
     }
 
+    /// Re-register child's tracked dispatch sites at `node_offset` in the parent IR.
+    pub(crate) fn copy_sites_from(&mut self, child: &Self, node_offset: u32) {
+        let snapshot: Vec<_> = child
+            .sites
+            .iter()
+            .map(|(&idx, site)| {
+                (
+                    idx + node_offset,
+                    site.universal,
+                    Arc::clone(&site.provenance),
+                    site.label.clone(),
+                    site.last.clone(),
+                )
+            })
+            .collect();
+        for (idx, universal, provenance, label, slots) in snapshot {
+            self.register_site(idx, universal, &provenance, label, &slots);
+        }
+    }
+
     /// Whether `node` currently runs a predictor-chosen variant instead of the caller's pipeline.
     pub(crate) fn is_promoted(&self, node: u32) -> bool {
         self.sites.get(&node).is_some_and(SitePredictor::is_promoted)

@@ -11,6 +11,8 @@
 
 use super::ResourceId;
 use crate::backend::{BufferHandle, ComputePipelineHandle, RenderTargetHandle, TextureHandle};
+use crate::error::GoldyError;
+use std::ops::Range;
 use std::sync::Arc;
 
 bitflags::bitflags! {
@@ -300,16 +302,120 @@ pub enum NodeKind {
 #[derive(Debug, Clone)]
 pub struct TaskNode {
     pub label: crate::SchemeLabel,
+    /// Provenance group this node was included under, if any.
+    pub group: Option<GroupId>,
     /// Resource access declarations used by the dependency analyzer.
     pub bindings: Vec<ResourceBinding>,
     /// What this node actually executes.
     pub kind: NodeKind,
 }
 
+/// Identity of a recorded group of nodes (an included child scheme or `Scheme::group`).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct GroupId(pub(crate) u32);
+
+impl GroupId {
+    /// Dense index of this group in its scheme's group table.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Provenance for a contiguous recorded range of nodes.
+#[derive(Clone, Debug)]
+pub(crate) struct GroupInfo {
+    pub label: crate::SchemeLabel,
+    pub parent: Option<GroupId>,
+    pub node_range: Range<usize>,
+}
+
 /// The full graph before scheduling.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GraphIR {
     pub(crate) nodes: Vec<TaskNode>,
+    pub(crate) groups: Vec<GroupInfo>,
+    /// Merchant-added precedences (spec §2): node i must complete before node j.
+    pub(crate) extra_edges: Vec<(usize, usize)>,
+    /// Group-level precedences, expanded to node pairs in [`super::analysis::build_edges`].
+    pub(crate) extra_group_edges: Vec<(GroupId, GroupId)>,
+}
+
+impl GraphIR {
+    /// Record that node `from` must complete before node `to`.
+    ///
+    /// Record order is the total order: `from` must be strictly earlier than `to`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn add_extra_edge(&mut self, from: usize, to: usize) -> Result<(), GoldyError> {
+        if from >= to || to >= self.nodes.len() {
+            return Err(GoldyError::Validation(format!(
+                "explicit precedence ({from} -> {to}) goes backward in record order. \
+                 hint: only forward precedences are admitted (record order is the total order)"
+            )));
+        }
+        self.extra_edges.push((from, to));
+        Ok(())
+    }
+
+    /// Record that every node in `from` must complete before every node in `to`.
+    pub(crate) fn add_group_edge(&mut self, from: GroupId, to: GroupId) -> Result<(), GoldyError> {
+        let from_info = self.groups.get(from.0 as usize).ok_or_else(|| {
+            GoldyError::Validation(format!(
+                "explicit group precedence: unknown prior group {}. hint: pass a GroupId returned by include/group",
+                from.0
+            ))
+        })?;
+        let to_info = self.groups.get(to.0 as usize).ok_or_else(|| {
+            GoldyError::Validation(format!(
+                "explicit group precedence: unknown later group {}. hint: pass a GroupId returned by include/group",
+                to.0
+            ))
+        })?;
+        if from_info.node_range.start >= to_info.node_range.start {
+            return Err(GoldyError::Validation(format!(
+                "explicit group precedence ({} -> {}) goes backward in record order. \
+                 hint: only forward precedences are admitted (record order is the total order)",
+                from_info.label, to_info.label
+            )));
+        }
+        self.extra_group_edges.push((from, to));
+        Ok(())
+    }
+
+    /// `layer0/attn/rmsnorm` path for `node_index` from group ancestry plus the leaf label.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn group_path_label(&self, node_index: usize) -> crate::SchemeLabel {
+        let node = &self.nodes[node_index];
+        group_path_label(&self.groups, node.group, &node.label)
+    }
+}
+
+/// Join group labels from the root down to `leaf`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn group_path_label(
+    groups: &[GroupInfo],
+    group: Option<GroupId>,
+    leaf: &crate::SchemeLabel,
+) -> crate::SchemeLabel {
+    let mut chain = Vec::new();
+    let mut cur = group;
+    while let Some(id) = cur {
+        chain.push(id);
+        cur = groups.get(id.0 as usize).and_then(|g| g.parent);
+    }
+    chain.reverse();
+    if chain.is_empty() {
+        return leaf.clone();
+    }
+    let mut s = String::new();
+    for id in chain {
+        if !s.is_empty() {
+            s.push('/');
+        }
+        s.push_str(groups[id.0 as usize].label.as_str());
+    }
+    s.push('/');
+    s.push_str(leaf.as_str());
+    s.into()
 }
 
 /// Per-resource sync/access semantics on one side of a barrier.

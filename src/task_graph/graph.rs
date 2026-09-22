@@ -2165,13 +2165,11 @@ fn submit_resolved_ir_partitions_replay(
     Ok((last_tv, result))
 }
 
-/// Schedule cache + parcel stamps + optional CB replay ledger for [`crate::Scheme`].
+/// Schedule cache + optional CB replay ledger for [`crate::Scheme`].
 pub(crate) struct IrSubmitState {
     schedule_cache: Option<CompiledCacheEntry>,
     /// Present only while CB replay is enabled for this submitter.
     replay: Option<super::cb_replay::CbReplayState>,
-    stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
-    resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     /// Reuse epochs merged into every partition's GPU queue-wait list at submit time.
     extra_submit_epochs: crate::timeline::ReferenceTable,
     /// Host-observed epochs + deferred writes (consumed once on the first partition job).
@@ -2185,8 +2183,6 @@ impl IrSubmitState {
             schedule_cache: None,
             // Start enabled; first submit with `cb_replay_disabled()` tears this down.
             replay: Some(super::cb_replay::CbReplayState::new()),
-            stamp_targets: Vec::new(),
-            resource_stamps: ResourceKeyMap::default(),
             extra_submit_epochs: crate::timeline::ReferenceTable::default(),
             host_observed_epochs: crate::timeline::ReferenceTable::default(),
             deferred_host_writes: Vec::new(),
@@ -2233,35 +2229,6 @@ impl IrSubmitState {
         (queue, host, writes)
     }
 
-    pub fn register_parcel_stamp(&mut self, parcel: &crate::Parcel) {
-        self.register_stamp_parts(parcel.resource_id(), parcel.stamp_handle());
-    }
-
-    pub fn register_stamp_parts(&mut self, resource_id: ResourceId, stamp: Arc<crate::parcel::ParcelStamp>) {
-        if let Some(key) = ResourceKey::from_resource_id(resource_id) {
-            // Rebinding the same resource identity replaces the map entry. Also drop any
-            // matching retired stamp from the legacy `stamp_targets` ledger so
-            // `all_stamps_alive` cannot keep failing after a correct re-record.
-            if let Some(old) = self.resource_stamps.insert(key, stamp) {
-                self.stamp_targets
-                    .retain(|s| !std::sync::Arc::ptr_eq(s, &old) && s.is_alive());
-            }
-        } else {
-            self.stamp_targets.push(stamp);
-        }
-    }
-
-    /// Register stamps for every parcel unit in a buffer (dependency tracking only).
-    pub fn register_buffer_stamps(&mut self, buffer: &crate::Buffer) {
-        for parcel in buffer.parcels() {
-            self.register_parcel_stamp(parcel);
-        }
-    }
-
-    pub fn register_stamp(&mut self, stamp: Arc<crate::parcel::ParcelStamp>) {
-        self.stamp_targets.push(stamp);
-    }
-
     /// Drop cached retention keys so the next submit re-records retained partitions.
     pub fn invalidate_retention(&mut self) {
         if let Some(replay) = &mut self.replay {
@@ -2285,15 +2252,6 @@ impl IrSubmitState {
         if let Some(replay) = &mut self.replay {
             replay.release_backend(ctx);
         }
-    }
-
-    pub fn resource_stamps(&self) -> &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>> {
-        &self.resource_stamps
-    }
-
-    /// True when every registered parcel stamp is still alive (owning Buffer/Texture not dropped).
-    pub fn all_stamps_alive(&self) -> bool {
-        self.resource_stamps.values().all(|s| s.is_alive()) && self.stamp_targets.iter().all(|s| s.is_alive())
     }
 
     /// Per-partition timeline values from the most recent successful submit.
@@ -2334,6 +2292,8 @@ impl IrSubmitState {
         deferred_acquire: Option<&'a mut DeferredPresentAcquire<'a>>,
         deposits: &'a std::collections::HashMap<u32, super::ResolvedDeposit>,
         deposit_claims: &'a mut std::collections::HashMap<u32, Option<crate::exchange::DepositClaim>>,
+        resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+        stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
         ir_clean: bool,
         partial: &'a mut PartitionSubmitResult,
         partial_tv: &'a mut TimelineValue,
@@ -2353,8 +2313,8 @@ impl IrSubmitState {
                 deferred_acquire,
                 deposits,
                 deposit_claims: Some(deposit_claims),
-                resource_stamps: &self.resource_stamps,
-                stamp_targets: &self.stamp_targets,
+                resource_stamps,
+                stamp_targets,
                 ir_clean,
                 sidecar,
                 partial,
@@ -2640,6 +2600,8 @@ mod slice_retention_tests {
                 None,
                 &empty_uploads,
                 &mut deposit_claims,
+                &ResourceKeyMap::default(),
+                &[],
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
@@ -2663,6 +2625,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
@@ -2701,6 +2664,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
@@ -2766,6 +2730,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "early".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
@@ -2779,6 +2744,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "copy".into(),
             bindings: vec![
                 ResourceBinding {
@@ -2929,6 +2895,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "early_a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
@@ -2942,6 +2909,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_a".into(),
             bindings: vec![
                 ResourceBinding {
@@ -2963,6 +2931,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "early_b".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
@@ -2976,6 +2945,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "copy_b".into(),
             bindings: vec![
                 ResourceBinding {
@@ -3063,6 +3033,7 @@ mod slice_retention_tests {
     fn dynamic_partition_slot_key_includes_generation() {
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "copy".into(),
             bindings: vec![
                 ResourceBinding {
@@ -3132,6 +3103,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "draw".into(),
             bindings: vec![],
             kind: NodeKind::RenderPass {
@@ -3187,6 +3159,7 @@ mod slice_retention_tests {
         let dst = ResourceId::Buffer(buf_dst);
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "upload_copy".into(),
             bindings: vec![
                 ResourceBinding {
@@ -3207,6 +3180,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "compute".into(),
             bindings: vec![ResourceBinding {
                 resource: dst,
@@ -3353,6 +3327,8 @@ mod slice_retention_tests {
                 None,
                 &uploads,
                 &mut deposit_claims,
+                &ResourceKeyMap::default(),
+                &[],
                 false,
                 &mut partial,
                 &mut partial_tv,
@@ -3389,6 +3365,7 @@ mod slice_retention_tests {
     fn deposit_copy_node(dst: ResourceId, size: u64) -> TaskNode {
         let src = ResourceId::Deposit(0);
         TaskNode {
+            group: None,
             label: "deposit_copy".into(),
             bindings: vec![
                 ResourceBinding {
@@ -3446,6 +3423,8 @@ mod slice_retention_tests {
                 None,
                 deposits,
                 &mut deposit_claims,
+                &ResourceKeyMap::default(),
+                &[],
                 ir_clean,
                 &mut partial,
                 &mut partial_tv,
@@ -3476,6 +3455,7 @@ mod slice_retention_tests {
     fn deposit_copy_buffer_is_retainable() {
         let ir = GraphIR {
             nodes: vec![deposit_copy_node(ResourceId::Buffer(1), 64)],
+            ..Default::default()
         };
         let edges = analysis::build_edges(&ir);
         let schedule = analysis::schedule_waves(&ir, &edges);
@@ -3526,6 +3506,7 @@ mod slice_retention_tests {
         GraphIR {
             nodes: vec![
                 TaskNode {
+                    group: None,
                     label: "pre".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Buffer(buf),
@@ -3539,6 +3520,7 @@ mod slice_retention_tests {
                     },
                 },
                 TaskNode {
+                    group: None,
                     label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Buffer(buf),
@@ -3551,6 +3533,7 @@ mod slice_retention_tests {
                     },
                 },
             ],
+            ..Default::default()
         }
     }
 
@@ -3560,6 +3543,7 @@ mod slice_retention_tests {
             nodes: vec![
                 deposit_copy_node(ResourceId::Buffer(buf), 64),
                 TaskNode {
+                    group: None,
                     label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Buffer(buf),
@@ -3572,6 +3556,7 @@ mod slice_retention_tests {
                     },
                 },
             ],
+            ..Default::default()
         }
     }
 
@@ -3595,6 +3580,7 @@ mod slice_retention_tests {
         GraphIR {
             nodes: vec![
                 TaskNode {
+                    group: None,
                     label: "pre".into(),
                     bindings: vec![ResourceBinding {
                         resource: compute,
@@ -3609,6 +3595,7 @@ mod slice_retention_tests {
                 },
                 copy,
                 TaskNode {
+                    group: None,
                     label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: compute,
@@ -3621,6 +3608,7 @@ mod slice_retention_tests {
                     },
                 },
             ],
+            ..Default::default()
         }
     }
 
@@ -3749,6 +3737,7 @@ mod slice_retention_tests {
             nodes: vec![
                 deposit_copy_node(ResourceId::Buffer(buf.handle), 64),
                 TaskNode {
+                    group: None,
                     label: "draw".into(),
                     bindings: vec![],
                     kind: NodeKind::RenderPass {
@@ -3758,6 +3747,7 @@ mod slice_retention_tests {
                     },
                 },
             ],
+            ..Default::default()
         };
         let uploads = deposit_map(buf.handle, 64);
 
@@ -3993,6 +3983,7 @@ mod slice_retention_tests {
     ) -> GraphIR {
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf0.handle),
@@ -4006,6 +3997,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "b".into(),
             bindings: vec![
                 ResourceBinding {
@@ -4025,6 +4017,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "c".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf1.handle),
@@ -4189,6 +4182,7 @@ mod slice_retention_tests {
         // semantics) picks split = 2 → partition 0 = waves 0..2, partition 1 = wave 2.
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
+            group: None,
             label: "upload".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf0.handle),
@@ -4201,6 +4195,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "compute_b".into(),
             bindings: vec![
                 ResourceBinding {
@@ -4220,6 +4215,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
+            group: None,
             label: "compute_c".into(),
             bindings: vec![
                 ResourceBinding {
@@ -4295,6 +4291,7 @@ mod partitioning_tests {
 
     fn dispatch_node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: bindings
                 .into_iter()
@@ -4311,6 +4308,7 @@ mod partitioning_tests {
 
     fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: buffer,
@@ -4326,6 +4324,7 @@ mod partitioning_tests {
 
     fn render_pass_node(label: &'static str, target: RenderTargetHandle) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![],
             kind: NodeKind::RenderPass {
@@ -4338,6 +4337,7 @@ mod partitioning_tests {
 
     fn copy_to_dst_node(label: &'static str, src: RenderTargetHandle, dst: ResourceId) -> TaskNode {
         TaskNode {
+            group: None,
             label: label.into(),
             bindings: vec![
                 ResourceBinding {
@@ -4502,6 +4502,7 @@ mod partitioning_tests {
     fn single_dispatch_one_pure_compute_logical_partition() {
         let ir = GraphIR {
             nodes: vec![dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 4)],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         assert_eq!(parts.len(), 1);
@@ -4517,6 +4518,7 @@ mod partitioning_tests {
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 4),
                 dispatch_node("b", 2, vec![(buf(1), NodeAccess::Write)], 4),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         // Two independent dispatches land in the same wave → one logical partition.
@@ -4535,6 +4537,7 @@ mod partitioning_tests {
                 dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
                 dispatch_node("c", 3, vec![(buf(1), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         assert_eq!(parts.len(), 1, "pure-compute linear chain is one logical partition");
@@ -4550,6 +4553,7 @@ mod partitioning_tests {
     fn render_pass_alone_one_render_logical_partition() {
         let ir = GraphIR {
             nodes: vec![render_pass_node("draw", 10)],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         assert_eq!(parts.len(), 1);
@@ -4568,6 +4572,7 @@ mod partitioning_tests {
                 render_pass_node("draw", 10),
                 copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         // Must have at least: one render partition + one present partition.
@@ -4588,6 +4593,7 @@ mod partitioning_tests {
             nodes: vec![
                 dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 TaskNode {
+                    group: None,
                     label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: buf(0),
@@ -4600,6 +4606,7 @@ mod partitioning_tests {
                     },
                 },
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         assert!(parts.len() >= 2, "compute→render must produce ≥ 2 logical partitions");
@@ -4619,6 +4626,7 @@ mod partitioning_tests {
     fn present_lease_copy_only_has_present_partition() {
         let ir = GraphIR {
             nodes: vec![copy_to_dst_node("copy", 5, ResourceId::PresentLease(0))],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         let present_count = parts.iter().filter(|p| p.has_present).count();
@@ -4637,6 +4645,7 @@ mod partitioning_tests {
                 render_pass_node("draw_b", 10),
                 copy_to_dst_node("copy_b", 10, ResourceId::PresentLease(1)),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         let present: Vec<_> = parts.iter().filter(|p| p.has_present).collect();
@@ -4659,6 +4668,7 @@ mod partitioning_tests {
                 copy_to_dst_node("copy_a", 5, ResourceId::PresentLease(0)),
                 copy_to_dst_node("copy_b", 6, ResourceId::PresentLease(1)),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         let present: Vec<_> = parts.iter().filter(|p| p.has_present).collect();
@@ -4675,6 +4685,7 @@ mod partitioning_tests {
                 dispatch_node("post", 2, vec![(buf(0), NodeAccess::Read)], 1),
                 copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         assert!(parts.last().unwrap().has_present, "present partition must be last");
@@ -4692,6 +4703,7 @@ mod partitioning_tests {
                 dispatch_node("post", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
             ],
+            ..Default::default()
         };
         let parts = logical_partitions(&ir);
         // Whatever the exact count, the present partition must be last.
@@ -4712,6 +4724,7 @@ mod partitioning_tests {
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_cache_kind_invariant(&ir, &entry);
@@ -4721,6 +4734,7 @@ mod partitioning_tests {
     fn cache_kind_invariant_render_only() {
         let ir = GraphIR {
             nodes: vec![render_pass_node("draw", 10)],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_cache_kind_invariant(&ir, &entry);
@@ -4734,6 +4748,7 @@ mod partitioning_tests {
                 dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_cache_kind_invariant(&ir, &entry);
@@ -4747,6 +4762,7 @@ mod partitioning_tests {
                 render_pass_node("draw", 10),
                 copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_cache_kind_invariant(&ir, &entry);
@@ -4763,6 +4779,7 @@ mod partitioning_tests {
                 write_node("upload", buf(0), 0),
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_upload_remap_invariant(&ir, &entry);
@@ -4776,6 +4793,7 @@ mod partitioning_tests {
                 write_node("upload_b", buf(1), 1),
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_upload_remap_invariant(&ir, &entry);
@@ -4804,6 +4822,7 @@ mod partitioning_tests {
                     1,
                 ),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_upload_remap_invariant(&ir, &entry);
@@ -4828,6 +4847,7 @@ mod partitioning_tests {
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let entry = build_cache(&ir);
         assert_eq!(entry.partitioned_upload_remap.len(), 0);
@@ -4845,6 +4865,7 @@ mod partitioning_tests {
                 dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
                 dispatch_node("c", 3, vec![(buf(1), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
@@ -4864,9 +4885,11 @@ mod partitioning_tests {
         // Changing the binding structure (different buffer id) changes the fingerprint.
         let ir_v1 = GraphIR {
             nodes: vec![dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1)],
+            ..Default::default()
         };
         let ir_v2 = GraphIR {
             nodes: vec![dispatch_node("a", 1, vec![(buf(1), NodeAccess::Write)], 1)],
+            ..Default::default()
         };
         let fp1 = binding_fingerprint(&ir_v1);
         let fp2 = binding_fingerprint(&ir_v2);
@@ -4896,7 +4919,7 @@ mod partitioning_tests {
 
     /// Call `partition_waves_can_retain` for a single-wave IR built from `nodes`.
     fn can_retain_single_wave(nodes: Vec<TaskNode>) -> bool {
-        let ir = GraphIR { nodes };
+        let ir = GraphIR { nodes, ..Default::default() };
         let edges = analysis::build_edges(&ir);
         let schedule = analysis::schedule_waves(&ir, &edges);
         partition_waves_can_retain(&ir, &schedule.waves)
@@ -4947,6 +4970,7 @@ mod partitioning_tests {
                 write_node("upload", buf(0), 0),
                 dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read)], 1),
             ],
+            ..Default::default()
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
