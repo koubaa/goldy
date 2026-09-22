@@ -11,7 +11,6 @@ use goldy::{
     RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
     TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
-use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -61,7 +60,6 @@ struct App {
     shader: Option<ShaderModule>,
     warm_parcel: Option<Buffer>,
     cool_parcel: Option<Buffer>,
-    upload_scheme: Option<Scheme>,
     warm_deposit: Option<DepositTransaction>,
     cool_deposit: Option<DepositTransaction>,
     surface: Option<SurfaceExchange>,
@@ -85,7 +83,6 @@ impl App {
             shader: None,
             warm_parcel: None,
             cool_parcel: None,
-            upload_scheme: None,
             warm_deposit: None,
             cool_deposit: None,
             surface: None,
@@ -140,6 +137,24 @@ impl App {
         pass.finish();
     }
 
+    fn bind_uploads(
+        ctx: &goldy::Context,
+        scheme: &mut Scheme,
+        warm_parcel: &Buffer,
+        cool_parcel: &Buffer,
+    ) -> anyhow::Result<(DepositTransaction, DepositTransaction)> {
+        let memory = MemoryExchange::new(ctx);
+        let warm_deposit = memory.bind_deposit(
+            scheme,
+            DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()),
+        )?;
+        let cool_deposit = memory.bind_deposit(
+            scheme,
+            DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()),
+        )?;
+        Ok((warm_deposit, cool_deposit))
+    }
+
     fn bind_frame(
         scheme: &mut Scheme,
         scene_rt: &Lease<LeaseRenderTarget>,
@@ -192,29 +207,16 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, Some(DepthFormat::Depth32Float))?;
+        let (warm_deposit, cool_deposit) = Self::bind_uploads(&ctx, &mut scheme, &warm_parcel, &cool_parcel)?;
         Self::record_pass(&mut scheme, &pipeline, &warm_parcel, &cool_parcel, &scene_rt);
         let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         self.ctx = Some(ctx);
-        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.warm_parcel = Some(warm_parcel);
         self.cool_parcel = Some(cool_parcel);
-        let warm_parcel = self.warm_parcel.as_ref().unwrap();
-        let cool_parcel = self.cool_parcel.as_ref().unwrap();
-        let mut upload_scheme = Scheme::new(ctx);
-        let memory = MemoryExchange::new(ctx);
-        let warm_deposit = memory.bind_deposit(
-            &mut upload_scheme,
-            DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()),
-        )?;
-        let cool_deposit = memory.bind_deposit(
-            &mut upload_scheme,
-            DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()),
-        )?;
-        self.upload_scheme = Some(upload_scheme);
         self.warm_deposit = Some(warm_deposit);
         self.cool_deposit = Some(cool_deposit);
         self.surface = surface;
@@ -249,10 +251,8 @@ impl App {
             ));
         }
 
-        let upload = self.upload_scheme.as_mut().unwrap();
         (self.warm_deposit.as_ref().unwrap() << warm_verts.as_slice())?;
         (self.cool_deposit.as_ref().unwrap() << cool_verts.as_slice())?;
-        upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
         let mut submission = scheme.submit()?;
@@ -295,13 +295,17 @@ impl App {
                     if let Ok(rt) =
                         ctx.lease_render_target(width.max(1), height.max(1), format, Some(DepthFormat::Depth32Float))
                     {
-                        Self::record_pass(&mut scheme, pipeline, warm, cool, &rt);
-                        if let Ok(present) =
-                            Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
-                        {
-                            self.present = present;
-                            self.scheme = Some(scheme);
-                            self.scene_rt = Some(rt);
+                        if let Ok((warm_deposit, cool_deposit)) = Self::bind_uploads(ctx, &mut scheme, warm, cool) {
+                            Self::record_pass(&mut scheme, pipeline, warm, cool, &rt);
+                            if let Ok(present) =
+                                Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
+                            {
+                                self.warm_deposit = Some(warm_deposit);
+                                self.cool_deposit = Some(cool_deposit);
+                                self.present = present;
+                                self.scheme = Some(scheme);
+                                self.scene_rt = Some(rt);
+                            }
                         }
                     }
                 }
