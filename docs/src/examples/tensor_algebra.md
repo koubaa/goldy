@@ -15,7 +15,7 @@ cargo run --no-default-features --features cuda,tensor --example tensor_algebra
 
 ## What it demonstrates
 
-- `TensorContext` / `TensorRecorder` recording into an ordinary `Scheme`
+- `TensorKernels` / `TensorRecorder` recording into an ordinary `Scheme`
 - Checked views and semantic matmul (cuBLAS / MPS / stdlib)
 - Host observation through `MemoryExchange`
 

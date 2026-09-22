@@ -6,6 +6,21 @@ use crate::shader::ShaderModule;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
+/// Native compute PSO lifetime. [`ComputePipeline`] and interned scheme nodes share this
+/// so dropping the caller's pipeline does not destroy a handle still recorded in GraphIR.
+pub(crate) struct ComputePipelineGpu {
+    backend: Arc<Mutex<Box<dyn GpuBackend>>>,
+    handle: ComputePipelineHandle,
+}
+
+impl Drop for ComputePipelineGpu {
+    fn drop(&mut self) {
+        tracing::trace!("Destroying compute pipeline");
+        let mut backend = self.backend.lock().unwrap();
+        backend.destroy_compute_pipeline(self.handle);
+    }
+}
+
 /// A compute pipeline.
 ///
 /// Compute pipelines run compute shaders on the GPU, enabling general-purpose
@@ -38,9 +53,11 @@ use std::sync::{Arc, Mutex};
 /// scheme.submit()?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
+///
+/// Recording a dispatch interns this object's GPU lifetime on the [`crate::Scheme`], so the
+/// scheme can be submitted after the caller's [`ComputePipeline`] is dropped.
 pub struct ComputePipeline {
     _device: Runtime,
-    backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ComputePipelineHandle,
     /// Per push-constant resource slot (shader-signature order), the descriptor
     /// access the shader signature requires. Used by [`crate::Scheme`] recording to
@@ -52,6 +69,7 @@ pub struct ComputePipeline {
     pub(crate) provenance: Arc<crate::shader::ShaderProvenance>,
     /// Continuation pipelines when the shader is a yielding script (see [`crate::petition`]).
     pub(crate) yielding: Option<Arc<crate::petition::YieldPipelines>>,
+    gpu: Arc<ComputePipelineGpu>,
 }
 
 impl ComputePipeline {
@@ -114,17 +132,24 @@ impl ComputePipeline {
 
         Ok(Self {
             _device: device.clone(),
-            backend: Arc::clone(&device.inner.backend),
             handle,
             slot_access,
             provenance: Arc::clone(compute_shader.provenance()),
             yielding,
+            gpu: Arc::new(ComputePipelineGpu {
+                backend: Arc::clone(&device.inner.backend),
+                handle,
+            }),
         })
     }
 
     /// Whether this pipeline was built from a yielding script (`$yield` / `[goldy_resume]`).
     pub fn is_yielding(&self) -> bool {
         self.yielding.is_some()
+    }
+
+    pub(crate) fn intern_gpu(&self) -> Arc<ComputePipelineGpu> {
+        Arc::clone(&self.gpu)
     }
 }
 
@@ -194,10 +219,3 @@ fn compile_compute_stage_unlocked(
     Ok(Some((result.shader.data, reflection)))
 }
 
-impl Drop for ComputePipeline {
-    fn drop(&mut self) {
-        tracing::trace!("Destroying compute pipeline");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_compute_pipeline(self.handle);
-    }
-}

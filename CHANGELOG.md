@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `TensorContext` is now `TensorKernels` (C `GoldyTensorKernels` /
+  `goldy_tensor_kernels_*`, C++ / Python / ffi-client same name). It is prepared portable
+  tensor pipelines for a runtime, not a Goldy `Context`.
+
 - **Breaking:** GPU-to-host reads are host claims via `(&mut submission >> &parcel).take::<T>()`, not an exchange. `MemoryExchange` is deposit-only. `BufferFlags::CPU_READABLE` is a placement hint (identical staged semantics without the flag). C ABI: `goldy_scheme_submission_take` / `take_texture` → `GoldyHostView`. C++ `SchemeSubmission::take`; Python `SchemeSubmission.take` / `>>`; .NET `SchemeSubmission.Take`; ffi-client `SchemeSubmission::take`.
 
 ## [0.3.0] - 2026-09-19

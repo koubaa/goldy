@@ -70,7 +70,7 @@ class Buffer;
 class Texture;
 class Parcel;
 class Tensor;
-class TensorContext;
+class TensorKernels;
 class RecordBuilder;
 class ShaderModule;
 class RenderPipeline;
@@ -262,8 +262,8 @@ struct TensorDeleter {
     void operator()(GoldyTensor* p) const { if (p) goldy_tensor_destroy(p); }
 };
 
-struct TensorContextDeleter {
-    void operator()(GoldyTensorContext* p) const { if (p) goldy_tensor_context_destroy(p); }
+struct TensorKernelsDeleter {
+    void operator()(GoldyTensorKernels* p) const { if (p) goldy_tensor_kernels_destroy(p); }
 };
 
 struct TextureDeleter {
@@ -1577,24 +1577,24 @@ inline Scheme::ComputeNode Scheme::compute_node(const char* label, const Compute
 }
 
 /**
- * @brief Prepared tensor kernels plus layout keepalive.
+ * @brief Prepared portable tensor kernels for one runtime.
  *
- * Keep this alive for as long as schemes that recorded through it still exist.
+ * Needed while recording; layout parcels intern onto the scheme.
  */
-class TensorContext {
+class TensorKernels {
 public:
-    explicit TensorContext(Runtime& runtime) {
-        GoldyTensorContext* ptr = goldy_tensor_context_create(runtime.get());
+    explicit TensorKernels(Runtime& runtime) {
+        GoldyTensorKernels* ptr = goldy_tensor_kernels_create(runtime.get());
         if (!ptr) {
             throw Exception::from_last_error();
         }
         ptr_.reset(ptr);
     }
 
-    TensorContext(const TensorContext&) = delete;
-    TensorContext& operator=(const TensorContext&) = delete;
-    TensorContext(TensorContext&&) = default;
-    TensorContext& operator=(TensorContext&&) = default;
+    TensorKernels(const TensorKernels&) = delete;
+    TensorKernels& operator=(const TensorKernels&) = delete;
+    TensorKernels(TensorKernels&&) = default;
+    TensorKernels& operator=(TensorKernels&&) = default;
 
     [[nodiscard]] Tensor add(Scheme& scheme, std::string_view label, const Tensor& a, const Tensor& b) {
         std::string label_str(label);
@@ -1620,10 +1620,10 @@ public:
             goldy_tensor_fill_f32(ptr_.get(), scheme.get(), label_str.c_str(), tensor.get(), value));
     }
 
-    GoldyTensorContext* get() const { return ptr_.get(); }
+    GoldyTensorKernels* get() const { return ptr_.get(); }
 
 private:
-    std::unique_ptr<GoldyTensorContext, detail::TensorContextDeleter> ptr_;
+    std::unique_ptr<GoldyTensorKernels, detail::TensorKernelsDeleter> ptr_;
 };
 
 /**

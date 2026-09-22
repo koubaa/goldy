@@ -194,12 +194,12 @@ pub type FnGoldyTensorDtype = unsafe extern "C" fn(*const GoldyTensor) -> GoldyT
 #[cfg(feature = "tensor")]
 pub type FnGoldyTensorShape = unsafe extern "C" fn(*const GoldyTensor, *mut GoldyTensorShape) -> GoldyResult;
 #[cfg(feature = "tensor")]
-pub type FnGoldyTensorContextCreate = unsafe extern "C" fn(*mut GoldyRuntime) -> *mut GoldyTensorContext;
+pub type FnGoldyTensorKernelsCreate = unsafe extern "C" fn(*mut GoldyRuntime) -> *mut GoldyTensorKernels;
 #[cfg(feature = "tensor")]
-pub type FnGoldyTensorContextDestroy = unsafe extern "C" fn(*mut GoldyTensorContext);
+pub type FnGoldyTensorKernelsDestroy = unsafe extern "C" fn(*mut GoldyTensorKernels);
 #[cfg(feature = "tensor")]
 pub type FnGoldyTensorAdd = unsafe extern "C" fn(
-    *mut GoldyTensorContext,
+    *mut GoldyTensorKernels,
     *mut GoldyScheme,
     *const c_char,
     *const GoldyTensor,
@@ -207,7 +207,7 @@ pub type FnGoldyTensorAdd = unsafe extern "C" fn(
 ) -> *mut GoldyTensor;
 #[cfg(feature = "tensor")]
 pub type FnGoldyTensorMatmul = unsafe extern "C" fn(
-    *mut GoldyTensorContext,
+    *mut GoldyTensorKernels,
     *mut GoldyScheme,
     *const c_char,
     *const GoldyTensor,
@@ -215,7 +215,7 @@ pub type FnGoldyTensorMatmul = unsafe extern "C" fn(
 ) -> *mut GoldyTensor;
 #[cfg(feature = "tensor")]
 pub type FnGoldyTensorFillF32 = unsafe extern "C" fn(
-    *mut GoldyTensorContext,
+    *mut GoldyTensorKernels,
     *mut GoldyScheme,
     *const c_char,
     *mut GoldyTensor,

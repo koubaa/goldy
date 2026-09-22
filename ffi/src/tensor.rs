@@ -3,7 +3,7 @@
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::runtime::GoldyRuntime;
 use crate::scheme::GoldyScheme;
-use goldy::{Tensor, TensorContext, TensorDType, TensorScalar, TensorShape};
+use goldy::{Tensor, TensorDType, TensorKernels, TensorScalar, TensorShape};
 use std::ptr;
 use std::slice;
 
@@ -61,9 +61,9 @@ pub struct GoldyTensor {
     pub(crate) inner: Tensor,
 }
 
-/// Prepared tensor kernels plus layout keepalive.
-pub struct GoldyTensorContext {
-    pub(crate) inner: TensorContext,
+/// Prepared tensor kernels. Layout parcels intern onto recorded schemes.
+pub struct GoldyTensorKernels {
+    pub(crate) inner: TensorKernels,
 }
 
 fn parse_shape(rank: u32, dims: *const u32) -> Result<TensorShape, GoldyResult> {
@@ -177,13 +177,13 @@ pub unsafe extern "C" fn goldy_tensor_shape(tensor: *const GoldyTensor, out: *mu
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn goldy_tensor_context_create(runtime: *mut GoldyRuntime) -> *mut GoldyTensorContext {
+pub unsafe extern "C" fn goldy_tensor_kernels_create(runtime: *mut GoldyRuntime) -> *mut GoldyTensorKernels {
     if runtime.is_null() {
         set_last_error("Runtime is null");
         return ptr::null_mut();
     }
-    match TensorContext::new(&(*runtime).inner) {
-        Ok(inner) => Box::into_raw(Box::new(GoldyTensorContext { inner })),
+    match TensorKernels::new(&(*runtime).inner) {
+        Ok(inner) => Box::into_raw(Box::new(GoldyTensorKernels { inner })),
         Err(e) => {
             set_last_error(e.to_string());
             ptr::null_mut()
@@ -192,14 +192,14 @@ pub unsafe extern "C" fn goldy_tensor_context_create(runtime: *mut GoldyRuntime)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn goldy_tensor_context_destroy(ctx: *mut GoldyTensorContext) {
+pub unsafe extern "C" fn goldy_tensor_kernels_destroy(ctx: *mut GoldyTensorKernels) {
     if !ctx.is_null() {
         drop(Box::from_raw(ctx));
     }
 }
 
 unsafe fn map_op<F>(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const libc::c_char,
     f: F,
@@ -208,7 +208,7 @@ where
     F: FnOnce(&mut goldy::TensorRecorder<'_>, &str) -> Result<Tensor, goldy::GoldyError>,
 {
     if ctx.is_null() || scheme.is_null() {
-        set_last_error("tensor context or scheme is null");
+        set_last_error("tensor kernels or scheme is null");
         return ptr::null_mut();
     }
     let label = if label.is_null() {
@@ -234,7 +234,7 @@ where
 
 #[no_mangle]
 pub unsafe extern "C" fn goldy_tensor_add(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const libc::c_char,
     a: *const GoldyTensor,
@@ -251,7 +251,7 @@ pub unsafe extern "C" fn goldy_tensor_add(
 
 #[no_mangle]
 pub unsafe extern "C" fn goldy_tensor_matmul(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const libc::c_char,
     a: *const GoldyTensor,
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn goldy_tensor_matmul(
 
 #[no_mangle]
 pub unsafe extern "C" fn goldy_tensor_fill_f32(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const libc::c_char,
     tensor: *mut GoldyTensor,

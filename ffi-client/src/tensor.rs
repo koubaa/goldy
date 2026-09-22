@@ -3,7 +3,7 @@
 use crate::error::{check, non_null, Result};
 use crate::runtime::Runtime;
 use crate::scheme::Scheme;
-use crate::sys::{self, GoldyTensor, GoldyTensorContext, GoldyTensorDType, GoldyTensorShape};
+use crate::sys::{self, GoldyTensor, GoldyTensorKernels, GoldyTensorDType, GoldyTensorShape};
 use std::ffi::CString;
 
 /// Dense tensor element type. Operation support is per-op, not universal.
@@ -104,15 +104,15 @@ impl Drop for Tensor {
     }
 }
 
-/// Prepared tensor kernels plus layout keepalive.
-pub struct TensorContext {
-    ptr: *mut GoldyTensorContext,
+/// Prepared tensor kernels. Layout parcels intern onto recorded schemes.
+pub struct TensorKernels {
+    ptr: *mut GoldyTensorKernels,
 }
 
-impl TensorContext {
+impl TensorKernels {
     pub fn new(runtime: &Runtime) -> Result<Self> {
         Ok(Self {
-            ptr: non_null(unsafe { sys::goldy_tensor_context_create(runtime.ptr) })?,
+            ptr: non_null(unsafe { sys::goldy_tensor_kernels_create(runtime.ptr) })?,
         })
     }
 
@@ -138,10 +138,10 @@ impl TensorContext {
     }
 }
 
-impl Drop for TensorContext {
+impl Drop for TensorKernels {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { sys::goldy_tensor_context_destroy(self.ptr) };
+            unsafe { sys::goldy_tensor_kernels_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }

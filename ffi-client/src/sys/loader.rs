@@ -127,9 +127,9 @@ pub(crate) struct GoldyFfi {
     #[cfg(feature = "tensor")]
     pub goldy_tensor_shape: FnGoldyTensorShape,
     #[cfg(feature = "tensor")]
-    pub goldy_tensor_context_create: FnGoldyTensorContextCreate,
+    pub goldy_tensor_kernels_create: FnGoldyTensorKernelsCreate,
     #[cfg(feature = "tensor")]
-    pub goldy_tensor_context_destroy: FnGoldyTensorContextDestroy,
+    pub goldy_tensor_kernels_destroy: FnGoldyTensorKernelsDestroy,
     #[cfg(feature = "tensor")]
     pub goldy_tensor_add: FnGoldyTensorAdd,
     #[cfg(feature = "tensor")]
@@ -347,9 +347,9 @@ impl GoldyFfi {
             #[cfg(feature = "tensor")]
             goldy_tensor_shape: sym!("goldy_tensor_shape", FnGoldyTensorShape),
             #[cfg(feature = "tensor")]
-            goldy_tensor_context_create: sym!("goldy_tensor_context_create", FnGoldyTensorContextCreate),
+            goldy_tensor_kernels_create: sym!("goldy_tensor_kernels_create", FnGoldyTensorKernelsCreate),
             #[cfg(feature = "tensor")]
-            goldy_tensor_context_destroy: sym!("goldy_tensor_context_destroy", FnGoldyTensorContextDestroy),
+            goldy_tensor_kernels_destroy: sym!("goldy_tensor_kernels_destroy", FnGoldyTensorKernelsDestroy),
             #[cfg(feature = "tensor")]
             goldy_tensor_add: sym!("goldy_tensor_add", FnGoldyTensorAdd),
             #[cfg(feature = "tensor")]

@@ -7,7 +7,7 @@ use crate::error::IntoPyResult;
 use crate::parcel::{parcel_from_cloned, PyParcel};
 use crate::runtime::PyRuntime;
 use crate::scheme::PyScheme;
-use goldy::{Tensor, TensorContext, TensorDType, TensorScalar, TensorShape};
+use goldy::{Tensor, TensorDType, TensorKernels, TensorScalar, TensorShape};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -87,24 +87,24 @@ pub(crate) fn tensor_from_owned(inner: Tensor) -> PyTensor {
     PyTensor { inner }
 }
 
-/// Prepared tensor kernels plus layout keepalive. Keep alive while recorded schemes exist.
-#[pyclass(name = "TensorContext", module = "goldy", unsendable)]
-pub struct PyTensorContext {
-    inner: RefCell<TensorContext>,
+/// Prepared tensor kernels. Layout parcels intern onto recorded schemes.
+#[pyclass(name = "TensorKernels", module = "goldy", unsendable)]
+pub struct PyTensorKernels {
+    inner: RefCell<TensorKernels>,
 }
 
 #[pymethods]
-impl PyTensorContext {
+impl PyTensorKernels {
     #[new]
     fn new(runtime: &PyRuntime) -> PyResult<Self> {
         Ok(Self {
-            inner: RefCell::new(TensorContext::new(&runtime.inner).into_py_result()?),
+            inner: RefCell::new(TensorKernels::new(&runtime.inner).into_py_result()?),
         })
     }
 
     fn add(&self, scheme: &PyScheme, label: &str, a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
         scheme.ensure_no_active_recorder()?;
-        let mut ctx = self.inner.borrow_mut();
+        let ctx = self.inner.borrow();
         let mut scheme = scheme.inner.borrow_mut();
         let mut rec = ctx.recorder(&mut scheme);
         rec.add(label, a.inner.view(), b.inner.view())
@@ -114,7 +114,7 @@ impl PyTensorContext {
 
     fn matmul(&self, scheme: &PyScheme, label: &str, a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
         scheme.ensure_no_active_recorder()?;
-        let mut ctx = self.inner.borrow_mut();
+        let ctx = self.inner.borrow();
         let mut scheme = scheme.inner.borrow_mut();
         let mut rec = ctx.recorder(&mut scheme);
         rec.matmul(label, a.inner.view(), b.inner.view())
@@ -124,7 +124,7 @@ impl PyTensorContext {
 
     fn fill_f32(&self, scheme: &PyScheme, label: &str, tensor: &PyTensor, value: f32) -> PyResult<()> {
         scheme.ensure_no_active_recorder()?;
-        let mut ctx = self.inner.borrow_mut();
+        let ctx = self.inner.borrow();
         let mut scheme = scheme.inner.borrow_mut();
         let mut rec = ctx.recorder(&mut scheme);
         rec.fill(label, tensor.inner.view(), TensorScalar::F32(value))
@@ -132,7 +132,7 @@ impl PyTensorContext {
     }
 
     fn __repr__(&self) -> String {
-        "TensorContext()".to_string()
+        "TensorKernels()".to_string()
     }
 }
 

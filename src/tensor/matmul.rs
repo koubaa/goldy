@@ -15,7 +15,7 @@ impl<'a> TensorRecorder<'a> {
         a.dtype().require_f32("matmul")?;
         b.dtype().require_f32("matmul")?;
         let out_shape = matmul_out_shape(a.shape(), b.shape())?;
-        let out = Tensor::zeros(&self.ctx.runtime, out_shape, TensorDType::F32)?;
+        let out = Tensor::zeros(&self.kernels.runtime, out_shape, TensorDType::F32)?;
         self.matmul_into(label, a, b, out.view())?;
         Ok(out)
     }
@@ -125,8 +125,8 @@ impl<'a> TensorRecorder<'a> {
         meta.o_s0 = stride_or(out, 0);
         meta.o_s1 = stride_or(out, 1);
         meta.o_s2 = stride_or(out, 2);
-        let idx = self.ctx.push_meta(meta)?;
-        self.ctx
+        let meta_buf = self.intern_meta(meta)?;
+        self.kernels
             .ops
             .batched
             .record(
@@ -135,7 +135,7 @@ impl<'a> TensorRecorder<'a> {
                 a.buffer(),
                 b.buffer(),
                 out.buffer(),
-                self.ctx.meta(idx),
+                &*meta_buf,
             )
             .over_1d(out.numel_u32().max(1));
         Ok(())

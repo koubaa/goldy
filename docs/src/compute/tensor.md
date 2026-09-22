@@ -53,20 +53,19 @@ Host updates and observations still go through [`MemoryExchange`](./settlement.m
 
 ## Recording
 
-[`TensorContext`] prepares portable kernels and retains tiny layout parcels. Keep it alive
-for as long as recorded schemes exist. [`TensorRecorder`] borrows the context and a mutable
+[`TensorKernels`] prepares portable kernels. Layout parcels intern onto the [`Scheme`](../programming-model/parcels.md) at record time, so the kernels object only needs to live while you are recording. [`TensorRecorder`] borrows the kernels and a mutable
 `Scheme`:
 
 ```rust,no_run
-# use goldy::{Instance, RequestAdapterOptions, RuntimeDescriptor, Scheme, Tensor, TensorContext, TensorShape};
+# use goldy::{Instance, RequestAdapterOptions, RuntimeDescriptor, Scheme, Tensor, TensorKernels, TensorShape};
 # fn main() -> Result<(), goldy::GoldyError> {
 # let runtime = Instance::new().unwrap().request_adapter(&Default::default()).unwrap().request_runtime(&Default::default()).unwrap();
 # let ctx = runtime.create_context().unwrap();
-let mut tensors = TensorContext::new(&runtime)?;
+let kernels = TensorKernels::new(&runtime)?;
 let a = Tensor::from_f32(&runtime, TensorShape::vector(4), &[1.0, 2.0, 3.0, 4.0])?;
 let b = Tensor::from_f32(&runtime, TensorShape::vector(1), &[10.0])?;
 let mut scheme = Scheme::new(&ctx);
-let c = tensors.recorder(&mut scheme).add("add", a.view(), b.view())?;
+let c = kernels.recorder(&mut scheme).add("add", a.view(), b.view())?;
 # let _ = c;
 # Ok(())
 # }

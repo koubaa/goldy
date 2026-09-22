@@ -1,6 +1,6 @@
 # Schemes
 
-A **scheme** is Goldy's retained unit of work: a recorded graph of dispatches and precedences you submit again without re-recording while it stays clean. Create one with [`Scheme::new`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html), bind parcels on nodes, and call `submit` every frame.
+A **scheme** is Goldy's retained unit of work: a recorded graph of dispatches and precedences you submit again without re-recording while it stays clean. Create one with [`Scheme::new`](https://docs.rs/goldy/latest/goldy/struct.Scheme.html), bind parcels on nodes, and call `submit` every frame. Compute pipelines and record-time constant buffers are interned on the scheme, so you can drop the objects you used only to record.
 
 ```rust
 let mut scheme = Scheme::new(&ctx);

@@ -727,7 +727,7 @@ pub(crate) struct SchemeDesc {
     pub ir: GraphIR,
     interned_leases: Vec<Arc<LeaseInner>>,
     record_constants: Vec<Arc<crate::Buffer>>,
-    stdlib_pipelines: Vec<Arc<crate::compute::ComputePipeline>>,
+    interned_pipelines: Vec<Arc<crate::compute::ComputePipelineGpu>>,
     resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
     prior_built_accels: HashSet<u64>,
@@ -745,7 +745,7 @@ impl SchemeDesc {
             ir: GraphIR::default(),
             interned_leases: Vec::new(),
             record_constants: Vec::new(),
-            stdlib_pipelines: Vec::new(),
+            interned_pipelines: Vec::new(),
             resource_stamps: ResourceKeyMap::default(),
             stamp_targets: Vec::new(),
             prior_built_accels: HashSet::new(),
@@ -1043,9 +1043,9 @@ impl Scheme {
         self.desc
             .record_constants
             .extend(child.desc.record_constants.iter().cloned());
-        for pipe in &child.desc.stdlib_pipelines {
-            if !self.desc.stdlib_pipelines.iter().any(|held| Arc::ptr_eq(held, pipe)) {
-                self.desc.stdlib_pipelines.push(Arc::clone(pipe));
+        for pipe in &child.desc.interned_pipelines {
+            if !self.desc.interned_pipelines.iter().any(|held| Arc::ptr_eq(held, pipe)) {
+                self.desc.interned_pipelines.push(Arc::clone(pipe));
             }
         }
         self.desc
@@ -1671,10 +1671,24 @@ impl Scheme {
     }
 
     /// Intern a record-time constant buffer so it outlives IR nodes that bind it.
+    pub(crate) fn intern_record_buffer_arc(&mut self, buf: crate::Buffer) -> Arc<crate::Buffer> {
+        let arc = Arc::new(buf);
+        self.desc.record_constants.push(Arc::clone(&arc));
+        arc
+    }
+
+    /// Intern a record-time constant buffer so it outlives IR nodes that bind it.
     pub(crate) fn intern_record_buffer(&mut self, buf: crate::Buffer) -> crate::parcel::Parcel {
-        let parcel = buf.whole().clone();
-        self.desc.record_constants.push(Arc::new(buf));
-        parcel
+        let arc = self.intern_record_buffer_arc(buf);
+        arc.whole().clone()
+    }
+
+    /// Intern the compute PSO so GraphIR handles stay valid after the caller drops the pipeline.
+    pub(crate) fn intern_compute_pipeline(&mut self, pipeline: &crate::compute::ComputePipeline) {
+        let gpu = pipeline.intern_gpu();
+        if !self.desc.interned_pipelines.iter().any(|held| Arc::ptr_eq(held, &gpu)) {
+            self.desc.interned_pipelines.push(gpu);
+        }
     }
 
     /// Intern `lease` and borrow its backing render target.
@@ -1692,6 +1706,7 @@ impl Scheme {
         label: impl Into<crate::SchemeLabel>,
         pipeline: &crate::compute::ComputePipeline,
     ) -> SchemeNodeBuilder<'a> {
+        self.intern_compute_pipeline(pipeline);
         let mut builder = self.node_from_parts(label, &PipelineParts::of(pipeline));
         builder.yielding = pipeline.yielding.clone();
         builder
@@ -1861,6 +1876,7 @@ impl Scheme {
         node: NodeId,
         pipeline: &crate::compute::ComputePipeline,
     ) -> Result<(), GoldyError> {
+        self.intern_compute_pipeline(pipeline);
         let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
             NodeKind::Dispatch {
                 pipeline: slot,
@@ -2097,7 +2113,7 @@ impl Scheme {
         }
         let pipeline = self.ctx.runtime().stdlib_matmul_f32()?;
         let handle = pipeline.handle;
-        self.desc.stdlib_pipelines.push(pipeline);
+        self.intern_compute_pipeline(&pipeline);
         for node in &mut self.desc.ir.nodes {
             if let NodeKind::MatMul(matmul) = &mut node.kind {
                 if !matmul.native && matmul.fallback_pipeline.is_none() {
@@ -3102,6 +3118,7 @@ impl Drop for Scheme {
         // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
         let _interned = std::mem::take(&mut self.desc.interned_leases);
         let _constants = std::mem::take(&mut self.desc.record_constants);
+        let _pipelines = std::mem::take(&mut self.desc.interned_pipelines);
     }
 }
 
@@ -4857,6 +4874,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             outstanding_held,
             "scheme intern keeps the backing alive after the user handle is dropped"
         );
+
         scheme.submit().expect("submit after lease handle drop");
 
         drop(scheme);
@@ -4865,6 +4883,25 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             outstanding_before,
             "pool return happens when the interned clone is dropped"
         );
+    }
+
+    #[test]
+    fn interned_compute_pipeline_survives_handle_drop() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let buffer = retained_buffer(&device);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write", &pipeline)
+            .with_parcel(&buffer, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        drop(pipeline);
+        scheme
+            .submit()
+            .expect("scheme intern keeps the compute pipeline alive after the user handle is dropped");
     }
 
     #[test]

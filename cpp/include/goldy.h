@@ -258,8 +258,8 @@ typedef struct GoldySurfaceExchange GoldySurfaceExchange;
 // Opaque owned tensor.
 typedef struct GoldyTensor GoldyTensor;
 
-// Prepared tensor kernels plus layout keepalive.
-typedef struct GoldyTensorContext GoldyTensorContext;
+// Prepared portable tensor kernels for one runtime.
+typedef struct GoldyTensorKernels GoldyTensorKernels;
 
 // Opaque handle to an acquired [`goldy::Texture`].
 typedef struct GoldyTexture GoldyTexture;
@@ -1063,27 +1063,27 @@ enum GoldyResult goldy_surface_exchange_resize(struct GoldySurfaceExchange *exch
 // `exchange` must be valid.
 uint32_t goldy_surface_exchange_width(const struct GoldySurfaceExchange *exchange);
 
-struct GoldyTensor *goldy_tensor_add(struct GoldyTensorContext *ctx,
+struct GoldyTensor *goldy_tensor_add(struct GoldyTensorKernels *ctx,
                                      struct GoldyScheme *scheme,
                                      const char *label,
                                      const struct GoldyTensor *a,
                                      const struct GoldyTensor *b);
 
-struct GoldyTensorContext *goldy_tensor_context_create(struct GoldyRuntime *runtime);
+struct GoldyTensorKernels *goldy_tensor_kernels_create(struct GoldyRuntime *runtime);
 
-void goldy_tensor_context_destroy(struct GoldyTensorContext *ctx);
+void goldy_tensor_kernels_destroy(struct GoldyTensorKernels *ctx);
 
 void goldy_tensor_destroy(struct GoldyTensor *tensor);
 
 enum GoldyTensorDType goldy_tensor_dtype(const struct GoldyTensor *tensor);
 
-enum GoldyResult goldy_tensor_fill_f32(struct GoldyTensorContext *ctx,
+enum GoldyResult goldy_tensor_fill_f32(struct GoldyTensorKernels *ctx,
                                        struct GoldyScheme *scheme,
                                        const char *label,
                                        struct GoldyTensor *tensor,
                                        float value);
 
-struct GoldyTensor *goldy_tensor_matmul(struct GoldyTensorContext *ctx,
+struct GoldyTensor *goldy_tensor_matmul(struct GoldyTensorKernels *ctx,
                                         struct GoldyScheme *scheme,
                                         const char *label,
                                         const struct GoldyTensor *a,

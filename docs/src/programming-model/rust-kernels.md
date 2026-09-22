@@ -130,7 +130,7 @@ DSL.
 
 Goldy only has eight user scalar words, so layouts are **not** push constants.
 The metadata parcel is interned on the scheme, read-only in GraphIR, and does
-not need an external `TensorContext` keepalive.
+not need an external `TensorKernels` keepalive.
 
 ## Architecture
 

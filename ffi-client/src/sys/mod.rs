@@ -585,18 +585,18 @@ pub unsafe fn goldy_tensor_shape(tensor: *const GoldyTensor, out: *mut GoldyTens
 }
 
 #[cfg(feature = "tensor")]
-pub unsafe fn goldy_tensor_context_create(runtime: *mut GoldyRuntime) -> *mut GoldyTensorContext {
-    (lib().goldy_tensor_context_create)(runtime)
+pub unsafe fn goldy_tensor_kernels_create(runtime: *mut GoldyRuntime) -> *mut GoldyTensorKernels {
+    (lib().goldy_tensor_kernels_create)(runtime)
 }
 
 #[cfg(feature = "tensor")]
-pub unsafe fn goldy_tensor_context_destroy(ctx: *mut GoldyTensorContext) {
-    (lib().goldy_tensor_context_destroy)(ctx)
+pub unsafe fn goldy_tensor_kernels_destroy(ctx: *mut GoldyTensorKernels) {
+    (lib().goldy_tensor_kernels_destroy)(ctx)
 }
 
 #[cfg(feature = "tensor")]
 pub unsafe fn goldy_tensor_add(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const std::ffi::c_char,
     a: *const GoldyTensor,
@@ -607,7 +607,7 @@ pub unsafe fn goldy_tensor_add(
 
 #[cfg(feature = "tensor")]
 pub unsafe fn goldy_tensor_matmul(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const std::ffi::c_char,
     a: *const GoldyTensor,
@@ -618,7 +618,7 @@ pub unsafe fn goldy_tensor_matmul(
 
 #[cfg(feature = "tensor")]
 pub unsafe fn goldy_tensor_fill_f32(
-    ctx: *mut GoldyTensorContext,
+    ctx: *mut GoldyTensorKernels,
     scheme: *mut GoldyScheme,
     label: *const std::ffi::c_char,
     tensor: *mut GoldyTensor,

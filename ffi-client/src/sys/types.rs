@@ -8,7 +8,7 @@ pub enum GoldyTexture {}
 pub enum GoldyParcel {}
 pub enum GoldyRuntime {}
 pub enum GoldyTensor {}
-pub enum GoldyTensorContext {}
+pub enum GoldyTensorKernels {}
 pub enum GoldyComputePipeline {}
 pub enum GoldyContext {}
 pub enum GoldyInstance {}

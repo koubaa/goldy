@@ -252,9 +252,9 @@ goldy_runtime_destroy(device);
 goldy_instance_destroy(instance);
 ```
 
-The `tensor` feature (on by default) adds `goldy_runtime_acquire_tensor`, `goldy_tensor_context_*`,
+The `tensor` feature (on by default) adds `goldy_runtime_acquire_tensor`, `goldy_tensor_kernels_*`,
 `goldy_tensor_add`, `goldy_tensor_matmul`, and `goldy_tensor_fill_f32`. C++ wraps them as
-`goldy::Tensor` and `goldy::TensorContext`.
+`goldy::Tensor` and `goldy::TensorKernels`.
 
 ## Platform Support
 

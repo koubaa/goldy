@@ -7,7 +7,7 @@ mod submission;
 
 use goldy::{
     BufferKind, MemoryExchange, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
-    TensorContext, TensorDType, TensorScalar, TensorShape, TensorView,
+    TensorDType, TensorKernels, TensorScalar, TensorShape, TensorView,
 };
 use std::ops::Shr;
 use std::sync::Mutex;
@@ -102,11 +102,12 @@ fn add_and_broadcast_and_replay() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).expect("tensor ctx");
+    let kernels = TensorKernels::new(&device).expect("tensor ctx");
     let a = Tensor::from_f32(&device, TensorShape::vector(2), &[1.0, 2.0]).unwrap();
     let b = Tensor::from_f32(&device, TensorShape::vector(1), &[10.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let out = tensors.recorder(&mut scheme).add("add", a.view(), b.view()).unwrap();
+    let out = kernels.recorder(&mut scheme).add("add", a.view(), b.view()).unwrap();
+    drop(kernels);
     let got = read_f32(&mut scheme, out.buffer());
     assert_eq!(got, vec![11.0, 12.0]);
     let _ = scheme.submit().unwrap();
@@ -122,10 +123,10 @@ fn unary_neg_exp_and_fill() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let x = Tensor::from_f32(&device, TensorShape::vector(2), &[1.0, -4.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let mut rec = tensors.recorder(&mut scheme);
+    let mut rec = kernels.recorder(&mut scheme);
     let n = rec.neg("neg", x.view()).unwrap();
     rec.fill("fill", n.view(), TensorScalar::F32(3.0)).unwrap();
     drop(rec);
@@ -137,11 +138,11 @@ fn matmul_gemv_matches_semantic_node() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let w = Tensor::from_f32(&device, TensorShape::matrix(2, 2), &[1.0, 0.0, 0.0, 1.0]).unwrap();
     let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let y = tensors
+    let y = kernels
         .recorder(&mut scheme)
         .matmul("gemv", w.view(), x.view())
         .unwrap();
@@ -153,11 +154,11 @@ fn strided_narrow_views_alias_parent() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let parent = Tensor::from_f32(&device, TensorShape::matrix(2, 3), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
     let row1 = parent.view().narrow(0, 1, 1).unwrap().reshape(&[3]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let out = tensors.recorder(&mut scheme).mul_scalar("id", row1, 1.0).unwrap();
+    let out = kernels.recorder(&mut scheme).mul_scalar("id", row1, 1.0).unwrap();
     assert_eq!(read_f32(&mut scheme, out.buffer()), vec![4.0, 5.0, 6.0]);
 }
 
@@ -166,10 +167,10 @@ fn reduce_sum_and_softmax() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let x = Tensor::from_f32(&device, TensorShape::matrix(2, 2), &[1.0, 2.0, 3.0, 4.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let mut rec = tensors.recorder(&mut scheme);
+    let mut rec = kernels.recorder(&mut scheme);
     let s = rec.sum("sum", x.view(), 1).unwrap();
     drop(rec);
     assert_eq!(read_f32(&mut scheme, s.buffer()), vec![3.0, 7.0]);
@@ -180,11 +181,11 @@ fn gather_1d() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let src = Tensor::from_f32(&device, TensorShape::vector(4), &[10.0, 20.0, 30.0, 40.0]).unwrap();
     let idx = Tensor::from_i32(&device, TensorShape::vector(3), &[0, 2, 2]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let g = tensors
+    let g = kernels
         .recorder(&mut scheme)
         .gather("gather", src.view(), idx.view(), 0)
         .unwrap();
@@ -196,12 +197,12 @@ fn scatter_add_unique_and_colliding() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let src = Tensor::from_f32(&device, TensorShape::vector(3), &[10.0, 30.0, 30.0]).unwrap();
     let idx = Tensor::from_i32(&device, TensorShape::vector(3), &[0, 2, 2]).unwrap();
     let dst = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 1.0, 1.0, 1.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    tensors
+    kernels
         .recorder(&mut scheme)
         .scatter("scatter", src.view(), idx.view(), dst.view(), 0, ScatterMode::Add)
         .unwrap();
@@ -215,13 +216,13 @@ fn overlapping_writes_are_ordered() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let parent = Tensor::from_f32(&device, TensorShape::vector(4), &[0.0, 0.0, 0.0, 0.0]).unwrap();
     let left = parent.view().narrow(0, 0, 3).unwrap();
     let right = parent.view().narrow(0, 1, 3).unwrap();
     let ones = Tensor::from_f32(&device, TensorShape::vector(3), &[1.0, 1.0, 1.0]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let mut rec = tensors.recorder(&mut scheme);
+    let mut rec = kernels.recorder(&mut scheme);
     rec.add_into("left", left, ones.view(), left).unwrap();
     rec.add_into("right", right, ones.view(), right).unwrap();
     drop(rec);
@@ -234,10 +235,10 @@ fn cast_f32_i32() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let x = Tensor::from_f32(&device, TensorShape::vector(2), &[1.9, -2.1]).unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let y = tensors
+    let y = kernels
         .recorder(&mut scheme)
         .cast("cast", x.view(), TensorDType::I32)
         .unwrap();
@@ -258,6 +259,7 @@ fn kernel_bindable_view_and_over_tensor() {
     let mut scheme = Scheme::new(&ctx);
     k.record(&mut scheme, "dbl", &data.view(), data.view().numel_u32())
         .over_tensor(&data.view());
+    drop(k);
 
     let mut sub = scheme.submit().unwrap();
     let bytes = (&mut sub >> data.buffer()).take::<u8>().expect("host take");
@@ -270,7 +272,7 @@ fn batched_matmul_rank3() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let mut tensors = TensorContext::new(&device).unwrap();
+    let kernels = TensorKernels::new(&device).unwrap();
     let a = Tensor::from_f32(
         &device,
         TensorShape::from_dims(&[2, 2, 2]).unwrap(),
@@ -284,7 +286,7 @@ fn batched_matmul_rank3() {
     )
     .unwrap();
     let mut scheme = Scheme::new(&ctx);
-    let y = tensors.recorder(&mut scheme).matmul("bmm", a.view(), b.view()).unwrap();
+    let y = kernels.recorder(&mut scheme).matmul("bmm", a.view(), b.view()).unwrap();
     assert_eq!(read_f32(&mut scheme, y.buffer()), vec![3.0, 4.0, 10.0, 12.0]);
 }
 

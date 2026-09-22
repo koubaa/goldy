@@ -92,7 +92,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_class::<tensor::PyTensorDType>()?;
         m.add_class::<tensor::PyTensor>()?;
-        m.add_class::<tensor::PyTensorContext>()?;
+        m.add_class::<tensor::PyTensorKernels>()?;
     }
 
     Ok(())
