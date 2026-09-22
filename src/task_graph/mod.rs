@@ -86,10 +86,43 @@ pub(crate) enum ResourceId {
     /// an explicit `Read` binding so the scheduler orders copy after render.
     #[cfg(feature = "graphics")]
     RenderTarget(crate::backend::RenderTargetHandle),
-    /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
+    /// Graph-scoped temporary buffer: a logical slot, not a client-owned parcel.
+    ///
+    /// Bindings use this id until submit. [`SlotResolver`] then lowers it to a
+    /// [`Self::BufferRange`] over pool backing ([`ResolvedTransientBuffer`]).
+    ///
+    /// **What this is for.** Scratch that lives only inside one scheme submit:
+    /// intermediates whose identity need not survive to the next `submit`. The
+    /// public [`crate::Context`] lease / [`crate::transient_pool::TransientPool`]
+    /// path already recycles *physical* buffers safely (epoch-gated bins, write-
+    /// first reuse). It does **not** plan *logical* intermediates: the caller
+    /// still chooses how many leases, their sizes, and which values share
+    /// storage. Eager tensor `add` / `matmul` allocate retained tensors; Llama
+    /// `_into` reuse is a hand-authored workspace. Neither is graph-scoped
+    /// packing.
+    ///
+    /// **Intended automatic path.** Expose typed scheme-local temps (tensor
+    /// views over a `TransientBuffer` slot). After wave scheduling, compute
+    /// each slot's inclusive wave range from node bindings (`transient_wave_intervals`
+    /// in `analysis`; test-only today). Non-overlapping ranges may alias the
+    /// same bytes. Fill [`SlotResolver::buffers`] from those packed ranges via
+    /// the context transient pool (whole objects today; sub-ranges when packing
+    /// lands). Barriers stay on the logical id until resolve; backends see only
+    /// the parent handle.
+    ///
+    /// **Not wired.** Recording never mints these ids (tests construct them).
+    /// [`crate::Scheme::include`] rejects transient bindings (lease-epoch across two
+    /// submitters is v1-out). Inaugural-write on recycled backing is still a
+    /// caller invariant, not a graph check. Keep retained parcels for values
+    /// that must persist across submits (weights, KV cache, `x`).
     #[allow(dead_code)] // constructed in analysis tests / future transient-graph paths
     TransientBuffer(TransientId),
-    /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
+    /// Graph-scoped temporary texture: same contract as [`Self::TransientBuffer`].
+    ///
+    /// Lowered to [`ResourceId::Texture`] via [`SlotResolver`]. Wave intervals
+    /// (`transient_texture_wave_intervals` in `analysis`) are test-only today.
+    /// Physical recycle is [`crate::Context::lease_texture`]; automatic aliasing
+    /// of independent temps is not public yet.
     #[allow(dead_code)]
     TransientTexture(TransientTextureId),
     /// Swapchain output: late-bound at submit time (legacy surface-graph path).
@@ -187,7 +220,10 @@ pub(crate) struct ResolvedDeposit {
 /// `PresentLease`, `Deposit`) through this table at emission time.
 /// No IR clone is ever necessary.
 ///
-/// Transient entries are scheme-local (resolved at submit from lease backing).
+/// Transient entries are scheme-local: intended to be filled after wave
+/// liveness packs [`ResourceId::TransientBuffer`] / `TransientTexture` slots
+/// onto [`crate::transient_pool::TransientPool`] backing. Submit does not
+/// populate `buffers` / `textures` yet (see that `ResourceId` variant).
 /// The swapchain entry is boundary-local (filled after `surface.begin()`).
 /// Deposits are scheme-local (filled by [`crate::Scheme`] before submit).
 #[derive(Debug, Clone, Default)]

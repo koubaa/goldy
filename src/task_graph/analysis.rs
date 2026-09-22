@@ -435,8 +435,10 @@ pub(crate) fn node_to_wave_map(schedule: &CompiledSchedule, n: usize) -> Vec<u32
 /// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
 /// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
 ///
-/// Used to pack transient heap allocations: non-overlapping wave intervals may
-/// alias the same memory.
+/// This is the liveness input for packing graph-scoped temps: non-overlapping
+/// intervals may alias the same transient-pool backing (see the long comment on
+/// [`super::ResourceId::TransientBuffer`]). Today the function is test-only;
+/// submit does not allocate or alias from these ranges.
 #[cfg(test)]
 pub(crate) fn transient_wave_intervals(ir: &GraphIR, node_waves: &[u32]) -> Result<HashMap<u32, (u32, u32)>> {
     if ir.nodes.is_empty() {
