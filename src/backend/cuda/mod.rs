@@ -1521,7 +1521,7 @@ impl CudaBackend {
         frame_table: Option<&[u32]>,
         arg_data: &[u8],
         count: u32,
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
     ) -> Result<Vec<CudaOp>> {
         let pipeline = self
             .compute_pipelines
@@ -1613,7 +1613,7 @@ impl CudaBackend {
             };
 
             ops.push(
-                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z), label)
+                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z), label.clone())
                     .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
             );
         }
@@ -1627,7 +1627,7 @@ impl CudaBackend {
         indices: &[u32],
         user: &[u32],
         workgroups: (u32, u32, u32),
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
     ) -> Result<CudaOp> {
         let pipeline = self
             .compute_pipelines
@@ -1647,7 +1647,7 @@ impl CudaBackend {
             workgroups,
             pipeline.workgroup_size,
             0,
-            label,
+            label.as_deref(),
         )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let (keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
@@ -1675,7 +1675,7 @@ impl CudaBackend {
         user: &[u32],
         shape_buffer: BufferHandle,
         shape_offset: u64,
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
     ) -> Result<CudaOp> {
         let pipeline = self
             .compute_pipelines
@@ -2098,7 +2098,7 @@ impl CudaBackend {
                         &current_indices,
                         &current_user,
                         (*workgroups_x, *workgroups_y, *workgroups_z),
-                        *label,
+                        label.clone(),
                     )?);
                 }
                 GpuCommand::DispatchIndirect { label, buffer, offset } => {
@@ -2111,7 +2111,7 @@ impl CudaBackend {
                         &current_user,
                         *buffer,
                         *offset,
-                        *label,
+                        label.clone(),
                     )?);
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
@@ -2220,7 +2220,7 @@ impl CudaBackend {
                         frame_table.as_deref(),
                         arg_data.as_ref(),
                         *count,
-                        *label,
+                        label.clone(),
                     )?;
                     ops.extend(batch_ops);
                 }
@@ -2519,7 +2519,7 @@ impl CudaBackend {
                     }
                 }
                 GpuCommand::MatMul { label, desc, a, b, c } => {
-                    ops.push(matmul::materialize(self, ctx, stream, *label, *desc, *a, *b, *c)?);
+                    ops.push(matmul::materialize(self, ctx, stream, label.clone(), *desc, *a, *b, *c)?);
                 }
             }
         }
@@ -3329,7 +3329,7 @@ pub(super) fn validate_launch_config(
     grid: (u32, u32, u32),
     block: [u32; 3],
     shared_mem_bytes: u32,
-    label: Option<&'static str>,
+    label: Option<&str>,
 ) -> Result<()> {
     if !crate::backend::goldy_validation_enabled() {
         return Ok(());
@@ -3344,7 +3344,7 @@ fn validate_launch_config_unchecked(
     grid: (u32, u32, u32),
     block: [u32; 3],
     shared_mem_bytes: u32,
-    label: Option<&'static str>,
+    label: Option<&str>,
 ) -> Result<()> {
     let where_ = label.unwrap_or("<unnamed>");
     let (gx, gy, gz) = grid;
@@ -5539,7 +5539,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                     frame_table_base: 0,
                 },
                 GpuCommand::Dispatch {
-                    label: Some("double"),
+                    label: Some("double".into()),
                     workgroups_x: 4,
                     workgroups_y: 1,
                     workgroups_z: 1,
@@ -6477,7 +6477,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                     frame_table_base: 0,
                 },
                 GpuCommand::Dispatch {
-                    label: Some("double"),
+                    label: Some("double".into()),
                     workgroups_x: 4,
                     workgroups_y: 1,
                     workgroups_z: 1,
@@ -7098,7 +7098,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 frame_table_base: 0,
             }),
             GraphCommand::Compute(GpuCommand::Dispatch {
-                label: Some("double"),
+                label: Some("double".into()),
                 workgroups_x: 4,
                 workgroups_y: 1,
                 workgroups_z: 1,

@@ -3247,7 +3247,7 @@ impl WebGpuBackend {
                             )?,
                         };
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: *label,
+                            label: label.as_deref(),
                             timestamp_writes: None,
                         });
                         pass.set_pipeline(&wgpu_pipeline);
@@ -3341,7 +3341,7 @@ impl WebGpuBackend {
                         {
                             let _tz = tracy_zone!("wgpu.dispatch_indirect.pass");
                             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: *label,
+                                label: label.as_deref(),
                                 timestamp_writes: None,
                             });
                             pass.set_pipeline(&wgpu_pipeline);
@@ -3490,7 +3490,7 @@ impl WebGpuBackend {
                                 )?,
                             };
                             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: *label,
+                                label: label.as_deref(),
                                 timestamp_writes: None,
                             });
                             pass.set_pipeline(&wgpu_pipeline);
@@ -6152,7 +6152,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                     frame_table_base: 0,
                 },
                 GpuCommand::Dispatch {
-                    label: Some("double"),
+                    label: Some("double".into()),
                     workgroups_x: 4,
                     workgroups_y: 1,
                     workgroups_z: 1,
@@ -6221,7 +6221,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                 frame_table_base: 0,
             },
             GpuCommand::Dispatch {
-                label: Some("double"),
+                label: Some("double".into()),
                 workgroups_x: 4,
                 workgroups_y: 1,
                 workgroups_z: 1,
@@ -6294,7 +6294,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                     frame_table_base: 0,
                 },
                 GpuCommand::Dispatch {
-                    label: Some("double"),
+                    label: Some("double".into()),
                     workgroups_x: 4,
                     workgroups_y: 1,
                     workgroups_z: 1,
@@ -6520,7 +6520,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                 frame_table_base: 0,
             },
             GpuCommand::Dispatch {
-                label: Some("double"),
+                label: Some("double".into()),
                 workgroups_x: 4,
                 workgroups_y: 1,
                 workgroups_z: 1,
@@ -6572,7 +6572,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                 frame_table_base: 0,
             }),
             GraphCommand::Compute(GpuCommand::Dispatch {
-                label: Some("double"),
+                label: Some("double".into()),
                 workgroups_x: 4,
                 workgroups_y: 1,
                 workgroups_z: 1,
@@ -6627,7 +6627,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                 frame_table_base: 0,
             }),
             GraphCommand::Compute(GpuCommand::Dispatch {
-                label: Some("double"),
+                label: Some("double".into()),
                 workgroups_x: 4,
                 workgroups_y: 1,
                 workgroups_z: 1,

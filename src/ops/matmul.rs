@@ -236,7 +236,7 @@ pub(crate) enum OperandKind {
 /// Builder returned by [`Scheme::matmul`](crate::Scheme::matmul).
 pub struct MatMulBuilder<'a> {
     scheme: &'a mut Scheme,
-    label: &'static str,
+    label: crate::SchemeLabel,
     desc: MatMulDesc,
     a: Option<BoundOperand>,
     b: Option<BoundOperand>,
@@ -250,7 +250,7 @@ pub(crate) struct BoundOperand {
 }
 
 impl<'a> MatMulBuilder<'a> {
-    pub(crate) fn new(scheme: &'a mut Scheme, label: &'static str, desc: MatMulDesc) -> Self {
+    pub(crate) fn new(scheme: &'a mut Scheme, label: crate::SchemeLabel, desc: MatMulDesc) -> Self {
         Self {
             scheme,
             label,

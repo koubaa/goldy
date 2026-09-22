@@ -585,14 +585,14 @@ pub(crate) enum GpuCommand {
     /// Dispatch compute workgroups.
     Dispatch {
         /// Debug label from [`crate::Scheme::node`] when emitted by the analyzer.
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         workgroups_x: u32,
         workgroups_y: u32,
         workgroups_z: u32,
     },
     /// Indirect dispatch: workgroup counts read from buffer at offset (3× u32: x, y, z).
     DispatchIndirect {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         buffer: BufferHandle,
         offset: u64,
     },
@@ -705,7 +705,7 @@ pub(crate) enum GpuCommand {
     /// are detected within a wave.  Falls back to individual `Dispatch` commands
     /// if no grouping is possible.
     DispatchBatch {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         /// Pre-filled argument data: `count` entries of `DISPATCH_BATCH_STRIDE` bytes each.
         arg_data: Arc<[u8]>,
         count: u32,
@@ -730,7 +730,7 @@ pub(crate) enum GpuCommand {
     SetRayTracingPipeline(RayTracingPipelineHandle),
     /// `vkCmdTraceRaysKHR` / `DispatchRays` with dimensions in rays (not workgroups).
     TraceRays {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         width: u32,
         height: u32,
         depth: u32,
@@ -740,7 +740,7 @@ pub(crate) enum GpuCommand {
     /// Fallback backends never see this variant: the emitter lowers MatMul nodes
     /// to an ordinary stdlib dispatch instead.
     MatMul {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         desc: crate::ops::MatMulDesc,
         a: crate::ops::matmul::MatMulOperand,
         b: crate::ops::matmul::MatMulOperand,

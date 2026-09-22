@@ -2663,7 +2663,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "a",
+            label: "a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
                 access: NodeAccess::Write,
@@ -2701,7 +2701,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "a",
+            label: "a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
                 access: NodeAccess::Write,
@@ -2766,7 +2766,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "early",
+            label: "early".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
                 access: NodeAccess::Write,
@@ -2779,7 +2779,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "copy",
+            label: "copy".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(5),
@@ -2929,7 +2929,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "early_a",
+            label: "early_a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
                 access: NodeAccess::Write,
@@ -2942,7 +2942,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "copy_a",
+            label: "copy_a".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(5),
@@ -2963,7 +2963,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "early_b",
+            label: "early_b".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf.handle),
                 access: NodeAccess::Write,
@@ -2976,7 +2976,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "copy_b",
+            label: "copy_b".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(6),
@@ -3063,7 +3063,7 @@ mod slice_retention_tests {
     fn dynamic_partition_slot_key_includes_generation() {
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "copy",
+            label: "copy".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(5),
@@ -3132,7 +3132,7 @@ mod slice_retention_tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "draw",
+            label: "draw".into(),
             bindings: vec![],
             kind: NodeKind::RenderPass {
                 target: rt.backend_handle(),
@@ -3187,7 +3187,7 @@ mod slice_retention_tests {
         let dst = ResourceId::Buffer(buf_dst);
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "upload_copy",
+            label: "upload_copy".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: upload_src,
@@ -3207,7 +3207,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "compute",
+            label: "compute".into(),
             bindings: vec![ResourceBinding {
                 resource: dst,
                 access: NodeAccess::Write,
@@ -3389,7 +3389,7 @@ mod slice_retention_tests {
     fn deposit_copy_node(dst: ResourceId, size: u64) -> TaskNode {
         let src = ResourceId::Deposit(0);
         TaskNode {
-            label: "deposit_copy",
+            label: "deposit_copy".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: src,
@@ -3526,7 +3526,7 @@ mod slice_retention_tests {
         GraphIR {
             nodes: vec![
                 TaskNode {
-                    label: "pre",
+                    label: "pre".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Buffer(buf),
                         access: NodeAccess::Write,
@@ -3539,7 +3539,7 @@ mod slice_retention_tests {
                     },
                 },
                 TaskNode {
-                    label: "draw",
+                    label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Buffer(buf),
                         access: NodeAccess::Read,
@@ -3560,7 +3560,7 @@ mod slice_retention_tests {
             nodes: vec![
                 deposit_copy_node(ResourceId::Buffer(buf), 64),
                 TaskNode {
-                    label: "draw",
+                    label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Buffer(buf),
                         access: NodeAccess::Read,
@@ -3595,7 +3595,7 @@ mod slice_retention_tests {
         GraphIR {
             nodes: vec![
                 TaskNode {
-                    label: "pre",
+                    label: "pre".into(),
                     bindings: vec![ResourceBinding {
                         resource: compute,
                         access: NodeAccess::Write,
@@ -3609,7 +3609,7 @@ mod slice_retention_tests {
                 },
                 copy,
                 TaskNode {
-                    label: "draw",
+                    label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: compute,
                         access: NodeAccess::Read,
@@ -3749,7 +3749,7 @@ mod slice_retention_tests {
             nodes: vec![
                 deposit_copy_node(ResourceId::Buffer(buf.handle), 64),
                 TaskNode {
-                    label: "draw",
+                    label: "draw".into(),
                     bindings: vec![],
                     kind: NodeKind::RenderPass {
                         target: rt.backend_handle(),
@@ -3993,7 +3993,7 @@ mod slice_retention_tests {
     ) -> GraphIR {
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "a",
+            label: "a".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf0.handle),
                 access: NodeAccess::Write,
@@ -4006,7 +4006,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "b",
+            label: "b".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::Buffer(buf0.handle),
@@ -4025,7 +4025,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "c",
+            label: "c".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf1.handle),
                 access: NodeAccess::Read,
@@ -4189,7 +4189,7 @@ mod slice_retention_tests {
         // semantics) picks split = 2 → partition 0 = waves 0..2, partition 1 = wave 2.
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "upload",
+            label: "upload".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Buffer(buf0.handle),
                 access: NodeAccess::Write,
@@ -4201,7 +4201,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "compute_b",
+            label: "compute_b".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::Buffer(buf0.handle),
@@ -4220,7 +4220,7 @@ mod slice_retention_tests {
             },
         });
         ir.nodes.push(TaskNode {
-            label: "compute_c",
+            label: "compute_c".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::Buffer(buf1.handle),
@@ -4295,7 +4295,7 @@ mod partitioning_tests {
 
     fn dispatch_node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: bindings
                 .into_iter()
                 .map(|(resource, access)| ResourceBinding { resource, access })
@@ -4311,7 +4311,7 @@ mod partitioning_tests {
 
     fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -4326,7 +4326,7 @@ mod partitioning_tests {
 
     fn render_pass_node(label: &'static str, target: RenderTargetHandle) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![],
             kind: NodeKind::RenderPass {
                 target,
@@ -4338,7 +4338,7 @@ mod partitioning_tests {
 
     fn copy_to_dst_node(label: &'static str, src: RenderTargetHandle, dst: ResourceId) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(src),
@@ -4588,7 +4588,7 @@ mod partitioning_tests {
             nodes: vec![
                 dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 TaskNode {
-                    label: "draw",
+                    label: "draw".into(),
                     bindings: vec![ResourceBinding {
                         resource: buf(0),
                         access: NodeAccess::Read,

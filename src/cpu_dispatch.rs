@@ -484,7 +484,7 @@ type ErasedMain = Box<dyn Fn(&Context, &mut [CpuArgView<'_>]) -> Result<(), Gold
 
 /// Side-table entry for one [`crate::task_graph::NodeKind::CpuDispatch`] node.
 pub(crate) struct CpuDispatchExec {
-    pub label: &'static str,
+    pub label: crate::SchemeLabel,
     main: ErasedMain,
     pub bindings: Vec<CpuBindingExec>,
     pub params: Vec<u32>,
@@ -512,7 +512,7 @@ fn transfer_usage(access: NodeAccessUnion) -> SlotUsageSet {
 
 impl CpuDispatchExec {
     pub(crate) fn new<M, F: CpuMain<M>>(
-        label: &'static str,
+        label: crate::SchemeLabel,
         main: F,
         bindings: Vec<CpuBindingExec>,
         params: Vec<u32>,
@@ -534,7 +534,7 @@ impl CpuDispatchExec {
     /// The graph still orders the node through the [`crate::task_graph::TaskNode`]
     /// bindings recorded next to it; `driver` runs once the GPU has retired everything
     /// recorded before the node and may submit sub-schemes on the context.
-    pub(crate) fn new_host_driver<F>(label: &'static str, driver: F) -> Self
+    pub(crate) fn new_host_driver<F>(label: crate::SchemeLabel, driver: F) -> Self
     where
         F: Fn(&Context) -> Result<(), GoldyError> + Send + Sync + 'static,
     {

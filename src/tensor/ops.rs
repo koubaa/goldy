@@ -103,7 +103,6 @@ pub struct TensorContext {
     pub(crate) runtime: Runtime,
     pub(crate) ops: PreparedOps,
     keepalive: Vec<Buffer>,
-    labels: Vec<String>,
 }
 
 impl TensorContext {
@@ -112,7 +111,6 @@ impl TensorContext {
             runtime: runtime.clone(),
             ops: PreparedOps::prepare(runtime)?,
             keepalive: Vec::new(),
-            labels: Vec::new(),
         })
     }
 
@@ -123,13 +121,6 @@ impl TensorContext {
     /// Borrow `scheme` and record tensor ops into it.
     pub fn recorder<'a>(&'a mut self, scheme: &'a mut Scheme) -> TensorRecorder<'a> {
         TensorRecorder { ctx: self, scheme }
-    }
-
-    pub(crate) fn intern_label(&mut self, label: impl Into<String>) -> &'static str {
-        self.labels.push(label.into());
-        let s = self.labels.last().unwrap().as_str();
-        // SAFETY: labels live as long as TensorContext, which outlives recorded schemes.
-        unsafe { std::mem::transmute::<&str, &'static str>(s) }
     }
 
     pub(crate) fn push_meta(&mut self, meta: TensorOpMeta) -> Result<usize, GoldyError> {
@@ -167,7 +158,6 @@ impl<'a> TensorRecorder<'a> {
             return Err(GoldyError::Validation("tensor fill: scalar dtype mismatch".into()));
         }
         let meta = encode_meta(OP_FILL, 0, value.bits(), 0, None, None, Some(out))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         let n = out.numel_u32().max(1);
         if out.dtype() == TensorDType::F32 {
@@ -207,7 +197,6 @@ impl<'a> TensorRecorder<'a> {
         }
         let src = src.broadcast_to(dst.shape())?;
         let meta = encode_meta(OP_COPY, 0, 0, 0, Some(src), None, Some(dst))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -238,7 +227,6 @@ impl<'a> TensorRecorder<'a> {
             return self.copy(label, src, dst);
         }
         let meta = encode_meta(OP_COPY, 0, 0, 0, Some(src), None, Some(dst))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         let n = dst.numel_u32().max(1);
         match (src.dtype(), dst.dtype()) {
@@ -394,7 +382,6 @@ impl<'a> TensorRecorder<'a> {
         src.shape().dim(axis)?;
         let out = Tensor::zeros(&self.ctx.runtime, index.shape(), src.dtype())?;
         let meta = encode_meta(OP_GATHER, axis as u32, 0, 0, Some(src), Some(index), Some(out.view()))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -430,7 +417,6 @@ impl<'a> TensorRecorder<'a> {
             ScatterMode::Max => OP_SCATTER_MAX,
         };
         let meta = encode_meta(op, axis as u32, 0, 0, Some(src), Some(index), Some(dst))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -459,7 +445,6 @@ impl<'a> TensorRecorder<'a> {
         src.dtype().require_f32("unary")?;
         dst.dtype().require_f32("unary")?;
         let meta = encode_meta(op, 0, 0, 0, Some(src), None, Some(dst))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -493,7 +478,6 @@ impl<'a> TensorRecorder<'a> {
         let a = a.broadcast_to(out.shape())?;
         let b = b.broadcast_to(out.shape())?;
         let meta = encode_meta(op, 0, 0, 0, Some(a), Some(b), Some(out))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -515,7 +499,6 @@ impl<'a> TensorRecorder<'a> {
         a.dtype().require_f32("binary_scalar")?;
         let out = Tensor::zeros(&self.ctx.runtime, a.shape(), TensorDType::F32)?;
         let meta = encode_meta(op, 0, scalar.to_bits(), 0, Some(a), None, Some(out.view()))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -556,7 +539,6 @@ impl<'a> TensorRecorder<'a> {
         let kernel_layout = super::layout::TensorLayout::packed(out.dtype(), keep_shape, 0)?;
         let kernel_view = TensorView::new(out.buffer(), kernel_layout)?;
         let meta = encode_meta(op, axis as u32, 0, reduce_len, Some(src), None, Some(kernel_view))?;
-        let label = self.ctx.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops
@@ -564,10 +546,6 @@ impl<'a> TensorRecorder<'a> {
             .record(self.scheme, label, src.buffer(), out.buffer(), self.ctx.meta(idx))
             .over_1d(kernel_view.numel_u32().max(1));
         Ok(out)
-    }
-
-    pub(crate) fn intern_label(&mut self, label: impl Into<String>) -> &'static str {
-        self.ctx.intern_label(label)
     }
 }
 

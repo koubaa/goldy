@@ -69,7 +69,6 @@ impl<'a> TensorRecorder<'a> {
             d
         };
         let c_view = packed_or_strided(out, false)?;
-        let label = self.intern_label(label);
         self.scheme
             .matmul(label, desc)
             .a(a.buffer(), a_view)
@@ -126,7 +125,6 @@ impl<'a> TensorRecorder<'a> {
         meta.o_s0 = stride_or(out, 0);
         meta.o_s1 = stride_or(out, 1);
         meta.o_s2 = stride_or(out, 2);
-        let label = self.intern_label(label);
         let idx = self.ctx.push_meta(meta)?;
         self.ctx
             .ops

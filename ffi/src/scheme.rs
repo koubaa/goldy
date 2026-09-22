@@ -34,16 +34,6 @@ pub struct GoldyScheme {
     pub(crate) inner: Scheme,
     active_compute: Option<ComputeNodeRecord>,
     pub(crate) active_render_pass: Option<RenderPassRecord>,
-    labels: Vec<String>,
-}
-
-impl GoldyScheme {
-    pub(crate) fn intern_label(&mut self, label: &str) -> &'static str {
-        self.labels.push(label.to_string());
-        let s = self.labels.last().unwrap();
-        // SAFETY: `labels` is cleared when the scheme is dropped alongside IR node labels.
-        unsafe { std::mem::transmute::<&str, &'static str>(s.as_str()) }
-    }
 }
 
 fn parse_label(label: *const libc::c_char) -> Result<String, GoldyResult> {
@@ -88,7 +78,6 @@ pub unsafe extern "C" fn goldy_scheme_create(ctx: *const GoldyContext) -> *mut G
         inner: Scheme::new(&(*ctx).inner),
         active_compute: None,
         active_render_pass: None,
-        labels: Vec::new(),
     }))
 }
 
@@ -168,7 +157,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_begin(
         return GoldyResult::InvalidArgument;
     }
     let label = match parse_label(label) {
-        Ok(l) => (*scheme).intern_label(&l),
+        Ok(l) => l,
         Err(e) => return e,
     };
     (*scheme).active_compute = Some(ComputeNodeRecord::new(label, &(*pipeline).inner));

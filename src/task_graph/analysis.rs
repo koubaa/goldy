@@ -64,7 +64,7 @@ fn emit_matmul_node(
     };
     if matmul.native {
         commands.push(GpuCommand::MatMul {
-            label: Some(node.label),
+            label: Some(node.label.clone()),
             desc: matmul.desc,
             a: matmul.a,
             b: matmul.b,
@@ -75,7 +75,7 @@ fn emit_matmul_node(
     let Some(pipeline) = matmul.fallback_pipeline else {
         tracing::error!(
             target: "goldy::matmul",
-            label = node.label,
+            label = %node.label,
             "matmul fallback pipeline missing at emit; realize_matmul_nodes should have filled it"
         );
         return;
@@ -95,7 +95,7 @@ fn emit_matmul_node(
     commands.push(GpuCommand::SetPipeline(pipeline));
     push_compute_resource_bind(commands, staging, &slots, &user);
     commands.push(GpuCommand::Dispatch {
-        label: Some(node.label),
+        label: Some(node.label.clone()),
         workgroups_x: x,
         workgroups_y: y,
         workgroups_z: z,
@@ -945,7 +945,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
             }
 
             struct PendingDispatch<'n> {
-                label: &'static str,
+                label: crate::SchemeLabel,
                 pipeline: crate::backend::ComputePipelineHandle,
                 resource_slots: SlotData<'n>,
                 user_slots: &'n Vec<u32>,
@@ -970,7 +970,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         None => SlotData::Borrowed(resource_slots),
                     };
                     pending.push(PendingDispatch {
-                        label: node.label,
+                        label: node.label.clone(),
                         pipeline: *pipeline,
                         resource_slots: slots,
                         user_slots,
@@ -1005,7 +1005,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         commands.push(GpuCommand::SetPipeline(*pipeline));
                         push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
                         commands.push(GpuCommand::DispatchIndirect {
-                            label: Some(node.label),
+                            label: Some(node.label.clone()),
                             buffer: *buffer,
                             offset: *offset,
                         });
@@ -1035,7 +1035,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     }
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
                     commands.push(GpuCommand::DispatchBatch {
-                        label: Some(run[0].label),
+                        label: Some(run[0].label.clone()),
                         arg_data: Arc::from(arg_data.as_slice()),
                         count: run.len() as u32,
                     });
@@ -1045,7 +1045,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let slots = d.resource_slots.as_slice();
                     push_compute_resource_bind(&mut commands, &mut frame_table, slots, d.user_slots);
                     commands.push(GpuCommand::Dispatch {
-                        label: Some(d.label),
+                        label: Some(d.label.clone()),
                         workgroups_x: d.x,
                         workgroups_y: d.y,
                         workgroups_z: d.z,
@@ -1074,7 +1074,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 commands.push(GpuCommand::SetRayTracingPipeline(*pipeline));
                 push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
                 commands.push(GpuCommand::TraceRays {
-                    label: Some(node.label),
+                    label: Some(node.label.clone()),
                     width: *width,
                     height: *height,
                     depth: *depth,
@@ -1809,7 +1809,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     match dispatch {
                         super::ir::DispatchDim::Direct { x, y, z } => {
                             commands.push(GraphCommand::Compute(GpuCommand::Dispatch {
-                                label: Some(node.label),
+                                label: Some(node.label.clone()),
                                 workgroups_x: *x,
                                 workgroups_y: *y,
                                 workgroups_z: *z,
@@ -1817,7 +1817,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                         }
                         super::ir::DispatchDim::Indirect { buffer, offset } => {
                             commands.push(GraphCommand::Compute(GpuCommand::DispatchIndirect {
-                                label: Some(node.label),
+                                label: Some(node.label.clone()),
                                 buffer: *buffer,
                                 offset: *offset,
                             }));
@@ -1843,7 +1843,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                         commands.push(GraphCommand::Compute(cmd));
                     }
                     commands.push(GraphCommand::Compute(GpuCommand::TraceRays {
-                        label: Some(node.label),
+                        label: Some(node.label.clone()),
                         width: *width,
                         height: *height,
                         depth: *depth,
@@ -1896,9 +1896,9 @@ mod tests {
     }
 
     /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
-    fn dispatch_node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
+    fn dispatch_node(label: impl Into<crate::SchemeLabel>, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: bindings
                 .into_iter()
                 .map(|(resource, access)| ResourceBinding { resource, access })
@@ -1922,7 +1922,7 @@ mod tests {
     /// is emitted (the staging prefix is only inserted when bindings exist).
     fn node_bound(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: bindings
                 .into_iter()
                 .map(|(resource, access)| ResourceBinding { resource, access })
@@ -1939,7 +1939,7 @@ mod tests {
     /// Build a `ClearBuffer` `TaskNode`.
     fn clear_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -1955,7 +1955,7 @@ mod tests {
     /// Build a `WriteBuffer` `TaskNode`.
     fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: buffer,
                 access: NodeAccess::Write,
@@ -1970,7 +1970,7 @@ mod tests {
 
     fn write_texture_node(label: &'static str, texture: ResourceId, tex_handle: u64) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: texture,
                 access: NodeAccess::Write,
@@ -1986,7 +1986,7 @@ mod tests {
 
     fn copy_buffer_node(label: &'static str, src: ResourceId, dst: ResourceId) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![
                 ResourceBinding {
                     resource: src,
@@ -2015,7 +2015,7 @@ mod tests {
         src_row_pitch: u32,
     ) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![
                 ResourceBinding {
                     resource: src,
@@ -2112,7 +2112,7 @@ mod tests {
     fn accel_build_wave_is_not_retainable() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "build_blas",
+                label: "build_blas".into(),
                 bindings: vec![],
                 kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
                     dest: 1,
@@ -2136,7 +2136,7 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 TaskNode {
-                    label: "draw",
+                    label: "draw".into(),
                     bindings: vec![],
                     kind: NodeKind::RenderPass {
                         target: 10,
@@ -2145,7 +2145,7 @@ mod tests {
                     },
                 },
                 TaskNode {
-                    label: "copy_to_swapchain",
+                    label: "copy_to_swapchain".into(),
                     bindings: vec![
                         ResourceBinding {
                             resource: ResourceId::RenderTarget(10),
@@ -2176,7 +2176,7 @@ mod tests {
     fn copy_render_target_resolves_swapchain_output_dst() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "copy_rt_to_swapchain",
+                label: "copy_rt_to_swapchain".into(),
                 bindings: vec![
                     ResourceBinding {
                         resource: ResourceId::RenderTarget(5),
@@ -2214,7 +2214,7 @@ mod tests {
     fn copy_texture_resolves_swapchain_output_dst() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "copy_to_swapchain",
+                label: "copy_to_swapchain".into(),
                 bindings: vec![
                     ResourceBinding {
                         resource: ResourceId::Texture(1),
@@ -2273,7 +2273,7 @@ mod tests {
     fn dispatch_graph_gets_staging_prefix() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "A",
+                label: "A".into(),
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
                     access: NodeAccess::Write,
@@ -2519,9 +2519,9 @@ mod tests {
             cmds[1],
             GpuCommand::Dispatch {
                 workgroups_x: 8,
-                label: Some("A"),
+                ref label,
                 ..
-            }
+            } if label.as_deref() == Some("A")
         ));
         assert!(matches!(cmds[2], GpuCommand::ResourceBarrier { .. }));
         assert!(matches!(cmds[3], GpuCommand::SetPipeline(20)));
@@ -2529,9 +2529,9 @@ mod tests {
             cmds[4],
             GpuCommand::Dispatch {
                 workgroups_x: 4,
-                label: Some("B"),
+                ref label,
                 ..
-            }
+            } if label.as_deref() == Some("B")
         ));
     }
 
@@ -2557,7 +2557,7 @@ mod tests {
     fn command_emission_with_resource_slots() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "A",
+                label: "A".into(),
                 bindings: vec![ResourceBinding {
                     resource: buf(0),
                     access: NodeAccess::Write,
@@ -2582,9 +2582,9 @@ mod tests {
             cmds[3],
             GpuCommand::Dispatch {
                 workgroups_x: 1,
-                label: Some("A"),
+                ref label,
                 ..
-            }
+            } if label.as_deref() == Some("A")
         ));
     }
 

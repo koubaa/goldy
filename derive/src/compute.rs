@@ -392,7 +392,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             pub fn record<'a>(
                 &'a self,
                 scheme: &'a mut ::goldy::Scheme,
-                label: &'static str,
+                label: impl Into<::goldy::SchemeLabel>,
                 #(#record_args),*
             ) -> ::core::result::Result<::goldy::kernel::DispatchBuilder<'a>, ::goldy::GoldyError> {
                 let mut start = self.prepared.begin_record(scheme, label);
@@ -408,7 +408,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             pub fn record<'a>(
                 &'a self,
                 scheme: &'a mut ::goldy::Scheme,
-                label: &'static str,
+                label: impl Into<::goldy::SchemeLabel>,
                 #(#record_args),*
             ) -> ::goldy::kernel::DispatchBuilder<'a> {
                 let mut start = self.prepared.begin_record(scheme, label);

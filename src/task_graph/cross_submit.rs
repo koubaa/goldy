@@ -903,7 +903,7 @@ mod tests {
     fn single_binding_ir(resource: ResourceId, access: NodeAccess) -> GraphIR {
         GraphIR {
             nodes: vec![TaskNode {
-                label: "n",
+                label: "n".into(),
                 bindings: vec![ResourceBinding { resource, access }],
                 kind: NodeKind::Dispatch {
                     pipeline: 1,
@@ -927,7 +927,7 @@ mod tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "write_tex",
+            label: "write_tex".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(4),
                 access: NodeAccess::Write,
@@ -965,7 +965,7 @@ mod tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "write_tex",
+            label: "write_tex".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(4),
                 access: NodeAccess::Write,
@@ -1230,7 +1230,7 @@ mod tests {
         let ledger = ledger_with_write(producer, key, 1);
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "draw",
+                label: "draw".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::Buffer(10),
                     access: NodeAccess::Read,
@@ -1289,7 +1289,7 @@ mod tests {
         let ledger = ledger_with_write(producer, key, 2);
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "read_tail",
+                label: "read_tail".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::BufferRange {
                         parent,
@@ -1329,7 +1329,7 @@ mod tests {
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "rw",
+                label: "rw".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::Buffer(10),
                     access: NodeAccess::ReadWrite,

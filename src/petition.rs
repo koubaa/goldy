@@ -310,7 +310,7 @@ struct PointState {
 
 /// Host-driven executor recorded in place of a yielding dispatch.
 pub(crate) struct YieldDriver {
-    label: &'static str,
+    label: crate::SchemeLabel,
     ctx: Context,
     pipelines: Arc<YieldPipelines>,
     prologue: PipelineParts,
@@ -328,7 +328,7 @@ pub(crate) struct YieldDriver {
 
 /// Record-time inputs collected by [`crate::SchemeNodeBuilder`].
 pub(crate) struct YieldRecord {
-    pub label: &'static str,
+    pub label: crate::SchemeLabel,
     pub pipelines: Arc<YieldPipelines>,
     pub prologue: PipelineParts,
     /// One entry per `with_parcel` call; `None` when the bindable was not a buffer parcel.
@@ -706,7 +706,7 @@ impl YieldDriver {
     ) -> Result<RoundOutcome, GoldyError> {
         let mut sub = Scheme::new(&self.ctx);
         sub.clear_parcel(self.cnt.whole(), 0, 0)?;
-        let mut node = sub.node_from_parts(self.label, &self.prologue);
+        let mut node = sub.node_from_parts(self.label.clone(), &self.prologue);
         for (p, access) in &self.user_parcels {
             node = node.with_parcel(p, *access);
         }

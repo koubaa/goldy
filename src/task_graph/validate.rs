@@ -66,7 +66,7 @@ fn validate_acyclic(ir: &GraphIR, edges: &[(usize, usize)]) -> Result<(), GoldyE
     }
     let leftover: Vec<&str> = (0..n)
         .filter(|&i| in_degree[i] > 0)
-        .map(|i| ir.nodes[i].label)
+        .map(|i| ir.nodes[i].label.as_str())
         .collect();
     Err(validation(format!(
         "scheme graph contains a dependency cycle involving nodes {leftover:?}. \
@@ -232,7 +232,7 @@ mod tests {
 
     fn dispatch_reading_accel(label: &'static str, accel: u64) -> TaskNode {
         TaskNode {
-            label,
+            label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Accel(accel),
                 access: NodeAccess::Read,
@@ -256,7 +256,7 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 TaskNode {
-                    label: "build_blas",
+                    label: "build_blas".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Accel(7),
                         access: NodeAccess::Overwrite,
@@ -286,7 +286,7 @@ mod tests {
     fn dispatch_mesh_without_pipeline_is_rejected() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "mesh",
+                label: "mesh".into(),
                 bindings: vec![],
                 kind: NodeKind::RenderPass {
                     target: 1,
@@ -305,7 +305,7 @@ mod tests {
     fn draw_after_mesh_pipeline_is_rejected() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "mesh",
+                label: "mesh".into(),
                 bindings: vec![],
                 kind: NodeKind::RenderPass {
                     target: 1,

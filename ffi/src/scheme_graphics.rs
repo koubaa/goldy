@@ -137,7 +137,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_begin(
         return GoldyResult::InvalidArgument;
     }
     let label = match parse_label(label) {
-        Ok(l) => (*scheme).intern_label(&l),
+        Ok(l) => l,
         Err(e) => return e,
     };
     let pass = RenderPassRecord::new_for_scheme_lease(

@@ -381,10 +381,10 @@ fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
 /// Collects the unique sequence of pipeline names (in order of first appearance)
 /// and counts total dispatch calls. Used by `submit` / `submit_graph` when
 /// `goldy::diag::submit` is enabled in `RUST_LOG`.
-fn summarise_commands<'a>(commands: impl Iterator<Item = &'a super::super::GpuCommand>) -> (usize, Vec<&'static str>) {
+fn summarise_commands<'a>(commands: impl Iterator<Item = &'a super::super::GpuCommand>) -> (usize, Vec<&'a str>) {
     let mut dispatch_count = 0usize;
-    let mut pipeline_names: Vec<&'static str> = Vec::new();
-    let mut pending_label: Option<&'static str> = None;
+    let mut pipeline_names: Vec<&'a str> = Vec::new();
+    let mut pending_label: Option<&str> = None;
     for cmd in commands {
         match cmd {
             super::super::GpuCommand::SetPipeline(_) => {
@@ -398,7 +398,7 @@ fn summarise_commands<'a>(commands: impl Iterator<Item = &'a super::super::GpuCo
                     super::super::GpuCommand::DispatchBatch { count, .. } => *count as usize,
                     _ => 1,
                 };
-                if let Some(name) = label.or(pending_label) {
+                if let Some(name) = label.as_deref().or(pending_label) {
                     if !pipeline_names.contains(&name) {
                         pipeline_names.push(name);
                     }
@@ -1023,10 +1023,10 @@ pub(super) fn record_commands_to_buffer(
                         depth: *workgroups_z as u64,
                     };
                     if super::api_log::enabled() {
-                        super::api_log::log_dispatch(*label, *workgroups_x, *workgroups_y, *workgroups_z);
+                        super::api_log::log_dispatch(label.as_deref(), *workgroups_x, *workgroups_y, *workgroups_z);
                     }
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
-                    if let Some(name) = *label {
+                    if let Some(name) = label.as_deref() {
                         enc.push_debug_group(name);
                     }
                     enc.dispatch_thread_groups(threadgroups, threads_per_group);
@@ -1038,7 +1038,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::DispatchBatch { label, arg_data, count } => {
                 ensure_compute!();
                 if super::api_log::enabled() {
-                    super::api_log::log_dispatch_batch(*label, *count);
+                    super::api_log::log_dispatch_batch(label.as_deref(), *count);
                 }
                 if let Some(pipeline) = current_pipeline {
                     let push_size = std::mem::size_of::<PushLayout>();
@@ -1061,7 +1061,7 @@ pub(super) fn record_commands_to_buffer(
                     };
                     let row_offset = prologue_row.map_or(0, |r| r * crate::frame_table::FRAME_TABLE_ROW_STRIDE);
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
-                    if let Some(name) = *label {
+                    if let Some(name) = label.as_deref() {
                         enc.push_debug_group(name);
                     }
                     for i in 0..entry_count {
@@ -1118,10 +1118,10 @@ pub(super) fn record_commands_to_buffer(
                     depth: pipeline.workgroup_size[2] as u64,
                 };
                 if super::api_log::enabled() {
-                    super::api_log::log_dispatch_indirect(*label, *buffer, *offset);
+                    super::api_log::log_dispatch_indirect(label.as_deref(), *buffer, *offset);
                 }
                 let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
-                if let Some(name) = *label {
+                if let Some(name) = label.as_deref() {
                     enc.push_debug_group(name);
                 }
                 enc.dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
@@ -1297,7 +1297,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::MatMul { label, desc, a, b, c } => {
                 end_compute!();
                 end_blit!();
-                super::matmul::encode(state, command_buffer, *label, *desc, *a, *b, *c)?;
+                super::matmul::encode(state, command_buffer, label.as_deref(), *desc, *a, *b, *c)?;
                 has_recorded_gpu_work = true;
             }
             GpuCommand::ResourceBarrier {

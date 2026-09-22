@@ -17,7 +17,7 @@ const MPS_DATA_TYPE_FLOAT32: u32 = 0x10000000 | 32;
 pub(super) fn encode(
     state: &MetalState,
     command_buffer: &::metal::CommandBufferRef,
-    label: Option<&'static str>,
+    label: Option<&str>,
     desc: MatMulDesc,
     a: MatMulOperand,
     b: MatMulOperand,

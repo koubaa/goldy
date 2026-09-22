@@ -71,6 +71,7 @@ pub mod petition;
 pub(crate) mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
+pub mod scheme_label;
 pub mod signal;
 pub(crate) mod specialization;
 #[cfg(feature = "graphics")]
@@ -90,6 +91,7 @@ pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use scheme::{
     Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission,
 };
+pub use scheme_label::SchemeLabel;
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
 pub use shader_timing::{dump_totals, reset_totals};

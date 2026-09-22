@@ -150,8 +150,8 @@ impl Scheme {
         Ok(SchemeSubmission { ptr: submission })
     }
 
-    pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
-        let label = CString::new(label).expect("compute node label contains interior null byte");
+    pub fn compute_node<'a>(&'a mut self, label: impl AsRef<str>, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
+        let label = CString::new(label.as_ref()).expect("compute node label contains interior null byte");
         expect_ok(unsafe { sys::goldy_scheme_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr()) });
         ComputeNodeBuilder {
             scheme: self,
@@ -161,11 +161,11 @@ impl Scheme {
 
     pub fn render_pass<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl AsRef<str>,
         target: &SchemeRenderTargetLease,
         load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
-        let label = CString::new(label).expect("render pass label contains interior null byte");
+        let label = CString::new(label.as_ref()).expect("render pass label contains interior null byte");
         let (load_kind, clear_color) = load.to_ffi();
         expect_ok(unsafe {
             sys::goldy_scheme_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr(), load_kind, clear_color)

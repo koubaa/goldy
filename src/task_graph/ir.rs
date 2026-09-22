@@ -299,7 +299,7 @@ pub enum NodeKind {
 /// A single node in the task graph.
 #[derive(Debug, Clone)]
 pub struct TaskNode {
-    pub label: &'static str,
+    pub label: crate::SchemeLabel,
     /// Resource access declarations used by the dependency analyzer.
     pub bindings: Vec<ResourceBinding>,
     /// What this node actually executes.

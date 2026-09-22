@@ -124,7 +124,6 @@ pub struct PyScheme {
     pub(crate) inner: RefCell<Scheme>,
     active_compute: RefCell<Option<ComputeNodeRecord>>,
     active_render_pass: RefCell<Option<RenderPassRecord>>,
-    labels: RefCell<Vec<String>>,
 }
 
 #[pymethods]
@@ -135,7 +134,6 @@ impl PyScheme {
             inner: RefCell::new(Scheme::new(&ctx.inner)),
             active_compute: RefCell::new(None),
             active_render_pass: RefCell::new(None),
-            labels: RefCell::new(Vec::new()),
         }
     }
 
@@ -147,8 +145,7 @@ impl PyScheme {
                 "Only one recorder may be open per scheme",
             ));
         }
-        let static_label = slf.intern_label(&label)?;
-        *slf.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(static_label, &pipeline.inner));
+        *slf.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(label, &pipeline.inner));
         Ok(PySchemeComputeNode {
             scheme: slf.into(),
             committed: RefCell::new(false),
@@ -169,9 +166,8 @@ impl PyScheme {
                     "Only one recorder may be open per scheme",
                 ));
             }
-            let static_label = scheme.intern_label(&label)?;
             let pass = RenderPassRecord::new_for_scheme_lease(
-                static_label,
+                label,
                 &mut scheme.inner.borrow_mut(),
                 &lease.inner,
                 load.inner,
@@ -207,13 +203,6 @@ impl PyScheme {
 }
 
 impl PyScheme {
-    fn intern_label(&self, label: &str) -> PyResult<&'static str> {
-        let mut labels = self.labels.borrow_mut();
-        labels.push(label.to_string());
-        let s = labels.last().unwrap();
-        Ok(unsafe { std::mem::transmute::<&str, &'static str>(s.as_str()) })
-    }
-
     pub(crate) fn ensure_no_active_recorder(&self) -> PyResult<()> {
         if self.active_compute.borrow().is_some() || self.active_render_pass.borrow().is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(

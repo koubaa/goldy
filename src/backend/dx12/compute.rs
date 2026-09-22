@@ -338,10 +338,10 @@ pub(super) struct Dx12GpuProfileResources {
     heap: ID3D12QueryHeap,
     readback: ID3D12Resource,
     query_count: u32,
-    dispatch_labels: Vec<Option<&'static str>>,
+    dispatch_labels: Vec<Option<crate::SchemeLabel>>,
 }
 
-fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&'static str>>) {
+fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for c in commands {
         match c {
@@ -349,7 +349,7 @@ fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&
             | GpuCommand::DispatchIndirect { label, .. }
             | GpuCommand::DispatchBatch { label, .. }
             | GpuCommand::TraceRays { label, .. } => {
-                labels.push(*label);
+                labels.push(label.clone());
             }
             _ => {}
         }
@@ -358,7 +358,7 @@ fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&
     (n, labels)
 }
 
-fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<&'static str>>) {
+fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for gc in commands {
         if let GraphCommand::Compute(
@@ -368,7 +368,7 @@ fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<
             | GpuCommand::TraceRays { label, .. },
         ) = gc
         {
-            labels.push(*label);
+            labels.push(label.clone());
         }
     }
     let n = labels.len();
@@ -378,7 +378,7 @@ fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<
 fn dx12_try_create_gpu_profile(
     device: &ID3D12Device10,
     dispatch_count: usize,
-    dispatch_labels: Vec<Option<&'static str>>,
+    dispatch_labels: Vec<Option<crate::SchemeLabel>>,
 ) -> Result<Option<Dx12GpuProfileResources>> {
     if !crate::gpu_profiler::gpu_profile_enabled() {
         return Ok(None);
@@ -473,7 +473,9 @@ pub(super) fn dx12_readback_gpu_profile(
         for i in 0..n {
             let si = 2 + 2 * i;
             let ns = dx12_decode_duration_ns(vals[si], vals[si + 1], freq);
-            let label = profile.dispatch_labels[i].unwrap_or("dispatch");
+            let label = profile.dispatch_labels[i]
+                .clone()
+                .unwrap_or_else(|| crate::SchemeLabel::from("dispatch"));
             dispatches.push(DispatchGpuNs { label, gpu_ns: ns });
         }
         gpu_profiler::log_dispatch_timings("dx12", fence_value, &dispatches);

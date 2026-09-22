@@ -877,7 +877,7 @@ impl Scheme {
             NodeAccess::Write
         };
         self.ir.nodes.push(TaskNode {
-            label: "copy_buffer_parcel",
+            label: "copy_buffer_parcel".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: src_resource,
@@ -997,7 +997,7 @@ impl Scheme {
             (None, 0, 0)
         };
         self.ir.nodes.push(TaskNode {
-            label: "build_blas",
+            label: "build_blas".into(),
             bindings,
             kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::BlasTriangles {
                 dest: dest.handle,
@@ -1061,7 +1061,7 @@ impl Scheme {
         }
         dest.retain_blases(instances);
         self.ir.nodes.push(TaskNode {
-            label: "build_tlas",
+            label: "build_tlas".into(),
             bindings,
             kind: NodeKind::BuildAccelerationStructure(crate::backend::AccelBuildCommand::Tlas {
                 dest: dest.handle,
@@ -1113,7 +1113,7 @@ impl Scheme {
                     NodeAccess::Write
                 };
                 self.ir.nodes.push(TaskNode {
-                    label: "deposit_buffer",
+                    label: "deposit_buffer".into(),
                     bindings: vec![
                         ResourceBinding {
                             resource: src_resource,
@@ -1183,7 +1183,7 @@ impl Scheme {
                     NodeAccess::Write
                 };
                 self.ir.nodes.push(TaskNode {
-                    label: "deposit_texture",
+                    label: "deposit_texture".into(),
                     bindings: vec![
                         ResourceBinding {
                             resource: src_resource,
@@ -1276,7 +1276,7 @@ impl Scheme {
             NodeAccess::Write
         };
         self.ir.nodes.push(TaskNode {
-            label: "copy_buffer_to_texture",
+            label: "copy_buffer_to_texture".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: src_resource,
@@ -1320,7 +1320,7 @@ impl Scheme {
         };
         self.submit_state.register_parcel_stamp(parcel);
         self.ir.nodes.push(TaskNode {
-            label: "clear_parcel",
+            label: "clear_parcel".into(),
             bindings: vec![ResourceBinding {
                 resource: parcel.resource_id(),
                 access: NodeAccess::Overwrite,
@@ -1338,7 +1338,7 @@ impl Scheme {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_compute_dispatch(
         &mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         pipeline: crate::backend::ComputePipelineHandle,
         provenance: &Arc<crate::shader::ShaderProvenance>,
         bindings: Vec<ResourceBinding>,
@@ -1346,9 +1346,10 @@ impl Scheme {
         user_slots: Vec<u32>,
         dispatch: DispatchDim,
     ) {
+        let label = label.into();
         self.mark_structure_dirty();
         self.specialization
-            .register_site(self.ir.nodes.len() as u32, pipeline, provenance, label, &user_slots);
+            .register_site(self.ir.nodes.len() as u32, pipeline, provenance, label.clone(), &user_slots);
         self.ir.nodes.push(TaskNode {
             label,
             bindings,
@@ -1365,7 +1366,7 @@ impl Scheme {
     #[cfg(feature = "graphics")]
     pub(crate) fn commit_render_pass(
         &mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         target: crate::backend::RenderTargetHandle,
         color_load: crate::types::TargetLoad,
         bindings: Vec<ResourceBinding>,
@@ -1375,7 +1376,7 @@ impl Scheme {
         self.apply_compute_stamps(stamp_targets);
         self.mark_structure_dirty();
         self.ir.nodes.push(TaskNode {
-            label,
+            label: label.into(),
             bindings,
             kind: NodeKind::RenderPass {
                 target,
@@ -1420,7 +1421,7 @@ impl Scheme {
     /// Calling this marks the scheme dirty (structural mutation).
     pub fn node<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         pipeline: &crate::compute::ComputePipeline,
     ) -> SchemeNodeBuilder<'a> {
         let mut builder = self.node_from_parts(label, &PipelineParts::of(pipeline));
@@ -1434,13 +1435,13 @@ impl Scheme {
     /// it does not own. The resulting node is never itself a yielding dispatch.
     pub(crate) fn node_from_parts<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         parts: &PipelineParts,
     ) -> SchemeNodeBuilder<'a> {
         self.mark_structure_dirty();
         SchemeNodeBuilder {
             scheme: self,
-            label,
+            label: label.into(),
             pipeline: parts.handle,
             rt_pipeline: None,
             bindings: Vec::new(),
@@ -1461,13 +1462,13 @@ impl Scheme {
     /// compute workgroups.
     pub fn trace_rays<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         pipeline: &crate::rt_pipeline::RayTracingPipeline,
     ) -> SchemeNodeBuilder<'a> {
         self.mark_structure_dirty();
         SchemeNodeBuilder {
             scheme: self,
-            label,
+            label: label.into(),
             pipeline: 0,
             rt_pipeline: Some(pipeline.handle),
             bindings: Vec::new(),
@@ -1485,10 +1486,10 @@ impl Scheme {
     /// Goldy stdlib kernel on first submit (`GOLDY_MATMUL=fallback` forces stdlib).
     pub fn matmul<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         desc: crate::ops::MatMulDesc,
     ) -> crate::ops::MatMulBuilder<'a> {
-        crate::ops::MatMulBuilder::new(self, label, desc)
+        crate::ops::MatMulBuilder::new(self, label.into(), desc)
     }
 
     pub(crate) fn push_record_error(&mut self, msg: String) {
@@ -1505,7 +1506,7 @@ impl Scheme {
 
     pub(crate) fn push_matmul_node(
         &mut self,
-        label: &'static str,
+        label: crate::SchemeLabel,
         desc: crate::ops::MatMulDesc,
         a: crate::ops::matmul::BoundOperand,
         b: crate::ops::matmul::BoundOperand,
@@ -1602,7 +1603,7 @@ impl Scheme {
             }
             _ => (false, Vec::new()),
         };
-        let label = self.ir.nodes[node.index()].label;
+        let label = self.ir.nodes[node.index()].label.clone();
         self.specialization.register_site(
             node.index() as u32,
             pipeline.handle,
@@ -1698,11 +1699,11 @@ impl Scheme {
     /// "virtual main": one `&[T]` / `&mut [T]` per bound parcel in binding order,
     /// followed by one scalar per `with_param`. See [`crate::cpu_dispatch`] for the
     /// execution model and its cost.
-    pub fn cpu_node<'a>(&'a mut self, label: &'static str) -> SchemeCpuNodeBuilder<'a> {
+    pub fn cpu_node<'a>(&'a mut self, label: impl Into<crate::SchemeLabel>) -> SchemeCpuNodeBuilder<'a> {
         self.mark_structure_dirty();
         SchemeCpuNodeBuilder {
             scheme: self,
-            label,
+            label: label.into(),
             bindings: Vec::new(),
             params: Vec::new(),
         }
@@ -2395,7 +2396,7 @@ impl Scheme {
         let binding_id = self.intern_present_binding(dst);
         let handle = self.intern_rt(src).backend_handle();
         self.ir.nodes.push(TaskNode {
-            label: "copy_to_present",
+            label: "copy_to_present".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(handle),
@@ -2430,7 +2431,7 @@ impl Scheme {
         self.submit_state
             .register_stamp_parts(ResourceId::Texture(src_h), stamp);
         self.ir.nodes.push(TaskNode {
-            label: "copy_texture_to_present",
+            label: "copy_texture_to_present".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::Texture(src_h),
@@ -2572,7 +2573,7 @@ impl Scheme {
         // variants). Partial copies use `CopyTextureRegion`.
         if full_dst && src_x == 0 && src_y == 0 && width == src.width() && height == src.height() {
             self.ir.nodes.push(TaskNode {
-                label: "copy_texture",
+                label: "copy_texture".into(),
                 bindings: vec![
                     ResourceBinding {
                         resource: ResourceId::Texture(src_h),
@@ -2591,7 +2592,7 @@ impl Scheme {
             });
         } else {
             self.ir.nodes.push(TaskNode {
-                label: "copy_texture_region",
+                label: "copy_texture_region".into(),
                 bindings: vec![
                     ResourceBinding {
                         resource: ResourceId::Texture(src_h),
@@ -2665,7 +2666,7 @@ impl Scheme {
         self.submit_state.register_parcel_stamp(dst);
         let dst_resource = dst.resource_id();
         self.ir.nodes.push(TaskNode {
-            label: "copy_to_texture",
+            label: "copy_to_texture".into(),
             bindings: vec![
                 ResourceBinding {
                     resource: ResourceId::RenderTarget(src_handle),
@@ -2688,7 +2689,7 @@ impl Scheme {
     #[cfg(feature = "graphics")]
     pub fn render_pass<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         rt: &Lease<LeaseRenderTarget>,
         color_load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
@@ -2701,7 +2702,7 @@ impl Scheme {
         };
         SchemeRenderPassBuilder {
             scheme: self,
-            label,
+            label: label.into(),
             target: handle,
             color_load,
             bindings: vec![ResourceBinding {
@@ -3002,7 +3003,7 @@ impl SchemeBindable for crate::Texture {
 /// Builder for a single compute dispatch node within a [`Scheme`].
 pub struct SchemeNodeBuilder<'a> {
     scheme: &'a mut Scheme,
-    label: &'static str,
+    label: crate::SchemeLabel,
     pipeline: crate::backend::ComputePipelineHandle,
     rt_pipeline: Option<crate::backend::RayTracingPipelineHandle>,
     bindings: Vec<ResourceBinding>,
@@ -3204,8 +3205,9 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// driver re-binds the same parcels in the sub-schemes it submits.
     fn push_yield_driver(self, dispatch: (u32, u32, u32)) -> NodeId {
         let pipelines = self.yielding.expect("push_yield_driver on a yielding builder");
+        let label = self.label;
         let record = crate::petition::YieldRecord {
-            label: self.label,
+            label: label.clone(),
             pipelines,
             prologue: PipelineParts {
                 handle: self.pipeline,
@@ -3223,12 +3225,12 @@ impl<'a> SchemeNodeBuilder<'a> {
             Ok((driver, stats)) => {
                 let cpu_id = scheme.cpu_dispatches.len() as u32;
                 scheme.cpu_dispatches.push(CpuDispatchExec::new_host_driver(
-                    self.label,
+                    label.clone(),
                     crate::petition::driver_main(Arc::new(driver)),
                 ));
                 scheme.yield_stats.insert(node_index, stats);
                 scheme.ir.nodes.push(TaskNode {
-                    label: self.label,
+                    label: label.clone(),
                     bindings: self.bindings,
                     kind: NodeKind::CpuDispatch { cpu_id },
                 });
@@ -3237,7 +3239,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 scheme.record_errors.push(msg);
                 // Keep node numbering stable for the caller: an inert node stands in.
                 scheme.ir.nodes.push(TaskNode {
-                    label: self.label,
+                    label,
                     bindings: Vec::new(),
                     kind: NodeKind::Dispatch {
                         pipeline: self.pipeline,
@@ -3300,7 +3302,7 @@ impl<'a> SchemeNodeBuilder<'a> {
             let node = self.scheme.ir.nodes.len() as u32;
             self.scheme
                 .specialization
-                .register_site(node, self.pipeline, provenance, self.label, &self.user_slots);
+                .register_site(node, self.pipeline, provenance, self.label.clone(), &self.user_slots);
         }
     }
 
@@ -3438,7 +3440,7 @@ impl PendingCpuBinding {
 /// Builder for a CPU dispatch node within a [`Scheme`]; see [`Scheme::cpu_node`].
 pub struct SchemeCpuNodeBuilder<'a> {
     scheme: &'a mut Scheme,
-    label: &'static str,
+    label: crate::SchemeLabel,
     bindings: Vec<Result<PendingCpuBinding, GoldyError>>,
     params: Vec<u32>,
 }
@@ -3454,7 +3456,7 @@ impl SchemeCpuNodeBuilder<'_> {
     /// Errors are reported by [`Self::dispatch`].
     pub fn with_parcel(mut self, parcel: &Parcel, access: NodeAccess) -> Self {
         self.bindings
-            .push(PendingCpuBinding::from_parcel(self.label, parcel, access));
+            .push(PendingCpuBinding::from_parcel(self.label.as_str(), parcel, access));
         self
     }
 
@@ -3463,7 +3465,7 @@ impl SchemeCpuNodeBuilder<'_> {
         self.scheme.intern_lease(&lease.inner);
         let parcel = lease.parcel();
         self.bindings
-            .push(PendingCpuBinding::from_parcel(self.label, parcel, access));
+            .push(PendingCpuBinding::from_parcel(self.label.as_str(), parcel, access));
         self
     }
 
@@ -3487,7 +3489,7 @@ impl SchemeCpuNodeBuilder<'_> {
         } = self;
         let bindings = bindings.into_iter().collect::<Result<Vec<_>, _>>()?;
         let shapes: Vec<(NodeAccess, u64)> = bindings.iter().map(|b| (b.access, b.byte_size)).collect();
-        crate::cpu_dispatch::validate_signature(label, &F::signature(), &shapes, params.len())?;
+        crate::cpu_dispatch::validate_signature(label.as_str(), &F::signature(), &shapes, params.len())?;
 
         let ctx = &scheme.ctx;
         let device = ctx.runtime();
@@ -3576,7 +3578,7 @@ impl SchemeCpuNodeBuilder<'_> {
         }
         scheme
             .cpu_dispatches
-            .push(CpuDispatchExec::new(label, main, execs, params));
+            .push(CpuDispatchExec::new(label.clone(), main, execs, params));
         scheme.mark_structure_dirty();
         scheme.ir.nodes.push(TaskNode {
             label,
@@ -3641,7 +3643,7 @@ impl PendingPushConstant {
 #[cfg(feature = "graphics")]
 pub struct SchemeRenderPassBuilder<'a> {
     scheme: &'a mut Scheme,
-    label: &'static str,
+    label: crate::SchemeLabel,
     target: crate::backend::RenderTargetHandle,
     color_load: crate::types::TargetLoad,
     bindings: Vec<ResourceBinding>,

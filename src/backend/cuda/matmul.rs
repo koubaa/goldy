@@ -40,7 +40,7 @@ pub(super) fn materialize(
     backend: &mut CudaBackend,
     ctx: crate::backend::ContextHandle,
     stream: &Arc<CudaStream>,
-    label: Option<&'static str>,
+    label: Option<crate::SchemeLabel>,
     desc: MatMulDesc,
     a: MatMulOperand,
     b: MatMulOperand,
@@ -122,7 +122,7 @@ pub(super) fn execute(op: &CudaOp) -> Result<()> {
     else {
         anyhow::bail!("CUDA: expected MatMul op");
     };
-    let name = label.unwrap_or("matmul");
+    let name = label.as_deref().unwrap_or("matmul");
     if desc.dtype != crate::ops::MatMulDType::F32 {
         anyhow::bail!("CUDA: MatMul `{name}` only supports F32");
     }

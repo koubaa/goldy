@@ -120,7 +120,7 @@ pub(super) struct MaterializedHostWrite {
 #[derive(Clone)]
 pub(super) enum CudaOp {
     Launch {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         function: CudaFunction,
         module: Arc<CudaModule>,
         workgroup_size: [u32; 3],
@@ -135,7 +135,7 @@ pub(super) enum CudaOp {
     /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
     /// path resolves the shape via DtoH on the worker stream.
     LaunchIndirect {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         function: CudaFunction,
         module: Arc<CudaModule>,
         workgroup_size: [u32; 3],
@@ -263,7 +263,7 @@ pub(super) enum CudaOp {
     },
     /// cuBLAS GEMM/GEMV captured on the submit stream.
     MatMul {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         desc: crate::ops::MatMulDesc,
         a: super::matmul::BlasOperand,
         b: super::matmul::BlasOperand,
@@ -671,7 +671,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 args,
                 ..
             } => {
-                launch_direct(stream, *label, function, *workgroup_size, *grid, args, validate)?;
+                launch_direct(stream, label.as_deref(), function, *workgroup_size, *grid, args, validate)?;
             }
             CudaOp::LaunchIndirect {
                 label,
@@ -704,7 +704,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 } else {
                     launch_indirect_fallback(
                         stream,
-                        *label,
+                        label.as_deref(),
                         function,
                         *workgroup_size,
                         args,
@@ -954,7 +954,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
 
 fn launch_direct(
     stream: &Arc<CudaStream>,
-    label: Option<&'static str>,
+    label: Option<&str>,
     function: &CudaFunction,
     workgroup_size: [u32; 3],
     grid: (u32, u32, u32),
@@ -1043,7 +1043,7 @@ fn launch_indirect_for_capture(
 
 fn launch_indirect_fallback(
     stream: &Arc<CudaStream>,
-    label: Option<&'static str>,
+    label: Option<&str>,
     function: &CudaFunction,
     workgroup_size: [u32; 3],
     args: &[CudaLaunchArg],
