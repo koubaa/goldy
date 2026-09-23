@@ -100,6 +100,9 @@ impl CudaBackend {
         if req.is_empty() {
             return Ok(());
         }
+        if self.buffers.get(&buffer).is_some_and(|b| b.readback) {
+            return Ok(());
+        }
         // Views share the parent allocation — materialize the parent, then refresh the view.
         if let Some(parent) = self.buffers.get(&buffer).and_then(|b| b.parent) {
             self.fold_view_pending_into_parent(buffer)?;

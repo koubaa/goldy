@@ -6,10 +6,9 @@
 mod submission;
 
 use goldy::{
-    BufferKind, MemoryExchange, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
+    BufferKind, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
     TensorDType, TensorKernels, TensorScalar, TensorShape, TensorView,
 };
-use std::ops::Shr;
 use std::sync::Mutex;
 
 #[goldy::compute(workgroup_size = [64, 1, 1])]

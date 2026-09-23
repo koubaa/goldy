@@ -1,10 +1,9 @@
 //! Yielding-script scenarios shared by the CPU and GPU backend test crates.
 
 use goldy::{
-    Backpressure, BufferKind, ComputePipeline, Context, GoldyError, Instance, MemoryExchange, NodeAccess, Parcel,
+    Backpressure, BufferKind, ComputePipeline, Context, GoldyError, Instance, NodeAccess, Parcel,
     Petition, Promised, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, YieldPoint,
 };
-use std::ops::Shr;
 use std::sync::{Arc, Mutex};
 
 #[repr(C)]
@@ -452,7 +451,7 @@ void cs_main(BufRO<Fetch> petitions, Scattered<Resolution> resolutions, Scattere
 
 pub fn node_handler_resolves_on_gpu(device: &Runtime) {
     let n = 256u32;
-    let (ctx, mut pool, data, pipeline) = fetch_setup(device, n);
+    let (ctx, pool, data, pipeline) = fetch_setup(device, n);
     let table_in: Vec<u32> = (0..16u32).map(|i| 1000 + i).collect();
     let table = pool
         .acquire_buffer_with_data(&table_in, BufferKind::Scattered)

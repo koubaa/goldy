@@ -44,8 +44,6 @@ use crate::types::{
 };
 #[cfg(feature = "graphics")]
 use crate::types::{DepthFormat, IndexFormat};
-#[cfg(test)]
-use crate::validation_env;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -5275,7 +5273,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut frame = scheme.submit().expect("submit");
         let view = (&mut frame >> &*parcel).take::<u8>().expect("take");
         drop(parcel);
-        drop(pool);
         assert_eq!(view.len(), 32, "reads full logical buffer size");
     }
 
@@ -5288,7 +5285,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut frame1 = scheme.submit().expect("submit 1");
         let loan1 = (&mut frame1 >> &*parcel).take::<u8>().expect("take frame1");
         drop(parcel);
-        drop(pool);
         assert!(
             matches!(scheme.submit(), Err(GoldyError::StaleResource)),
             "resubmit after dropping a bound retained buffer must fail"
@@ -5632,7 +5628,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut frame = scheme.submit().expect("submit");
         let loan = (&mut frame >> &*texture).take::<u8>().expect("take");
         drop(texture);
-        drop(pool);
         assert_eq!(loan.len(), 4 * 4 * 4);
     }
 
@@ -5807,13 +5802,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let tx = scheme.register_present_exchange(&lease);
         assert_eq!(scheme.ir_node_count(), 0, "registration must not append IR nodes");
-        assert_eq!(
-            match tx.key {
-                ClaimKey::Present { present_idx } => present_idx,
-                _ => panic!("expected present"),
-            },
-            0
-        );
+        let ClaimKey::Present { present_idx } = tx.key;
+        assert_eq!(present_idx, 0);
     }
 
     #[cfg(feature = "graphics")]
@@ -6504,20 +6494,10 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             left_grant.binding_id, right_grant.binding_id,
             "distinct pools must intern distinct scheme bindings"
         );
-        assert_eq!(
-            match left_grant.key {
-                ClaimKey::Present { present_idx } => present_idx,
-                _ => panic!("expected present"),
-            },
-            0
-        );
-        assert_eq!(
-            match right_grant.key {
-                ClaimKey::Present { present_idx } => present_idx,
-                _ => panic!("expected present"),
-            },
-            1
-        );
+        let ClaimKey::Present { present_idx: left_idx } = left_grant.key;
+        let ClaimKey::Present { present_idx: right_idx } = right_grant.key;
+        assert_eq!(left_idx, 0);
+        assert_eq!(right_idx, 1);
 
         let left_res = scheme.desc.ir.nodes[0].bindings[1].resource;
         let right_res = scheme.desc.ir.nodes[1].bindings[1].resource;
@@ -6536,16 +6516,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         let first = scheme.register_present_exchange(&lease);
         let second = scheme.register_present_exchange(&lease);
-        assert_eq!(
-            match first.key {
-                ClaimKey::Present { present_idx } => present_idx,
-                _ => panic!("expected present"),
-            },
-            match second.key {
-                ClaimKey::Present { present_idx } => present_idx,
-                _ => panic!("expected present"),
-            }
-        );
+        let ClaimKey::Present { present_idx: first_idx } = first.key;
+        let ClaimKey::Present { present_idx: second_idx } = second.key;
+        assert_eq!(first_idx, second_idx);
         assert_eq!(first.binding_id, second.binding_id);
         assert_eq!(scheme.ir_node_count(), 0, "reuse must not append IR nodes");
     }
@@ -7057,13 +7030,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         // No read grants → finish_submit_frame keeps the present-partition tv as
         // the submission timeline; the acquired frame must carry the same stamp
         // so Present waits on that epoch rather than timeline_next-1.
+        let ClaimKey::Present { present_idx } = present.key;
         let stamped = submission
-            .present_frame_submit_timeline(
-                (match present.key {
-                    ClaimKey::Present { present_idx } => present_idx,
-                    _ => panic!("expected present"),
-                }) as usize,
-            )
+            .present_frame_submit_timeline(present_idx as usize)
             .expect("present frame must be stamped before consume");
         assert_eq!(
             stamped,

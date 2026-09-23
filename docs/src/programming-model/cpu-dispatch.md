@@ -59,7 +59,8 @@ some of them and the rest must keep their previous values.
 
 Host claims (`(&mut submission >> &parcel).take()`) follow the same medium rule: the parcel
 stays device-resident; mapped backends expose a coherent pointer after a timeline wait,
-others copy through a context staging pool. See [Settlement](../compute/settlement.md).
+others copy through a context staging pool. CUDA's pool is cacheable pinned host memory
+filled by one DtoH on the producing stream. See [Settlement](../compute/settlement.md).
 
 Because the staging is a fence wait, a CPU dispatch is a full pipeline drain: every GPU node
 it depends on has finished before it runs, and every GPU node that depends on it starts

@@ -12,7 +12,7 @@ mod imp {
         types::BackendType, Color, Instance, MeshPipeline, MeshPipelineDesc, RequestAdapterOptions, Runtime,
         RuntimeDescriptor, ShaderModule, TargetLoad, TextureFormat,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     static GPU: Mutex<()> = Mutex::new(());
 

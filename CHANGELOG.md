@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** GPU-to-host reads are host claims via `(&mut submission >> &parcel).take::<T>()`, not an exchange. `MemoryExchange` is deposit-only. `BufferFlags::CPU_READABLE` is a placement hint (identical staged semantics without the flag). C ABI: `goldy_scheme_submission_take` / `take_texture` → `GoldyHostView`. C++ `SchemeSubmission::take`; Python `SchemeSubmission.take` / `>>`; .NET `SchemeSubmission.Take`; ffi-client `SchemeSubmission::take`.
 
+- **CUDA host-claim readback** — withdraw staging is cacheable pinned host memory filled by one context-stream DtoH. `take()` no longer does a device-wide stream drain and second DtoH. Eager `CPU_READABLE` placement and streaming identities are not in this change.
+
 ## [0.3.0] - 2026-09-19
 
 ### Changed

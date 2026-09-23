@@ -13,7 +13,7 @@ mod imp {
         RequestAdapterOptions, Runtime, RuntimeDescriptor, Sampler, Scheme, ShaderModule, StructuredBufferElement,
         Submission,
     };
-    use std::ops::Shr;
+    
     use std::sync::Arc;
 
     fn make_device() -> Runtime {
@@ -365,7 +365,7 @@ mod imp {
 
         // Submit once, check every element, and let any compile the predictor started land
         // before the next frame polls for it.
-        let mut frame_and_check = |scheme: &mut Scheme, factor: u32, bias: u32, what: &str| {
+        let frame_and_check = |scheme: &mut Scheme, factor: u32, bias: u32, what: &str| {
             let mut frame = scheme.submit().expect(what);
             for (i, &val) in read_grant_u32(&mut frame, &data, 64).iter().enumerate() {
                 let i = i as u32;
@@ -1020,7 +1020,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
             .expect("input");
-        let mut output = pool
+        let output = pool
             .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -1110,7 +1110,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("input");
-        let mut output = pool
+        let output = pool
             .acquire_buffer_with_data(&vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -1149,7 +1149,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&vec![42u32; 64], BufferKind::Scattered)
             .expect("input");
-        let mut output = pool
+        let output = pool
             .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -1207,7 +1207,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
             .expect("input");
-        let mut output = pool
+        let output = pool
             .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
             .expect("output");
 
@@ -1307,7 +1307,7 @@ mod imp {
                 None,
             )
             .expect("scratch");
-        let mut output = pool
+        let output = pool
             .acquire_buffer(
                 byte_size as u64,
                 BufferKind::Scattered,
@@ -1352,7 +1352,7 @@ mod imp {
         let byte_size = (N * 4) as u64;
 
         let pool = &device;
-        let mut output = pool
+        let output = pool
             .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
             .expect("output");
 
@@ -1824,7 +1824,7 @@ mod imp {
         let input = pool
             .acquire_buffer_with_data(&input_data, BufferKind::Scattered)
             .expect("input");
-        let mut output = pool
+        let output = pool
             .acquire_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
             .expect("output");
 
@@ -1910,7 +1910,7 @@ mod imp {
             .node("write_tex_raw", &pipeline)
             .with_parcel(&texture, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
-        let mut frame = scheme.submit().expect("submit");
+        let frame = scheme.submit().expect("submit");
         frame.wait_until_settled().expect("wait");
 
         let output = read_texture_via_scheme_copy(&ctx, &texture);
@@ -2070,7 +2070,7 @@ mod imp {
                 let r = (packed & 0xFF) as u8;
                 let g = ((packed >> 8) & 0xFF) as u8;
                 let b = ((packed >> 16) & 0xFF) as u8;
-                let a = ((packed >> 24) as u8);
+                let a = (packed >> 24) as u8;
                 assert_eq!(r, expected_r, "r mismatch at ({x},{y})");
                 assert_eq!(g, expected_g, "g mismatch at ({x},{y})");
                 assert_eq!(b, 0, "b mismatch at ({x},{y})");
@@ -2126,7 +2126,7 @@ mod imp {
             .expect("buf");
 
         let mut scheme = Scheme::new(&ctx_a);
-        let mut frame_a = scheme.submit().expect("ctx_a submit");
+        let frame_a = scheme.submit().expect("ctx_a submit");
         drop(buf);
 
         frame_a.wait_until_settled().expect("ctx_a wait");
@@ -4588,7 +4588,7 @@ mod imp {
             .with_parcel(&texture, NodeAccess::Write)
             .dispatch(width.div_ceil(8), height.div_ceil(8), 1);
         for frame_i in 0..4u32 {
-            let mut frame = scheme
+            let frame = scheme
                 .submit()
                 .unwrap_or_else(|e| panic!("submit frame {frame_i}: {e:#}"));
             frame

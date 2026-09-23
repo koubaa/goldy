@@ -27,8 +27,6 @@ use goldy::{
     RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
     TextureKind,
 };
-use std::ops::Shr;
-use std::sync::Arc;
 use submission::submission_context;
 
 fn read_grant_u32(submission: &mut Submission, parcel: &Parcel, count: usize) -> Vec<u32> {
@@ -225,7 +223,7 @@ fn clean_scheme_resubmits_without_rerecord() {
         .dispatch(1, 1, 1);
 
     scheme.submit().expect("submit 0");
-    let mut frame = scheme.submit().expect("submit 1");
+    let frame = scheme.submit().expect("submit 1");
     frame.wait_until_settled().expect("wait");
     assert!(output.is_settled(), "completed work must leave parcel settled");
 
@@ -774,7 +772,7 @@ fn withdraw_drop_frame_without_read_then_submit_and_read() {
 
     let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
 
-    let mut frame1 = scheme.submit().expect("submit 1");
+    let frame1 = scheme.submit().expect("submit 1");
     drop(frame1);
 
     let mut frame2 = scheme.submit().expect("submit 2 after frame1 drop");

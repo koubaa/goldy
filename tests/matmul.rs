@@ -6,9 +6,8 @@
 mod submission;
 
 use goldy::{
-    BufferKind, MatMulDesc, MatMulView, MemoryExchange, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
+    BufferKind, MatMulDesc, MatMulView, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
 };
-use std::ops::Shr;
 use std::sync::Mutex;
 
 static GPU: Mutex<()> = Mutex::new(());

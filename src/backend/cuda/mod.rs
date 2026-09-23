@@ -28,8 +28,8 @@
 //! Retainable compute partitions are split into alternating graph-safe islands and
 //! stream-replayed boundary segments (`submit_graph_and_retain`). Graph islands are
 //! captured into CUDA graphs and relaunched on cache hits (`try_resubmit_retained`);
-//! pinned host→device copies, CUDA-owned memsets/DtoD copies, and kernel launches
-//! share graph islands. Format-specialized launches, imported-surface copies, and
+//! Pinned host→device copies, CUDA-owned memsets/DtoD copies, and kernel launches
+//! share graph islands. Device→pinned-host readback copies stay on the stream path.
 //! external fences stay on the stream path. Schemes write a CUDA-owned staging
 //! texture (`out_image`) and export via `CopyTexture` into D3D12-imported RGBA8
 //! scratch before present's `CopyResource`. Indirect dispatches use CUDA 13.1
@@ -257,6 +257,9 @@ pub(super) enum CudaDeferredDrop {
         /// Native CUDA alloc, or `None` when already leaked / deferred-unmaterialized.
         #[allow(dead_code)]
         memory: Option<Arc<Mutex<CudaSlice<u8>>>>,
+        /// Pinned readback host; kept until the producing stream retires.
+        #[allow(dead_code)]
+        readback_host: Option<Arc<Mutex<CudaPinnedHost>>>,
         /// When set with [`CudaBuffer::memory_is_external`], drop order is leak-slice then twin.
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         #[allow(dead_code)]
@@ -460,6 +463,11 @@ struct CudaBuffer {
     /// [`CudaOp`] that HtoDs from this Arc at execute time (so retained resubmits see
     /// fresh bytes). Page-locked so memcpy nodes can be CUDA-graph-captured.
     host_staging: Option<Arc<Mutex<CudaPinnedHost>>>,
+    /// Cacheable pinned host destination for [`Self::readback`] staging. Filled by a
+    /// context-stream DtoH; CPU reads after that stream settles.
+    readback_host: Option<Arc<Mutex<CudaPinnedHost>>>,
+    /// Stream that last produced into [`Self::readback_host`].
+    readback_stream: Option<Arc<CudaStream>>,
     /// Parent allocation for [`GpuBackend::create_buffer_view`] slices (shares memory).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     parent: Option<BufferHandle>,
@@ -836,6 +844,8 @@ impl CudaBackend {
                 kind,
                 flags,
                 host_staging,
+                readback_host: None,
+                readback_stream: None,
                 slot: Some(slot),
                 readback: false,
                 content_epoch: 0,
@@ -1913,10 +1923,13 @@ impl CudaBackend {
                     // CPU_WRITABLE deposit staging stays host-only; Copy materializes as HtoD
                     // into dst — do not force TRANSFER materialization of the staging parcel.
                     let src_host = self.buffers.get(src).is_some_and(|b| b.has_host_staging());
+                    let dst_readback = self.buffers.get(dst).is_some_and(|b| b.readback);
                     if !src_host {
                         updates.push((*src, CudaBufferReq::TRANSFER));
                     }
-                    updates.push((*dst, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
+                    if !dst_readback {
+                        updates.push((*dst, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
+                    }
                 }
                 GpuCommand::CopyBufferToTexture { src, .. } => {
                     let src_host = self.buffers.get(src).is_some_and(|b| b.has_host_staging());
@@ -2166,7 +2179,42 @@ impl CudaBackend {
                     if *src_offset + *size > src_buf.size {
                         anyhow::bail!("CUDA: copy source range exceeds logical buffer size");
                     }
-                    if let Some(staging) = src_buf.host_staging.as_ref() {
+                    let dst_is_readback = self.buffers.get(dst).is_some_and(|b| b.readback);
+                    if dst_is_readback {
+                        let src_staging = src_buf.host_staging.as_ref().map(Arc::clone);
+                        let src_host_offset = (src_buf.offset + *src_offset) as usize;
+                        let src_memory = if src_staging.is_none() {
+                            Some(Arc::clone(src_buf.memory_arc()?))
+                        } else {
+                            None
+                        };
+                        let src_abs = src_buf.offset + *src_offset;
+                        let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid copy destination")?;
+                        if *dst_offset + *size > dst_buf.size {
+                            anyhow::bail!("CUDA: copy destination range exceeds logical buffer size");
+                        }
+                        dst_buf.bump_content_epoch();
+                        let host = dst_buf
+                            .readback_host
+                            .as_ref()
+                            .context("CUDA: readback missing pinned host")?;
+                        let host = Arc::clone(host);
+                        let host_offset = (dst_buf.offset + *dst_offset) as usize;
+                        let len = *size as usize;
+                        if let Some(src_host) = src_staging {
+                            copy_pinned_range(&src_host, src_host_offset, &host, host_offset, len)?;
+                        } else {
+                            let src_memory = src_memory.context("CUDA: copy source has no device memory")?;
+                            dst_buf.readback_stream = Some(Arc::clone(stream));
+                            ops.push(CudaOp::CopyToReadbackHost {
+                                src: src_memory,
+                                src_abs,
+                                host,
+                                host_offset,
+                                len,
+                            });
+                        }
+                    } else if let Some(staging) = src_buf.host_staging.as_ref() {
                         let start = (src_buf.offset + *src_offset) as usize;
                         let host = Arc::clone(staging);
                         let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid copy destination")?;
@@ -2403,18 +2451,26 @@ impl CudaBackend {
                             src_tex.height
                         );
                     }
-                    let dst_memory = Arc::clone(dst_buf.memory_arc()?);
-                    let dst_abs = dst_buf.offset + layout.footprint_offset;
-                    let dst_ptr = pending_submit::bake_device_ptr(stream, &dst_memory, dst_abs);
-                    ops.push(CudaOp::CopyTextureToBuffer {
+                    if !dst_buf.readback {
+                        anyhow::bail!("CUDA: CopyTextureToReadback destination is not a readback buffer");
+                    }
+                    let host = dst_buf
+                        .readback_host
+                        .as_ref()
+                        .context("CUDA: readback missing pinned host")?;
+                    let host = Arc::clone(host);
+                    let host_offset = (dst_buf.offset + layout.footprint_offset) as usize;
+                    let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid CopyTextureToReadback destination")?;
+                    dst_buf.bump_content_epoch();
+                    dst_buf.readback_stream = Some(Arc::clone(stream));
+                    ops.push(CudaOp::CopyTextureToReadbackHost {
                         texture: Arc::clone(src_tex),
                         x: 0,
                         y: 0,
                         width: layout.width,
                         height: layout.height,
-                        dst: dst_memory,
-                        dst_abs,
-                        dst_ptr,
+                        host,
+                        host_offset,
                         dst_row_pitch: layout.row_pitch,
                     });
                 }
@@ -3237,6 +3293,8 @@ impl CudaBuffer {
             kind: self.kind,
             flags: self.flags,
             host_staging: self.host_staging.as_ref().map(Arc::clone),
+            readback_host: self.readback_host.as_ref().map(Arc::clone),
+            readback_stream: self.readback_stream.as_ref().map(Arc::clone),
             slot: self.slot,
             readback: self.readback,
             content_epoch: self.content_epoch,
@@ -3260,6 +3318,42 @@ impl CudaBuffer {
     fn bump_content_epoch(&mut self) {
         self.content_epoch = self.content_epoch.wrapping_add(1);
     }
+}
+
+fn copy_pinned_range(
+    src: &Arc<Mutex<CudaPinnedHost>>,
+    src_offset: usize,
+    dst: &Arc<Mutex<CudaPinnedHost>>,
+    dst_offset: usize,
+    len: usize,
+) -> Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    if Arc::ptr_eq(src, dst) {
+        let mut host = src.lock().unwrap();
+        let src_end = src_offset.checked_add(len).context("CUDA: pinned copy overflow")?;
+        let dst_end = dst_offset.checked_add(len).context("CUDA: pinned copy overflow")?;
+        if src_end > host.len() || dst_end > host.len() {
+            anyhow::bail!("CUDA: pinned copy exceeds host staging");
+        }
+        host.as_mut_slice().copy_within(src_offset..src_end, dst_offset);
+        return Ok(());
+    }
+    let (src_guard, mut dst_guard) = if Arc::as_ptr(src) < Arc::as_ptr(dst) {
+        (src.lock().unwrap(), dst.lock().unwrap())
+    } else {
+        let dst_guard = dst.lock().unwrap();
+        let src_guard = src.lock().unwrap();
+        (src_guard, dst_guard)
+    };
+    let src_end = src_offset.checked_add(len).context("CUDA: pinned copy overflow")?;
+    let dst_end = dst_offset.checked_add(len).context("CUDA: pinned copy overflow")?;
+    if src_end > src_guard.len() || dst_end > dst_guard.len() {
+        anyhow::bail!("CUDA: pinned copy exceeds host staging");
+    }
+    dst_guard.as_mut_slice()[dst_offset..dst_end].copy_from_slice(&src_guard.as_slice()[src_offset..src_end]);
+    Ok(())
 }
 
 fn ensure_cuda_toolkit_on_path() {
@@ -3954,6 +4048,7 @@ impl GpuBackend for CudaBackend {
                 device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Buffer {
                     retire_at,
                     memory: buffer.memory,
+                    readback_host: buffer.readback_host,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     shared: buffer.shared,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -4096,18 +4191,17 @@ impl GpuBackend for CudaBackend {
         let gpu = self.device(device)?;
         let _gate = capture_gate::lock_capture_alloc_gate();
         let capacity = size.max(4);
-        let memory = Arc::new(Mutex::new(
-            gpu.alloc_stream
-                .alloc_zeros::<u8>(capacity as usize)
-                .context("CUDA: alloc readback")?,
-        ));
+        let readback_host = Some(Arc::new(Mutex::new(CudaPinnedHost::alloc_readback(
+            &gpu.ctx,
+            capacity as usize,
+        )?)));
         let handle = self.next_buffer;
         self.next_buffer += 1;
         self.buffers.insert(
             handle,
             CudaBuffer {
                 device,
-                memory: Some(memory),
+                memory: None,
                 offset: 0,
                 size,
                 capacity,
@@ -4115,6 +4209,8 @@ impl GpuBackend for CudaBackend {
                 kind: BufferKind::Scattered,
                 flags: BufferFlags::empty(),
                 host_staging: None,
+                readback_host,
+                readback_stream: None,
                 slot: None,
                 readback: true,
                 content_epoch: 0,
@@ -4146,25 +4242,30 @@ impl GpuBackend for CudaBackend {
             anyhow::bail!("CUDA: read exceeds readback buffer size");
         }
         let device = buffer.device;
-        // Ensure any context-stream copy into this staging buffer has retired.
+        // Drain pending worker enqueue so a caller that skipped `wait_until` still
+        // observes the DtoH that lives on the producing context stream.
         let worker = Arc::clone(&self.device(device)?.submission_worker);
         worker.flush()?;
         self.graph_stats.worker_flushes.fetch_add(1, Ordering::Relaxed);
-        for context in self.contexts.values().filter(|context| context.device == device) {
-            context
-                .stream
+        if let Some(stream) = buffer.readback_stream.as_ref() {
+            stream
                 .synchronize()
-                .context("CUDA: readback context stream sync failed")?;
+                .context("CUDA: readback producer stream sync failed")?;
         }
-        let stream = Arc::clone(&self.device(device)?.alloc_stream);
-        let memory = buffer.memory_arc()?.lock().unwrap();
-        let view = memory
-            .try_slice(buffer.offset as usize..(buffer.offset as usize + output.len()))
-            .context("CUDA: readback range out of bounds")?;
-        stream
-            .memcpy_dtoh(&view, output)
-            .context("CUDA: DtoH readback failed")?;
-        self.graph_stats.dtoh_calls.fetch_add(1, Ordering::Relaxed);
+        let host = buffer
+            .readback_host
+            .as_ref()
+            .context("CUDA: readback missing pinned host")?;
+        let host = host.lock().unwrap();
+        let start = buffer.offset as usize;
+        let end = start + output.len();
+        if end > host.len() {
+            anyhow::bail!(
+                "CUDA: readback range [{start}..{end}] exceeds pinned staging {}",
+                host.len()
+            );
+        }
+        output.copy_from_slice(&host.as_slice()[start..end]);
         Ok(())
     }
 
@@ -4360,6 +4461,8 @@ impl GpuBackend for CudaBackend {
                 flags: parent.flags,
                 // Views write through the parent; no separate host staging.
                 host_staging: None,
+                readback_host: None,
+                readback_stream: None,
                 slot: Some(slot),
                 readback: false,
                 content_epoch: parent.content_epoch,
@@ -4463,6 +4566,7 @@ impl GpuBackend for CudaBackend {
             device.deletion_queue.lock().unwrap().push(CudaDeferredDrop::Buffer {
                 retire_at,
                 memory: old.memory,
+                readback_host: old.readback_host,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                 shared: old.shared,
                 #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -5502,6 +5606,18 @@ import goldy_exp;
 [numthreads(1, 1, 1)]
 void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
     output[id.x] = input[id.x] * 2;
+}
+"#;
+
+    const SPIN_SLANG: &str = r#"
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void cs_main(uniform RWStructuredBuffer<uint> data, uint3 id : SV_DispatchThreadID) {
+    uint x = data[0];
+    for (uint i = 0; i < 200000000u; i++) {
+        x = x * 1664525u + 1013904223u;
+    }
+    data[0] = x;
 }
 "#;
 
@@ -7018,6 +7134,281 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             bytes.as_slice(),
             &[16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
             "relaunch must observe CPU writes into pinned staging"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn readback_cpu_copy_does_not_increment_dtoh_or_sync_all_streams() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA readback stats test: {error:#}");
+                return Ok(());
+            }
+        };
+        let stats = backend.graph_stats();
+        stats.reset();
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]))?;
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        let copied = backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: buffer,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        wait_for(&mut backend, ctx, copied)?;
+        let before = stats.snapshot();
+        let mut bytes = [0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        let after = stats.snapshot();
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[1, 2, 3, 4]);
+        assert_eq!(
+            after.dtoh_calls, before.dtoh_calls,
+            "read_readback_buffer must not issue a second DtoH: before={before:?} after={after:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn readback_without_wait_until_sees_copy() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA readback-without-wait test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let buffer = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(buffer, 0, bytemuck::cast_slice(&[9u32, 8, 7, 6]))?;
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: buffer,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        let mut bytes = [0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[9, 8, 7, 6]);
+        Ok(())
+    }
+
+    #[test]
+    fn readback_reuse_sees_new_bytes() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA readback reuse test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let a = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        let b = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(a, 0, bytemuck::cast_slice(&[1u32, 1, 1, 1]))?;
+        backend.write_buffer(b, 0, bytemuck::cast_slice(&[2u32, 2, 2, 2]))?;
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: a,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        let mut bytes = [0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[1, 1, 1, 1]);
+        backend.submit_standalone(
+            ctx,
+            &[GpuCommand::CopyBuffer {
+                src: b,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 2, 2, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn readback_does_not_synchronize_unrelated_context() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA multi-context readback test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx_a = backend.create_context(device)?;
+        let ctx_b = backend.create_context(device)?;
+
+        let spin = backend.create_buffer(
+            device,
+            4,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(spin, 0, bytemuck::cast_slice(&[1u32]))?;
+        let small = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(small, 0, bytemuck::cast_slice(&[3u32, 4, 5, 6]))?;
+        let shader = backend.create_shader_with_paths(
+            device,
+            SPIN_SLANG,
+            &[],
+            &[],
+            crate::types::OptimizationLevel::Default,
+        )?;
+        let pipeline = backend.create_compute_pipeline(device, shader, Some("spin"))?;
+        let slot = backend.buffer_bindless_index(spin).context("missing registry key")?;
+        let tv_a = backend.submit_standalone(
+            ctx_a,
+            &[
+                GpuCommand::SetPipeline(pipeline),
+                GpuCommand::BindResourcesRaw {
+                    indices: vec![slot],
+                    user: vec![],
+                    frame_table_base: 0,
+                },
+                GpuCommand::Dispatch {
+                    label: Some("spin".into()),
+                    workgroups_x: 1,
+                    workgroups_y: 1,
+                    workgroups_z: 1,
+                },
+            ],
+            None,
+        )?;
+
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        backend.submit_standalone(
+            ctx_b,
+            &[GpuCommand::CopyBuffer {
+                src: small,
+                src_offset: 0,
+                dst: readback,
+                dst_offset: 0,
+                size: 16,
+            }],
+            None,
+        )?;
+        let mut bytes = [0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[3, 4, 5, 6]);
+        let progress_a = backend.gpu_progress(ctx_a);
+        assert!(
+            progress_a < tv_a,
+            "readback on context B retired context A ({progress_a} >= {tv_a}); producer-stream isolation is broken"
+        );
+        wait_for(&mut backend, ctx_a, tv_a)?;
+        Ok(())
+    }
+
+    #[test]
+    fn retained_readback_copy_replays_on_the_stream_path() -> Result<()> {
+        let _exclusive = cuda_exclusive_guard();
+        let mut backend = match CudaBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skipping CUDA retained readback test: {error:#}");
+                return Ok(());
+            }
+        };
+        let device = backend.create_device(0)?;
+        let ctx = backend.create_context(device)?;
+        let src = backend.create_buffer(
+            device,
+            16,
+            BufferKind::Scattered,
+            Some(4),
+            BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
+        )?;
+        backend.write_buffer(src, 0, bytemuck::cast_slice(&[11u32, 12, 13, 14]))?;
+        let readback = backend.alloc_readback_buffer(device, 16)?;
+        const KEY: u64 = 0xD2_0B_AC;
+        let commands = [GraphCommand::Compute(GpuCommand::CopyBuffer {
+            src,
+            src_offset: 0,
+            dst: readback,
+            dst_offset: 0,
+            size: 16,
+        })];
+        let tv = backend.submit_graph_and_retain(ctx, &commands, KEY, None)?;
+        wait_for(&mut backend, ctx, tv)?;
+        let mut bytes = [0u8; 16];
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[11, 12, 13, 14]);
+
+        backend.write_buffer(src, 0, bytemuck::cast_slice(&[21u32, 22, 23, 24]))?;
+        let tv = backend
+            .try_resubmit_retained(ctx, KEY, None)?
+            .context("expected retained readback stream replay")?;
+        wait_for(&mut backend, ctx, tv)?;
+        backend.read_readback_buffer(readback, &mut bytes)?;
+        assert_eq!(
+            bytemuck::cast_slice::<u8, u32>(&bytes),
+            &[21, 22, 23, 24],
+            "stream-segment relaunch must DtoH the latest source bytes"
         );
         Ok(())
     }
